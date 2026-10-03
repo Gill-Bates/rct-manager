@@ -1,0 +1,13 @@
+# .github/actionlint.yaml
+# Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
+#
+# actionlint validates runs-on against a label list baked into the binary. The
+# Ubuntu 26.04 images are newer than the list in released actionlint versions,
+# so every job would be reported as an unknown runner label.
+#
+# These are GitHub-hosted labels, not self-hosted ones - this file only tells the
+# linter they exist. Drop the entries once the pinned actionlint knows them.
+self-hosted-runner:
+  labels:
+    - ubuntu-26.04
+    - ubuntu-26.04-arm
