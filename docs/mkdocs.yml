@@ -1,10 +1,10 @@
-site_name: rct-rest-api Documentation
+site_name: rct-manager Documentation
 site_description: Vendor-neutral REST gateway for RCT Power inverters
 site_author: Gill-Bates
-site_url: https://gill-bates.github.io/rct-rest-api/
+site_url: https://gill-bates.github.io/rct-manager/
 
-repo_name: Gill-Bates/rct-rest-api
-repo_url: https://github.com/Gill-Bates/rct-rest-api
+repo_name: Gill-Bates/rct-manager
+repo_url: https://github.com/Gill-Bates/rct-manager
 edit_uri: edit/main/docs/
 
 # mkdocs.yml lives inside docs/, so the docs directory is its own folder.
@@ -107,7 +107,7 @@ extra:
   generator: false
   social:
     - icon: fontawesome/brands/github
-      link: https://github.com/Gill-Bates/rct-rest-api
+      link: https://github.com/Gill-Bates/rct-manager
 
 extra_css:
   - stylesheets/extra.css

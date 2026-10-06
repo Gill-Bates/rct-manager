@@ -96,7 +96,7 @@ jobs:
 
       # img.shields.io is excluded: it throttles, and a 503 badge says nothing
       # about the documentation. The site's own URL is not deployed yet on the
-      # first run. 404.html uses root-relative links (/rct-rest-api/...) derived
+      # first run. 404.html uses root-relative links (/rct-manager/...) derived
       # from site_url so it works at any depth; lychee cannot resolve those locally.
       - name: Check links
         uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8 # v2.9.0
@@ -106,7 +106,7 @@ jobs:
             --no-progress
             --exclude 'fonts\.gstatic\.com'
             --exclude 'img\.shields\.io'
-            --exclude 'gill-bates\.github\.io/rct-rest-api'
+            --exclude 'gill-bates\.github\.io/rct-manager'
             --exclude-path 'site/404\.html'
             './site/**/*.html'
           fail: true

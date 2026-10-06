@@ -705,7 +705,7 @@ def _add_docs(app: FastAPI, settings: Settings) -> None:
     async def swagger_ui() -> HTMLResponse:
         page = get_swagger_ui_html(
             openapi_url="/openapi.json",
-            title="RCT REST API",
+            title="RCT Manager",
             swagger_favicon_url="/favicon.ico",
             swagger_ui_parameters={
                 "tryItOutEnabled": True,
@@ -808,7 +808,7 @@ def create_app(settings: Settings, *, clock: Clock | None = None, connector: Con
         )
         coordinator.set_dispatch_restore(runtime.dispatch.shutdown_restore)
     app = FastAPI(
-        title="RCT REST API",
+        title="RCT Manager",
         version=__version__,
         description="Vendor-neutral REST gateway for RCT Power inverters.",
         lifespan=_lifespan(runtime, parts, gateway, connector),

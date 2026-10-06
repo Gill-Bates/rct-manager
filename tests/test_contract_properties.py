@@ -128,7 +128,7 @@ def _run(specs: list[Spec]):
     return asyncio.run(scenario())
 
 
-# Feature: rct-rest-api, Property 12: the vendor-neutral contract exposes no protocol details
+# Feature: rct-manager, Property 12: the vendor-neutral contract exposes no protocol details
 @settings(max_examples=100, deadline=None)
 @given(specs=st.lists(_specs, min_size=1, max_size=3))
 def test_neutral_contract_leaks_no_protocol_details(specs: list[Spec]) -> None:
@@ -147,7 +147,7 @@ def test_neutral_contract_leaks_no_protocol_details(specs: list[Spec]) -> None:
             assert not pattern.search(text), (spec, pattern.pattern)
 
 
-# Feature: rct-rest-api, Property 13: every error response satisfies the error contract
+# Feature: rct-manager, Property 13: every error response satisfies the error contract
 @settings(max_examples=100, deadline=None)
 @given(specs=st.lists(_specs, min_size=1, max_size=3))
 def test_every_error_response_meets_the_error_contract(specs: list[Spec]) -> None:
@@ -212,7 +212,7 @@ async def _rejecting(scenario: str, h, repeat: int) -> None:
     assert response.status_code == expected, (scenario, response.text)
 
 
-# Feature: rct-rest-api, Property 9: load-free endpoints and rejected requests cause no device load
+# Feature: rct-manager, Property 9: load-free endpoints and rejected requests cause no device load
 @settings(max_examples=100, deadline=None)
 @given(
     scenario=st.sampled_from(
@@ -301,7 +301,7 @@ def _write_case(draw):
     return float(low), float(high), step, kind, value
 
 
-# Feature: rct-rest-api, Property 10: an invalid write value causes no write transaction
+# Feature: rct-manager, Property 10: an invalid write value causes no write transaction
 @settings(max_examples=100, deadline=None)
 @given(case=_write_case())
 def test_invalid_write_value_creates_no_write_transaction(case) -> None:

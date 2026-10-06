@@ -25,7 +25,7 @@ KEY = EndpointKey("10.0.0.5", 8899)
 OBJECT_ID = 0x1234
 
 
-# Feature: rct-rest-api, Property 11: exactly one WRITE frame per write operation from the Commit_Point on
+# Feature: rct-manager, Property 11: exactly one WRITE frame per write operation from the Commit_Point on
 @settings(max_examples=100, deadline=None)
 @given(
     fault=st.sampled_from(["none", "connect", "write_raises", "drain_raises", "no_response", "drop"]),

@@ -76,7 +76,7 @@ async def test_about_update_check_requires_login_and_renders_release_controls(tm
     def fake_check(force=False):
         calls.append(force)
         return {"update_available": True, "current_version": "1.0.0", "latest_version": "1.1.0",
-                "release_url": "https://github.com/Gill-Bates/rct-rest-api/releases/tag/v1.1.0",
+                "release_url": "https://github.com/Gill-Bates/rct-manager/releases/tag/v1.1.0",
                 "published_at": "2026-10-01T12:00:00Z", "error": None}
 
     monkeypatch.setattr(updates, "check_for_updates", fake_check)

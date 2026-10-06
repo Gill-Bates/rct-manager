@@ -2794,7 +2794,7 @@ Verwendete Werkzeuge, alle im Extra `dev` von `rct-manager/pyproject.toml`:
   Property 17 wird getrennt für Skalartypen und Slave_Struktur geprüft.
 - Mindestens 100 Durchläufe je Eigenschaftstest (`@settings(max_examples=100)`).
 - Jeder Test trägt einen Kommentar in der Form
-  `# Feature: rct-rest-api, Property {Nummer}: {Eigenschaftstext}`.
+  `# Feature: rct-manager, Property {Nummer}: {Eigenschaftstext}`.
 - Zeitabhängige Eigenschaften (7, 14, 15, 16) verwenden `ManualClock` über den Port
   `Clock`; kein `asyncio.sleep` mit Realzeit, keine Toleranz gegen Wanduhrdrift.
 - Lastfreiheitseigenschaften (9, 10, 11, 15) verwenden einen Attrappen-Transport, der
@@ -2853,7 +2853,7 @@ Korrektur jeweils auf eine Stelle begrenzt.
 
 ### Verifikation
 
-Aus dem Projektverzeichnis `rct-rest-api/`:
+Aus dem Projektverzeichnis `rct-manager/`:
 
 ```bash
 ruff check .          # Konfiguration aus dem Repository-Wurzelverzeichnis, Zeilenlänge 120

@@ -3,12 +3,12 @@
 The repository ships `docker/Dockerfile`, `docker/compose.yaml` and
 `docker/build.sh`. Tagged releases are published multi-arch (`linux/amd64` and
 `linux/arm64`) to Docker Hub as
-[`giiibates/rct-rest-api`](https://hub.docker.com/r/giiibates/rct-rest-api), with
+[`giiibates/rct-manager`](https://hub.docker.com/r/giiibates/rct-manager), with
 Trivy scanning, an SBOM and provenance attestation (`.github/workflows/release.yml`).
 `docker/compose.yaml` and `docker/build.sh` default to a separate, manual path:
 building and pushing `linux/amd64` only to the private registry
 `docker.cirrio.de/rct-api`, for a local build or a self-hosted mirror. Point
-`IMAGE=`/the `image:` key at `giiibates/rct-rest-api` instead to run the published
+`IMAGE=`/the `image:` key at `giiibates/rct-manager` instead to run the published
 release image.
 
 ## Run with Compose

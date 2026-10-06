@@ -4,7 +4,7 @@
 # Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
 #
 
-"""Check the latest RCT REST API release for the administration page."""
+"""Check the latest RCT Manager release for the administration page."""
 
 import json
 import logging
@@ -17,7 +17,7 @@ from urllib.request import Request, urlopen
 from app import __version__
 
 _log = logging.getLogger(__name__)
-_RELEASE_API = "https://api.github.com/repos/Gill-Bates/rct-rest-api/releases/latest"
+_RELEASE_API = "https://api.github.com/repos/Gill-Bates/rct-manager/releases/latest"
 _CACHE_TTL = 3600
 _cache: dict | None = None
 _cache_time = 0.0
@@ -50,7 +50,7 @@ def check_for_updates(force: bool = False) -> dict:
         }
         request = Request(_RELEASE_API, headers={
             "Accept": "application/vnd.github+json",
-            "User-Agent": f"rct-rest-api/{__version__}",
+            "User-Agent": f"rct-manager/{__version__}",
         })
         try:
             with urlopen(request, timeout=10) as response:

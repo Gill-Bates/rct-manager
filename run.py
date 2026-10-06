@@ -4,7 +4,7 @@
 # Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
 #
 
-"""Container and bare-metal entry point for rct-rest-api."""
+"""Container and bare-metal entry point for rct-manager."""
 
 from app.__main__ import main
 

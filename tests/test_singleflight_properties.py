@@ -31,7 +31,7 @@ def _request(recheck: bool = False) -> TransactionRequest:
     )
 
 
-# Feature: rct-rest-api, Property 15: single flight, N concurrent requests share exactly one read
+# Feature: rct-manager, Property 15: single flight, N concurrent requests share exactly one read
 @settings(max_examples=100, deadline=None)
 @given(st.integers(1, 12), st.sets(st.integers(0, 11), max_size=12), st.booleans())
 def test_n_callers_share_one_read(n: int, cancelled: set[int], cancel_first: bool) -> None:

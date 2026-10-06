@@ -3,7 +3,7 @@
 #
 # Tag-driven release: validates the tag against pyproject.toml, builds native
 # linux/amd64 and linux/arm64 images (no QEMU), smoke-tests each, scans with
-# Trivy, assembles a multi-arch manifest on Docker Hub (giiibates/rct-rest-api)
+# Trivy, assembles a multi-arch manifest on Docker Hub (giiibates/rct-manager)
 # and attests its provenance. Related: ci.yml (PR gate), docs-build.yml.
 # Supersedes the manual docker/build.sh path for tagged releases.
 
@@ -24,7 +24,7 @@ permissions:
 
 env:
   REGISTRY: docker.io
-  IMAGE_NAME: giiibates/rct-rest-api
+  IMAGE_NAME: giiibates/rct-manager
 
 jobs:
   gate:
@@ -786,7 +786,7 @@ jobs:
               : `\`${IMAGE_NAME}:latest\` was left untouched: a newer version is already published.`;
 
             const body = [
-              `## rct-rest-api ${VERSION}`,
+              `## rct-manager ${VERSION}`,
               '',
               `Published as a native \`linux/amd64\` + \`linux/arm64\` multi-arch image.`,
               '',

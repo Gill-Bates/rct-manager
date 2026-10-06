@@ -143,7 +143,18 @@ class TransportEndpoint:
         return self._device_counters.setdefault(device_key, DeviceCounters())
 
     def _on_periodic(self, plant_address: int | None, now: float) -> None:
-        self.counters_for(DeviceKey(self._key, plant_address)).last_periodic_monotonic = now
+        # A periodic push is as much proof the device is alive and answering as a transaction is
+        # (Heartbeat.tick() already treats it that way via last_periodic_monotonic); device_status()
+        # only reads last_success_at, so without this a device driven purely by periodic reads shows
+        # a last-connection timestamp frozen at whatever transaction or heartbeat last ran, even
+        # while fresh values keep arriving.
+        device = self.counters_for(DeviceKey(self._key, plant_address))
+        device.last_periodic_monotonic = now
+        device.last_success_monotonic = now
+        device.last_success_at = self._clock.now()
+        self.counters.last_periodic_monotonic = now
+        self.counters.last_success_monotonic = now
+        self.counters.last_success_at = device.last_success_at
 
     def register_periodic(self, device_key: DeviceKey, object_id: int) -> None:
         self._demux.register_periodic(device_key, object_id)

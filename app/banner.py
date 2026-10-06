@@ -20,7 +20,7 @@ from importlib import metadata
 from app import __version__
 from app.logging_setup import use_colors
 
-DISTRIBUTION = "rct-rest-api"
+DISTRIBUTION = "rct-manager"
 
 _WORDMARK = r"""
           _                     _

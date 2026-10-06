@@ -12,7 +12,7 @@
 # the Dockerfile ARGs. The version comes from pyproject.toml. Tagged releases
 # ship separately via .github/workflows/release.yml, which builds multi-arch
 # (linux/amd64 + linux/arm64) and publishes to Docker Hub as
-# giiibates/rct-rest-api; this script only builds linux/amd64. By default the
+# giiibates/rct-manager; this script only builds linux/amd64. By default the
 # image is built and PUSHED as :latest and :<version> (requires `docker
 # login`). PUSH=0 builds a local :dev image only.
 #
@@ -83,6 +83,7 @@ if [ "${PUSH}" = 1 ]; then
         -f "${SCRIPT_DIR}/Dockerfile" \
         -t "${IMAGE}:latest" \
         -t "${IMAGE}:${APP_VERSION}" \
+        -t "${IMAGE}:dev" \
         --push \
         "$@" \
         "${REPO_ROOT}"

@@ -48,7 +48,7 @@ async def test_about_requires_session_and_renders_project_details(tmp_path):
         assert "Dependencies" in response.text
         assert "<code>com_service</code>" in response.text
         assert '<h3 class="h6">1.0.0 - 2026-10-06</h3>' in response.text
-        assert response.text.count("/rct-rest-api/releases") == 1
-        assert "https://gill-bates.github.io/rct-rest-api/" in response.text
-        assert "https://github.com/Gill-Bates/rct-rest-api/releases" in response.text
+        assert response.text.count("/rct-manager/releases") == 1
+        assert "https://gill-bates.github.io/rct-manager/" in response.text
+        assert "https://github.com/Gill-Bates/rct-manager/releases" in response.text
         assert (await client.get("/admin/static/css/about.css")).status_code == 200

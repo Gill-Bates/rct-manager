@@ -1,8 +1,8 @@
-# rct-rest-api in Docker
+# rct-manager in Docker
 
 Vendor-neutral REST gateway for RCT Power inverters. Tagged releases are published
 multi-arch (`linux/amd64`, `linux/arm64`) to Docker Hub as
-[`giiibates/rct-rest-api`](https://hub.docker.com/r/giiibates/rct-rest-api) by
+[`giiibates/rct-manager`](https://hub.docker.com/r/giiibates/rct-manager) by
 `.github/workflows/release.yml`, with Trivy scanning, an SBOM and provenance
 attestation. `docker/build.sh` below is a separate, manual local-build path that
 defaults to pushing `linux/amd64` only to a private registry
@@ -11,12 +11,12 @@ build, not as the source for a production pull of a tagged version.
 
 Deployment artefacts: [`compose.yaml`](compose.yaml), [`Dockerfile`](Dockerfile)
 and [`build.sh`](build.sh). The operator documentation (configuration, endpoints,
-security posture) is at <https://gill-bates.github.io/rct-rest-api/>.
+security posture) is at <https://gill-bates.github.io/rct-manager/>.
 
 ## Run
 
 ```sh
-cd rct-rest-api
+cd rct-manager
 docker compose -f docker/compose.yaml up -d
 docker compose -f docker/compose.yaml logs rct-api
 docker compose -f docker/compose.yaml run --rm rct-api validate
@@ -123,7 +123,7 @@ mapping yourself.
 ## Build and publish
 
 Tagged releases ship through `.github/workflows/release.yml` to Docker Hub
-(`giiibates/rct-rest-api`, `linux/amd64` + `linux/arm64`), not through this
+(`giiibates/rct-manager`, `linux/amd64` + `linux/arm64`), not through this
 script. `docker/build.sh` is the separate manual path for a local build or a
 push to a private/self-hosted registry:
 

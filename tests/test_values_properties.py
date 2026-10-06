@@ -43,7 +43,7 @@ _INT_RANGES = {
 }
 
 
-# Feature: rct-rest-api, Property 17: value round-trip across all data types
+# Feature: rct-manager, Property 17: value round-trip across all data types
 @PROP
 @given(st.data())
 def test_integer_round_trip(data: st.DataObject) -> None:
@@ -88,7 +88,7 @@ def test_length_mismatch_reports_expected_and_received() -> None:
     assert (info.value.expected, info.value.received) == (4, 2)
 
 
-# Feature: rct-rest-api, Property 18: string decoding terminates for every byte sequence
+# Feature: rct-manager, Property 18: string decoding terminates for every byte sequence
 @PROP
 @given(st.binary(max_size=200), st.sampled_from(["utf-8", "latin-1"]))
 def test_string_decoding_terminates_and_is_deterministic(payload: bytes, encoding: str) -> None:
@@ -151,7 +151,7 @@ async def _read_with_cache(ttl: int, grace: int, age: int, device_ok: bool, wall
     return outcome, waited, frames
 
 
-# Feature: rct-rest-api, Property 14: cache fields are consistent with each other
+# Feature: rct-manager, Property 14: cache fields are consistent with each other
 @settings(max_examples=100, deadline=None)
 @given(
     ttl=st.integers(0, 30),

@@ -1,4 +1,4 @@
-# rct-rest-api
+# rct-manager
 
 Vendor-neutral REST gateway for RCT Power inverters.
 
@@ -28,5 +28,5 @@ the process.
 | Errors | RFC 9457 problem details |
 | Monitoring | Prometheus text format at `GET /metrics`; optional push export to InfluxDB 2 or QuestDB |
 | Transport | Plain HTTP; TLS terminates at a reverse proxy |
-| License | [MIT](https://github.com/Gill-Bates/rct-rest-api/blob/main/LICENSE) |
+| License | [MIT](https://github.com/Gill-Bates/rct-manager/blob/main/LICENSE) |
 

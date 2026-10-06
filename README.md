@@ -12,8 +12,8 @@
 </p>
 
 <p align="center">
-  <a href="https://gill-bates.github.io/rct-rest-api/"><img src="https://img.shields.io/badge/Documentation-2ea44f?style=for-the-badge&logo=readthedocs&logoColor=white" alt="Documentation"></a>
-  <a href="https://gill-bates.github.io/rct-rest-api/getting-started/quick-start/"><img src="https://img.shields.io/badge/Quick%20Start-0a7bbb?style=for-the-badge&logo=docker&logoColor=white" alt="Quick Start"></a>
+  <a href="https://gill-bates.github.io/rct-manager/"><img src="https://img.shields.io/badge/Documentation-2ea44f?style=for-the-badge&logo=readthedocs&logoColor=white" alt="Documentation"></a>
+  <a href="https://gill-bates.github.io/rct-manager/getting-started/quick-start/"><img src="https://img.shields.io/badge/Quick%20Start-0a7bbb?style=for-the-badge&logo=docker&logoColor=white" alt="Quick Start"></a>
 </p>
 
 ---
@@ -69,7 +69,7 @@ when absent. For Docker, provide it before starting. Back up the database and
 secret together. See [Configuration](docs/getting-started/configuration.md).
 
 Installation, configuration, authentication and the full API reference are in the
-**[Documentation](https://gill-bates.github.io/rct-rest-api/)**. Container details
+**[Documentation](https://gill-bates.github.io/rct-manager/)**. Container details
 are in [`docker/README_docker.md`](docker/README_docker.md).
 
 ---

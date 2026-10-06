@@ -43,7 +43,7 @@ mkdocs build -f docs/mkdocs.yml --strict -d /tmp/rct-site
 | --- | --- |
 | `.github/workflows/ci.yml` | ruff, pytest, actionlint, `docker build --check`, manifest checks |
 | `.github/workflows/docs-build.yml` | strict docs build, link check, Trivy scan, deploy to GitHub Pages from `main` |
-| `.github/workflows/release.yml` | tag-driven: validates the tag against `pyproject.toml`, builds native `linux/amd64` + `linux/arm64` images, smoke-tests and scans each, publishes a multi-arch manifest to Docker Hub (`giiibates/rct-rest-api`) with an SBOM and provenance attestation, and creates the GitHub Release |
+| `.github/workflows/release.yml` | tag-driven: validates the tag against `pyproject.toml`, builds native `linux/amd64` + `linux/arm64` images, smoke-tests and scans each, publishes a multi-arch manifest to Docker Hub (`giiibates/rct-manager`) with an SBOM and provenance attestation, and creates the GitHub Release |
 
 Push a tag `v<version>` matching `[project].version` in `pyproject.toml` to trigger a release;
 `docker/build.sh` stays the separate manual path for a local build or a push to a private

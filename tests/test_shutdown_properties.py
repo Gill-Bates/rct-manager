@@ -38,7 +38,7 @@ async def _drive(clock: ManualClock, task: asyncio.Task, limit: float) -> None:
         assert waited <= limit, "shutdown overran its deadline"
 
 
-# Feature: rct-rest-api, Property 16: the shutdown deadline is one overall deadline
+# Feature: rct-manager, Property 16: the shutdown deadline is one overall deadline
 @settings(max_examples=100, deadline=None)
 @given(
     delay=st.one_of(st.none(), st.floats(0.0, 30.0)),  # None means the device never answers

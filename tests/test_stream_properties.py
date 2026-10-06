@@ -34,7 +34,7 @@ def _split(data: bytes, cuts: list[int]) -> list[bytes]:
     return [data[a:b] for a, b in pairwise(points)]
 
 
-# Feature: rct-rest-api, Property 4: any split of the stream leaves the result unchanged
+# Feature: rct-manager, Property 4: any split of the stream leaves the result unchanged
 @PROP
 @given(st.lists(frames(), min_size=1, max_size=5), st.lists(st.integers(0, 10_000), max_size=20))
 def test_arbitrary_split_gives_same_frames(sequence: list[Frame], cuts: list[int]) -> None:
@@ -49,7 +49,7 @@ def test_arbitrary_split_gives_same_frames(sequence: list[Frame], cuts: list[int
     assert parser.stats.discarded_bytes == 0
 
 
-# Feature: rct-rest-api, Property 5: resynchronization after a disturbance
+# Feature: rct-manager, Property 5: resynchronization after a disturbance
 @PROP
 @given(
     st.binary(max_size=60).map(lambda b: b.replace(bytes([START_BYTE]), b"\x01")),
@@ -222,7 +222,7 @@ def test_buffer_stays_bounded_for_escape_heavy_frames() -> None:
     assert peak <= 2 * 64
 
 
-# Feature: rct-rest-api, Property 6: the frame class assignment (FrameKind) is unambiguous and complete
+# Feature: rct-manager, Property 6: the frame class assignment (FrameKind) is unambiguous and complete
 @PROP
 @given(
     st.sets(st.integers(0, 15), max_size=6),

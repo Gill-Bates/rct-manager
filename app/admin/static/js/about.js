@@ -28,7 +28,7 @@
     try {
       const url = new URL(value);
       if (url.protocol === 'https:' && url.hostname === 'github.com' &&
-          url.pathname.startsWith('/Gill-Bates/rct-rest-api/releases/tag/')) return url.href;
+        url.pathname.startsWith('/Gill-Bates/rct-manager/releases/tag/')) return url.href;
     } catch { /* Missing or invalid release URL. */ }
     return null;
   }

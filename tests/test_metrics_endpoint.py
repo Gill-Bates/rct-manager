@@ -72,7 +72,7 @@ def _state(draw):
     return entries, counters
 
 
-# Feature: rct-rest-api, Property 19: metric names and labels separate device and transport endpoint
+# Feature: rct-manager, Property 19: metric names and labels separate device and transport endpoint
 @settings(max_examples=100, deadline=None)
 @given(state=_state())
 def test_metric_names_and_labels_separate_device_and_transport(state) -> None:
