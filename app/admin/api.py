@@ -555,17 +555,14 @@ def _device_card_label(catalog, name: str, value: Any) -> str | None:
 # a given tower actually exists on this device; _battery_tower_present answers that from readings.
 _BATTERY_TOWER_PREFIXES = ("battery", "battery_placeholder_0")
 _BATTERY_MODULE_SLOTS = 7
-# One of these having a cached reading proves the tower is physically present; module_sn slots do
-# not qualify here because an unpopulated slot (None) and a missing tower look identical.
+# A plain numeric/status reading alone does not prove the *placeholder* tower is real: a device
+# answers a periodically-registered read with some value even for a register nothing is wired to
+# (an unpopulated numeric register reads back as 0, not as "no reading"), so soc/temperature/
+# cycles/status2 are only a presence signal for the primary tower, which every single-battery
+# device has always had (keeps compatibility with registries that carry no module_sn slots at
+# all). A placeholder tower is only real when it has at least one populated module serial — the
+# one signal a device cannot answer for a slot nothing is plugged into.
 _BATTERY_PRESENCE_SUFFIXES = ("soc", "temperature", "cycles", "status2")
-
-
-def _battery_tower_present(runtime, device_id: str, prefix: str) -> bool:
-    for suffix in _BATTERY_PRESENCE_SUFFIXES:
-        name = f"{prefix}_{suffix}"
-        if runtime.catalog.exists(name) and runtime.gateway.cached_reading(device_id, name) is not None:
-            return True
-    return False
 
 
 def _battery_module_count(runtime, device_id: str, prefix: str) -> int:
@@ -579,6 +576,18 @@ def _battery_module_count(runtime, device_id: str, prefix: str) -> int:
         if reading is not None and isinstance(reading[0], str) and reading[0].strip():
             count += 1
     return count
+
+
+def _battery_tower_present(runtime, device_id: str, prefix: str, module_count: int) -> bool:
+    if module_count > 0:
+        return True
+    if prefix != "battery":
+        return False  # a placeholder tower with no module serials is not installed
+    for suffix in _BATTERY_PRESENCE_SUFFIXES:
+        name = f"{prefix}_{suffix}"
+        if runtime.catalog.exists(name) and runtime.gateway.cached_reading(device_id, name) is not None:
+            return True
+    return False
 
 
 @router.get("/devices")
@@ -615,8 +624,9 @@ def devices(request: Request) -> dict:
             readings.append(metric)
         batteries = []
         for prefix in _BATTERY_TOWER_PREFIXES:
-            if _battery_tower_present(runtime, item.device_id, prefix):
-                batteries.append({"id": prefix, "module_count": _battery_module_count(runtime, item.device_id, prefix)})
+            module_count = _battery_module_count(runtime, item.device_id, prefix)
+            if _battery_tower_present(runtime, item.device_id, prefix, module_count):
+                batteries.append({"id": prefix, "module_count": module_count})
         reported = runtime.gateway.reported_name(item.device_id)
         result.append({
             "id": item.device_id, "name": item.display_name or reported or item.device_id,

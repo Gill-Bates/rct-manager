@@ -17,7 +17,7 @@ from pathlib import Path
 from app.catalog.registry import RegistryCatalog
 from app.protocol.frames import encode_frame
 from app.protocol.stream import StreamParser
-from app.protocol.types import Command
+from app.protocol.types import Command, DataType
 from app.protocol.values import encode_value
 from tests.fakes import response_to
 
@@ -26,22 +26,37 @@ VALUES = {"solar_a_power": 1234.5, "solar_b_power": 800.0, "grid_power": -250.0,
 # Device-card status badges (Requirement: dashboard shows inverter_state/battery_status2 as text);
 # feed_in=13 and the community-observed "balancing active" bit combination exercise the labels.
 INT_VALUES = {"inverter_state": 13, "battery_status2": 2304, "battery_cycles": 142}
+# battery_module_sn_0..2 of the single simulated tower, so the dashboard's dynamic battery-slice
+# stack has something concrete to count (module_count = 3); every other module_sn slot (including
+# all of battery_placeholder_0_*, the would-be second tower) is left unmodeled on purpose, to prove
+# that an absent tower is not fabricated from a generic numeric fallback.
+STRING_VALUES = {f"battery_module_sn_{i}": f"SIM-{i:03d}" for i in range(3)}
 
 
-def _by_object_id() -> dict[int, bytes]:
+def _default_payload(data_type: DataType) -> bytes:
+    """A real device answers an unmodeled register with its own type's zero value, not another
+    type's bytes reinterpreted; an unpopulated t_string register decodes to '', never garbage."""
+    return b"\x00" if data_type is DataType.STRING else struct.pack(">f", 1.0)
+
+
+def _by_object_id() -> tuple[dict[int, bytes], dict[int, DataType]]:
     catalog = RegistryCatalog.from_file(Path(__file__).resolve().parents[2] / "app" / "catalog" / "objects.json")
+    types = {entry.object_id: entry.data_type for entry in catalog.entries()}
     payloads = {catalog.object_entry(name).object_id: struct.pack(">f", value) for name, value in VALUES.items()}
     for name, value in INT_VALUES.items():
         entry = catalog.object_entry(name)
         payloads[entry.object_id] = encode_value(entry.data_type, value, byte_width=entry.byte_width)
-    return payloads
+    for name, value in STRING_VALUES.items():
+        entry = catalog.object_entry(name)
+        payloads[entry.object_id] = encode_value(entry.data_type, value, byte_width=entry.byte_width)
+    return payloads, types
 
 
 PAS_PERIOD = 0x9C8FE559
 
 
 async def _serve(port: int) -> None:
-    values = _by_object_id()
+    values, types = _by_object_id()
     stored: dict[int, bytes] = {}  # values the gateway wrote (pas.period readback)
 
     async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
@@ -49,7 +64,11 @@ async def _serve(port: int) -> None:
         periodic: dict[int, object] = {}
 
         def payload_for(object_id: int) -> bytes:
-            return stored.get(object_id) or values.get(object_id) or struct.pack(">f", 1.0)
+            if object_id in stored:
+                return stored[object_id]
+            if object_id in values:
+                return values[object_id]
+            return _default_payload(types.get(object_id, DataType.FLOAT))
 
         async def push() -> None:
             while True:
