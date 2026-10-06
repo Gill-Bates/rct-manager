@@ -82,13 +82,29 @@ sign conventions for battery power and grid power) are not configured through th
 They are **per-device capabilities**, persisted in the dispatch database and shown and set through
 the admin dispatch API (`/admin/api/dispatch/...`, not part of the public, documented contract).
 
-- `GET .../capabilities` returns the sign-convention evidence (`battery_discharge_positive`,
-  `grid_import_positive`) as plain booleans. For the external-control strategy, it also returns
-  the raw `soc_strategy_external_code` register value, since the RCT register catalog carries no
-  enum label table for it (the meaning is device/firmware-specific, not a project-wide constant).
-  That raw code is only meaningful together with `note`: record there what the code means and how
-  it was verified (hardware model, firmware, observed behavior) when entering it through the PUT
-  endpoint.
+- **Each capability row carries only the evidence that governs it.** The dispatch adapter reads every
+  evidence field from exactly one capability, so `GET .../capabilities` reports it on that row only
+  and `null` on all others — `null` means "not applicable to this capability", never "unset":
+    - `battery_power_sign_convention` → `battery_discharge_positive`
+    - `grid_power_sign_convention` → `grid_import_positive`
+    - `write_path_convention` → `soc_strategy_external_code`
+
+  A `PUT` that sets an evidence field on a capability that does not govern it is refused with `422`
+  instead of storing a value the adapter would ignore. The same rule covers the remaining evidence
+  fields: `enum_byte_width`, `bool_byte_width`, `write_frame_layout_verified` and
+  `apply_sequence_verified` belong to `write_path_convention`, and
+  `export_limit_zero_blocks_export` to `export_limit_convention`. `note` is the exception — every
+  capability may carry one.
+
+- **`PUT` replaces the capability record; it is not a partial update.** An omitted evidence field is
+  reset to its assumption default rather than kept, so a value that was set earlier is lost unless
+  the request sends it again. Read the capability first and resend the fields you want to keep.
+
+- `soc_strategy_external_code` is returned as the raw register value, since the RCT register catalog
+  carries no enum label table for it (the meaning is device/firmware-specific, not a project-wide
+  constant). It is only interpretable together with `note`, so setting `write_path_convention` to
+  `verified` is refused with `400` unless the `PUT` supplies a non-empty `note`; record there what
+  the code means and what was observed (hardware model, firmware, behavior).
 
 - **Shipping state is `unverified`.** A fresh database ships every capability as `unverified` with
   assumption defaults the adapter works with (for example `battery_discharge_positive = true`,

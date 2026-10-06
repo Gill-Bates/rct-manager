@@ -56,6 +56,9 @@ _REQUIRED_FOR_VERIFIED: dict[CapabilityName, tuple[str, ...]] = {
         "bool_byte_width",
         "write_frame_layout_verified",
         "apply_sequence_verified",
+        # The strategy code is a vendor-specific raw value with no project-wide meaning, so it is
+        # only interpretable together with the evidence an operator writes down for it.
+        "note",
     ),
     CapabilityName.BATTERY_POWER_SIGN: ("battery_discharge_positive",),
     CapabilityName.GRID_POWER_SIGN: ("grid_import_positive",),
@@ -63,15 +66,53 @@ _REQUIRED_FOR_VERIFIED: dict[CapabilityName, tuple[str, ...]] = {
     CapabilityName.SETPOINT_VOLATILITY: (),
 }
 _TRUTHY_FLAGS = frozenset({"write_frame_layout_verified", "apply_sequence_verified"})
+# A value that is present but blank is no evidence: `note` carries the human-readable backing for
+# the strategy code, so an empty or whitespace-only string counts as missing.
+_NON_BLANK_FIELDS = frozenset({"note"})
+# `note` is the one required field that is not capability-specific — every row may carry one — so it
+# is excluded from the governance map derived below.
+_CAPABILITY_AGNOSTIC_FIELDS = frozenset({"note"})
+# Single source of truth for "which capability does this evidence field govern", derived from
+# _REQUIRED_FOR_VERIFIED so the response projection and the PUT rejection cannot drift apart. The
+# adapter (app.gateway.rct_dispatch) reads each of these fields from exactly that one capability;
+# the same value stored on any other capability is inert.
+_GOVERNED_BY: dict[str, CapabilityName] = {
+    field_name: name
+    for name, field_names in _REQUIRED_FOR_VERIFIED.items()
+    for field_name in field_names
+    if field_name not in _CAPABILITY_AGNOSTIC_FIELDS
+}
 
 
 def _missing_evidence(name: CapabilityName, record: CapabilityRecord) -> list[str]:
     missing = []
     for field_name in _REQUIRED_FOR_VERIFIED[name]:
         value = getattr(record, field_name)
-        if value is None or (field_name in _TRUTHY_FLAGS and not value):
+        blank = field_name in _NON_BLANK_FIELDS and isinstance(value, str) and not value.strip()
+        if value is None or blank or (field_name in _TRUTHY_FLAGS and not value):
             missing.append(field_name)
     return missing
+
+
+def _governed(record: CapabilityRecord, field_name: str):
+    """The field's value if this capability governs it, ``None`` otherwise (inert elsewhere)."""
+    if _GOVERNED_BY[field_name] is not record.name:
+        return None
+    return getattr(record, field_name)
+
+
+def _misplaced_evidence(name: CapabilityName, body: "CapabilityUpdate") -> list[str]:
+    """Evidence fields the caller set explicitly on a capability that does not govern them.
+
+    Storing such a value would echo it back from GET while the adapter ignores it entirely, so the
+    PUT is refused instead. Only explicitly sent fields count (``model_fields_set``): an omitted
+    field is the caller saying nothing, not setting a value.
+    """
+    return sorted(
+        field_name
+        for field_name in body.model_fields_set & _GOVERNED_BY.keys()
+        if _GOVERNED_BY[field_name] is not name
+    )
 
 
 def _device_or_404(request: Request, device_id: str) -> None:
@@ -110,30 +151,38 @@ class CapabilityUpdate(BaseModel):
 class CapabilityResponse(BaseModel):
     """GET/PUT shape of one device capability.
 
-    Evidence fields (``battery_discharge_positive``, ``grid_import_positive``,
-    ``soc_strategy_external_code``) reflect the currently configured value regardless of
-    verification status; always read them together with ``status``. When ``status`` is
-    ``unverified``, these are the shipped assumption defaults the adapter works with, not
-    measured facts about this device's hardware.
+    Evidence fields are **capability-specific**: each row carries only the evidence the adapter
+    actually reads from that capability and ``null`` everywhere else. ``null`` therefore means "this
+    field does not govern this capability", not "unset" — it never means the adapter works without a
+    value. Where a field is populated it reflects the currently configured value regardless of
+    verification status, so always read it together with ``status``: when ``status`` is
+    ``unverified``, it is the shipped assumption default the adapter works with, not a measured fact
+    about this device's hardware.
     """
 
     device_id: str
     name: CapabilityName
     status: CapabilityStatus
-    battery_discharge_positive: bool = Field(
-        description="BATTERY_POWER_SIGN evidence: whether a positive power_mng_battery_power_extern"
-        " write discharges the battery on this device."
+    battery_discharge_positive: bool | None = Field(
+        default=None,
+        description="BATTERY_POWER_SIGN evidence, governed by `battery_power_sign_convention` only:"
+        " whether a positive power_mng_battery_power_extern write discharges the battery on this"
+        " device. `null` on every other capability, which this field does not govern.",
     )
-    grid_import_positive: bool = Field(
-        description="GRID_POWER_SIGN evidence: whether a positive grid_power reading means import"
-        " on this device."
+    grid_import_positive: bool | None = Field(
+        default=None,
+        description="GRID_POWER_SIGN evidence, governed by `grid_power_sign_convention` only:"
+        " whether a positive grid_power reading means import on this device. `null` on every other"
+        " capability, which this field does not govern.",
     )
     soc_strategy_external_code: int | None = Field(
-        description="WRITE_PATH evidence: the raw power_mng_soc_strategy register value this device"
-        " uses for external control. This is a vendor-specific code with no project-wide meaning"
-        " (the RCT register catalog carries no enum label table for it) — read it together with"
-        " `note`, which an operator must set to the human-readable evidence (e.g. hardware model,"
-        " firmware, and what was observed) backing this value."
+        default=None,
+        description="WRITE_PATH evidence, governed by `write_path_convention` only: the raw"
+        " power_mng_soc_strategy register value this device uses for external control. This is a"
+        " vendor-specific code with no project-wide meaning (the RCT register catalog carries no"
+        " enum label table for it), so it is only interpretable together with `note`: setting"
+        " `write_path_convention` to `verified` is refused unless a non-empty `note` is supplied."
+        " `null` on every other capability, which this field does not govern.",
     )
     verified_device_model: str | None
     verified_firmware: str | None
@@ -147,9 +196,9 @@ class CapabilityResponse(BaseModel):
             device_id=record.device_id,
             name=record.name,
             status=record.status,
-            battery_discharge_positive=record.battery_discharge_positive,
-            grid_import_positive=record.grid_import_positive,
-            soc_strategy_external_code=record.soc_strategy_external_code,
+            battery_discharge_positive=_governed(record, "battery_discharge_positive"),
+            grid_import_positive=_governed(record, "grid_import_positive"),
+            soc_strategy_external_code=_governed(record, "soc_strategy_external_code"),
             verified_device_model=record.verified_device_model,
             verified_firmware=record.verified_firmware,
             verified_at=record.verified_at,
@@ -212,10 +261,21 @@ async def put_capability(
     dispatch = _dispatch_or_503(request)
     verified_by = _ADMIN_ACTOR
 
+    misplaced = _misplaced_evidence(name, body)
+    if misplaced:
+        raise HTTPException(422, f"evidence not governed by {name.value}: {', '.join(misplaced)}")
+
+    # This PUT replaces the record; it is not a partial update. An omitted field falls through to
+    # the CapabilityRecord default, so a previously stored non-default value is RESET, not kept: a
+    # caller that wants to preserve an evidence value has to send it again. exclude_unset is only
+    # here so model_fields_set can tell "omitted" from "sent" for the misplaced-evidence check
+    # above; it does not turn the replace into a merge.
+    evidence = body.model_dump(exclude={"status"}, exclude_unset=True)
+
     if body.status is CapabilityStatus.VERIFIED:
         if not body.verified_device_model or not body.verified_firmware:
             raise HTTPException(400, "verified_device_model and verified_firmware are required")
-        candidate = CapabilityRecord(device_id=device_id, name=name, **body.model_dump(exclude={"status"}))
+        candidate = CapabilityRecord(device_id=device_id, name=name, **evidence)
         missing = _missing_evidence(name, candidate)
         if missing:
             raise HTTPException(400, f"missing evidence for {name.value}: {', '.join(missing)}")
@@ -226,7 +286,7 @@ async def put_capability(
         name=name,
         verified_at=now if body.status is CapabilityStatus.VERIFIED else None,
         verified_by=verified_by if body.status is CapabilityStatus.VERIFIED else None,
-        **body.model_dump(exclude={"status"}),
+        **evidence,
         status=body.status,
     )
     # The active-operation guard (D2) lives in DispatchController.set_capability(), under the same
