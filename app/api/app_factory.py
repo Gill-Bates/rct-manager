@@ -305,6 +305,11 @@ _DASHBOARD_METRIC_NAMES = (
     "heat_sink_temperature",  # inverter-side actual temperature, not the sink_temp power-reduction target
     "battery_temperature",  # battery pack temperature, distinct from the inverter's heat_sink_temperature
     "battery_cycles",  # battery.cycles - aggregate pack charge-cycle counter
+    # module_sn_0..6 per tower (t_string, non-numeric so the usual periodic-selection filter would
+    # skip them): read so app/admin/api.py's devices() can derive each tower's module count from
+    # the populated slots. No dedicated module-count register exists on the device.
+    *(f"battery_module_sn_{i}" for i in range(7)),
+    *(f"battery_placeholder_0_module_sn_{i}" for i in range(7)),
 )
 
 

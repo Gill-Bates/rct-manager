@@ -548,6 +548,39 @@ def _device_card_label(catalog, name: str, value: Any) -> str | None:
     return _humanize_enum_label(label) if label else None
 
 
+# Prefixes of the per-tower module_sn_0..6 string slots (app/catalog/objects.json); no dedicated
+# module-count register exists on the device, so the count is derived from populated slots. Each
+# prefix corresponds to one physical battery tower that could share the inverter. The registry
+# carries entries for both prefixes unconditionally, so catalog presence alone cannot tell whether
+# a given tower actually exists on this device; _battery_tower_present answers that from readings.
+_BATTERY_TOWER_PREFIXES = ("battery", "battery_placeholder_0")
+_BATTERY_MODULE_SLOTS = 7
+# One of these having a cached reading proves the tower is physically present; module_sn slots do
+# not qualify here because an unpopulated slot (None) and a missing tower look identical.
+_BATTERY_PRESENCE_SUFFIXES = ("soc", "temperature", "cycles", "status2")
+
+
+def _battery_tower_present(runtime, device_id: str, prefix: str) -> bool:
+    for suffix in _BATTERY_PRESENCE_SUFFIXES:
+        name = f"{prefix}_{suffix}"
+        if runtime.catalog.exists(name) and runtime.gateway.cached_reading(device_id, name) is not None:
+            return True
+    return False
+
+
+def _battery_module_count(runtime, device_id: str, prefix: str) -> int:
+    """Number of populated module_sn slots for one tower, 0 when none are populated (yet)."""
+    count = 0
+    for i in range(_BATTERY_MODULE_SLOTS):
+        name = f"{prefix}_module_sn_{i}"
+        if not runtime.catalog.exists(name):
+            continue
+        reading = runtime.gateway.cached_reading(device_id, name)
+        if reading is not None and isinstance(reading[0], str) and reading[0].strip():
+            count += 1
+    return count
+
+
 @router.get("/devices")
 def devices(request: Request) -> dict:
     require_admin(request)
@@ -580,12 +613,16 @@ def devices(request: Request) -> dict:
             if label is not None:
                 metric["label"] = label
             readings.append(metric)
+        batteries = []
+        for prefix in _BATTERY_TOWER_PREFIXES:
+            if _battery_tower_present(runtime, item.device_id, prefix):
+                batteries.append({"id": prefix, "module_count": _battery_module_count(runtime, item.device_id, prefix)})
         reported = runtime.gateway.reported_name(item.device_id)
         result.append({
             "id": item.device_id, "name": item.display_name or reported or item.device_id,
             "status": status.state.value, "host": item.host, "port": item.port,
             "last_success_at": status.last_success_at.isoformat() if status.last_success_at else None,
-            "queue_length": status.queue_length, "metrics": readings,
+            "queue_length": status.queue_length, "metrics": readings, "batteries": batteries,
         })
     return {"devices": result, "tsdb": _tsdb_view(runtime)}
 

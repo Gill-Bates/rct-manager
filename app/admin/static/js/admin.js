@@ -297,20 +297,67 @@
   ];
 
   // Metric names that prove a battery system is attached; without any of them no battery card is
-  // rendered at all rather than an empty one.
+  // rendered at all rather than an empty one. Fallback only — used when the server's `batteries`
+  // list (below) is empty, e.g. a registry without the module_sn_0..6 slots.
   const BATTERY_PRESENCE = ['battery_soc', 'battery_temperature', 'battery_cycles', 'battery_status2',
     'battery_placeholder_0_status2'];
 
   // Describes the battery cards to render for one device. /admin/api/devices (app/admin/api.py,
-  // devices()) exposes a single logical battery system per inverter — battery_soc,
-  // battery_temperature, battery_cycles, battery_soc_target, power_mng_bat_next_calib_date plus
-  // battery_status2 / battery_placeholder_0_status2 — with no per-tower index or count, so this
-  // returns at most one descriptor. The card grid below renders one column per descriptor, so a
-  // future per-tower model only has to return more of them; a second card is never invented from
-  // the shared readings.
-  function batteryTowers(metrics) {
+  // devices()) returns a `batteries` list, one entry per physical tower sharing the inverter, each
+  // with its own `module_count` derived server-side from the populated battery_module_sn_0..6 /
+  // battery_placeholder_0_module_sn_0..6 slots. `module_count` is the number of modules *in that
+  // one tower*, not the number of towers. The status metric name follows the same per-tower prefix
+  // as those slots (`battery_status2` for id `battery`, `battery_placeholder_0_status2` for id
+  // `battery_placeholder_0`). A registry without any module_sn slots reports no `batteries` entries
+  // at all; BATTERY_PRESENCE then falls back to a single descriptor with an unknown module count so
+  // older/simpler registries still show one battery card.
+  function batteryTowers(metrics, batteries) {
+    if (Array.isArray(batteries) && batteries.length) {
+      return batteries.map((battery) => ({
+        title: 'Battery',
+        statusMetric: `${battery.id}_status2`,
+        moduleCount: typeof battery.module_count === 'number' ? battery.module_count : null,
+      }));
+    }
     if (!BATTERY_PRESENCE.some((name) => metrics.has(name))) return [];
-    return [{ title: 'Battery', statusMetric: 'battery_status2' }];
+    return [{ title: 'Battery', statusMetric: 'battery_status2', moduleCount: null }];
+  }
+
+  // The three battery slices (app/admin/static/img/battery_{top,middle,bottom}.svg) share a 220-wide
+  // viewBox and are drawn edge-to-edge, so stacking top + middle*N + bottom at one common rendered
+  // width with no gap reproduces one continuous tower. Height per slice follows from its own viewBox
+  // aspect ratio at that width, so slices never need matching/hardcoded heights.
+  const BATTERY_SLICE_WIDTH = 64;  // matches the previous single rct-batterystack.svg image width
+  const BATTERY_SLICE_VIEWBOX_WIDTH = 220;
+  const BATTERY_SLICES = {
+    top: { file: 'battery_top.svg', viewBoxHeight: 74 },
+    middle: { file: 'battery_middle.svg', viewBoxHeight: 112 },
+    bottom: { file: 'battery_bottom.svg', viewBoxHeight: 140 },
+  };
+
+  function batterySliceImage(kind) {
+    const { file, viewBoxHeight } = BATTERY_SLICES[kind];
+    const image = element('img', 'device-battery-slice');
+    image.src = `/admin/static/img/${file}`;
+    image.alt = '';
+    image.width = BATTERY_SLICE_WIDTH;
+    image.height = Math.round((BATTERY_SLICE_WIDTH * viewBoxHeight) / BATTERY_SLICE_VIEWBOX_WIDTH);
+    return image;
+  }
+
+  // Bottom once, N middles, top once — DOM order top-to-bottom, matching the visual stack order.
+  function buildBatteryStack(moduleCount) {
+    const nodes = [batterySliceImage('top')];
+    for (let i = 0; i < moduleCount; i += 1) nodes.push(batterySliceImage('middle'));
+    nodes.push(batterySliceImage('bottom'));
+    return nodes;
+  }
+
+  // An unknown count (registry without module_sn slots) falls back to a single middle slice so the
+  // tower never collapses to just top+bottom; an explicit, confirmed zero stays zero rather than
+  // fabricating a module that was not actually found.
+  function effectiveModuleCount(moduleCount) {
+    return moduleCount === null || moduleCount === undefined ? 1 : Math.max(0, moduleCount);
   }
 
   // Reconciles a parent's children with the wanted nodes in order; untouched nodes are not re-inserted.
@@ -422,10 +469,14 @@
     });
     const readings = element('div', 'device-subcard-readings');
     readings.append(charge, grid);
+    const stack = element('div', 'device-battery-stack');
     const body = element('div', 'device-subcard-body');
-    body.append(cardImage('rct-batterystack.svg', 64, 252), readings);
+    body.append(stack, readings);
     card.append(head.node, body);
-    return { node: card, head, grid, cells, chargeValue, bar, statusMetric: tower.statusMetric };
+    return {
+      node: card, head, grid, cells, chargeValue, bar, stack, moduleCount: -1,
+      statusMetric: tower.statusMetric,
+    };
   }
 
   function createDeviceVisual() {
@@ -486,7 +537,14 @@
     syncChildren(card.grid, nodes);
   }
 
-  function patchBatteryCard(card, metrics) {
+  function patchBatteryCard(card, metrics, moduleCount) {
+    const wanted = effectiveModuleCount(moduleCount);
+    // Rebuilds the slice stack only when the module count actually changed, not on every poll —
+    // same no-churn pattern as syncChildren/patchDeviceVisual elsewhere in this file.
+    if (card.moduleCount !== wanted) {
+      card.moduleCount = wanted;
+      card.stack.replaceChildren(...buildBatteryStack(wanted));
+    }
     patchCardStatus(card.head, metrics, card.statusMetric);
     const metric = metrics.get('battery_soc');
     const value = metric && metric.value !== null && metric.value !== undefined ? Number(metric.value) : NaN;
@@ -504,13 +562,13 @@
     const metrics = new Map((device.metrics || []).map((item) => [item.name, item]));
     patchCardStatus(visual.inverterCard.head, metrics, visual.inverterCard.statusMetric);
     patchCardGrid(visual.inverterCard, metrics);
-    const towers = batteryTowers(metrics);
+    const towers = batteryTowers(metrics, device.batteries);
     // Battery cards are created and dropped as the reported towers change; the surviving cards
     // keep their nodes, so a poll does not rebuild the whole card.
     while (visual.batteries.length > towers.length) visual.batteries.pop();
     towers.forEach((tower, index) => {
       if (!visual.batteries[index]) visual.batteries[index] = createBatteryCard(tower);
-      patchBatteryCard(visual.batteries[index], metrics);
+      patchBatteryCard(visual.batteries[index], metrics, tower.moduleCount);
     });
     // Drives the column count of the card grid, so one tower fills the row and two share it.
     visual.node.style.setProperty('--battery-count', String(towers.length));
@@ -597,7 +655,11 @@
       time.textContent = '';
       return;
     }
-    if (tsdb.healthy) {
+    if (!tsdb.export_enabled) {
+      icon.textContent = 'pause_circle';
+      icon.classList.add('text-secondary');
+      label.textContent = 'Export paused';
+    } else if (tsdb.healthy) {
       icon.textContent = 'cloud_done';
       icon.classList.add('text-success');
       label.textContent = 'Sending';

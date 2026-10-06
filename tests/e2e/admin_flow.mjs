@@ -130,22 +130,36 @@ check('grid value (-250 W feed-in) is shown as magnitude with a feed-in indicato
   /^arrow_upward\s*250\s*W$/.test(gridTile.text) && !/[-−]/.test(gridTile.text) && gridTile.label === 'Feeding into the grid'
   && gridTile.card === 'Feeding into the grid' && /^arrow_upward\s*250\s*W$/.test(gridTile.cardText), JSON.stringify(gridTile));
 check('battery ratio 0.55 shown as 55 %', /^55\s*%/.test(kpi['battery-soc']), kpi['battery-soc']);
+// The inverter image sits beside the power card's readings; the battery tower is now a stack of
+// top + N middle + bottom slices (app/admin/static/img/battery_{top,middle,bottom}.svg) beside the
+// battery card's readings, so the device no longer carries exactly 2 images.
 await page.waitForFunction(() => {
   const images = [...document.querySelectorAll('.device-visual img')];
-  return images.length === 2 && images.every((image) => image.complete);
+  return images.length >= 3 && images.every((image) => image.complete);
 });
 const deviceImages = await page.locator('.device-visual img').evaluateAll((images) => images.map((image) => ({
   src: new URL(image.src).pathname,
   alt: image.alt,
   loaded: image.complete && image.naturalWidth > 0,
-  leftOfReadings: image.getBoundingClientRect().right <= image.nextElementSibling.getBoundingClientRect().left,
+  leftOfReadings: image.closest('.device-subcard-body').lastElementChild.getBoundingClientRect().left
+    >= image.getBoundingClientRect().right,
 })));
-check('device card shows both SVGs left of their readings',
-  deviceImages.length === 2
-  && deviceImages[0].src === '/admin/static/img/rct-inverter.svg'
-  && deviceImages[1].src === '/admin/static/img/rct-batterystack.svg'
+const inverterImages = deviceImages.filter((image) => image.src === '/admin/static/img/rct-inverter.svg');
+const batterySliceImages = deviceImages.filter((image) => /\/admin\/static\/img\/battery_(top|middle|bottom)\.svg$/.test(image.src));
+check('device card shows the inverter SVG and a battery slice stack, both left of their readings',
+  inverterImages.length === 1
+  && batterySliceImages.length >= 2  // at least top + bottom; middle count depends on module data
+  && batterySliceImages.filter((image) => image.src.endsWith('battery_top.svg')).length === 1
+  && batterySliceImages.filter((image) => image.src.endsWith('battery_bottom.svg')).length === 1
   && deviceImages.every((image) => image.alt === '' && image.loaded && image.leftOfReadings),
   JSON.stringify(deviceImages));
+// DOM order within the stack must be top, then middles, then bottom (visual stack order top-down).
+const stackOrder = await page.locator('.device-battery-stack').first().evaluate((stack) =>
+  [...stack.querySelectorAll('img')].map((image) => new URL(image.src).pathname.split('/').pop()));
+check('battery slice stack is ordered top, middle(s), bottom',
+  stackOrder[0] === 'battery_top.svg' && stackOrder[stackOrder.length - 1] === 'battery_bottom.svg'
+  && stackOrder.slice(1, -1).every((name) => name === 'battery_middle.svg'),
+  JSON.stringify(stackOrder));
 await page.waitForFunction(() => [...document.querySelectorAll('.device-fact-badge')].some((b) => b.textContent.trim().length > 0), null, { timeout: 20000 }).catch(() => { });
 const badgeTexts = await page.$$eval('.device-fact-badge', (list) => list.map((b) => b.textContent.trim()));
 check('inverter status badge is fully readable (feed_in test value)', badgeTexts.some((t) => /feed in/i.test(t)), JSON.stringify(badgeTexts));
