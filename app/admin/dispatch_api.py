@@ -108,9 +108,33 @@ class CapabilityUpdate(BaseModel):
 
 
 class CapabilityResponse(BaseModel):
+    """GET/PUT shape of one device capability.
+
+    Evidence fields (``battery_discharge_positive``, ``grid_import_positive``,
+    ``soc_strategy_external_code``) reflect the currently configured value regardless of
+    verification status; always read them together with ``status``. When ``status`` is
+    ``unverified``, these are the shipped assumption defaults the adapter works with, not
+    measured facts about this device's hardware.
+    """
+
     device_id: str
     name: CapabilityName
     status: CapabilityStatus
+    battery_discharge_positive: bool = Field(
+        description="BATTERY_POWER_SIGN evidence: whether a positive power_mng_battery_power_extern"
+        " write discharges the battery on this device."
+    )
+    grid_import_positive: bool = Field(
+        description="GRID_POWER_SIGN evidence: whether a positive grid_power reading means import"
+        " on this device."
+    )
+    soc_strategy_external_code: int | None = Field(
+        description="WRITE_PATH evidence: the raw power_mng_soc_strategy register value this device"
+        " uses for external control. This is a vendor-specific code with no project-wide meaning"
+        " (the RCT register catalog carries no enum label table for it) — read it together with"
+        " `note`, which an operator must set to the human-readable evidence (e.g. hardware model,"
+        " firmware, and what was observed) backing this value."
+    )
     verified_device_model: str | None
     verified_firmware: str | None
     verified_at: datetime | None
@@ -123,6 +147,9 @@ class CapabilityResponse(BaseModel):
             device_id=record.device_id,
             name=record.name,
             status=record.status,
+            battery_discharge_positive=record.battery_discharge_positive,
+            grid_import_positive=record.grid_import_positive,
+            soc_strategy_external_code=record.soc_strategy_external_code,
             verified_device_model=record.verified_device_model,
             verified_firmware=record.verified_firmware,
             verified_at=record.verified_at,

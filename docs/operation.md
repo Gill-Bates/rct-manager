@@ -82,6 +82,14 @@ sign conventions for battery power and grid power) are not configured through th
 They are **per-device capabilities**, persisted in the dispatch database and shown and set through
 the admin dispatch API (`/admin/api/dispatch/...`, not part of the public, documented contract).
 
+- `GET .../capabilities` returns the sign-convention evidence (`battery_discharge_positive`,
+  `grid_import_positive`) as plain booleans. For the external-control strategy, it also returns
+  the raw `soc_strategy_external_code` register value, since the RCT register catalog carries no
+  enum label table for it (the meaning is device/firmware-specific, not a project-wide constant).
+  That raw code is only meaningful together with `note`: record there what the code means and how
+  it was verified (hardware model, firmware, observed behavior) when entering it through the PUT
+  endpoint.
+
 - **Shipping state is `unverified`.** A fresh database ships every capability as `unverified` with
   assumption defaults the adapter works with (for example `battery_discharge_positive = true`,
   `grid_import_positive = true`). An `unverified` required capability blocks the dispatch mode it

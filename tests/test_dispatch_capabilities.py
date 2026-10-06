@@ -441,6 +441,32 @@ async def test_admin_api_verified_capability_lifts_the_gate_for_exactly_that_dev
         assert names["battery_power_sign_convention"] == "unverified"
 
 
+async def test_admin_api_capabilities_get_round_trips_evidence_fields(tmp_path: Path) -> None:
+    async with _admin_harness(tmp_path) as (harness, headers):
+        body = {
+            **_verified_write_path_body(),
+            "soc_strategy_external_code": 53,
+            "battery_discharge_positive": False,
+            "note": "code 53 = external control, verified on RCT Power Storage DC, firmware 1.0.0",
+        }
+        put = await harness.client.put(
+            "/admin/api/dispatch/devices/main/capabilities/write_path_convention",
+            headers=headers,
+            json=body,
+        )
+        assert put.status_code == 200
+
+        get = await harness.client.get("/admin/api/dispatch/devices/main/capabilities", headers=headers)
+        assert get.status_code == 200
+        row = next(r for r in get.json() if r["name"] == "write_path_convention")
+        assert row["soc_strategy_external_code"] == 53
+        assert row["battery_discharge_positive"] is False
+        assert row["note"] == body["note"]
+        # PUT's own response is the same shape as GET's rows (round-trip consistency).
+        assert put.json()["soc_strategy_external_code"] == 53
+        assert put.json()["note"] == body["note"]
+
+
 async def test_admin_api_rejects_verified_write_path_with_missing_evidence(tmp_path: Path) -> None:
     async with _admin_harness(tmp_path) as (harness, headers):
         resp = await harness.client.put(
