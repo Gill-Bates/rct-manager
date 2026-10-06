@@ -759,6 +759,7 @@ def create_app(settings: Settings, *, clock: Clock | None = None, connector: Con
         _roles(settings),
         coordinator,
         parts.exporter,
+        parts.service,
         gateway,
     )
     dispatch_store = None

@@ -471,9 +471,34 @@
     } catch { /* the count is informational; keep the last value */ }
   }
 
-  function renderDashboard(devices) {
+  function renderTsdbTile(tsdb) {
+    const icon = $('tsdb-status-icon');
+    const label = $('tsdb-status-label');
+    const time = $('tsdb-status-time');
+    icon.classList.remove('text-success', 'text-danger', 'text-secondary');
+    if (!tsdb || !tsdb.configured) {
+      icon.textContent = 'cloud_off';
+      icon.classList.add('text-secondary');
+      label.textContent = 'Not configured';
+      time.textContent = '';
+      return;
+    }
+    if (tsdb.healthy) {
+      icon.textContent = 'cloud_done';
+      icon.classList.add('text-success');
+      label.textContent = 'Sending';
+    } else {
+      icon.textContent = 'sync_problem';
+      icon.classList.add('text-danger');
+      label.textContent = 'Failing';
+    }
+    time.textContent = tsdb.last_success_at ? `Last sent ${hhmm(new Date(tsdb.last_success_at))}` : '';
+  }
+
+  function renderDashboard(devices, tsdb) {
     const list = $('devices-list');
     showHeroMetrics(devices);
+    renderTsdbTile(tsdb);
     $('device-count').textContent = String(devices.length);
     $('connected-count').textContent = String(devices.filter((item) => displayStatus(item.status)[1] === 'online').length);
     const seen = new Set();
@@ -505,7 +530,7 @@
       if (generation !== dashboardGeneration) return 'skipped';
       dashboardPollFailing = false;
       dashboardFailures = 0;
-      renderDashboard(Array.isArray(data.devices) ? data.devices : []);
+      renderDashboard(Array.isArray(data.devices) ? data.devices : [], data.tsdb || null);
       dashboardLastSuccess = new Date();
       const updated = $('dashboard-updated');
       if (updated) updated.textContent = `Updated ${hhmm(dashboardLastSuccess)}`;
@@ -1215,7 +1240,7 @@
         for (const field of exportFields) {
           if (exportGroup(field.key) !== group || !exportFieldKnown(field)) continue;
           if ((field.backend && field.backend !== type) || (field.any && !type)) continue;
-          if (field.key === 'questdb_raw_retention_days' && settingsDraft.questdb_downsampling === 'off') continue;
+          if (field.key === 'questdb_raw_retention_days' && settingsDraft.questdb_downsampling !== 'manual') continue;
           if (field.key === 'questdb_retention_days' && settingsDraft.questdb_downsampling === 'manual') continue;
           body.append(exportControl(field, rerender));
         }

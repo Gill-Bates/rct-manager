@@ -22,6 +22,7 @@ from app.errors import DeviceApiError, UnknownDevice, UnknownMetric
 from app.gateway.base import DeviceGateway, DeviceState
 from app.gateway.vendor import VendorDiagnostics
 from app.observability.exporter import MetricsExporter
+from app.observability.stats import ServiceCounters
 from app.scheduling.shutdown import ShutdownCoordinator
 
 # A device is ready when it answers; a degraded device still delivers values.
@@ -39,6 +40,7 @@ class Runtime:
     roles: dict[str, str]
     shutdown: ShutdownCoordinator | None = None
     exporter: MetricsExporter | None = None
+    stats: ServiceCounters | None = None
     vendor: VendorDiagnostics | None = None
     tasks: list = field(default_factory=list)
     dispatch: BatteryDispatchPort | None = None

@@ -11,7 +11,8 @@ import hmac
 import logging
 import re
 import threading
-from datetime import datetime
+import time
+from datetime import UTC, datetime
 from secrets import token_urlsafe
 from typing import Any
 
@@ -505,6 +506,37 @@ def _exposed_names(runtime, store) -> list[str]:
     return exposed
 
 
+def _tsdb_view(runtime) -> dict:
+    """TSDB export status for the dashboard tile; additive, independent of the device list."""
+    settings = runtime.settings
+    stats = runtime.stats
+    configured = settings.db_type is not None
+    export_enabled = bool(stats.export_enabled) if stats else False
+    last_success_unix = stats.export_last_success_unix if stats else None
+    last_success_at = (
+        datetime.fromtimestamp(last_success_unix, tz=UTC).isoformat() if last_success_unix is not None else None
+    )
+    if not configured:
+        healthy = None  # neutral: "healthy" has no meaning when no TSDB is configured
+    elif not export_enabled:
+        healthy = False  # configured but the export loop isn't running: nothing is being sent
+    else:
+        # Generous but simple freshness window: 3x the configured push interval absorbs ordinary
+        # scheduling jitter and one retry backoff doubling (same "allow slack past the nominal
+        # period" idea as the ttl + grace pattern in app/cache.py).
+        healthy = (
+            last_success_unix is not None
+            and (time.time() - last_success_unix) <= 3 * settings.metrics_export_interval_seconds
+        )
+    return {
+        "configured": configured,
+        "db_type": settings.db_type.value if configured else None,
+        "export_enabled": export_enabled,
+        "last_success_at": last_success_at,
+        "healthy": healthy,
+    }
+
+
 def _device_card_label(catalog, name: str, value: Any) -> str | None:
     """Human-readable text for a device-card badge; None when the value is not an int."""
     if not isinstance(value, int) or isinstance(value, bool):
@@ -555,7 +587,7 @@ def devices(request: Request) -> dict:
             "last_success_at": status.last_success_at.isoformat() if status.last_success_at else None,
             "queue_length": status.queue_length, "metrics": readings,
         })
-    return {"devices": result}
+    return {"devices": result, "tsdb": _tsdb_view(runtime)}
 
 
 def _parameter_view(request: Request) -> dict:
