@@ -13,7 +13,7 @@ from app.api import server
 
 
 def _settings(address: str) -> SimpleNamespace:
-    return SimpleNamespace(bind_address=address, bind_port=8080)
+    return SimpleNamespace(bind_address=address, bind_port=8000)
 
 
 def test_warns_on_loopback_in_container(monkeypatch, caplog) -> None:

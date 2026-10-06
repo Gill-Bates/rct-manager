@@ -65,7 +65,7 @@ restricted. Docker Compose sets it because the container listens on `0.0.0.0`
 while the host publishes the port on `127.0.0.1`.
 
 ### BIND_PORT
-Default: `8080`
+Default: `8000`
 
 REST API listen port.
 

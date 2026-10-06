@@ -3,7 +3,7 @@
 ## Introduction
 
 Dieses Dokument beschreibt die Anforderungen an einen neuen, eigenständigen Dienst
-im Verzeichnis `rct-rest-api/`: einen Docker-Container, der die Daten eines oder
+im Verzeichnis `rct-manager/`: einen Docker-Container, der die Daten eines oder
 mehrerer RCT Power Wechselrichter über eine offene, token-geschützte REST-Schnittstelle
 bereitstellt.
 
@@ -324,7 +324,7 @@ mit Einheit abrufen, so that ich keine Objekt-IDs und Rohbytes interpretieren mu
 14. THE Objekt_Registry SHALL die Objekt_ID `0x8FC89B10` (`com_service`) als nicht idempotente Aktionsvariable kennzeichnen.
 15. THE Objekt_Registry SHALL je Eintrag das optionale Feld `prometheus_name` mit dem auf dem Metrik_Endpunkt zu verwendenden Metriknamen führen können.
 16. IF ein Aufrufer einen Messwertnamen als Pfadsegment anfragt, der nicht in der Objekt_Registry enthalten ist, THEN THE REST_API SHALL den HTTP-Statuscode 404 und Problem_Details nach Requirement 25 mit dem Fehlerschlüssel `unknown_metric` und dem unbekannten Namen zurückgeben.
-17. THE Objekt_Registry SHALL als JSON-Datei im Verzeichnis `rct-rest-api/` außerhalb des Anwendungscodes vorliegen, sodass die Auswahl der Messwerte ohne Codeänderung erweitert werden kann.
+17. THE Objekt_Registry SHALL als JSON-Datei im Verzeichnis `rct-manager/` außerhalb des Anwendungscodes vorliegen, sodass die Auswahl der Messwerte ohne Codeänderung erweitert werden kann.
 18. THE Objekt_Registry SHALL ohne Laufzeitabhängigkeit zu einem fremden RCT-Client-Projekt auskommen.
 19. WHEN die Anwendung startet, THE Konfigurationslader SHALL die Objekt_Registry gegen ihr Schema prüfen und den Start mit einer Fehlermeldung abbrechen, wenn ein Eintrag Name, Objekt_ID, Datentyp, Einheit oder Idempotenz_Kennzeichnung vermisst.
 20. IF zwei Einträge der Objekt_Registry denselben Namen oder dieselbe Objekt_ID tragen, THEN THE Konfigurationslader SHALL den Start mit einer Fehlermeldung abbrechen, die den doppelten Namen oder die doppelte Objekt_ID nennt.
@@ -1051,7 +1051,7 @@ Konfigurationsvertrag (Spalte `Betreiber`: `ja` = aus Umgebung und `settings.env
 | Umgebungsvariable | Typ | Vorgabewert | Minimum | Maximum | Einheit | Betreiber |
 | --- | --- | --- | --- | --- | --- | --- |
 | `BIND_ADDRESS` | IP-Adresse | `127.0.0.1` | — | — | — | ja |
-| `BIND_PORT` | Ganzzahl | `8080` | 1024 | 65535 | — | ja |
+| `BIND_PORT` | Ganzzahl | `8000` | 1024 | 65535 | — | ja |
 | `HTTP_WORKERS` | Ganzzahl | `1` | 1 | 1 | Arbeiter | nein |
 | `LOG_LEVEL` | Auswahl aus `DEBUG`, `INFO`, `WARNING`, `ERROR` | `INFO` | — | — | — | ja |
 | `LOG_FORMAT` | Auswahl aus `json`, `text` | `text` | — | — | — | nein |
@@ -1123,7 +1123,7 @@ nachvollziehbar und ohne Zugriff auf fremde Quellcodeverwaltungen gelingt.
 
 #### Acceptance Criteria
 
-1. THE Projekt SHALL alle Laufzeit- und Entwicklungsabhängigkeiten ausschließlich in `rct-rest-api/pyproject.toml` führen.
+1. THE Projekt SHALL alle Laufzeit- und Entwicklungsabhängigkeiten ausschließlich in `rct-manager/pyproject.toml` führen.
 2. THE Projekt SHALL direkt importierte Laufzeitpakete wie `python-dotenv` und `starlette` deklarieren; der Metrik_Endpunkt erzeugt das Prometheus-Textformat selbst und benötigt kein `prometheus-client`.
 3. THE Projekt SHALL jede Abhängigkeit aus dem Paketindex beziehen.
 4. THE Projekt SHALL für jede Abhängigkeit eine Versionsangabe mit unterer und oberer Grenze führen.
@@ -1132,7 +1132,7 @@ nachvollziehbar und ohne Zugriff auf fremde Quellcodeverwaltungen gelingt.
 7. THE Projekt SHALL eine Abhängigkeit zu einem Client eines Zeitreihen-Backends auslassen.
 8. THE Projekt SHALL die Datei `requirements.txt` auslassen.
 9. THE Projekt SHALL Python in der Version 3.13 oder höher verlangen.
-10. THE Projekt SHALL in `rct-rest-api/pyproject.toml` ein Extra `dev` führen, das `ruff` mit einer Versionsangabe mit unterer und oberer Grenze festlegt.
+10. THE Projekt SHALL in `rct-manager/pyproject.toml` ein Extra `dev` führen, das `ruff` mit einer Versionsangabe mit unterer und oberer Grenze festlegt.
 11. THE Projekt SHALL eine Abhängigkeit zu einem Typprüfer auslassen.
 
 > Begründung zu Kriterium 11: Dieses Repository führt keinen Typprüfer. Eine
@@ -1268,45 +1268,45 @@ braucht.
 
 #### Acceptance Criteria
 
-1. THE Projekt SHALL das Container_Image aus einer Datei `rct-rest-api/docker/Dockerfile` mit einem mehrstufigen Build aus einer Build-Stage und einer Runtime-Stage bauen.
-2. THE Datei `rct-rest-api/docker/Dockerfile` SHALL in der ersten Zeile die Angabe `# syntax=docker/dockerfile:1` führen.
-3. THE Datei `rct-rest-api/docker/Dockerfile` SHALL als Basis-Image `python:3.13-slim` mit einer bewusst gewählten Minor-Version verwenden.
-4. THE Datei `rct-rest-api/docker/Dockerfile` SHALL die Angaben `latest` und einen Major-Alias als Basis-Image auslassen.
-5. THE Datei `rct-rest-api/docker/Dockerfile` SHALL das Basis-Image zusätzlich über seinen Digest festlegen.
+1. THE Projekt SHALL das Container_Image aus einer Datei `rct-manager/docker/Dockerfile` mit einem mehrstufigen Build aus einer Build-Stage und einer Runtime-Stage bauen.
+2. THE Datei `rct-manager/docker/Dockerfile` SHALL in der ersten Zeile die Angabe `# syntax=docker/dockerfile:1` führen.
+3. THE Datei `rct-manager/docker/Dockerfile` SHALL als Basis-Image `python:3.13-slim` mit einer bewusst gewählten Minor-Version verwenden.
+4. THE Datei `rct-manager/docker/Dockerfile` SHALL die Angaben `latest` und einen Major-Alias als Basis-Image auslassen.
+5. THE Datei `rct-manager/docker/Dockerfile` SHALL das Basis-Image zusätzlich über seinen Digest festlegen.
 6. THE Build-Stage und die Runtime-Stage SHALL dieselbe Python-Minor-Version verwenden.
 7. THE Projekt SHALL die Aktualisierung der Pins des Basis-Image und seines Digests über Renovate oder Dependabot vorsehen und eine Aktualisierung von Hand auslassen.
-8. WHERE die Datei `rct-rest-api/docker/Dockerfile` Pakete des Betriebssystems installiert, THE Datei SHALL im selben `RUN` zuerst `apt-get update`, dann `apt-get upgrade -y`, dann die Installation mit `--no-install-recommends` und abschließend `rm -rf /var/lib/apt/lists/*` ausführen.
+8. WHERE die Datei `rct-manager/docker/Dockerfile` Pakete des Betriebssystems installiert, THE Datei SHALL im selben `RUN` zuerst `apt-get update`, dann `apt-get upgrade -y`, dann die Installation mit `--no-install-recommends` und abschließend `rm -rf /var/lib/apt/lists/*` ausführen.
 9. THE Build-Stage SHALL eine virtuelle Umgebung unter `/opt/venv` anlegen.
 10. THE Build-Stage SHALL `pip install --upgrade pip` ausführen und die Abhängigkeiten mit `--upgrade --upgrade-strategy eager` installieren.
 11. THE Runtime-Stage SHALL die virtuelle Umgebung aus `/opt/venv` aus der Build-Stage übernehmen.
 12. THE Runtime-Stage SHALL `pip` entfernen, sofern die Laufzeit `pip` nicht benötigt.
-13. THE Datei `rct-rest-api/docker/Dockerfile` SHALL die Umgebungsvariablen `PYTHONDONTWRITEBYTECODE=1` und `PYTHONUNBUFFERED=1` setzen.
-14. THE Datei `rct-rest-api/docker/Dockerfile` SHALL `ENTRYPOINT` und `CMD` in der Exec-Form angeben, sodass der Anwendungsprozess die Prozesskennung 1 erhält und Signale unmittelbar empfängt.
-15. THE Datei `rct-rest-api/docker/Dockerfile` SHALL Cache-Mounts von BuildKit für den Paket-Cache von pip und für den Paket-Cache des Betriebssystems verwenden.
-16. THE Datei `rct-rest-api/docker/Dockerfile` SHALL eine Gruppe und einen Benutzer mit der festen Kennung 10001 anlegen und den Container mit `USER 10001:10001` betreiben.
-17. THE Datei `rct-rest-api/docker/Dockerfile` SHALL den Anwendungscode für den Laufzeitnutzer als nicht beschreibbar ablegen.
-18. THE Datei `rct-rest-api/docker/Dockerfile` SHALL die OCI-Labels `org.opencontainers.image.source`, `org.opencontainers.image.version` und `org.opencontainers.image.revision` aus Build-Args belegen.
-19. THE Datei `rct-rest-api/docker/Dockerfile` SHALL eine `HEALTHCHECK`-Angabe führen, die den Health_Endpunkt über einen Einzeiler des im Image vorhandenen Python-Interpreters abfragt.
-20. THE Datei `rct-rest-api/docker/Dockerfile` SHALL in der `HEALTHCHECK`-Angabe `curl` und `wget` auslassen.
-21. THE Datei `rct-rest-api/docker/Dockerfile` SHALL Zugangsdaten in `ARG`, in `ENV` und in kopierten Dateien auslassen.
-22. THE Datei `rct-rest-api/.dockerignore` SHALL `.git`, `settings.env`, Dateien mit Zugangsdaten, virtuelle Umgebungen, Caches und Testartefakte vom Build-Kontext ausschließen.
+13. THE Datei `rct-manager/docker/Dockerfile` SHALL die Umgebungsvariablen `PYTHONDONTWRITEBYTECODE=1` und `PYTHONUNBUFFERED=1` setzen.
+14. THE Datei `rct-manager/docker/Dockerfile` SHALL `ENTRYPOINT` und `CMD` in der Exec-Form angeben, sodass der Anwendungsprozess die Prozesskennung 1 erhält und Signale unmittelbar empfängt.
+15. THE Datei `rct-manager/docker/Dockerfile` SHALL Cache-Mounts von BuildKit für den Paket-Cache von pip und für den Paket-Cache des Betriebssystems verwenden.
+16. THE Datei `rct-manager/docker/Dockerfile` SHALL eine Gruppe und einen Benutzer mit der festen Kennung 10001 anlegen und den Container mit `USER 10001:10001` betreiben.
+17. THE Datei `rct-manager/docker/Dockerfile` SHALL den Anwendungscode für den Laufzeitnutzer als nicht beschreibbar ablegen.
+18. THE Datei `rct-manager/docker/Dockerfile` SHALL die OCI-Labels `org.opencontainers.image.source`, `org.opencontainers.image.version` und `org.opencontainers.image.revision` aus Build-Args belegen.
+19. THE Datei `rct-manager/docker/Dockerfile` SHALL eine `HEALTHCHECK`-Angabe führen, die den Health_Endpunkt über einen Einzeiler des im Image vorhandenen Python-Interpreters abfragt.
+20. THE Datei `rct-manager/docker/Dockerfile` SHALL in der `HEALTHCHECK`-Angabe `curl` und `wget` auslassen.
+21. THE Datei `rct-manager/docker/Dockerfile` SHALL Zugangsdaten in `ARG`, in `ENV` und in kopierten Dateien auslassen.
+22. THE Datei `rct-manager/.dockerignore` SHALL `.git`, `settings.env`, Dateien mit Zugangsdaten, virtuelle Umgebungen, Caches und Testartefakte vom Build-Kontext ausschließen.
 23. THE Projekt SHALL das Container_Image mit `docker buildx build --platform linux/amd64 --pull -f docker/Dockerfile --push` bauen und veröffentlichen.
-24. THE Projekt SHALL das Container_Image als `docker.cirrio.de/rct-api:latest` und zusätzlich mit der aus `rct-rest-api/pyproject.toml` gelesenen Version als `docker.cirrio.de/rct-api:<version>` veröffentlichen.
-25. THE Projekt SHALL die Compose-Datei unter dem Namen `rct-rest-api/docker/compose.yaml` nach der Compose Specification führen.
-26. THE Datei `rct-rest-api/docker/compose.yaml` SHALL den Schlüssel `version` auslassen.
-27. THE Datei `rct-rest-api/docker/compose.yaml` SHALL den Port des Dienstes ausschließlich an eine Loopback-Adresse des Hosts veröffentlichen.
-28. THE Datei `rct-rest-api/docker/compose.yaml` SHALL `privileged` und ein Mount des Docker-Sockets auslassen.
-29. THE Datei `rct-rest-api/docker/compose.yaml` SHALL `cap_drop` mit dem Wert `ALL`, `security_opt` mit dem Wert `no-new-privileges:true` und `read_only` mit dem Wert `true` führen.
-30. THE Datei `rct-rest-api/docker/compose.yaml` SHALL eine Neustartregel, eine Begrenzung der Prozesszahl, Grenzwerte für Hauptspeicher und Prozessorzeit und eine Begrenzung der Protokollgröße führen.
-31. THE Datei `rct-rest-api/docker/compose.yaml` SHALL die Konfiguration über `env_file` aus `settings.env` beziehen.
-32. THE Datei `rct-rest-api/.gitignore` SHALL `settings.env` von der Versionsverwaltung ausschließen.
-33. THE Projekt SHALL eine Datei `rct-rest-api/.trivyignore` führen und sie ohne Einträge einchecken, solange keine Ausnahme bestehen soll.
-34. WHERE die Datei `rct-rest-api/.trivyignore` einen Eintrag führt, THE Datei SHALL je Eintrag eine Begründung und ein Ablaufdatum als Kommentar führen.
-35. THE Datei `rct-rest-api/docker/compose.yaml` SHALL die Festlegungen nach Requirement 7 und Requirement 14 einhalten, namentlich genau eine Replik je Gerätegruppe und die Veröffentlichung des Ports ausschließlich an eine Loopback-Adresse.
+24. THE Projekt SHALL das Container_Image als `docker.cirrio.de/rct-api:latest` und zusätzlich mit der aus `rct-manager/pyproject.toml` gelesenen Version als `docker.cirrio.de/rct-api:<version>` veröffentlichen.
+25. THE Projekt SHALL die Compose-Datei unter dem Namen `rct-manager/docker/compose.yaml` nach der Compose Specification führen.
+26. THE Datei `rct-manager/docker/compose.yaml` SHALL den Schlüssel `version` auslassen.
+27. THE Datei `rct-manager/docker/compose.yaml` SHALL den Port des Dienstes ausschließlich an eine Loopback-Adresse des Hosts veröffentlichen.
+28. THE Datei `rct-manager/docker/compose.yaml` SHALL `privileged` und ein Mount des Docker-Sockets auslassen.
+29. THE Datei `rct-manager/docker/compose.yaml` SHALL `cap_drop` mit dem Wert `ALL`, `security_opt` mit dem Wert `no-new-privileges:true` und `read_only` mit dem Wert `true` führen.
+30. THE Datei `rct-manager/docker/compose.yaml` SHALL eine Neustartregel, eine Begrenzung der Prozesszahl, Grenzwerte für Hauptspeicher und Prozessorzeit und eine Begrenzung der Protokollgröße führen.
+31. THE Datei `rct-manager/docker/compose.yaml` SHALL die Konfiguration über `env_file` aus `settings.env` beziehen.
+32. THE Datei `rct-manager/.gitignore` SHALL `settings.env` von der Versionsverwaltung ausschließen.
+33. THE Projekt SHALL eine Datei `rct-manager/.trivyignore` führen und sie ohne Einträge einchecken, solange keine Ausnahme bestehen soll.
+34. WHERE die Datei `rct-manager/.trivyignore` einen Eintrag führt, THE Datei SHALL je Eintrag eine Begründung und ein Ablaufdatum als Kommentar führen.
+35. THE Datei `rct-manager/docker/compose.yaml` SHALL die Festlegungen nach Requirement 7 und Requirement 14 einhalten, namentlich genau eine Replik je Gerätegruppe und die Veröffentlichung des Ports ausschließlich an eine Loopback-Adresse.
 
 > Klarstellung zu Kriterium 24: Der Name des Projektverzeichnisses und der Name des
 > Container_Image weichen hier bewusst voneinander ab. Das Verzeichnis heißt
-> `rct-rest-api/`, das Image `docker.cirrio.de/rct-api`. Das entspricht der Praxis der
+> `rct-manager/`, das Image `docker.cirrio.de/rct-api`. Das entspricht der Praxis der
 > übrigen Projekte dieses Repositorys, in dem etwa `talsperren/` als `damflux` und
 > `rctpower/` als `rct-collector` veröffentlicht wird. Die Abweichung ist keine
 > Unstimmigkeit und nicht zu „korrigieren“.
@@ -1377,9 +1377,9 @@ Projekten gebaut, geprüft und betrieben werden kann.
 
 #### Acceptance Criteria
 
-1. THE Projekt SHALL vollständig im Verzeichnis `rct-rest-api/` liegen.
+1. THE Projekt SHALL vollständig im Verzeichnis `rct-manager/` liegen.
 2. THE Projekt SHALL einen Import aus einem anderen Projekt dieses Repositorys auslassen.
-3. THE Projekt SHALL den Anwendungscode im Paket `rct-rest-api/app/` führen.
+3. THE Projekt SHALL den Anwendungscode im Paket `rct-manager/app/` führen.
 4. THE Anwendung SHALL über `python -m app` startbar sein.
 5. THE Anwendung SHALL den Aufrufmodus nach Requirement 22 bereitstellen, der die Konfiguration prüft und sich ohne Start des HTTP-Servers beendet.
 6. THE Projekt SHALL `ruff check .` mit der Konfiguration des Repository-Wurzelverzeichnisses ohne Befunde bestehen.
@@ -1393,7 +1393,7 @@ Projekten gebaut, geprüft und betrieben werden kann.
 14. THE Projekt SHALL `typing.Self` für Rückgaben des eigenen Typs verwenden.
 15. THE Projekt SHALL `typing.Optional`, `typing.List` und `os.path` auslassen.
 16. THE Projekt SHALL einen Kompatibilitätsbehelf für eine Python-Version unterhalb von 3.13 auslassen.
-17. THE Projekt SHALL eine Datei `rct-rest-api/README.md` führen, die Zweck, Konfiguration, Betrieb, Prüfbefehle und die Nicht-Ziele nach Requirement 21 benennt.
+17. THE Projekt SHALL eine Datei `rct-manager/README.md` führen, die Zweck, Konfiguration, Betrieb, Prüfbefehle und die Nicht-Ziele nach Requirement 21 benennt.
 18. THE Projektdokumentation SHALL den Bau und die Veröffentlichung nach Requirement 26 beschreiben. Die persönliche Datei `setup.conf` wird ausschließlich auf ausdrücklichen Wunsch des Maintainers angelegt oder geändert.
 19. THE Anwendung SHALL Fristen, Mindestpausen, Zeitfenster und Cache-Alter mit einer monotonen Uhr messen; Änderungen der Systemzeit dürfen diese Größen nicht verkürzen oder verlängern. Ausgegebene Zeitstempel bleiben UTC-Zeitpunkte.
 
@@ -1687,10 +1687,10 @@ Befunde, die abweichen, zu ergänzen waren oder in der Quelle nicht geregelt sin
     Introduction, das Protokoll sei nach außen nicht durchreichbar, bleibt damit
     unberührt.
 20. **Verzeichnis- und Imagename am Ist-Zustand geprüft.** Das Projektverzeichnis
-    besteht als `rct-rest-api/` und enthält derzeit ausschließlich die Protokollquelle
+    besteht als `rct-manager/` und enthält derzeit ausschließlich die Protokollquelle
     `docs/reference/6707-RCT-Power-Serial-Communication-Protocol.pdf`. Ein Verzeichnis
     `rct-api/` besteht nicht. Dieses Dokument benennt das Projektverzeichnis deshalb
-    durchgängig als `rct-rest-api/`. Das Container_Image heißt abweichend davon
+    durchgängig als `rct-manager/`. Das Container_Image heißt abweichend davon
     `docker.cirrio.de/rct-api` (Requirement 26 Kriterium 24). Beide Namen sind bewusst
     unterschiedlich, wie auch in den übrigen Projekten dieses Repositorys, und es
     besteht keine Abweichung zwischen Dokument und Repository mehr.

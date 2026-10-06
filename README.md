@@ -57,7 +57,7 @@ python -m app validate
 python -m app
 ```
 
-Open `http://127.0.0.1:8080/`. The first start prints a boxed `FIRST START - admin login` block
+Open `http://127.0.0.1:8000/`. The first start prints a boxed `FIRST START - admin login` block
 with the one-time `admin` password in clear text (also saved to `data/initial-admin-password` as
 a fallback); the first login requires a password change
 ([details](docs/configuration/authentication.md)). Until then, periodic reads, heartbeat and

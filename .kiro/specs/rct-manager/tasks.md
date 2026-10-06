@@ -1,4 +1,4 @@
-# Implementation Plan: rct-rest-api
+# Implementation Plan: rct-manager
 
 ## Overview
 
@@ -22,10 +22,10 @@ Plausibilität.
 
 Sprache und Werkzeuge: Python 3.13+, asyncio, FastAPI, pydantic v2 und
 pydantic-settings, python-dotenv, starlette; `pytest`, `pytest-asyncio`, `hypothesis`, `httpx` und
-`ruff` im Extra `dev`. `rct-rest-api/pyproject.toml` ist die einzige Quelle für
+`ruff` im Extra `dev`. `rct-manager/pyproject.toml` ist die einzige Quelle für
 Abhängigkeiten und Version; es gibt kein `requirements.txt` und keinen Typprüfer.
 
-Verifikation je Aufgabe, aus `rct-rest-api/`:
+Verifikation je Aufgabe, aus `rct-manager/`:
 
 ```bash
 ruff check .            # Konfiguration aus der Repository-Wurzel, line-length 120, py313
@@ -37,9 +37,9 @@ python -m app validate   # nach Abschluss von Aufgabe 8.6: Konfiguration prüfen
 
 - [x] 1. Projektskelett und Querschnittsmodule
   - [x] 1.1 Projektverzeichnis und `pyproject.toml` anlegen
-    - `rct-rest-api/pyproject.toml` mit Paket `app`, Python ≥ 3.13, Laufzeitabhängigkeiten `fastapi`, `uvicorn`, `pydantic`, `pydantic-settings`, `python-dotenv`, `starlette`, je mit unterer **und** oberer Versionsgrenze, ausschließlich aus dem Paketindex; der Exporter erzeugt das Textformat selbst
+    - `rct-manager/pyproject.toml` mit Paket `app`, Python ≥ 3.13, Laufzeitabhängigkeiten `fastapi`, `uvicorn`, `pydantic`, `pydantic-settings`, `python-dotenv`, `starlette`, je mit unterer **und** oberer Versionsgrenze, ausschließlich aus dem Paketindex; der Exporter erzeugt das Textformat selbst
     - Extra `dev` mit `pytest`, `pytest-asyncio`, `hypothesis`, `httpx`, `ruff`, je mit unterer und oberer Grenze; kein Typprüfer, kein Zeitreihen-Client, keine Quellcodeverwaltungs-Adresse, kein `requirements.txt`
-    - `app/__init__.py`, `run.py` als Shim nach Monorepo-Konvention, `tests/`, `rct-rest-api/.gitignore` mit `settings.env`, `rct-rest-api/.dockerignore`, leere `rct-rest-api/.trivyignore`
+    - `app/__init__.py`, `run.py` als Shim nach Monorepo-Konvention, `tests/`, `rct-manager/.gitignore` mit `settings.env`, `rct-manager/.dockerignore`, leere `rct-manager/.trivyignore`
     - _Requirements: 23.1, 23.2, 23.3, 23.4, 23.5, 23.6, 23.7, 23.8, 23.9, 23.10, 23.11, 26.22, 26.32, 26.33, 28.1, 28.2, 28.3_
 
   - [x] 1.2 Port `Clock` und `SystemClock` implementieren
@@ -99,7 +99,7 @@ python -m app validate   # nach Abschluss von Aufgabe 8.6: Konfiguration prüfen
     - _Requirements: 1.1, 1.2, 1.4, 1.5, 1.10, 1.11, 1.12, 1.13, 1.14, 5.1_
 
   - [x] 3.4 Eigenschaftstest Frame-Round-Trip
-    - `tests/test_protocol_properties.py`, mindestens 100 Durchläufe, Kommentar `# Feature: rct-rest-api, Property 1: …`
+    - `tests/test_protocol_properties.py`, mindestens 100 Durchläufe, Kommentar `# Feature: rct-manager, Property 1: …`
     - **Property 1: Frame-Round-Trip**
     - **Validates: Requirements 1.1, 1.2, 1.3, 1.4, 1.5, 1.9, 1.10, 1.11, 1.15**
 
@@ -251,7 +251,7 @@ python -m app validate   # nach Abschluss von Aufgabe 8.6: Konfiguration prüfen
 - [x] 8. Catalog, Cache, Freigabeliste und Geräteadapter
   - [x] 8.1 Port `MetricCatalog` und `RegistryCatalog`
     - `app/catalog/base.py` mit `describe`, `names`, `preselected`, `exists` und neutralen Deskriptoren; `app/catalog/registry.py` mit `RegistryEntry`, `ObjectRegistry`, Indizes Name → Eintrag und Objekt_ID → Eintrag sowie der adapterseitigen Zusatzmethode `object_entry`
-    - `rct-rest-api/objects_read.json` als Datei neben dem Code anlegen, mit `net.slave_data` als `t_struct`/`slave_data` und `com_service` als nicht idempotente Aktionsvariable
+    - `rct-manager/objects_read.json` als Datei neben dem Code anlegen, mit `net.slave_data` als `t_struct`/`slave_data` und `com_service` als nicht idempotente Aktionsvariable
     - Startprüfungen: Pflichtfelder, doppelte Namen und Objekt_IDs, unbekannter Datentyp, `t_struct` ohne oder mit unbekannter Strukturkennung, unzulässige `byte_width`
     - _Requirements: 4.1, 4.2, 4.3, 4.4, 4.5, 4.6, 4.10, 4.11, 4.12, 4.13, 4.14, 4.15, 4.17, 4.18, 4.19, 4.20, 4.21, 10.4_
 
@@ -275,7 +275,7 @@ python -m app validate   # nach Abschluss von Aufgabe 8.6: Konfiguration prüfen
     - _Requirements: 10.19, 15.6, 15.7, 15.8, 15.9, 17.14, 17.15, 17.16, 17.17, 17.18, 17.19, 30.17_
 
   - [x] 8.6 Freigabeliste laden und prüfen
-    - `app/allowlist.py` mit `AllowlistEntry`; `rct-rest-api/objects_write_allowed.json` mit allen 894 skalaren Schreibfreigaben und Datentypgrenzen außerhalb des Codes; vollständigen Prüfmodus aus 2.3 verdrahten
+    - `app/allowlist.py` mit `AllowlistEntry`; `rct-manager/objects_write_allowed.json` mit allen 894 skalaren Schreibfreigaben und Datentypgrenzen außerhalb des Codes; vollständigen Prüfmodus aus 2.3 verdrahten
     - Startabbruch bei fehlendem Datentyp oder Wertebereich, bei einem Messwert außerhalb der Objekt_Registry, bei abweichendem Datentyp ; Protokoll_Steuervariablen explizit zulassen; für Aktionsvariablen zulässige Werte einzeln aufzählen, für `t_enum` auch Rohwertebereiche zulassen
     - _Requirements: 19.4, 19.15, 19.16, 19.17, 19.18, 19.19, 19.20, 19.23, 19.25_
 
@@ -446,9 +446,9 @@ python -m app validate   # nach Abschluss von Aufgabe 8.6: Konfiguration prüfen
 ## Notes
 
 - Alle Aufgaben einschließlich Sicherheits-, Eigenschafts- und Vertragstests sind verpflichtend für den finalen Checkpoint. Hardware-Verifikation bleibt ein gesondertes Produktivsetzungsgate.
-- Je Correctness Property des Designs mindestens ein Eigenschaftstest (Property 17 getrennt für Skalartypen und Slave_Struktur) in der dort benannten Testdatei, mindestens 100 Durchläufe, mit dem Kommentar `# Feature: rct-rest-api, Property {Nummer}: {Eigenschaftstext}`.
+- Je Correctness Property des Designs mindestens ein Eigenschaftstest (Property 17 getrennt für Skalartypen und Slave_Struktur) in der dort benannten Testdatei, mindestens 100 Durchläufe, mit dem Kommentar `# Feature: rct-manager, Property {Nummer}: {Eigenschaftstext}`.
 - Zeitabhängige Eigenschaften (7, 14, 15, 16) verwenden `ManualClock` über den Port `Clock`; Lastfreiheitseigenschaften (9, 10, 11, 15) einen zählenden Attrappen-Transport.
-- Verifikation je Aufgabe mit `ruff check .` und `pytest` aus `rct-rest-api/`, nach Abschluss von Aufgabe 8.6 zusätzlich `python -m app validate`. Ein Typprüfer existiert in diesem Repository nicht und wird nicht eingeführt.
+- Verifikation je Aufgabe mit `ruff check .` und `pytest` aus `rct-manager/`, nach Abschluss von Aufgabe 8.6 zusätzlich `python -m app validate`. Ein Typprüfer existiert in diesem Repository nicht und wird nicht eingeführt.
 - Es werden keine Aufgaben für ein Deployment auf Fremdsysteme geführt, und `settings.env` wird nicht mit echten Zugangsdaten befüllt; gepflegt wird ausschließlich `settings.env.example`.
 - Aufgabe 16.1 ist die einzige Aufgabe, die ein echtes Gerät braucht, und bleibt bis zur Produktivsetzung offen.
 

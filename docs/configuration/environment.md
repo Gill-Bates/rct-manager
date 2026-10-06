@@ -17,7 +17,7 @@ ignored.
 | `DISPATCH_MAX_CHARGE_POWER_W` | unset | Verified maximum grid-charge power; required for dispatch |
 | `DISPATCH_MAX_DISCHARGE_POWER_W` | unset | Verified maximum load-following discharge power; required for dispatch |
 | `BIND_ADDRESS` | `127.0.0.1` | Listen address |
-| `BIND_PORT` | `8080` | Listen port, 1024 to 65535 |
+| `BIND_PORT` | `8000` | Listen port, 1024 to 65535 |
 | `ALLOW_NON_LOOPBACK_BIND` | `false` | Explicit consent for a non-loopback listener; does not provide TLS or secure cookies. Compose sets it while publishing only on host loopback |
 | `DOCS_PUBLIC` | `false` | `true`: serve `/docs` and `/openapi.json` without a token; `false`: both return 404 on every bind address |
 | `LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING` or `ERROR` |

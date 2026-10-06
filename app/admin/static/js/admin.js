@@ -45,6 +45,31 @@
     return error instanceof Error ? error.message : 'An unknown error occurred.';
   }
 
+  // navigator.clipboard requires a secure context (HTTPS or localhost) and is undefined on a
+  // plain-HTTP LAN deployment, so fall back to the classic textarea + execCommand('copy') trick.
+  async function copyToClipboard(text) {
+    if (navigator.clipboard) {
+      try {
+        await navigator.clipboard.writeText(text);
+        return true;
+      } catch { /* fall through to the legacy fallback below */ }
+    }
+    const textarea = element('textarea');
+    textarea.value = text;
+    textarea.setAttribute('readonly', '');
+    textarea.style.position = 'fixed';
+    textarea.style.top = '0';
+    textarea.style.left = '0';
+    textarea.style.opacity = '0';
+    document.body.append(textarea);
+    textarea.select();
+    textarea.setSelectionRange(0, text.length);
+    let copied = false;
+    try { copied = document.execCommand('copy'); } catch { copied = false; }
+    textarea.remove();
+    return copied;
+  }
+
   async function api(path, options = {}) {
     const method = options.method || 'GET';
     const response = await fetch(`/admin/api/${path}`, {
@@ -628,8 +653,8 @@
       finally { submitState(form, false); }
     });
     $('copy-token').addEventListener('click', async () => {
-      try { await navigator.clipboard.writeText($('new-token-value').textContent); toast('Token copied.'); }
-      catch { toast('Copying is not available here. Please select and copy the token.', 'warning'); }
+      if (await copyToClipboard($('new-token-value').textContent)) toast('Token copied.');
+      else toast('Copying is not available here. Please select and copy the token.', 'warning');
     });
   }
 
@@ -1820,8 +1845,8 @@
     renderParameters();
     $('parameter-search')?.addEventListener('input', renderParameters);
     $('copy-metrics-endpoint')?.addEventListener('click', async () => {
-      try { await navigator.clipboard.writeText(`${location.origin}/metrics`); toast('Metrics endpoint copied.'); }
-      catch { toast('Could not copy the metrics endpoint.', 'danger'); }
+      if (await copyToClipboard(`${location.origin}/metrics`)) toast('Metrics endpoint copied.');
+      else toast('Could not copy the metrics endpoint.', 'danger');
     });
     $('exposed-search')?.addEventListener('input', () => { exposedPage = 0; renderParameters(); });
     $('exposed-prev')?.addEventListener('click', () => { exposedPage -= 1; renderParameters(); });

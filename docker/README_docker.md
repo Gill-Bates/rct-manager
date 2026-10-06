@@ -4,9 +4,9 @@ Vendor-neutral REST gateway for RCT Power inverters. Tagged releases are publish
 multi-arch (`linux/amd64`, `linux/arm64`) to Docker Hub as
 [`giiibates/rct-manager`](https://hub.docker.com/r/giiibates/rct-manager) by
 `.github/workflows/release.yml`, with Trivy scanning, an SBOM and provenance
-attestation. `docker/build.sh` below is a separate, manual local-build path that
-defaults to pushing `linux/amd64` only to a private registry
-(`docker.cirrio.de/rct-api`); use it for a self-hosted mirror or a local custom
+attestation. `docker/build.sh` below is a separate, manual local-build path
+that always builds `linux/amd64` only and pushes the `:dev` tag to
+`giiibates/rct-manager` on Docker Hub by default; use it for a local custom
 build, not as the source for a production pull of a tagged version.
 
 Deployment artefacts: [`compose.yaml`](compose.yaml), [`Dockerfile`](Dockerfile)
@@ -47,7 +47,7 @@ inside `app/catalog`; GUI selections are stored in the database.
 Compose sets `BIND_ADDRESS=0.0.0.0` and `ALLOW_NON_LOOPBACK_BIND=true` for the
 container listener. Enable the GUI option "behind reverse proxy" when requests
 arrive through a TLS proxy, and keep `BIND_PORT` equal to the container port of the
-mapping in `compose.yaml` (default `8080`; `127.0.0.1:8080:8080`). If you change `BIND_PORT`,
+mapping in `compose.yaml` (default `8000`; `127.0.0.1:8000:8000`). If you change `BIND_PORT`,
 change the published port as well. A loopback `BIND_ADDRESS` inside the container (including
 the default `127.0.0.1`) makes the service unreachable through the port mapping; the start
 then logs a WARNING and the health check fails.
@@ -94,7 +94,7 @@ the server process has an empty capability set and `no-new-privileges` stays act
 
 | Setting | Value | Why |
 | --- | --- | --- |
-| `ports` | `127.0.0.1:8080:8080` | Loopback only; TLS is terminated by a reverse proxy in front of it |
+| `ports` | `127.0.0.1:8000:8000` | Loopback only; TLS is terminated by a reverse proxy in front of it |
 | `BIND_ADDRESS`, `ALLOW_NON_LOOPBACK_BIND` | `0.0.0.0`, `true` | Allow container networking while the host port remains loopback-only |
 | `env_file` | `../settings.env` | Operator settings; never baked into the image |
 | `volumes` | `rct-data:/app/data` | Persistent encrypted settings, admin credentials and PAT records |
@@ -124,28 +124,26 @@ mapping yourself.
 
 Tagged releases ship through `.github/workflows/release.yml` to Docker Hub
 (`giiibates/rct-manager`, `linux/amd64` + `linux/arm64`), not through this
-script. `docker/build.sh` is the separate manual path for a local build or a
-push to a private/self-hosted registry:
+script. `docker/build.sh` has one job: build and push the `:dev` tag of a
+`linux/amd64` image to `giiibates/rct-manager` on Docker Hub by default:
 
 ```sh
-docker/build.sh                      # buildx build + push :latest and :<version>
-PUSH=0 docker/build.sh               # local :dev image via plain docker build, no push
+docker/build.sh                      # buildx build + push :dev
 IMAGE=my.reg/repo docker/build.sh    # another repository
 ```
 
-The default repository is `docker.cirrio.de/rct-api` (private registry,
-`linux/amd64` only); `<version>` is `[project].version` from `pyproject.toml`. The
-push path is equivalent to
+`<version>` (fed into the OCI labels, not into the tag) is `[project].version`
+from `pyproject.toml`. The script is equivalent to
 
 ```sh
 docker buildx build --platform linux/amd64 --pull -f docker/Dockerfile \
   --build-arg APP_VERSION=<version> --build-arg GIT_SHA=<sha> --build-arg BUILD_DATE=<utc> \
-  -t docker.cirrio.de/rct-api:latest -t docker.cirrio.de/rct-api:<version> --push .
+  -t giiibates/rct-manager:dev --push .
 ```
 
-`PUSH=0` uses plain `docker build` without `--platform` and tags `:dev` only.
-Pushing needs `docker login docker.cirrio.de` (or `IMAGE=` pointed at a
-registry you can log in to).
+It refuses to run with an unresolved git SHA, since that would make the
+`:dev` image's OCI revision label meaningless. Pushing needs
+`docker login` (or `IMAGE=` pointed at a registry you can log in to).
 
 The `Dockerfile` defaults to the Python 3.13 slim base image in both stages,
 builds the dependencies into a virtual environment in a separate stage,

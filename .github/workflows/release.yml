@@ -326,7 +326,7 @@ jobs:
             fi
 
             if docker exec "rct-smoketest-${{ matrix.arch }}" python -c \
-                "import os, socket, urllib.request as u; u.urlopen('http://%s:%s/health' % (socket.gethostbyname(socket.gethostname()), os.environ.get('BIND_PORT', '8080')), timeout=2)" \
+                "import os, socket, urllib.request as u; u.urlopen('http://%s:%s/health' % (socket.gethostbyname(socket.gethostname()), os.environ.get('BIND_PORT', '8000')), timeout=2)" \
                 > /dev/null 2>&1; then
               echo "✓ Health endpoint answered after ${i}s"
               exit 0

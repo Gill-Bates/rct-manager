@@ -5,11 +5,12 @@ The repository ships `docker/Dockerfile`, `docker/compose.yaml` and
 `linux/arm64`) to Docker Hub as
 [`giiibates/rct-manager`](https://hub.docker.com/r/giiibates/rct-manager), with
 Trivy scanning, an SBOM and provenance attestation (`.github/workflows/release.yml`).
-`docker/compose.yaml` and `docker/build.sh` default to a separate, manual path:
-building and pushing `linux/amd64` only to the private registry
-`docker.cirrio.de/rct-api`, for a local build or a self-hosted mirror. Point
-`IMAGE=`/the `image:` key at `giiibates/rct-manager` instead to run the published
-release image.
+`docker/compose.yaml` defaults to the private registry `docker.cirrio.de/rct-api`
+for a self-hosted mirror; point `RCT_API_TAG`/the `image:` key at
+`giiibates/rct-manager` instead to run the published release image.
+`docker/build.sh` is a separate, manual local-build path: it always builds
+`linux/amd64` only and pushes the `:dev` tag to `giiibates/rct-manager` on
+Docker Hub by default (set `IMAGE=` to push elsewhere).
 
 ## Run with Compose
 
@@ -31,10 +32,10 @@ are persisted in the `rct-data` volume at `/app/data/rct.db`.
     the container while publishing the host port on `127.0.0.1`. Enable the
     GUI option "behind reverse proxy" when serving through a TLS proxy. Keep
     `BIND_PORT` equal to the container side of the port mapping (default
-    `8080`). A loopback bind makes the service unreachable through the
+    `8000`). A loopback bind makes the service unreachable through the
     published port; the start logs a warning and the health check fails.
 
-The shell variables `RCT_API_PORT` (host port, default `8080`), `RCT_API_TAG` (image tag, default
+The shell variables `RCT_API_PORT` (host port, default `8000`), `RCT_API_TAG` (image tag, default
 `latest`) and `TZ` (default `Etc/UTC`) are read by `docker/compose.yaml` itself.
 
 ## Tokens
@@ -64,7 +65,7 @@ See [Configuration](configuration.md) for details.
 
 | Setting | Value |
 | --- | --- |
-| `ports` | `127.0.0.1:${RCT_API_PORT:-8080}:8080` (TLS terminates at a reverse proxy) |
+| `ports` | `127.0.0.1:${RCT_API_PORT:-8000}:8000` (TLS terminates at a reverse proxy) |
 | `read_only` | `true`, with `/tmp` as tmpfs (`noexec,nosuid,nodev`) |
 | `cap_drop`, `cap_add` | `ALL`; `CHOWN`, `SETUID`, `SETGID` (entrypoint only) |
 | `security_opt` | `no-new-privileges:true` |
@@ -101,8 +102,7 @@ with a Python one-liner; it contains neither curl nor wget.
 ## Build
 
 Tagged releases ship through `.github/workflows/release.yml` to Docker Hub, not
-through this script. `docker/build.sh` is the manual path for a local build or a
-push to a private/self-hosted registry: it builds for `linux/amd64`, feeds
-version, git SHA and build date into the image labels, and pushes `:latest` and
-`:<version>` to `docker.cirrio.de/rct-api` by default (needs `docker login`).
-`PUSH=0 docker/build.sh` builds a local `:dev` image only.
+through this script. `docker/build.sh` has one job: build for `linux/amd64`,
+feed version, git SHA and build date into the image labels, and push the
+`:dev` tag to `giiibates/rct-manager` on Docker Hub by default (needs
+`docker login`).

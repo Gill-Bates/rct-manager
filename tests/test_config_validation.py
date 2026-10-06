@@ -54,7 +54,7 @@ def test_tuning_variables_are_not_read_from_the_environment(monkeypatch) -> None
 
 def test_valid_defaults_load() -> None:
     settings = load_settings()
-    assert settings.bind_port == 8080
+    assert settings.bind_port == 8000
     assert settings.auth_required is True and settings.devices == [] and settings.enable_write_support is False
     assert settings.behind_reverse_proxy is False
     assert settings.allow_non_loopback_bind is False

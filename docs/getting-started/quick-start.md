@@ -35,7 +35,7 @@ See [Environment Variables](../configuration/environment.md) for all settings.
 
 ## Administration and tokens
 
-Open `http://127.0.0.1:8080/` after starting the server. The first start prints a boxed
+Open `http://127.0.0.1:8000/` after starting the server. The first start prints a boxed
 `FIRST START - admin login` block with the one-time `admin` password (8 characters, one special
 character) in clear text, so it can be copy-pasted straight from the console. It is also saved to
 `initial-admin-password` next to the admin database as a fallback for runs without a visible
@@ -70,8 +70,8 @@ python -m app              # start the server (serve is the default mode)
 Check the service:
 
 ```sh
-curl http://127.0.0.1:8080/health
-curl -H "Authorization: Bearer <token>" http://127.0.0.1:8080/api/v1/devices
+curl http://127.0.0.1:8000/health
+curl -H "Authorization: Bearer <token>" http://127.0.0.1:8000/api/v1/devices
 ```
 
 ## Administration menu

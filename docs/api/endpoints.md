@@ -30,7 +30,7 @@ purpose.
 
 ```sh
 curl -H "Authorization: Bearer $TOKEN" \
-  "http://127.0.0.1:8080/api/v1/devices/main/metrics?names=battery_soc,inverter_state"
+  "http://127.0.0.1:8000/api/v1/devices/main/metrics?names=battery_soc,inverter_state"
 ```
 
 - Without `names` the request returns all preselected metrics and is exempt
@@ -49,7 +49,7 @@ curl -H "Authorization: Bearer $TOKEN" \
 ```sh
 curl -X PUT -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
   -d '{"value": 80}' \
-  http://127.0.0.1:8080/api/v1/devices/main/metrics/<metric_name>
+  http://127.0.0.1:8000/api/v1/devices/main/metrics/<metric_name>
 ```
 
 - Needs write access enabled in the GUI, a `read/write` token and a metric approved on the
@@ -88,7 +88,7 @@ Grid charging:
 ```sh
 curl -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
   -d '{"mode":"charge_from_grid","target_soc_percent":80,"max_power_w":3000,"valid_until":"2026-10-05T23:00:00+02:00"}' \
-  http://127.0.0.1:8080/api/v1/devices/main/battery/dispatch
+  http://127.0.0.1:8000/api/v1/devices/main/battery/dispatch
 ```
 
 Load-following discharge:
@@ -96,7 +96,7 @@ Load-following discharge:
 ```sh
 curl -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
   -d '{"mode":"discharge_to_load","target_soc_percent":20,"max_power_w":5000,"valid_until":"2026-10-05T23:00:00+02:00"}' \
-  http://127.0.0.1:8080/api/v1/devices/main/battery/dispatch
+  http://127.0.0.1:8000/api/v1/devices/main/battery/dispatch
 ```
 
 - `max_power_w` is an upper bound and is clamped to the configured device limit.

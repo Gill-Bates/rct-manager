@@ -15,7 +15,7 @@ services:
     # configurable. Exactly one replica per device group: several instances
     # against one inverter endpoint break the access serialization.
     ports:
-      - "127.0.0.1:${RCT_API_PORT:-8080}:8080"
+      - "127.0.0.1:${RCT_API_PORT:-8000}:8000"
     env_file:
       - ../settings.env
     environment:
@@ -24,7 +24,7 @@ services:
       # Pinned to the container port in the mapping above: settings.env must
       # not be able to move the app's listener away from the port Compose
       # publishes, or a healthy container becomes unreachable through it.
-      BIND_PORT: "8080"
+      BIND_PORT: "8000"
       ALLOW_NON_LOOPBACK_BIND: "true"
     logging:
       driver: json-file

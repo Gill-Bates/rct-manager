@@ -274,7 +274,7 @@ class Settings(BaseSettings):
 
     # HTTP server and operating environment
     bind_address: IPvAnyAddress = IPv4Address("127.0.0.1")
-    bind_port: int = Field(8080, ge=1024, le=65535)
+    bind_port: int = Field(8000, ge=1024, le=65535)
     allow_non_loopback_bind: bool = False
     http_workers: int = Field(1, ge=1, le=1)
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
