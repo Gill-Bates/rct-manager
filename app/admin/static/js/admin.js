@@ -278,15 +278,40 @@
     $('battery-soc').textContent = formatMetric(soc, all.find((item) => item.name === 'battery_soc')?.unit || 'ratio');
   }
 
-  const INVERTER_METRICS = [['solar_a_power', 'PV A'], ['solar_b_power', 'PV B'], ['grid_power', 'Grid'], ['ac_power', 'AC power']];
-  const BATTERY_METRICS = [['battery_soc', 'Charge level']];
-  const INVERTER_FACTS = [['heat_sink_temperature', 'Heat sink']];
-  const BATTERY_FACTS = [
-    ['battery_temperature', 'Battery temperature'],
-    ['battery_cycles', 'Charge cycles'],
-    ['battery_soc_target', 'SOC target'],
-    ['power_mng_bat_next_calib_date', 'Next calibration'],
+  // { name, label, icon, kind } per cell of the power card's 2x3 grid, in reading order. 'label'
+  // takes the server-decoded enum text instead of a number; the icon is decorative (aria-hidden).
+  const POWER_CELLS = [
+    { name: 'solar_a_power', label: 'PV A', icon: 'wb_sunny' },
+    { name: 'solar_b_power', label: 'PV B', icon: 'wb_sunny' },
+    { name: 'grid_power', label: 'Grid power', icon: 'electric_meter' },
+    { name: 'ac_power', label: 'AC power', icon: 'bolt' },
+    { name: 'heat_sink_temperature', label: 'Heat sink', icon: 'device_thermostat', optional: true },
+    { name: 'inverter_state', label: 'Status', icon: 'tune', kind: 'label', optional: true },
   ];
+  // The battery card's 2x2 fact grid below the charge level and its bar.
+  const BATTERY_CELLS = [
+    { name: 'battery_temperature', label: 'Temperature', icon: 'device_thermostat', optional: true },
+    { name: 'battery_cycles', label: 'Charge cycles', icon: 'loop', optional: true },
+    { name: 'battery_soc_target', label: 'SOC target', icon: 'flag', optional: true },
+    { name: 'power_mng_bat_next_calib_date', label: 'Next calibration', icon: 'event_repeat', optional: true },
+  ];
+
+  // Metric names that prove a battery system is attached; without any of them no battery card is
+  // rendered at all rather than an empty one.
+  const BATTERY_PRESENCE = ['battery_soc', 'battery_temperature', 'battery_cycles', 'battery_status2',
+    'battery_placeholder_0_status2'];
+
+  // Describes the battery cards to render for one device. /admin/api/devices (app/admin/api.py,
+  // devices()) exposes a single logical battery system per inverter — battery_soc,
+  // battery_temperature, battery_cycles, battery_soc_target, power_mng_bat_next_calib_date plus
+  // battery_status2 / battery_placeholder_0_status2 — with no per-tower index or count, so this
+  // returns at most one descriptor. The card grid below renders one column per descriptor, so a
+  // future per-tower model only has to return more of them; a second card is never invented from
+  // the shared readings.
+  function batteryTowers(metrics) {
+    if (!BATTERY_PRESENCE.some((name) => metrics.has(name))) return [];
+    return [{ title: 'Battery', statusMetric: 'battery_status2' }];
+  }
 
   // Reconciles a parent's children with the wanted nodes in order; untouched nodes are not re-inserted.
   function syncChildren(parent, nodes) {
@@ -321,111 +346,175 @@
     [/balancing active/i, 'The battery is balancing its cells right now; this finishes on its own.'],
   ];
 
-  function createDeviceHalf(className, title, imageName, badgeMetric, badgeLabel, metricDefs, factDefs) {
-    const half = element('section', `device-half ${className}`);
-    half.append(element('h4', 'device-half-title', title));
-    const cell = (label) => {
-      const node = element('div', 'device-metric');
-      const dd = element('dd', 'mb-0 fw-semibold');
-      node.append(element('dt', 'fw-normal text-secondary', label), dd);
-      return { node, dd };
-    };
-    const list = element('dl', 'device-metrics mb-0');
-    const facts = element('dl', 'device-facts mb-0');
-    const rows = [];
-    for (const [name, label] of metricDefs) {
-      const { node, dd } = cell(label);
-      const row = { name, dd, cell: node, optional: false, bar: null };
-      if (name === 'battery_soc') {
-        // Decorative: the percentage is already printed above the bar.
-        row.bar = element('div', 'device-soc-bar');
-        row.bar.setAttribute('aria-hidden', 'true');
-        row.bar.append(element('div', 'device-soc-fill'));
-        node.append(row.bar);
-      }
-      list.append(node);
-      rows.push(row);
+  // One cell of a card's key-value grid: decorative icon, small label, value.
+  function createMetricCell({ label, icon }) {
+    const node = element('div', 'device-metric-card');
+    if (icon) {
+      const iconNode = element('span', 'material-icons device-metric-card-icon', icon);
+      iconNode.setAttribute('aria-hidden', 'true');
+      node.append(iconNode);
     }
-    const { node: badgeNode, dd: badgeDd } = cell(badgeLabel);
-    badgeDd.classList.add('device-fact-badge');
-    badgeNode.classList.add('device-status-metric');
-    const note = element('p', 'device-notice-text mb-0');
-    note.hidden = true;
-    badgeNode.append(note);
-    const badgeCell = { badgeMetric, dd: badgeDd, cell: badgeNode, note };
-    for (const [name, label] of factDefs) {
-      const { node, dd } = cell(label);
-      rows.push({ name, dd, cell: node, optional: true, bar: null });
-    }
-    const readings = element('div', 'device-readings');
-    readings.append(list, facts);
-    const image = element('img', 'device-half-image');
+    const dd = element('dd', 'mb-0');
+    node.append(element('dt', 'fw-normal', label), dd);
+    return { node, dd };
+  }
+
+  // Header shared by the power card and every battery card: icon + title left, status chip right.
+  // Both start on the same baseline, which is what keeps the cards reading as equal columns.
+  function createCardHead(title, icon) {
+    const head = element('div', 'device-subcard-head');
+    const titleNode = element('h4', 'device-subcard-title mb-0');
+    const iconNode = element('span', 'material-icons', icon);
+    iconNode.setAttribute('aria-hidden', 'true');
+    titleNode.append(iconNode, element('span', null, title));
+    const chip = element('span', 'device-chip');
+    const dot = element('span', 'device-chip-dot');
+    dot.setAttribute('aria-hidden', 'true');
+    const text = element('span');
+    chip.append(dot, text);
+    chip.hidden = true;
+    head.append(titleNode, chip);
+    return { node: head, chip, chipText: text };
+  }
+
+  function cardImage(imageName, width, height) {
+    const image = element('img', 'device-subcard-image');
     image.src = `/admin/static/img/${imageName}`;
     image.alt = '';
-    image.width = 152;
-    image.height = 200;
-    const content = element('div', 'device-half-content');
-    content.append(image, readings);
-    half.append(content);
-    return { node: half, rows, badgeCell, facts };
+    image.width = width;
+    image.height = height;
+    return image;
+  }
+
+  // Power card: header, inverter image on the left, a fixed 2-column key-value grid on the right.
+  function createPowerCard() {
+    const card = element('section', 'device-subcard device-subcard-power');
+    const head = createCardHead('Inverter / Power', 'bolt');
+    const grid = element('dl', 'device-metric-grid mb-0');
+    const cells = POWER_CELLS.map((spec) => {
+      const { node, dd } = createMetricCell(spec);
+      grid.append(node);
+      return { ...spec, dd, node };
+    });
+    const body = element('div', 'device-subcard-body');
+    body.append(cardImage('rct-inverter.svg', 120, 127), grid);
+    card.append(head.node, body);
+    return { node: card, head, grid, cells, statusMetric: 'inverter_state' };
+  }
+
+  // Battery card: header, tower image on the left, and on the right the charge level with its bar
+  // directly beneath the value, then a 2x2 fact grid. Same outer shape as the power card.
+  function createBatteryCard(tower) {
+    const card = element('section', 'device-subcard device-subcard-battery');
+    const head = createCardHead(tower.title, 'battery_charging_full');
+    const charge = element('div', 'device-charge');
+    const chargeValue = element('dd', 'mb-0 device-charge-value');
+    charge.append(element('dt', 'fw-normal', 'Charge level'), chargeValue);
+    const bar = element('div', 'device-soc-bar');
+    bar.setAttribute('aria-hidden', 'true');  // the percentage is printed right above it
+    bar.append(element('div', 'device-soc-fill'));
+    charge.append(bar);
+    const grid = element('dl', 'device-metric-grid mb-0');
+    const cells = BATTERY_CELLS.map((spec) => {
+      const { node, dd } = createMetricCell(spec);
+      grid.append(node);
+      return { ...spec, dd, node };
+    });
+    const readings = element('div', 'device-subcard-readings');
+    readings.append(charge, grid);
+    const body = element('div', 'device-subcard-body');
+    body.append(cardImage('rct-batterystack.svg', 64, 252), readings);
+    card.append(head.node, body);
+    return { node: card, head, grid, cells, chargeValue, bar, statusMetric: tower.statusMetric };
   }
 
   function createDeviceVisual() {
     const wrap = element('div', 'device-visual');
-    const inverterHalf = createDeviceHalf(
-      'device-half-inverter', 'Power', 'rct-inverter.svg', 'inverter_state', 'Inverter status', INVERTER_METRICS, INVERTER_FACTS,
-    );
-    const batteryHalf = createDeviceHalf(
-      'device-half-battery', 'Battery', 'rct-batterystack.svg', 'battery_status2', 'Battery status', BATTERY_METRICS, BATTERY_FACTS,
-    );
-    const divider = element('div', 'device-divider');
-    divider.setAttribute('aria-hidden', 'true');
-    wrap.append(inverterHalf.node, divider, batteryHalf.node);
-    return { node: wrap, inverterHalf, batteryHalf };
+    const inverterCard = createPowerCard();
+    wrap.append(inverterCard.node);
+    // batteries grows to match batteryTowers() on the first patch; see patchDeviceVisual.
+    return { node: wrap, inverterCard, batteries: [] };
   }
 
-  // Patches one half's rows and badge cell in place, same reconciliation pattern for both halves.
-  function patchDeviceHalf(half, metrics) {
-    const factNodes = [];
-    const { badgeMetric, dd: badgeDd, cell: badgeCell, note } = half.badgeCell || {};
-    // Falls back to the second battery stack's status when the first is not present.
-    const badgeReading = badgeMetric ? metrics.get(badgeMetric) || (badgeMetric === 'battery_status2' ? metrics.get('battery_placeholder_0_status2') : undefined) : undefined;
-    if (badgeReading?.label) {
-      const badgeText = badgeReading.label;
-      setText(badgeDd, badgeText);
-      if (badgeDd.title !== badgeText) badgeDd.title = badgeText;
-      const notice = BATTERY_NOTICES.find(([pattern]) => pattern.test(badgeText));
-      setClass(badgeCell, 'is-notice', Boolean(notice));
-      setText(note, notice ? notice[1] : '');
-      note.hidden = !notice;
-      factNodes.push(badgeCell);
+  // Shows the server-decoded status text as a compact chip. A status that needs an explanation
+  // carries it in the title tooltip only, so no long prose sits permanently in the card.
+  function patchCardStatus(head, metrics, statusMetric) {
+    const reading = statusMetric
+      ? metrics.get(statusMetric) || (statusMetric === 'battery_status2' ? metrics.get('battery_placeholder_0_status2') : undefined)
+      : undefined;
+    if (!reading?.label) { head.chip.hidden = true; return; }
+    const text = reading.label;
+    setText(head.chipText, text);
+    const notice = BATTERY_NOTICES.find(([pattern]) => pattern.test(text));
+    const title = notice ? `${text} — ${notice[1]}` : text;
+    if (head.chip.title !== title) head.chip.title = title;
+    setClass(head.chip, 'device-chip-warning', Boolean(notice));
+    head.chip.hidden = false;
+  }
+
+  // Fills one key-value cell. Returns false when the device reports no reading for it, so an
+  // optional cell can be dropped from the grid instead of showing a permanent placeholder.
+  function patchMetricCell(cell, metrics) {
+    const metric = metrics.get(cell.name);
+    if (!metric && cell.optional) return false;
+    if (cell.kind === 'label') {
+      const available = Boolean(metric?.label);
+      setReading(cell.dd, available ? metric.label : 'n/a');
+      setClass(cell.dd, 'text-secondary', !available);
+      return available;
     }
-    for (const { name, dd, cell, optional, bar } of half.rows) {
-      const metric = metrics.get(name);
-      if (optional) {
-        if (!metric) continue;  // no reading for this device: leave the fact out
-        factNodes.push(cell);
-      }
-      const value = metric && metric.value !== null && metric.value !== undefined ? Number(metric.value) : NaN;
-      const calibrationDate = name === 'power_mng_bat_next_calib_date' && Number.isFinite(value) && value > 0 ? new Date(value * 1000) : null;
-      const available = name === 'power_mng_bat_next_calib_date' ? Boolean(calibrationDate && !Number.isNaN(calibrationDate.getTime())) : Number.isFinite(value);
-      const isGrid = name === 'grid_power';
-      const [number, unit] = calibrationDate ? [formatDate(calibrationDate, { time: true }), ''] : metricParts(isGrid ? Math.abs(value) : value, metric?.unit);
-      if (available) setReading(dd, number, unit, isGrid ? gridFlow(value) : null); else setReading(dd, 'n/a');
-      setClass(dd, 'text-secondary', !available);
-      if (bar) {
-        const percent = available ? Math.min(100, Math.max(0, metric.unit === 'ratio' ? value * 100 : value)) : 0;
-        const width = `${percent}%`;
-        if (bar.firstElementChild.style.width !== width) bar.firstElementChild.style.width = width;
-      }
+    const value = metric && metric.value !== null && metric.value !== undefined ? Number(metric.value) : NaN;
+    const calibrationDate = cell.name === 'power_mng_bat_next_calib_date' && Number.isFinite(value) && value > 0 ? new Date(value * 1000) : null;
+    const available = cell.name === 'power_mng_bat_next_calib_date'
+      ? Boolean(calibrationDate && !Number.isNaN(calibrationDate.getTime()))
+      : Number.isFinite(value);
+    const isGrid = cell.name === 'grid_power';
+    const [number, unit] = calibrationDate
+      ? [formatDate(calibrationDate, { time: true }), '']
+      : metricParts(isGrid ? Math.abs(value) : value, metric?.unit);
+    if (available) setReading(cell.dd, number, unit, isGrid ? gridFlow(value) : null); else setReading(cell.dd, 'n/a');
+    setClass(cell.dd, 'text-secondary', !available);
+    return available;
+  }
+
+  function patchCardGrid(card, metrics) {
+    const nodes = [];
+    for (const cell of card.cells) {
+      const available = patchMetricCell(cell, metrics);
+      if (!cell.optional || available) nodes.push(cell.node);
     }
-    syncChildren(half.facts, factNodes);
+    syncChildren(card.grid, nodes);
+  }
+
+  function patchBatteryCard(card, metrics) {
+    patchCardStatus(card.head, metrics, card.statusMetric);
+    const metric = metrics.get('battery_soc');
+    const value = metric && metric.value !== null && metric.value !== undefined ? Number(metric.value) : NaN;
+    const available = Number.isFinite(value);
+    const [number, unit] = metricParts(value, metric?.unit);
+    if (available) setReading(card.chargeValue, number, unit); else setReading(card.chargeValue, 'n/a');
+    setClass(card.chargeValue, 'text-secondary', !available);
+    const percent = available ? Math.min(100, Math.max(0, metric.unit === 'ratio' ? value * 100 : value)) : 0;
+    const width = `${percent}%`;
+    if (card.bar.firstElementChild.style.width !== width) card.bar.firstElementChild.style.width = width;
+    patchCardGrid(card, metrics);
   }
 
   function patchDeviceVisual(visual, device) {
     const metrics = new Map((device.metrics || []).map((item) => [item.name, item]));
-    patchDeviceHalf(visual.inverterHalf, metrics);
-    patchDeviceHalf(visual.batteryHalf, metrics);
+    patchCardStatus(visual.inverterCard.head, metrics, visual.inverterCard.statusMetric);
+    patchCardGrid(visual.inverterCard, metrics);
+    const towers = batteryTowers(metrics);
+    // Battery cards are created and dropped as the reported towers change; the surviving cards
+    // keep their nodes, so a poll does not rebuild the whole card.
+    while (visual.batteries.length > towers.length) visual.batteries.pop();
+    towers.forEach((tower, index) => {
+      if (!visual.batteries[index]) visual.batteries[index] = createBatteryCard(tower);
+      patchBatteryCard(visual.batteries[index], metrics);
+    });
+    // Drives the column count of the card grid, so one tower fills the row and two share it.
+    visual.node.style.setProperty('--battery-count', String(towers.length));
+    syncChildren(visual.node, [visual.inverterCard.node, ...visual.batteries.map((card) => card.node)]);
   }
 
   function createDeviceCard() {

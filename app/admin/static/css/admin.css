@@ -308,14 +308,12 @@ body {
     line-height: 1.1;
 }
 
-/* 21rem, not 16rem: a card is laid out horizontally (image, readings, device facts), so a narrower
-   track squeezes it back into a tall single column. Measured against 23rem and 26rem: 21rem keeps
-   two cards side by side around 1000px of content width, where a wider minimum drops to one column
-   and makes the whole Inverters area taller again. */
+/* One inverter per row over the full content width: each card already holds its own card grid
+   (power plus one column per battery tower), so a second card beside it would halve the space
+   those columns need. No max-width, so the area uses the width the content column offers. */
 .device-grid {
-    max-width: 75rem;
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(min(21rem, 100%), 1fr));
+    grid-template-columns: minmax(0, 1fr);
     gap: 1rem;
 }
 
@@ -430,154 +428,151 @@ body {
     background: #b4232e;
 }
 
+/* The card grid inside one inverter: the power card, then one column per battery tower.
+   --battery-count is set by patchDeviceVisual() from the towers the device actually reports, so a
+   single tower fills the rest of the row (no empty third column) and two share it evenly. The
+   tracks use minmax(0, …) rather than a pixel minimum: a pixel minimum larger than the available
+   width is exactly what pushes a grid past its container and creates a horizontal ghost scroll,
+   so the narrow cases are handled by the container queries below instead. */
 .device-visual {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) 1px minmax(0, 1fr);
-    align-items: stretch;
-    gap: 1.5rem;
-}
-
-.device-half {
     min-width: 0;
-}
-
-.device-half-title {
-    margin: 0 0 .6rem;
-    font-size: .8rem;
-    font-weight: 700;
-    letter-spacing: .04em;
-    text-transform: uppercase;
-    color: var(--bs-secondary-color);
-}
-
-.device-half-content {
     display: grid;
-    grid-template-columns: 9.5rem minmax(0, 1fr);
-    align-items: start;
-    gap: 1.25rem;
+    grid-template-columns: minmax(0, 1.15fr) repeat(var(--battery-count, 1), minmax(0, 1fr));
+    align-items: stretch;
+    gap: 1rem;
 }
 
-.device-half-image {
-    width: 100%;
-    height: 12.5rem;
-    object-fit: contain;
-    object-position: left top;
-}
-
-.device-divider {
-    background: var(--rct-line);
-}
-
+/* Two columns once the card is too narrow for power plus every tower side by side, then a single
+   column on a phone. Container queries, not viewport ones: the card's own width is what decides
+   whether the columns fit, and it already differs from the viewport by sidebar and padding. */
 @container (max-width: 56rem) {
     .device-visual {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+}
+
+@container (max-width: 34rem) {
+    .device-visual {
         grid-template-columns: minmax(0, 1fr);
-        gap: 1.25rem;
-    }
-
-    .device-divider {
-        height: 1px;
     }
 }
 
-@container (max-width: 28rem) {
-    .device-half-content {
-        grid-template-columns: 5rem minmax(0, 1fr);
-        gap: .75rem;
-    }
-
-    .device-half-image {
-        height: 8rem;
-    }
-
-    /* Prefixed with .device-item so these beat the later base size rules of equal specificity. */
-    .device-item .device-half-inverter .device-metrics dd,
-    .device-item .device-half-battery .device-metrics dd {
-        font-size: 1.4rem;
-        white-space: nowrap;
-    }
-
-    .device-metric dt {
-        overflow-wrap: break-word;
-        hyphens: auto;
-    }
-}
-
-.device-fact-badge {
-    display: inline-block;
-    width: fit-content;
-    max-width: 100%;
-    font-size: 1rem;
-    font-weight: 500;
-    color: var(--bs-body-color);
-}
-
-/* A calm status line: a small neutral dot instead of a filled pill. */
-.device-fact-badge::before {
-    content: '';
-    display: inline-block;
-    width: .5rem;
-    height: .5rem;
-    margin-right: .5rem;
-    border-radius: 50%;
-    background: var(--bs-secondary-color);
-    vertical-align: .08em;
-}
-
-.device-readings {
+.device-subcard {
     min-width: 0;
-    display: grid;
-    gap: .85rem;
+    display: flex;
+    flex-direction: column;
+    gap: .75rem;
+    padding: .85rem .9rem;
+    border: 1px solid var(--rct-line);
+    border-radius: .6rem;
+    background: var(--bs-tertiary-bg);
 }
 
-.device-metrics,
-.device-facts {
+/* Header shared by the power card and every battery card: icon + title left, status chip right. */
+.device-subcard-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: .5rem;
     min-width: 0;
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: .75rem 1rem;
 }
 
-.device-metrics:empty,
-.device-facts:empty {
-    display: none;
-}
-
-.device-metric dt,
-.device-metric dd {
+.device-subcard-title {
+    display: flex;
+    align-items: center;
+    gap: .4rem;
+    min-width: 0;
+    font-size: .9rem;
+    font-weight: 700;
     overflow-wrap: anywhere;
 }
 
-.device-status-metric {
-    grid-column: 1 / -1;
-}
-
-.device-unit {
-    margin-left: .1em;
-    font-size: .7em;
-    font-weight: 500;
+.device-subcard-title .material-icons {
+    font-size: 1.05rem;
     color: var(--bs-secondary-color);
 }
 
-.device-half-battery .device-metrics {
-    grid-template-columns: 1fr;
+/* Compact status chip: label plus a colored dot. The long explanation of a status such as
+   "Balancing required" lives in the title tooltip, not as permanent prose in the card. */
+.device-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: .35rem;
+    flex: 0 1 auto;
+    min-width: 0;
+    padding: .18rem .5rem;
+    border-radius: 1rem;
+    font-size: .7rem;
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    background: var(--bs-secondary-bg);
+    color: var(--bs-secondary-color);
 }
 
-.device-half-battery .device-metrics dd {
-    font-size: 1.75rem;
+.device-chip-dot {
+    flex: 0 0 auto;
+    width: .4rem;
+    height: .4rem;
+    border-radius: 50%;
+    background: var(--bs-secondary-color);
+}
+
+.device-chip-warning {
+    background: rgb(var(--bs-warning-rgb) / 16%);
+    color: var(--bs-warning-text-emphasis);
+}
+
+.device-chip-warning .device-chip-dot {
+    background: var(--bs-warning);
+}
+
+/* Image left, readings right. The image track is a fixed small column: a secondary illustration,
+   so the metric cells carry the card's visual weight. */
+.device-subcard-body {
+    display: grid;
+    grid-template-columns: 4rem minmax(0, 1fr);
+    align-items: start;
+    gap: .85rem;
+    min-width: 0;
+}
+
+.device-subcard-image {
+    display: block;
+    width: 100%;
+    height: 7rem;
+    object-fit: contain;
+    object-position: center top;
+}
+
+.device-subcard-readings {
+    min-width: 0;
+    display: grid;
+    gap: .6rem;
+}
+
+/* Charge level: the value, then its bar directly beneath, above the fact grid. */
+.device-charge {
+    min-width: 0;
+}
+
+.device-charge dt {
+    font-size: .78rem;
+    line-height: 1.2;
+    color: var(--bs-secondary-color);
+}
+
+.device-charge-value {
+    font-size: 1.6rem;
     font-weight: 700;
     line-height: 1.1;
     font-variant-numeric: tabular-nums;
 }
 
-.device-half-inverter .device-metrics dd {
-    font-size: 1.75rem;
-    line-height: 1.15;
-    font-variant-numeric: tabular-nums;
-}
-
 .device-soc-bar {
-    height: .5rem;
-    margin-top: .5rem;
+    height: .45rem;
+    margin-top: .4rem;
     border-radius: .25rem;
     overflow: hidden;
     background: var(--bs-secondary-bg);
@@ -589,19 +584,64 @@ body {
     background: var(--bs-success);
 }
 
-.device-status-metric.is-notice .device-fact-badge::before {
-    background: var(--bs-warning);
+/* The key-value grid: 2 columns, so the power card reads as 2x3 and a battery card as 2x2. */
+.device-metric-grid {
+    min-width: 0;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: .5rem;
 }
 
-.device-notice-text {
-    margin-top: .25rem;
-    font-size: .85rem;
-    line-height: 1.35;
+.device-metric-grid:empty {
+    display: none;
+}
+
+.device-metric-card {
+    min-width: 0;
+    padding: .45rem .55rem;
+    border: 1px solid var(--rct-line);
+    border-radius: .45rem;
+    background: var(--bs-body-bg);
+    overflow-wrap: anywhere;
+}
+
+.device-metric-card-icon {
+    display: block;
+    margin-bottom: .15rem;
+    font-size: .95rem;
     color: var(--bs-secondary-color);
 }
 
-.device-facts .device-metric dd {
+.device-metric-card dt {
+    font-size: .72rem;
+    line-height: 1.2;
+    color: var(--bs-secondary-color);
+}
+
+.device-metric-card dd {
+    margin: 0;
     font-size: .95rem;
+    font-weight: 600;
+    line-height: 1.25;
+    font-variant-numeric: tabular-nums;
+}
+
+.device-unit {
+    margin-left: .15em;
+    font-size: .72em;
+    font-weight: 500;
+    color: var(--bs-secondary-color);
+}
+
+/* Narrow card: the image moves above the readings so the value columns keep their width. */
+@container (max-width: 22rem) {
+    .device-subcard-body {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    .device-subcard-image {
+        height: 4.5rem;
+    }
 }
 
 @media (max-width: 420px) {
@@ -616,16 +656,6 @@ body {
     .device-head {
         margin-bottom: .75rem;
     }
-}
-
-.device-metric dt {
-    font-size: .85rem;
-    line-height: 1.2;
-}
-
-.device-metric dd {
-    font-size: .9rem;
-    line-height: 1.25;
 }
 
 /* Cards in one grid row share the row height (stretch), and the body fills that height so the
