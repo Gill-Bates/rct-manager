@@ -2,7 +2,7 @@
 
 ## Overview
 
-`rct-rest-api/` wird ein eigenständiges Projekt dieses Monorepos nach dem Muster der
+`rct-manager/` wird ein eigenständiges Projekt dieses Monorepos nach dem Muster der
 neueren Dienste (`talsperren`, `tanken`, `wartezeiten.app`): ein Paket `app/`,
 startbar über `python -m app`, Abhängigkeiten und Version ausschließlich in
 `pyproject.toml`, Auslieferung als gehärtetes Container_Image
@@ -424,7 +424,7 @@ sequenceDiagram
 ### Verzeichnis- und Modulaufbau
 
 ```
-rct-rest-api/
+rct-manager/
 ├── app/
 │   ├── __init__.py
 │   ├── __main__.py                 # CLI: serve | validate
@@ -2392,7 +2392,7 @@ insoweit zusammengefasst, wie sie den Code berühren:
   genau eine Replik je Gerätegruppe (26.25–26.31, 26.35).
 - Veröffentlichung als `docker.cirrio.de/rct-api:latest` und `:<version>` über
   `docker buildx build --platform linux/amd64 --pull -f docker/Dockerfile --push`
-  (26.23, 26.24). Verzeichnisname `rct-rest-api/` und Imagename `rct-api` weichen
+  (26.23, 26.24). Verzeichnisname `rct-manager/` und Imagename `rct-api` weichen
   bewusst voneinander ab, wie `talsperren` → `damflux` und `rctpower` →
   `rct-collector`.
 - `read_only: true` verlangt, dass die Anwendung nichts in das Dateisystem schreibt.
@@ -2779,7 +2779,7 @@ Eingaberaum der reinen Funktionen und der Operationsfolgen, Beispieltests beschr
 konkrete Fälle, Statuscodes und Fehlermeldungen. Keine der beiden Formen ersetzt die
 andere.
 
-Verwendete Werkzeuge, alle im Extra `dev` von `rct-rest-api/pyproject.toml`:
+Verwendete Werkzeuge, alle im Extra `dev` von `rct-manager/pyproject.toml`:
 
 - `pytest` als Testläufer, `pytest-asyncio` für die asynchronen Pfade.
 - `hypothesis` als Bibliothek für Property-Based Testing. Eigenschaftstests werden
