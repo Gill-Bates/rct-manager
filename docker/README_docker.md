@@ -1,7 +1,13 @@
 # rct-rest-api in Docker
 
-Vendor-neutral REST gateway for RCT Power inverters, published as
-`docker.cirrio.de/rct-api` (`linux/amd64`, private registry).
+Vendor-neutral REST gateway for RCT Power inverters. Tagged releases are published
+multi-arch (`linux/amd64`, `linux/arm64`) to Docker Hub as
+[`giiibates/rct-rest-api`](https://hub.docker.com/r/giiibates/rct-rest-api) by
+`.github/workflows/release.yml`, with Trivy scanning, an SBOM and provenance
+attestation. `docker/build.sh` below is a separate, manual local-build path that
+defaults to pushing `linux/amd64` only to a private registry
+(`docker.cirrio.de/rct-api`); use it for a self-hosted mirror or a local custom
+build, not as the source for a production pull of a tagged version.
 
 Deployment artefacts: [`compose.yaml`](compose.yaml), [`Dockerfile`](Dockerfile)
 and [`build.sh`](build.sh). The operator documentation (configuration, endpoints,
@@ -116,14 +122,20 @@ mapping yourself.
 
 ## Build and publish
 
+Tagged releases ship through `.github/workflows/release.yml` to Docker Hub
+(`giiibates/rct-rest-api`, `linux/amd64` + `linux/arm64`), not through this
+script. `docker/build.sh` is the separate manual path for a local build or a
+push to a private/self-hosted registry:
+
 ```sh
 docker/build.sh                      # buildx build + push :latest and :<version>
 PUSH=0 docker/build.sh               # local :dev image via plain docker build, no push
 IMAGE=my.reg/repo docker/build.sh    # another repository
 ```
 
-The default repository is `docker.cirrio.de/rct-api`; `<version>` is
-`[project].version` from `pyproject.toml`. The push path is equivalent to
+The default repository is `docker.cirrio.de/rct-api` (private registry,
+`linux/amd64` only); `<version>` is `[project].version` from `pyproject.toml`. The
+push path is equivalent to
 
 ```sh
 docker buildx build --platform linux/amd64 --pull -f docker/Dockerfile \
@@ -132,7 +144,8 @@ docker buildx build --platform linux/amd64 --pull -f docker/Dockerfile \
 ```
 
 `PUSH=0` uses plain `docker build` without `--platform` and tags `:dev` only.
-Pushing needs `docker login docker.cirrio.de`.
+Pushing needs `docker login docker.cirrio.de` (or `IMAGE=` pointed at a
+registry you can log in to).
 
 The `Dockerfile` defaults to the Python 3.13 slim base image in both stages,
 builds the dependencies into a virtual environment in a separate stage,

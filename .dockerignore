@@ -21,7 +21,6 @@ docs/
 tests/
 docker/
 !docker/entrypoint.sh
-!docker/requirements.lock
 .github/
 site/
 build/

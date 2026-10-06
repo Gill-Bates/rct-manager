@@ -2,7 +2,10 @@
 # Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
 #
 # Builds the MkDocs site strictly, scans its dependencies and deploys it to
-# GitHub Pages from main. Related: ci.yml.
+# GitHub Pages from main. The scan runs in the same job and on the same
+# installed environment as the build, not a separately resolved one, so there
+# is no window in which the two can diverge without a lock file. Related:
+# ci.yml.
 
 name: Deploy Documentation
 
@@ -10,8 +13,6 @@ on:
   push:
     branches:
       - main
-    tags:
-      - 'v*'
     paths:
       - 'docs/**'
       - 'LICENSE'
@@ -64,6 +65,31 @@ jobs:
           cat requirements-docs.txt
           python -m pip install --upgrade pip
           pip install -r requirements-docs.txt
+      # Freezes the exact environment the build step below runs in. No lock
+      # file: without one, resolving separately for the scan (a second pip
+      # install into another venv) can land on a different version than this
+      # run's build did - freezing what is already installed here instead of
+      # re-resolving removes that gap entirely rather than narrowing it.
+      - name: Freeze installed versions for scanning
+        run: |
+          set -euo pipefail
+          pip freeze --all > docs-requirements-frozen.txt
+          echo "Scanning $(grep -c '==' docs-requirements-frozen.txt) resolved packages"
+      # Vulnerabilities only; secret and misconfig scanning of the sources is
+      # not part of this pipeline. The file name must contain "requirement" or
+      # Trivy's pip analyzer skips it.
+      - name: Trivy scan docs dependencies
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: 'fs'
+          scan-ref: 'docs-requirements-frozen.txt'
+          scanners: 'vuln'
+          trivyignores: '.trivyignore'
+          format: 'table'
+          exit-code: '1'
+          ignore-unfixed: true
+          severity: 'CRITICAL,HIGH'
+          timeout: '5m'
 
       - name: Build documentation
         run: mkdocs build -f docs/mkdocs.yml --strict
@@ -87,47 +113,12 @@ jobs:
 
       - name: Upload artifact
         if: |
-          (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) &&
+          github.ref == 'refs/heads/main' &&
           (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
         uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
           path: ./site
 
-  security-scan:
-    runs-on: ubuntu-26.04
-    timeout-minutes: 10
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Set up Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: '3.13'
-
-      # Scanning the manifest would cover the direct dependencies only; the
-      # frozen venv includes the transitive set. The file name must contain
-      # "requirement" or Trivy's pip analyzer skips it.
-      - name: Materialise the docs environment for scanning
-        run: |
-          set -euo pipefail
-          python3 -c 'import tomllib; print("\n".join(tomllib.load(open("pyproject.toml", "rb"))["project"]["optional-dependencies"]["docs"]))' > requirements-docs.txt
-          python3 -m venv .docs-scan
-          .docs-scan/bin/python -m pip install --quiet --upgrade pip
-          .docs-scan/bin/python -m pip install --quiet -r requirements-docs.txt
-          .docs-scan/bin/python -m pip freeze --all > docs-requirements-frozen.txt
-          echo "Scanning $(grep -c '==' docs-requirements-frozen.txt) resolved packages"
-
-      # Vulnerabilities only; secret and misconfig scanning of the sources is
-      # not part of this pipeline.
-      - name: Trivy scan docs dependencies
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
-        with:
-          scan-type: 'fs'
-          scan-ref: 'docs-requirements-frozen.txt'
-          scanners: 'vuln'
           trivyignores: '.trivyignore'
           format: 'table'
           exit-code: '1'
@@ -137,11 +128,10 @@ jobs:
 
   deploy:
     if: |
-      (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) &&
+      github.ref == 'refs/heads/main' &&
       (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     needs:
       - build
-      - security-scan
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     permissions:

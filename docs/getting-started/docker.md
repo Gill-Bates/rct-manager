@@ -1,8 +1,15 @@
 # Docker
 
 The repository ships `docker/Dockerfile`, `docker/compose.yaml` and
-`docker/build.sh`. The image is published to a private registry as
-`docker.cirrio.de/rct-api`.
+`docker/build.sh`. Tagged releases are published multi-arch (`linux/amd64` and
+`linux/arm64`) to Docker Hub as
+[`giiibates/rct-rest-api`](https://hub.docker.com/r/giiibates/rct-rest-api), with
+Trivy scanning, an SBOM and provenance attestation (`.github/workflows/release.yml`).
+`docker/compose.yaml` and `docker/build.sh` default to a separate, manual path:
+building and pushing `linux/amd64` only to the private registry
+`docker.cirrio.de/rct-api`, for a local build or a self-hosted mirror. Point
+`IMAGE=`/the `image:` key at `giiibates/rct-rest-api` instead to run the published
+release image.
 
 ## Run with Compose
 
@@ -93,6 +100,9 @@ with a Python one-liner; it contains neither curl nor wget.
 
 ## Build
 
-`docker/build.sh` builds for `linux/amd64`, feeds version, git SHA and build
-date into the image labels, and pushes `:latest` and `:<version>` (needs
-`docker login`). `PUSH=0 docker/build.sh` builds a local `:dev` image only.
+Tagged releases ship through `.github/workflows/release.yml` to Docker Hub, not
+through this script. `docker/build.sh` is the manual path for a local build or a
+push to a private/self-hosted registry: it builds for `linux/amd64`, feeds
+version, git SHA and build date into the image labels, and pushes `:latest` and
+`:<version>` to `docker.cirrio.de/rct-api` by default (needs `docker login`).
+`PUSH=0 docker/build.sh` builds a local `:dev` image only.

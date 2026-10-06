@@ -7,10 +7,14 @@
 # =============================================================================
 # rct-api - image build
 # =============================================================================
-# Builds docker.cirrio.de/rct-api and feeds the OCI metadata (version, git sha,
-# build date) into the Dockerfile ARGs. The version comes from pyproject.toml.
-# By default the image is built for linux/amd64 and PUSHED as :latest and
-# :<version> (requires `docker login`). PUSH=0 builds a local :dev image only.
+# Manual local-build / private-registry path: builds docker.cirrio.de/rct-api
+# by default and feeds the OCI metadata (version, git sha, build date) into
+# the Dockerfile ARGs. The version comes from pyproject.toml. Tagged releases
+# ship separately via .github/workflows/release.yml, which builds multi-arch
+# (linux/amd64 + linux/arm64) and publishes to Docker Hub as
+# giiibates/rct-rest-api; this script only builds linux/amd64. By default the
+# image is built and PUSHED as :latest and :<version> (requires `docker
+# login`). PUSH=0 builds a local :dev image only.
 #
 # Usage (from anywhere):
 #   docker/build.sh [extra buildx args...]   # build + push :latest and :<version>

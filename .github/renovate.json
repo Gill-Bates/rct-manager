@@ -42,7 +42,7 @@
             "groupName": "docker-images",
             "automerge": false,
             "pinDigests": true,
-            "labels": [
+            "addLabels": [
                 "docker"
             ]
         },
@@ -53,7 +53,7 @@
             ],
             "groupName": "python-dependencies",
             "automerge": false,
-            "labels": [
+            "addLabels": [
                 "python"
             ]
         },
@@ -74,7 +74,7 @@
                 "major"
             ],
             "automerge": false,
-            "labels": [
+            "addLabels": [
                 "breaking-change"
             ]
         }

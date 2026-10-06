@@ -9,16 +9,20 @@ SHELL ["/bin/sh", "-eu", "-c"]
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1
 WORKDIR /src
 
-# Installed from the hash-pinned lock file, not re-resolved from pyproject.toml,
-# so the same commit always installs the same packages. Regenerate the lock
-# with `uv pip compile pyproject.toml --generate-hashes -o docker/requirements.lock`
-# after a dependency change. The application code stays in /app with its
-# packaged catalog, administration templates and assets.
-COPY docker/requirements.lock ./
+# Resolved from pyproject.toml's [project].dependencies at build time,
+# deliberately unpinned: every build installs the newest release of each
+# dependency ("latest is greatest"). Two architecture builds started minutes
+# apart can therefore resolve different transitive versions; release.yml's
+# cross-arch parity check is the backstop that catches it, not a lock file.
+# The application code stays in /app with its packaged catalog, administration
+# templates and assets - only the dependency list is needed here, so only
+# pyproject.toml is copied into this stage.
+COPY pyproject.toml ./
 RUN --mount=type=cache,target=/root/.cache/pip \
     python -m venv /opt/venv \
     && /opt/venv/bin/pip install --upgrade pip \
-    && /opt/venv/bin/pip install --require-hashes --no-deps -r requirements.lock \
+    && python -c 'import tomllib; print("\n".join(tomllib.load(open("pyproject.toml", "rb"))["project"]["dependencies"]))' > requirements.txt \
+    && /opt/venv/bin/pip install --no-cache-dir -r requirements.txt \
     && /opt/venv/bin/pip check
 
 # --- Runtime stage -----------------------------------------------------------

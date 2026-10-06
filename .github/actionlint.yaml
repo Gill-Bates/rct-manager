@@ -6,7 +6,10 @@
 # so every job would be reported as an unknown runner label.
 #
 # These are GitHub-hosted labels, not self-hosted ones - this file only tells the
-# linter they exist. Drop the entries once the pinned actionlint knows them.
+# linter they exist. gate.yml installs actionlint-py unpinned ("latest is
+# greatest", like the rest of this project's dependencies), so drop these
+# entries once the installed version's own label list includes them - check
+# by removing an entry and re-running the Workflow lint job.
 self-hosted-runner:
   labels:
     - ubuntu-26.04

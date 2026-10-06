@@ -1,4 +1,7 @@
 # Set HMAC_SECRET in ../settings.env before starting Compose; administer devices and PATs in the GUI.
+# docker.cirrio.de/rct-api is the manual local-build/private-registry target (see docker/build.sh);
+# tagged releases are published to Docker Hub as giiibates/rct-rest-api (.github/workflows/release.yml).
+# Point RCT_API_TAG and this image reference at that repository to run a published release instead.
 services:
   rct-api:
     image: docker.cirrio.de/rct-api:${RCT_API_TAG:?RCT_API_TAG must be set}

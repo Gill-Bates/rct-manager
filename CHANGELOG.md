@@ -1,4 +1,4 @@
-## [1.0.0] - 2026-xx-xx
+## [1.0.0] - 2026-10-06
 
 - Initial Release
 
@@ -14,8 +14,10 @@
   never releases another device of the same model; the only transfer is an explicit
   `capabilities:copy-from` call that requires a matching model and firmware. A new per-device
   engineering mode, with a shorter TTL cap, is the only way to dispatch on unverified hardware. The
-  capabilities are managed through a new, undocumented admin API
-  (`/admin/api/dispatch/devices/{device_id}/capabilities/...`).
+  capabilities are managed through a new admin API
+  (`/admin/api/dispatch/devices/{device_id}/capabilities/...`), internal/engineering-only and
+  deliberately excluded from the public, documented REST contract and the OpenAPI schema; its
+  workflow is covered in [Operation](docs/operation.md#battery-dispatch-capabilities).
 
 ### Fixed
 
