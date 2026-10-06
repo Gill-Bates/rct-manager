@@ -1,0 +1,29 @@
+**/.env*
+**/settings.env
+
+# Repository and local tooling state
+.git/
+**/.omc/
+**/.omx/
+.venv/
+venv/
+.hypothesis/
+.pytest_cache/
+.ruff_cache/
+__pycache__/
+*.py[cod]
+*.egg-info/
+data/
+*.zip/
+
+# Not needed by the runtime image
+docs/
+tests/
+docker/
+!docker/entrypoint.sh
+!docker/requirements.lock
+.github/
+site/
+build/
+dist/
+*.pdf

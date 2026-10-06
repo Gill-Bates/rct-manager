@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block title %}Log in – RCT Administration{% endblock %}
+{% block auth_content %}
+<div class="card auth-card shadow-sm">
+  <div class="card-body p-4 p-sm-5">
+    <div class="text-center mb-4"><img class="auth-logo auth-logo-light" src="/admin/static/img/rct-logo-black.svg"
+        width="250" height="136" alt=""><img class="auth-logo auth-logo-dark" src="/admin/static/img/rct-logo-white.svg"
+        width="250" height="136" alt="">
+      <h1 class="h3 mt-2 mb-1">RCT Administration</h1>
+      <p class="text-secondary mb-0">Log in to manage the server.</p>
+    </div>
+    <div id="form-error" class="alert alert-danger" role="alert" tabindex="-1" hidden></div>
+    {# method/action are the no-JS fallback: the submit handler is registered during page parse and
+    preventDefault()s every submit while JS is alive, so this POST can only ever fire with JS dead
+    — and a POST keeps the password out of the URL, the history and the access log. #}
+    <form id="login-form" method="post" action="/admin/api/login">
+      <div class="mb-3"><label class="form-label" for="username">Username</label><input
+          class="form-control form-control-lg" id="username" name="username" type="text" autocomplete="username"
+          value="admin" required autofocus></div>
+      <div class="mb-4"><label class="form-label" for="password">Password</label><input
+          class="form-control form-control-lg" id="password" name="password" type="password"
+          autocomplete="current-password" required></div>
+      <button class="btn btn-primary btn-lg w-100" type="submit" id="login-submit">Log in</button>
+      <p id="auth-init-state" class="form-text mb-0" role="status"></p>
+      <noscript>
+        <p class="form-text text-danger mb-0">JavaScript is required to log in. Enable it and reload this page.</p>
+      </noscript>
+    </form>
+  </div>
+</div>
+{% endblock %}

@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% block title %}API tokens – RCT Administration{% endblock %}
+{% block content %}
+<div class="page-heading">
+    <div>
+        <h1>API tokens</h1>
+        <p class="text-secondary mb-0">Create and revoke personal access tokens</p>
+    </div>
+</div>
+<div class="row g-4 mt-1">
+    <div class="col-12 col-xl-4">
+        <section class="card">
+            <div class="card-body">
+                <h2 class="h5">New token</h2>
+                <p class="text-secondary small">The token is shown only once after creation.</p>
+                <form id="token-form">
+                    <div class="mb-3"><label for="token-name" class="form-label">Name</label><input id="token-name"
+                            class="form-control" maxlength="64" required autocomplete="off"
+                            placeholder="e.g. Monitoring"></div>
+                    <div class="mb-3"><label for="token-role" class="form-label">Permission</label><select
+                            id="token-role" class="form-select">
+                            <option value="read">Read</option>
+                            <option value="read/write">Read and write</option>
+                        </select></div>
+                    <div class="mb-3"><label for="token-expires" class="form-label">Expiry</label><select
+                            id="token-expires" class="form-select">
+                            <option value="30d">30 days</option>
+                            <option value="90d" selected>90 days</option>
+                            <option value="1y">1 year</option>
+                            <option value="never">Never expires</option>
+                        </select></div><button type="submit" class="btn btn-primary">Create token</button>
+                </form>
+                <div id="new-token-box" class="alert alert-success mt-4" hidden>
+                    <p class="mb-2"><strong>Copy the token now.</strong> It will not be shown again.</p>
+                    <div class="d-flex gap-2 flex-wrap"><code id="new-token-value"
+                            class="token-value flex-grow-1"></code><button id="copy-token"
+                            class="btn btn-outline-success" type="button">Copy</button></div>
+                </div>
+            </div>
+        </section>
+    </div>
+    <div class="col-12 col-xl-8">
+        <section class="card">
+            <div class="card-body">
+                <h2 class="h5">Existing tokens</h2>
+                <div id="tokens-list" aria-live="polite">
+                    <p class="text-secondary">Loading tokens …</p>
+                </div>
+            </div>
+        </section>
+    </div>
+</div>
+{% endblock %}

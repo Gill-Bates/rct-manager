@@ -1,0 +1,344 @@
+#!/usr/bin/env python3
+#
+# tests/test_export_admin.py
+# Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
+#
+
+"""Export settings through the admin API: validation, write-only secrets, persistence."""
+
+
+import httpx
+
+from app.api.app_factory import create_app
+from app.config import DbType, QuestDbDownsampling, Settings
+
+
+async def test_export_settings_round_trip(tmp_path):
+    settings = Settings(_env_file=None, hmac_secret="s" * 48, admin_db_path=tmp_path / "rct.db")
+    app = create_app(settings)
+    password = app.state.first_start_password
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver") as client:
+        csrf = (await client.get("/admin/api/session")).json()["csrf_token"]
+        login = await client.post("/admin/api/login", headers={"X-CSRF-Token": csrf},
+                                  json={"username": "admin", "password": password})
+        changed = await client.post("/admin/api/change-password", headers={"X-CSRF-Token": login.json()["csrf_token"]},
+                                    json={"current_password": password, "new_password": "a much stronger password"})
+        headers = {"X-CSRF-Token": changed.json()["csrf_token"]}
+        shown = (await client.get("/admin/api/settings")).json()["settings"]
+        assert shown["db_type"] is None and shown["questdb_downsampling"] == "off"
+        assert "questdb_password" not in shown and shown["questdb_password_configured"] is False
+
+        incomplete = await client.put("/admin/api/settings", headers=headers, json={"db_type": "influxdb_v2"})
+        assert incomplete.status_code == 400
+        body = {"db_type": "questdb", "questdb_hostname": "localhost", "questdb_username": "u",
+                "questdb_password": "pw-secret", "questdb_downsampling": "medium",
+                "questdb_raw_retention_days": 3, "questdb_retention_days": 90}
+        saved = await client.put("/admin/api/settings", headers=headers, json=body)
+        assert saved.status_code == 200 and "pw-secret" not in saved.text
+        assert saved.json()["settings"]["questdb_password_configured"] is True
+        # TSDB target/connection/retention settings restart the push exporter task in place,
+        # not the whole application: none of them appear in restart_required any more.
+        assert saved.json()["restart_required"] == []
+        assert "db_type" in saved.json()["live"]
+        # an empty secret keeps the stored one; an invalid raw retention is rejected
+        keep = await client.put("/admin/api/settings", headers=headers,
+                                json={"questdb_password": "", "questdb_retention_days": 60})
+        assert keep.status_code == 200
+        bad = await client.put("/admin/api/settings", headers=headers, json={"questdb_raw_retention_days": 99})
+        assert bad.status_code == 400
+    restarted = create_app(settings)
+    desired = restarted.state.admin_desired_settings
+    assert desired.db_type is DbType.QUESTDB and desired.questdb_downsampling is QuestDbDownsampling.MEDIUM
+    assert desired.questdb_password.get_secret_value() == "pw-secret" and desired.questdb_retention_days == 60
+    assert restarted.state.runtime.settings.db_type is DbType.QUESTDB
+
+
+async def test_metrics_export_enabled_toggle_is_orthogonal_to_db_type(tmp_path):
+    """`metrics_export_enabled` defaults to True (existing db_type configs keep exporting) and,
+    once set to False, withholds the export regardless of db_type; the connection fields stay
+    saved and visible, unlike resetting db_type back to "" (Disabled)."""
+    settings = Settings(_env_file=None, hmac_secret="s" * 48, admin_db_path=tmp_path / "rct.db")
+    assert settings.metrics_export_enabled is True
+    app = create_app(settings)
+    password = app.state.first_start_password
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver") as client:
+        csrf = (await client.get("/admin/api/session")).json()["csrf_token"]
+        login = await client.post("/admin/api/login", headers={"X-CSRF-Token": csrf},
+                                  json={"username": "admin", "password": password})
+        changed = await client.post("/admin/api/change-password", headers={"X-CSRF-Token": login.json()["csrf_token"]},
+                                    json={"current_password": password, "new_password": "a much stronger password"})
+        headers = {"X-CSRF-Token": changed.json()["csrf_token"]}
+        shown = (await client.get("/admin/api/settings")).json()["settings"]
+        assert shown["metrics_export_enabled"] is True
+
+        body = {"db_type": "questdb", "questdb_hostname": "localhost", "questdb_downsampling": "off"}
+        saved = await client.put("/admin/api/settings", headers=headers, json=body)
+        assert saved.status_code == 200
+
+        paused = await client.put("/admin/api/settings", headers=headers,
+                                  json={"metrics_export_enabled": False})
+        assert paused.status_code == 200
+        assert paused.json()["restart_required"] == []
+        assert "metrics_export_enabled" in paused.json()["live"]
+        after_pause = (await client.get("/admin/api/settings")).json()["settings"]
+        # db_type and the hostname are still there: pausing does not reset the connection config.
+        assert after_pause["metrics_export_enabled"] is False
+        assert after_pause["db_type"] == "questdb" and after_pause["questdb_hostname"] == "localhost"
+
+
+async def test_resaving_an_unchanged_enabled_value_does_not_restart_the_exporter(tmp_path):
+    settings = Settings(_env_file=None, hmac_secret="s" * 48, admin_db_path=tmp_path / "rct.db")
+    app = create_app(settings)
+    password = app.state.first_start_password
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver") as client:
+        csrf = (await client.get("/admin/api/session")).json()["csrf_token"]
+        login = await client.post("/admin/api/login", headers={"X-CSRF-Token": csrf},
+                                  json={"username": "admin", "password": password})
+        changed = await client.post("/admin/api/change-password", headers={"X-CSRF-Token": login.json()["csrf_token"]},
+                                    json={"current_password": password, "new_password": "a much stronger password"})
+        headers = {"X-CSRF-Token": changed.json()["csrf_token"]}
+        base = await client.put("/admin/api/settings", headers=headers,
+                                json={"db_type": "questdb", "questdb_hostname": "localhost"})
+        assert base.status_code == 200
+        from unittest.mock import patch
+
+        with patch("app.admin.api._restart_export") as mocked:
+            resend_same_value = await client.put("/admin/api/settings", headers=headers,
+                                                  json={"metrics_export_enabled": True})
+            assert resend_same_value.status_code == 200
+            mocked.assert_not_called()
+
+
+async def test_export_target_change_takes_effect_without_a_restart(tmp_path):
+    """Saving a new TSDB target restarts the running push-exporter task in place: the next cycle
+    pushes to the new target, no application restart needed (restart_required stays empty)."""
+    import asyncio
+    import json
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    from tests.api_helpers import make_settings, running_app
+
+    class _Server:
+        def __init__(self) -> None:
+            self.hits = 0
+            outer = self
+
+            class Handler(BaseHTTPRequestHandler):
+                def do_POST(self) -> None:
+                    outer.hits += 1
+                    length = int(self.headers.get("Content-Length") or 0)
+                    self.rfile.read(length)
+                    self.send_response(204)
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+
+                def do_GET(self) -> None:
+                    body = json.dumps({"dataset": []}).encode()
+                    self.send_response(200)
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+
+                def log_message(self, *args) -> None:
+                    pass
+
+            self.httpd = HTTPServer(("127.0.0.1", 0), Handler)
+            self.url = f"http://127.0.0.1:{self.httpd.server_port}"
+            threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+
+        def close(self) -> None:
+            self.httpd.shutdown()
+            self.httpd.server_close()
+
+    first, second = _Server(), _Server()
+    try:
+        settings = make_settings(
+            hmac_secret="s" * 48, admin_db_path=tmp_path / "rct.db", db_type="questdb",
+            questdb_hostname=first.url, metrics_export_interval_seconds=5,
+        )
+        async with running_app(settings, settle=False) as h:
+            assert h.app.state.admin_store.change_password(
+                h.app.state.first_start_password, "replacement-test-password"
+            )
+            h.client.headers.pop("Authorization")
+            csrf = (await h.client.get("/admin/api/session")).json()["csrf_token"]
+            login = await h.client.post("/admin/api/login", headers={"X-CSRF-Token": csrf},
+                                        json={"username": "admin", "password": "replacement-test-password"})
+            assert login.status_code == 200
+            for _ in range(100):
+                if first.hits:
+                    break
+                await asyncio.sleep(0.05)
+            assert first.hits >= 1, "exporter never pushed to the original target"
+            before_task = h.app.state.runtime.export_task
+            assert before_task is not None
+
+            response = await h.client.put(
+                "/admin/api/settings", headers={"X-CSRF-Token": login.json()["csrf_token"]},
+                json={"questdb_hostname": second.url},
+            )
+            assert response.status_code == 200, response.text
+            assert response.json()["restart_required"] == []
+            assert "questdb_hostname" in response.json()["live"]
+            assert h.app.state.runtime.settings.questdb_hostname == second.url
+
+            for _ in range(100):
+                if second.hits:
+                    break
+                await asyncio.sleep(0.05)
+            assert second.hits >= 1, "exporter never picked up the new target"
+            # The old task was cancelled and a new one started, not left running alongside it.
+            assert before_task.cancelled() or before_task.done()
+            assert h.app.state.runtime.export_task is not None
+            assert h.app.state.runtime.export_task is not before_task
+            assert before_task not in h.app.state.runtime.tasks
+    finally:
+        first.close()
+        second.close()
+
+
+async def test_disabling_export_stops_the_running_task_without_a_restart(tmp_path):
+    """Toggling `metrics_export_enabled` to False while export is running stops the push task in
+    place (no application restart); toggling back to True with the same db_type starts it again."""
+    import asyncio
+    import json
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    from unittest.mock import patch
+
+    from tests.api_helpers import WRITE_TOKEN, make_settings, running_app
+
+    class _Server:
+        def __init__(self) -> None:
+            self.hits = 0
+            outer = self
+
+            class Handler(BaseHTTPRequestHandler):
+                def do_POST(self) -> None:
+                    outer.hits += 1
+                    length = int(self.headers.get("Content-Length") or 0)
+                    self.rfile.read(length)
+                    self.send_response(204)
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+
+                def do_GET(self) -> None:
+                    body = json.dumps({"dataset": []}).encode()
+                    self.send_response(200)
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+
+                def log_message(self, *args) -> None:
+                    pass
+
+            self.httpd = HTTPServer(("127.0.0.1", 0), Handler)
+            self.url = f"http://127.0.0.1:{self.httpd.server_port}"
+            threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+
+        def close(self) -> None:
+            self.httpd.shutdown()
+            self.httpd.server_close()
+
+    server = _Server()
+    try:
+        settings = make_settings(
+            hmac_secret="s" * 48, admin_db_path=tmp_path / "rct.db", db_type="questdb",
+            questdb_hostname=server.url, metrics_export_interval_seconds=5,
+        )
+        from app.admin.store import AdminStore
+        from app.security.tokens import TokenStore
+
+        # Pre-change the bootstrap password at admin_db_path, same pattern as
+        # test_app_starts_with_export_and_contains_failures above: create_app() (inside
+        # running_app) builds its own admin_store from settings.admin_db_path and that store's
+        # own password-change gate must already be past, independently of the second AdminStore
+        # running_app() builds for session/token handling in its own temporary directory.
+        store = AdminStore(settings.admin_db_path, "s" * 48)
+        try:
+            assert store.change_password(store.initialize(), "a much stronger password")
+            with patch("app.admin.store.generate_pat", side_effect=[WRITE_TOKEN]):
+                store.create_token("write test token", "read/write", None)
+            async with running_app(settings, settle=False) as h:
+                # Swap in the token store that actually authenticates against settings.admin_db_path
+                # (the admin_store running_app() builds and installs lives in its own, unrelated
+                # temporary directory, so its default WRITE_TOKEN fixture is not valid against this
+                # app's admin_store).
+                h.app.state.security.tokens = TokenStore(auth_required=settings.auth_required, admin_store=store)
+                for _ in range(100):
+                    if server.hits:
+                        break
+                    await asyncio.sleep(0.05)
+                assert server.hits >= 1, "exporter never pushed before being paused"
+                running_task = h.app.state.runtime.export_task
+                assert running_task is not None
+
+                paused = await h.client.put(
+                    "/admin/api/settings", headers={"Authorization": f"Bearer {WRITE_TOKEN}"},
+                    json={"metrics_export_enabled": False},
+                )
+                assert paused.status_code == 200, paused.text
+                assert paused.json()["restart_required"] == []
+                for _ in range(100):
+                    if running_task.cancelled() or running_task.done():
+                        break
+                    await asyncio.sleep(0.05)
+                assert running_task.cancelled() or running_task.done()
+                assert running_task not in h.app.state.runtime.tasks
+                # Finding 3/4: an explicit handle, not a 0.3 s timing-based negative assertion, proves
+                # that disabling export left no export task registered at all (not even a replacement).
+                assert h.app.state.runtime.export_task is None
+
+                hits_while_paused = server.hits
+
+                resumed = await h.client.put(
+                    "/admin/api/settings", headers={"Authorization": f"Bearer {WRITE_TOKEN}"},
+                    json={"metrics_export_enabled": True},
+                )
+                assert resumed.status_code == 200, resumed.text
+                for _ in range(100):
+                    if server.hits > hits_while_paused:
+                        break
+                    await asyncio.sleep(0.05)
+                assert server.hits > hits_while_paused, "export never resumed after re-enabling"
+        finally:
+            store.close()
+    finally:
+        server.close()
+
+
+async def test_app_starts_with_export_and_contains_failures(tmp_path):
+    """Lifespan with the export enabled against a closed port: the API stays up, health is exposed."""
+    import asyncio
+    import socket
+
+    from tests.api_helpers import make_settings, running_app
+
+    # Established pattern from test_export_pusher.py: bind an ephemeral port, note the address,
+    # close it, then use that now-provably-closed address instead of the unguaranteed 127.0.0.1:1.
+    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    probe.bind(("127.0.0.1", 0))
+    closed_url = f"http://127.0.0.1:{probe.getsockname()[1]}"
+    probe.close()
+
+    settings = make_settings(
+        hmac_secret="s" * 48, admin_db_path=tmp_path / "rct.db", db_type="questdb",
+        questdb_hostname=closed_url, metrics_export_interval_seconds=5,
+    )
+    from app.admin.store import AdminStore
+
+    store = AdminStore(settings.admin_db_path, "s" * 48)  # the export only starts after the first password change
+    try:
+        assert store.change_password(store.initialize(), "a much stronger password")
+    finally:
+        store.close()
+    async with running_app(settings, settle=False) as h:
+        for _ in range(100):
+            if h.app.state.runtime.exporter._service.export_failures:
+                break
+            await asyncio.sleep(0.05)
+        assert h.app.state.runtime.exporter._service.export_failures >= 1
+        text = (await h.client.get("/metrics")).text
+        assert 'rct_export_pushes_total{result="error"}' in text
+        assert (await h.client.get("/admin/api/session")).status_code == 200

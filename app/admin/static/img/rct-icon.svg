@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="rct-icon-title">
+  <title id="rct-icon-title">RCT</title>
+
+  <defs>
+    <linearGradient id="rct-icon-bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#9c1d20"/>
+      <stop offset="1" stop-color="#6f1215"/>
+    </linearGradient>
+  </defs>
+
+  <!-- rounded square badge in the brand color -->
+  <rect x="8" y="8" width="496" height="496" rx="88" fill="url(#rct-icon-bg)"/>
+
+  <!-- RCT brand mark (the six-petal device from the company logo), centered and scaled up -->
+  <g transform="translate(256,256) scale(3.75) translate(-317.4805,-88.5835)" fill="#ffffff">
+    <path d="M289.134,74.41C292.629,81.151 299.563,85.749 307.559,85.749C315.555,85.749 322.489,81.151 325.984,74.41L289.134,74.41Z"/>
+    <path d="M362.835,74.41C359.34,67.67 352.404,63.072 344.409,63.072C336.414,63.072 329.479,67.67 325.984,74.41L362.835,74.41Z"/>
+    <path d="M280.63,88.583C284.125,95.324 291.06,99.922 299.055,99.922C307.05,99.922 313.985,95.324 317.48,88.583L280.63,88.583Z"/>
+    <path d="M354.33,88.583C350.835,81.843 343.9,77.245 335.905,77.245C327.91,77.245 320.975,81.843 317.479,88.583L354.33,88.583Z"/>
+    <path d="M272.126,102.756C275.621,109.497 282.556,114.095 290.551,114.095C298.546,114.095 305.481,109.497 308.977,102.756L272.126,102.756Z"/>
+    <path d="M345.826,102.756C342.331,96.016 335.396,91.418 327.401,91.418C319.406,91.418 312.471,96.016 308.976,102.756L345.826,102.756Z"/>
+  </g>
+</svg>

@@ -1,0 +1,139 @@
+site_name: rct-rest-api Documentation
+site_description: Vendor-neutral REST gateway for RCT Power inverters
+site_author: Gill-Bates
+site_url: https://gill-bates.github.io/rct-rest-api/
+
+repo_name: Gill-Bates/rct-rest-api
+repo_url: https://github.com/Gill-Bates/rct-rest-api
+edit_uri: edit/main/docs/
+
+# mkdocs.yml lives inside docs/, so the docs directory is its own folder.
+docs_dir: .
+site_dir: ../site
+use_directory_urls: true
+
+exclude_docs: |
+  mkdocs.yml
+  AGENTS.md
+
+validation:
+  nav:
+    omitted_files: warn
+    absolute_links: warn
+  links:
+    anchors: warn
+    absolute_links: warn
+    unrecognized_links: warn
+
+theme:
+  name: material
+  language: en
+  palette:
+    - media: "(prefers-color-scheme)"
+      toggle:
+        icon: material/brightness-auto
+        name: Switch to light mode
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: blue
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: blue
+      toggle:
+        icon: material/brightness-4
+        name: Switch to system preference
+  font:
+    text: Roboto
+    code: Roboto Mono
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.tabs
+    - navigation.sections
+    - navigation.expand
+    - navigation.top
+    - navigation.footer
+    - search.suggest
+    - search.highlight
+    - search.share
+    - content.code.copy
+    - content.code.annotate
+    - content.tabs.link
+  icon:
+    repo: fontawesome/brands/github
+    edit: material/pencil
+    view: material/eye
+
+plugins:
+  - search:
+      lang: en
+  - minify:
+      minify_html: true
+  - git-revision-date-localized:
+      enable_creation_date: true
+      type: timeago
+      # Pages not yet committed (local builds, new files) fall back to the build date.
+      fallback_to_build_date: true
+
+markdown_extensions:
+  - abbr
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - md_in_html
+  - toc:
+      permalink: true
+      toc_depth: 3
+  - pymdownx.betterem:
+      smart_enable: all
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.keys
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+
+extra:
+  generator: false
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/Gill-Bates/rct-rest-api
+
+extra_css:
+  - stylesheets/extra.css
+
+nav:
+  - Home: index.md
+  - Getting Started:
+    - Quick Start: getting-started/quick-start.md
+    - Docker: getting-started/docker.md
+    - Configuration: getting-started/configuration.md
+  - Configuration:
+    - Environment Variables: configuration/environment.md
+    - Authentication: configuration/authentication.md
+    - Network and TLS: configuration/network.md
+    - Push Export: configuration/export.md
+  - API Reference:
+    - Overview: api/overview.md
+    - Endpoints: api/endpoints.md
+    - Errors: api/errors.md
+    - Prometheus Metrics: api/prometheus.md
+  - Operation: operation.md
+  - Development:
+    - Setup: development/setup.md
+    - Architecture: development/architecture.md
+  - Reference:
+    - Protocol Specification: reference/protocol.md
+  - Troubleshooting: troubleshooting.md
+
+copyright: Copyright &copy; 2026 Gill-Bates | Licensed under MIT

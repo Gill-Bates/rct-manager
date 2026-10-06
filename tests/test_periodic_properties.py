@@ -1,0 +1,270 @@
+#!/usr/bin/env python3
+#
+# tests/test_periodic_properties.py
+# Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
+#
+
+"""Regression for Finding 4: a partial periodic registration must not count as available."""
+
+import asyncio
+from datetime import timedelta
+
+from app.catalog.registry import RegistryCatalog
+from app.config import DeviceKey, EndpointKey
+from app.observability.names import prometheus_name
+from app.protocol.frames import Frame
+from app.protocol.types import Command, DataType
+from app.protocol.values import encode_value
+from app.scheduling.periodic import PAS_PERIOD_OBJECT_ID, PeriodicManager
+from app.scheduling.serializer import AccessSerializer
+from app.transport.endpoint import EndpointConfig, TransportEndpoint
+from tests.api_helpers import make_settings, running_app
+from tests.conftest import AutoClock
+from tests.fakes import FakeNetwork
+
+FAILING_OBJECT_ID = 0x2222
+
+
+def test_partial_registration_leaves_available_false_until_retried() -> None:
+    async def scenario() -> tuple[bool, bool, int]:
+        clock = AutoClock()
+        key = EndpointKey("10.0.0.5", 8899)
+
+        def behavior(frame):
+            # Every request answers except the one for the object id chosen to fail.
+            if frame.object_id == FAILING_OBJECT_ID:
+                return "ignore"
+            return "respond"
+
+        net = FakeNetwork(clock, behavior=behavior)
+        cfg = EndpointConfig(response_timeout_seconds=0.01, min_interval=timedelta(0))
+        endpoint = TransportEndpoint("endpoint-1", key, cfg, clock, connector=net.connect)
+
+        async def handler(request):
+            return await endpoint.execute(request)
+
+        serializer = AccessSerializer(endpoint, handler, queue_max_length=10, queue_max_wait_seconds=10)
+        serializer.start()
+        device = DeviceKey(key)
+        manager = PeriodicManager(endpoint, serializer, device, [0x1111, FAILING_OBJECT_ID, 0x3333], 30, clock)
+
+        first = await manager.setup()
+        registrations_after_partial = manager.registrations
+
+        # Fix the device response and retry: ensure() must redo the full setup, not skip it.
+        net.behavior = lambda frame: "respond"
+        second = await manager.ensure()
+        return first, second, registrations_after_partial
+
+    first, second, registrations_after_partial = asyncio.run(scenario())
+    assert first is False
+    # The timeout on the failing object drops the connection (Requirement 9.18), so the next
+    # object in this same setup round reconnects on a new epoch. A setup round belongs to one
+    # epoch (Finding P2-1): the mid-round reconnect discards every registration made so far
+    # instead of keeping ones made on the now-dead connection.
+    assert registrations_after_partial == 0
+    assert second is True
+
+
+def test_reconnect_during_setup_discards_registrations_from_the_old_connection() -> None:
+    """Finding P2-1: a setup round must not mix registrations made on different connections."""
+
+    async def scenario() -> tuple[bool, int, bool]:
+        clock = AutoClock()
+        key = EndpointKey("10.0.0.5", 8899)
+        net = FakeNetwork(clock)
+        cfg = EndpointConfig(response_timeout_seconds=0.01, min_interval=timedelta(0))
+        endpoint = TransportEndpoint("endpoint-1", key, cfg, clock, connector=net.connect)
+
+        async def handler(request):
+            return await endpoint.execute(request)
+
+        serializer = AccessSerializer(endpoint, handler, queue_max_length=10, queue_max_wait_seconds=10)
+        serializer.start()
+        device = DeviceKey(key)
+        manager = PeriodicManager(endpoint, serializer, device, [0x1111, 0x3333], 30, clock)
+
+        real_submit = serializer.submit
+
+        async def submit_and_bump_epoch_once(request):
+            result = await real_submit(request)
+            if request.frame.object_id == 0x1111:
+                endpoint._epoch += 1  # simulate a reconnect between two registrations of this round
+            return result
+
+        serializer.submit = submit_and_bump_epoch_once
+        ok = await manager.setup()
+        return ok, manager.registrations, manager.is_registered(0x1111)
+
+    ok, registrations, old_object_registered = asyncio.run(scenario())
+    assert ok is False
+    assert registrations == 0
+    assert old_object_registered is False
+
+
+def _manager(clock, net, ids, interval=30):
+    key = EndpointKey("10.0.0.5", 8899)
+    cfg = EndpointConfig(response_timeout_seconds=0.01, min_interval=timedelta(0))
+    endpoint = TransportEndpoint("endpoint-1", key, cfg, clock, connector=net.connect)
+
+    async def handler(request):
+        return await endpoint.execute(request)
+
+    serializer = AccessSerializer(endpoint, handler, queue_max_length=10, queue_max_wait_seconds=10)
+    serializer.start()
+    return PeriodicManager(endpoint, serializer, DeviceKey(key), ids, interval, clock)
+
+
+def _pas_writes(net) -> int:
+    return sum(1 for _, f in net.frames if f.command is Command.WRITE and f.object_id == PAS_PERIOD_OBJECT_ID)
+
+
+def test_silent_write_is_confirmed_by_readback_and_registers() -> None:
+    async def scenario():
+        clock = AutoClock()
+        net = FakeNetwork(clock)  # WRITE is never answered, like the real device
+        manager = _manager(clock, net, [0x1111, 0x3333])
+        return await manager.setup(), manager, net
+
+    ok, manager, net = asyncio.run(scenario())
+    assert ok and manager.available and manager.period_enabled and manager.registrations == 2
+    assert net.payloads[PAS_PERIOD_OBJECT_ID] == encode_value(DataType.UINT32, 30)
+    assert _pas_writes(net) == 1
+
+
+def test_unconfirmed_pas_period_is_not_available_and_backs_off() -> None:
+    async def scenario():
+        clock = AutoClock()
+        net = FakeNetwork(clock)
+        net.freeze_writes = True  # the interval never changes on the device
+        net.payloads[PAS_PERIOD_OBJECT_ID] = encode_value(DataType.UINT32, 0)
+        manager = _manager(clock, net, [0x1111])
+        for _ in range(30):  # 30 loop ticks of 10 s
+            await manager.ensure()
+            clock.advance(10)
+        return manager, net
+
+    manager, net = asyncio.run(scenario())
+    assert not manager.available
+    assert 1 < _pas_writes(net) < 10  # exponential backoff instead of one write per tick
+
+
+def test_concurrent_ensure_runs_one_setup() -> None:
+    async def scenario():
+        clock = AutoClock()
+        net = FakeNetwork(clock)
+        manager = _manager(clock, net, [0x1111])
+        await asyncio.gather(manager.ensure(), manager.ensure(), manager.ensure())
+        return net
+
+    assert _pas_writes(asyncio.run(scenario())) == 1
+
+
+async def test_values_reach_metrics_after_setup_against_a_silent_write_device() -> None:
+    settings = make_settings()
+    catalog = RegistryCatalog.from_file(settings.object_registry_path)
+    entry = next(e for e in catalog.entries() if e.preselected and e.data_type is DataType.FLOAT)
+    async with running_app(settings, settle=False) as h:
+        bindings = [h.runtime.gateway._device(d) for d in h.runtime.devices]
+        async with asyncio.timeout(5):
+            while not all(b.periodic is not None and b.periodic.available for b in bindings):
+                await asyncio.sleep(0.01)
+        h.net.push(Frame(Command.RESPONSE, entry.object_id, encode_value(DataType.FLOAT, 1.5)))
+        await asyncio.sleep(0.05)
+        body = (await h.client.get("/metrics")).text
+    assert _lines(body, prometheus_name(entry), " 1.5"), body
+
+
+async def _registered(h) -> None:
+    bindings = [h.runtime.gateway._device(d) for d in h.runtime.devices]
+    async with asyncio.timeout(5):
+        while not all(b.periodic is not None and b.periodic.available for b in bindings):
+            await asyncio.sleep(0.01)
+
+
+def _float_entry(settings):
+    catalog = RegistryCatalog.from_file(settings.object_registry_path)
+    return next(e for e in catalog.entries() if e.preselected and e.data_type is DataType.FLOAT)
+
+
+def _reads(net, start: int, object_id: int) -> int:
+    return sum(1 for _, f in net.frames[start:] if f.command is Command.READ and f.object_id == object_id)
+
+
+def _lines(body: str, metric_name: str, value: str) -> list[str]:
+    return [
+        ln
+        for ln in body.splitlines()
+        if ln.startswith(metric_name) and 'device="main"' in ln and ln.endswith(value)
+    ]
+
+
+async def test_silent_value_is_refreshed_by_read_and_shows_the_new_device_value() -> None:
+    # pas.period 1 s: refresh after 2 s without update, freshness window 3 s (Requirement 17.27, 17.29).
+    settings = make_settings(periodic_interval_seconds=1, cache_ttl_seconds=0.05, cache_grace_seconds=0.5)
+    entry = _float_entry(settings)
+    async with running_app(settings, settle=False) as h:
+        h.net.payloads[entry.object_id] = encode_value(DataType.FLOAT, 2.5)
+        await _registered(h)
+        gateway = h.runtime.gateway
+        metric_name = prometheus_name(entry)
+        assert _lines((await h.client.get("/metrics")).text, metric_name, " 2.5")
+        h.net.payloads[entry.object_id] = encode_value(DataType.FLOAT, 3.5)  # device changes, pushes nothing
+        await asyncio.sleep(2.2)
+        start = len(h.net.frames)
+        before = h.runtime.gateway._device("main").serializer.budget.remaining()
+        assert await gateway.refresh_stale_periodic("main") >= 1
+        assert _reads(h.net, start, entry.object_id) == 1
+        assert h.runtime.gateway._device("main").serializer.budget.remaining() == before  # budget-exempt
+        body = (await h.client.get("/metrics")).text
+        assert _lines(body, metric_name, " 3.5") and not _lines(body, metric_name, " 2.5")
+        assert "rct_device_metric_age_seconds" not in "".join(
+            ln for ln in body.splitlines() if 'metric="' + entry.name in ln or entry.name in ln
+        ).replace("rct_device_" + entry.name, "")
+
+
+async def test_unrefreshable_value_ages_visibly_then_leaves_metrics() -> None:
+    settings = make_settings(periodic_interval_seconds=1, cache_ttl_seconds=0.05, cache_grace_seconds=1.0)
+    entry = _float_entry(settings)
+    async with running_app(settings, settle=False) as h:
+        h.net.payloads[entry.object_id] = encode_value(DataType.FLOAT, 2.5)
+        await _registered(h)
+        metric_name = prometheus_name(entry)
+        # From now on the device answers no read of this object id and pushes nothing.
+        h.net.behavior = lambda f: "ignore" if f.object_id == entry.object_id else "respond"
+        await asyncio.sleep(2.2)
+        assert _lines((await h.client.get("/metrics")).text, metric_name, " 2.5")  # inside the 3 s window: fresh
+        await asyncio.sleep(1.0)  # window exceeded, grace running
+        grace = (await h.client.get("/metrics")).text
+        await asyncio.sleep(1.2)  # window plus grace exceeded
+        gone = (await h.client.get("/metrics")).text
+        # A refresh without any device answer fails quietly, stops after two failures, changes nothing.
+        h.net.behavior = lambda f: "ignore"
+        assert await h.runtime.gateway.refresh_stale_periodic("main") == 2
+    assert _lines(grace, metric_name, " 2.5")
+    assert any(ln.startswith("rct_device_metric_age_seconds") and 'device="main"' in ln for ln in grace.splitlines())
+    assert not _lines(gone, metric_name, " 2.5")
+
+
+async def test_pushed_values_cause_no_refresh_reads_and_the_cycle_is_limited() -> None:
+    settings = make_settings(periodic_interval_seconds=1, device_budget_transactions=3)
+    entry = _float_entry(settings)
+    async with running_app(settings, settle=False) as h:
+        await _registered(h)
+        gateway = h.runtime.gateway
+        start = len(h.net.frames)
+        for _ in range(5):  # the device keeps pushing this one value
+            h.net.push(Frame(Command.RESPONSE, entry.object_id, encode_value(DataType.FLOAT, 1.0)))
+            await asyncio.sleep(0.5)
+        assert await gateway.refresh_stale_periodic("main", limit=3) == 3
+        reads = [f for _, f in h.net.frames[start:] if f.command is Command.READ]
+        assert len(reads) == 3 and all(f.object_id != entry.object_id for f in reads)
+        assert await gateway.refresh_stale_periodic("main", limit=3) >= 1  # the next oldest ones
+        assert _reads(h.net, start, entry.object_id) == 0
+        assert h.runtime.gateway._device("main").serializer.budget.remaining() == 3  # nothing charged
+        await asyncio.sleep(0)
+        total = len([1 for _, f in h.net.frames[start:] if f.command is Command.READ])
+        # 8+1, not 7+1: the device-card wiring now adds two dashboard-only metrics
+        # (heat_sink_temperature, battery_temperature) to the periodic set instead of one, so one
+        # more non-pushed id needs its own read within the same "each id once per interval" bound.
+        assert await gateway.refresh_stale_periodic("main", limit=8) + total <= 8 + 1

@@ -1,0 +1,54 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rct-rest-api"
+version = "1.0.0"
+description = "Vendor-neutral REST gateway for RCT Power inverters"
+requires-python = ">=3.13"
+authors = [{ name = "Gill-Bates" }]
+license = "MIT"
+license-files = ["LICENSE"]
+dependencies = [
+    "argon2-cffi>=25.1,<26",
+    "cryptography>=50.0.2,<51",
+    "fastapi>=0.139,<1",
+    "jinja2>=3.1.6,<4",
+    "pydantic>=2.13,<3",
+    "pydantic-settings>=2.14,<3",
+    "starlette>=1.7,<2",
+    "uvicorn>=0.51,<1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "httpx>=0.28,<1",
+    "hypothesis>=6.156,<7",
+    "pytest>=8.3,<9",
+    "pytest-asyncio>=1.4,<2",
+    "ruff>=0.16,<1",
+]
+docs = [
+    "markdown==3.11",
+    "mkdocs==1.6.1",
+    "mkdocs-git-revision-date-localized-plugin==1.6.0",
+    "mkdocs-material==9.7.7",
+    "mkdocs-minify-plugin==0.8.0",
+]
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[tool.setuptools.package-data]
+"app.catalog" = ["*.json"]
+"app.admin" = ["templates/*.html", "static/*", "static/**/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+
+[tool.ruff.lint]
+# Modules carry a shebang in their file header but are run via `python -m app`.
+extend-ignore = ["EXE001"]

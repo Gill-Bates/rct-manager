@@ -1,0 +1,32 @@
+settings.env
+**/settings.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+build/
+dist/
+data/
+
+# Test and lint caches
+.hypothesis/
+.pytest_cache/
+.ruff_cache/
+
+# Documentation build output
+/site/
+*.zip/
+
+# Local agent state
+.omc/
+.omx/
+**/.omc/
+**/.omx/
+.agents/
+
+# Git worktrees created for isolated task branches. Never commit these: git records a
+# live worktree as a gitlink (mode 160000), which looks like a stray submodule.
+.worktrees/

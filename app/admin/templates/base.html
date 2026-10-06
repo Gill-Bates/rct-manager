@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en" data-bs-theme="light">
+
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>{% block title %}RCT Administration{% endblock %}</title>
+  <link rel="icon" href="/admin/static/img/favicon.svg" type="image/svg+xml">
+  <link rel="alternate icon" href="/favicon.ico">
+  <script src="/admin/static/js/theme.js"></script>
+  <link rel="stylesheet" href="/admin/static/vendor/bootstrap.min.css">
+  <link rel="stylesheet" href="/admin/static/vendor/material-icons.css">
+  <link rel="stylesheet" href="/admin/static/css/admin.css">
+  {% block extra_css %}{% endblock %}
+</head>
+{% set nav = [
+('dashboard', 'Overview', 'dashboard'),
+('inverters', 'Inverters', 'solar_power'),
+('tsdb', 'TSDB', 'storage'),
+('prometheus', 'Prometheus', 'monitoring'),
+('tokens', 'API tokens', 'key'),
+('settings', 'Settings', 'settings'),
+('about', 'About', 'info'),
+] %}
+
+<body data-page="{{ page }}">
+  {% if page in ('login', 'change-password') %}
+  <main class="auth-shell container py-4">
+    {% block auth_content %}{% endblock %}
+  </main>
+  {% else %}
+  <header class="navbar navbar-dark admin-navbar">
+    <div class="container-fluid gap-2">
+      <a class="navbar-brand d-flex align-items-center gap-2" href="/ui/dashboard"><img class="nav-logo"
+          src="/admin/static/img/rct-logo-white.svg" width="84" height="46" alt=""><span>Administration</span></a>
+      <div class="d-flex align-items-center gap-2 ms-auto">
+        <button type="button" class="btn btn-outline-light icon-button" id="theme-toggle"
+          aria-label="Toggle color scheme" title="Toggle color scheme"><span class="material-icons"
+            aria-hidden="true">dark_mode</span></button>
+        {# The text label is hidden below the sm breakpoint and the icon is aria-hidden, so without
+        this label the button has no accessible name on a phone. #}
+        <button type="button" class="btn btn-outline-light d-flex align-items-center gap-1" id="logout-button"
+          aria-label="Log out"><span class="material-icons" aria-hidden="true">logout</span><span
+            class="d-none d-sm-inline">Log
+            out</span></button>
+        <button type="button" class="btn btn-outline-light icon-button d-lg-none" id="nav-toggle" aria-label="Open menu"
+          aria-controls="mobile-nav" aria-expanded="false"><span class="material-icons"
+            aria-hidden="true">menu</span></button>
+      </div>
+    </div>
+  </header>
+  <nav id="mobile-nav" class="mobile-nav d-lg-none" aria-label="Mobile menu" hidden>
+    {% for slug, label, icon in nav %}<a href="/ui/{{ slug }}" {% if page==slug %}aria-current="page" {% endif %}><span
+        class="material-icons" aria-hidden="true">{{ icon }}</span>{{ label }}</a>{% endfor %}
+  </nav>
+  <div class="app-shell">
+    <nav class="sidebar d-none d-lg-flex" aria-label="Main menu">
+      {% for slug, label, icon in nav %}<a href="/ui/{{ slug }}" {% if page==slug %}aria-current="page" {% endif
+        %}><span class="material-icons" aria-hidden="true">{{ icon }}</span>{{ label }}</a>{% endfor %}
+    </nav>
+    <main id="main-content" class="main-content container-fluid py-4 px-3 px-md-4">
+      {% block content %}{% endblock %}
+    </main>
+  </div>
+  <footer class="admin-footer">
+    <span>RCT REST API v{{ app_version }} &middot; &copy;&nbsp;{{ copyright_year }}&nbsp;Gill-Bates &middot; <a
+        href="https://github.com/Gill-Bates/rct-rest-api" target="_blank" rel="noopener noreferrer">GitHub<span
+          class="visually-hidden"> (opens in a new tab)</span></a></span>
+  </footer>
+  {% endif %}
+  <div id="toast-region" class="toast-region" role="status" aria-live="polite" aria-atomic="true"></div>
+  <script src="/admin/static/vendor/bootstrap.bundle.min.js" defer></script>
+  <script src="/admin/static/js/admin.js" defer></script>
+</body>
+
+</html>

@@ -1,0 +1,1497 @@
+{
+  "id": null,
+  "uid": "rct-questdb-overview",
+  "title": "RCT Inverter — QuestDB",
+  "description": "Live power flow, battery SOC, inverter operating state, device connectivity and per-device breakdown queried from the QuestDB export (table \"${table}\") via the official QuestDB Grafana plugin (questdb-questdb-datasource). Targets QuestDB 10.x SQL and Grafana 13.x dashboard schema.",
+  "schemaVersion": 41,
+  "version": 2,
+  "editable": true,
+  "graphTooltip": 1,
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "refresh": "30s",
+  "timezone": "browser",
+  "timepicker": {
+    "refresh_intervals": [
+      "10s",
+      "30s",
+      "1m",
+      "5m"
+    ],
+    "time_options": [
+      "5m",
+      "15m",
+      "1h",
+      "6h",
+      "12h",
+      "24h",
+      "7d"
+    ]
+  },
+  "tags": [
+    "rct",
+    "questdb",
+    "inverter"
+  ],
+  "annotations": {
+    "list": []
+  },
+  "links": [],
+  "templating": {
+    "list": [
+      {
+        "name": "datasource",
+        "type": "datasource",
+        "query": "questdb-questdb-datasource",
+        "pluginId": "questdb-questdb-datasource",
+        "current": {},
+        "hide": 0,
+        "includeAll": false,
+        "multi": false,
+        "refresh": 1,
+        "label": "QuestDB",
+        "skipUrlSync": false
+      },
+      {
+        "name": "table",
+        "type": "textbox",
+        "label": "Table",
+        "description": "Measurement/table name; matches the operator-configurable questdb_measurement_name setting (default \"rct\").",
+        "query": "rct",
+        "current": {
+          "value": "rct",
+          "text": "rct"
+        },
+        "options": [],
+        "hide": 0,
+        "skipUrlSync": false
+      },
+      {
+        "name": "device",
+        "type": "query",
+        "datasource": {
+          "type": "questdb-questdb-datasource",
+          "uid": "${datasource}"
+        },
+        "definition": "SELECT device FROM ${table} LATEST ON timestamp PARTITION BY device ORDER BY device;",
+        "query": {
+          "rawSql": "SELECT device FROM ${table} LATEST ON timestamp PARTITION BY device ORDER BY device;",
+          "queryType": "sql",
+          "format": 1,
+          "selectedFormat": 1,
+          "refId": "device-variable"
+        },
+        "refresh": 2,
+        "includeAll": true,
+        "multi": true,
+        "current": {},
+        "hide": 0,
+        "label": "Device",
+        "sort": 1,
+        "skipUrlSync": false
+      },
+      {
+        "name": "rollup_view",
+        "type": "query",
+        "label": "Rollup view (auto)",
+        "description": "Current materialized rollup view for ${table}, discovered dynamically because its name is content-hashed and changes whenever the exported column set changes.",
+        "datasource": {
+          "type": "questdb-questdb-datasource",
+          "uid": "${datasource}"
+        },
+        "definition": "SELECT view_name FROM materialized_views() WHERE base_table_name = '${table}' AND view_status = 'valid' ORDER BY view_name DESC LIMIT 1;",
+        "query": {
+          "rawSql": "SELECT view_name FROM materialized_views() WHERE base_table_name = '${table}' AND view_status = 'valid' ORDER BY view_name DESC LIMIT 1;",
+          "queryType": "sql",
+          "format": 1,
+          "selectedFormat": 1,
+          "refId": "rollup-view-variable"
+        },
+        "refresh": 1,
+        "includeAll": false,
+        "multi": false,
+        "current": {},
+        "hide": 2,
+        "skipUrlSync": true
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Live power flow (PV / grid / battery / load)",
+      "description": "Summed across the selected device(s), one pass over the raw table (no UNION ALL). PV = rct_solar_a_power_watts + rct_solar_b_power_watts. $__conditionalAll lets 'All' devices skip the IN-filter instead of listing every device.",
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 16,
+        "h": 8
+      },
+      "datasource": {
+        "type": "questdb-questdb-datasource",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "questdb-questdb-datasource",
+            "uid": "${datasource}"
+          },
+          "queryType": "sql",
+          "format": 0,
+          "selectedFormat": 0,
+          "rawSql": "SELECT timestamp AS time,\n       sum(rct_grid_power_watts) AS \"Grid\",\n       sum(rct_battery_power_watts) AS \"Battery\",\n       sum(rct_solar_a_power_watts + rct_solar_b_power_watts) AS \"PV\",\n       sum(rct_household_load_power_watts) AS \"Household load\"\nFROM ${table}\nWHERE $__timeFilter(timestamp) AND $__conditionalAll(device IN (${device:sqlstring}), $device)\nGROUP BY timestamp\nORDER BY timestamp;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "watt",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Battery SOC (latest)",
+      "description": "Current battery state of charge per device, with its own age in seconds so a stale reading is visible. Raw column rct_battery_soc_ratio is 0.0-1.0, scaled to percent here.",
+      "gridPos": {
+        "x": 16,
+        "y": 0,
+        "w": 8,
+        "h": 8
+      },
+      "datasource": {
+        "type": "questdb-questdb-datasource",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "questdb-questdb-datasource",
+            "uid": "${datasource}"
+          },
+          "queryType": "sql",
+          "format": 1,
+          "selectedFormat": 1,
+          "rawSql": "SELECT device AS metric,\n       rct_battery_soc_ratio * 100 AS value,\n       (cast(now() as long) / 1000000.0 - cast(timestamp as long) / 1000000.0) AS age_seconds\nFROM ${table}\nWHERE $__conditionalAll(device IN (${device:sqlstring}), $device)\nLATEST ON timestamp PARTITION BY device;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 20
+              },
+              {
+                "color": "green",
+                "value": 50
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "age_seconds"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "s"
+              },
+              {
+                "id": "custom.displayName",
+                "value": "Age"
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "orange",
+                      "value": 60
+                    },
+                    {
+                      "color": "red",
+                      "value": 120
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": true
+        },
+        "orientation": "horizontal",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none"
+      }
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Battery SOC over time",
+      "gridPos": {
+        "x": 0,
+        "y": 8,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "questdb-questdb-datasource",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "questdb-questdb-datasource",
+            "uid": "${datasource}"
+          },
+          "queryType": "sql",
+          "format": 0,
+          "selectedFormat": 0,
+          "rawSql": "SELECT timestamp AS time, device AS metric, rct_battery_soc_ratio * 100 AS value FROM ${table} WHERE $__timeFilter(timestamp) AND $__conditionalAll(device IN (${device:sqlstring}), $device) ORDER BY timestamp;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "min",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 4,
+      "type": "state-timeline",
+      "title": "Inverter operating state",
+      "description": "Operating-state enum (standby, feed_in, hardware_check, ...) from rct_inverter_state, one series per state label, value 1 while that state is active. This is NOT a connectivity signal: a device that stopped exporting hours ago keeps showing its last operating state here. See \"Device connectivity\" for online/offline, derived from export staleness.",
+      "gridPos": {
+        "x": 12,
+        "y": 8,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "questdb-questdb-datasource",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "questdb-questdb-datasource",
+            "uid": "${datasource}"
+          },
+          "queryType": "sql",
+          "format": 1,
+          "selectedFormat": 1,
+          "rawSql": "SELECT timestamp AS time, device AS metric, state AS value FROM ${table} WHERE $__timeFilter(timestamp) AND $__conditionalAll(device IN (${device:sqlstring}), $device) AND rct_inverter_state = 1 ORDER BY timestamp;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "lineWidth": 0,
+            "fillOpacity": 70
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "mergeValues": true,
+        "showValue": "auto",
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 5,
+      "type": "table",
+      "title": "Per-device breakdown (latest)",
+      "description": "Latest power/SOC reading per device with its own age in seconds.",
+      "gridPos": {
+        "x": 0,
+        "y": 16,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "questdb-questdb-datasource",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "questdb-questdb-datasource",
+            "uid": "${datasource}"
+          },
+          "queryType": "sql",
+          "format": 1,
+          "selectedFormat": 1,
+          "rawSql": "SELECT device,\n       rct_grid_power_watts AS grid_power_w,\n       rct_battery_power_watts AS battery_power_w,\n       rct_battery_soc_ratio * 100 AS battery_soc_percent,\n       rct_household_load_power_watts AS household_load_w,\n       rct_ac_power_watts AS ac_power_w,\n       (cast(now() as long) / 1000000.0 - cast(timestamp as long) / 1000000.0) AS age_seconds\nFROM ${table}\nWHERE $__conditionalAll(device IN (${device:sqlstring}), $device)\nLATEST ON timestamp PARTITION BY device;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "grid_power_w"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "watt"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "battery_power_w"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "watt"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "household_load_w"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "watt"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "ac_power_w"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "watt"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "battery_soc_percent"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "age_seconds"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "s"
+              },
+              {
+                "id": "displayName",
+                "value": "age"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true
+      }
+    },
+    {
+      "id": 6,
+      "type": "table",
+      "title": "Device connectivity (last success / errors)",
+      "description": "No boolean online column exists; connectivity is derived from the staleness of rct_device_last_success_timestamp_seconds (offline once the last successful transaction is older than 120s, roughly 4x the default 30s export interval) together with rct_device_errors_total.",
+      "gridPos": {
+        "x": 12,
+        "y": 16,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "questdb-questdb-datasource",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "questdb-questdb-datasource",
+            "uid": "${datasource}"
+          },
+          "queryType": "sql",
+          "format": 1,
+          "selectedFormat": 1,
+          "rawSql": "SELECT device,\n       rct_device_last_success_timestamp_seconds AS last_success_unix_seconds,\n       rct_device_errors_total AS errors_total,\n       CASE\n         WHEN rct_device_last_success_timestamp_seconds IS NULL THEN 'unknown'\n         WHEN (cast(now() as long) / 1000000.0 - rct_device_last_success_timestamp_seconds) > 120 THEN 'offline'\n         ELSE 'online'\n       END AS connectivity\nFROM ${table}\nWHERE $__conditionalAll(device IN (${device:sqlstring}), $device)\nLATEST ON timestamp PARTITION BY device;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "last_success_unix_seconds"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "s"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "errors_total"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "short"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "connectivity"
+            },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "online": {
+                        "color": "green",
+                        "text": "online"
+                      }
+                    }
+                  },
+                  {
+                    "type": "value",
+                    "options": {
+                      "offline": {
+                        "color": "red",
+                        "text": "offline"
+                      }
+                    }
+                  },
+                  {
+                    "type": "value",
+                    "options": {
+                      "unknown": {
+                        "color": "orange",
+                        "text": "unknown"
+                      }
+                    }
+                  }
+                ]
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-background"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true
+      }
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Grid power — long range (rollup view)",
+      "description": "Retention-aware: queries the current materialized rollup view (${rollup_view}), discovered dynamically via materialized_views() rather than a hardcoded content-hashed name, instead of the raw table whose TTL can be as short as 1 day. No FILL is applied, so an export gap renders as a gap rather than an interpolated value. Empty if no downsampling preset is configured (no rollup view exists yet).",
+      "gridPos": {
+        "x": 0,
+        "y": 24,
+        "w": 24,
+        "h": 8
+      },
+      "datasource": {
+        "type": "questdb-questdb-datasource",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "questdb-questdb-datasource",
+            "uid": "${datasource}"
+          },
+          "queryType": "sql",
+          "format": 0,
+          "selectedFormat": 0,
+          "rawSql": "SELECT timestamp AS time, 'Grid power (avg)' AS metric, \"rct_grid_power_watts_avg\" AS value\nFROM \"${rollup_view}\"\nWHERE $__timeFilter(timestamp) AND $__conditionalAll(device IN (${device:sqlstring}), $device)\nORDER BY timestamp;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "watt",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      }
+    },
+    {
+      "id": 8,
+      "type": "stat",
+      "title": "☀️ Südseite",
+      "description": "Solar generator A, summed across the selected device(s). Verified column: rct_solar_a_power_watts (app/catalog/objects.json object_id 0xDB11855B \"Solar generator A power\", unit W).",
+      "gridPos": {
+        "x": 0,
+        "y": 32,
+        "w": 3,
+        "h": 3
+      },
+      "datasource": {
+        "type": "questdb-questdb-datasource",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "questdb-questdb-datasource",
+            "uid": "${datasource}"
+          },
+          "queryType": "sql",
+          "format": 1,
+          "selectedFormat": 1,
+          "rawSql": "SELECT sum(rct_solar_a_power_watts) AS value\nFROM ${table}\nWHERE $__conditionalAll(device IN (${device:sqlstring}), $device)\nLATEST ON timestamp PARTITION BY device;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "watt",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "value": null,
+                "color": "dark-yellow"
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background_solid",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      }
+    },
+    {
+      "id": 9,
+      "type": "stat",
+      "title": "☀️ Nordseite",
+      "description": "Solar generator B, summed across the selected device(s). Verified column: rct_solar_b_power_watts (app/catalog/objects.json object_id 0x0CB5D21B \"Solar generator B power\", unit W).",
+      "gridPos": {
+        "x": 3,
+        "y": 32,
+        "w": 3,
+        "h": 3
+      },
+      "datasource": {
+        "type": "questdb-questdb-datasource",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "questdb-questdb-datasource",
+            "uid": "${datasource}"
+          },
+          "queryType": "sql",
+          "format": 1,
+          "selectedFormat": 1,
+          "rawSql": "SELECT sum(rct_solar_b_power_watts) AS value\nFROM ${table}\nWHERE $__conditionalAll(device IN (${device:sqlstring}), $device)\nLATEST ON timestamp PARTITION BY device;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "watt",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "value": null,
+                "color": "dark-yellow"
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background_solid",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      }
+    },
+    {
+      "id": 10,
+      "type": "stat",
+      "title": "⚡Aktueller Verbrauch",
+      "description": "Household load, summed across the selected device(s). Verified column: rct_household_load_power_watts (app/catalog/objects.json object_id 0x1AC87AA0 \"Household load including external power\", unit W). Thresholds match the reference dashboard's green/yellow/orange/red ramp.",
+      "gridPos": {
+        "x": 6,
+        "y": 32,
+        "w": 3,
+        "h": 3
+      },
+      "datasource": {
+        "type": "questdb-questdb-datasource",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "questdb-questdb-datasource",
+            "uid": "${datasource}"
+          },
+          "queryType": "sql",
+          "format": 1,
+          "selectedFormat": 1,
+          "rawSql": "SELECT sum(rct_household_load_power_watts) AS value\nFROM ${table}\nWHERE $__conditionalAll(device IN (${device:sqlstring}), $device)\nLATEST ON timestamp PARTITION BY device;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "watt",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "value": 0,
+                "color": "#9ca8a226"
+              },
+              {
+                "value": 100,
+                "color": "dark-green"
+              },
+              {
+                "value": 2000,
+                "color": "yellow"
+              },
+              {
+                "value": 5000,
+                "color": "orange"
+              },
+              {
+                "value": 7000,
+                "color": "dark-red"
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background_solid",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      }
+    },
+    {
+      "id": 11,
+      "type": "stat",
+      "title": "⚡Aktuelle Einspeisung",
+      "description": "Grid feed-in magnitude, summed across the selected device(s): rct_grid_power_watts is signed (app/gateway/conventions.py RctGridPowerConvention, dispatch_grid_import_positive defaults to true -> positive = draw/import, negative = feed-in). Feed-in is shown as the positive magnitude of the negative branch. If an operator has set DISPATCH_GRID_IMPORT_POSITIVE=false, this query and panel 12 must be swapped.",
+      "gridPos": {
+        "x": 9,
+        "y": 32,
+        "w": 3,
+        "h": 3
+      },
+      "datasource": {
+        "type": "questdb-questdb-datasource",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "questdb-questdb-datasource",
+            "uid": "${datasource}"
+          },
+          "queryType": "sql",
+          "format": 1,
+          "selectedFormat": 1,
+          "rawSql": "SELECT sum(CASE WHEN rct_grid_power_watts < 0 THEN -rct_grid_power_watts ELSE 0 END) AS value\nFROM (\n  SELECT device, rct_grid_power_watts\n  FROM ${table}\n  WHERE $__conditionalAll(device IN (${device:sqlstring}), $device)\n  LATEST ON timestamp PARTITION BY device\n);"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "watt",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "value": 0,
+                "color": "#9ca8a226"
+              },
+              {
+                "value": 10,
+                "color": "dark-green"
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background_solid",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      }
+    },
+    {
+      "id": 12,
+      "type": "stat",
+      "title": "⚡Aktueller Bezug",
+      "description": "Grid draw magnitude, summed across the selected device(s): the positive branch of the signed rct_grid_power_watts column (see panel 11 for the sign convention and the swap note).",
+      "gridPos": {
+        "x": 12,
+        "y": 32,
+        "w": 3,
+        "h": 3
+      },
+      "datasource": {
+        "type": "questdb-questdb-datasource",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "questdb-questdb-datasource",
+            "uid": "${datasource}"
+          },
+          "queryType": "sql",
+          "format": 1,
+          "selectedFormat": 1,
+          "rawSql": "SELECT sum(CASE WHEN rct_grid_power_watts > 0 THEN rct_grid_power_watts ELSE 0 END) AS value\nFROM (\n  SELECT device, rct_grid_power_watts\n  FROM ${table}\n  WHERE $__conditionalAll(device IN (${device:sqlstring}), $device)\n  LATEST ON timestamp PARTITION BY device\n);"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "watt",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "value": 0,
+                "color": "#9ca8a226"
+              },
+              {
+                "value": 1000,
+                "color": "dark-yellow"
+              },
+              {
+                "value": 3000,
+                "color": "dark-orange"
+              },
+              {
+                "value": 5000,
+                "color": "dark-red"
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background_solid",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      }
+    },
+    {
+      "id": 13,
+      "type": "stat",
+      "title": "",
+      "description": "Overall connectivity across the selected device(s): OFFLINE if any device's rct_device_last_success_timestamp_seconds is older than 120s (same staleness rule as panel 6 \"Device connectivity\"), otherwise ONLINE. Value mapping only, no numeric display.",
+      "gridPos": {
+        "x": 15,
+        "y": 32,
+        "w": 3,
+        "h": 3
+      },
+      "datasource": {
+        "type": "questdb-questdb-datasource",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "questdb-questdb-datasource",
+            "uid": "${datasource}"
+          },
+          "queryType": "sql",
+          "format": 1,
+          "selectedFormat": 1,
+          "rawSql": "SELECT min(online) AS value\nFROM (\n  SELECT device,\n         CASE\n           WHEN rct_device_last_success_timestamp_seconds IS NULL THEN 0\n           WHEN (cast(now() as long) / 1000000.0 - rct_device_last_success_timestamp_seconds) > 120 THEN 0\n           ELSE 1\n         END AS online\n  FROM ${table}\n  WHERE $__conditionalAll(device IN (${device:sqlstring}), $device)\n  LATEST ON timestamp PARTITION BY device\n);"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "OFFLINE",
+                  "color": "dark-red"
+                },
+                "1": {
+                  "text": "ONLINE",
+                  "color": "dark-green"
+                }
+              }
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background_solid",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value"
+      }
+    },
+    {
+      "id": 14,
+      "type": "stat",
+      "title": "🔋SoC",
+      "description": "Average battery state of charge across the selected device(s). Raw column rct_battery_soc_ratio is 0.0-1.0, scaled to percent. Thresholds match the reference dashboard's panel-1 ramp (red<30, orange<50, #EAB839<70, green>=70).",
+      "gridPos": {
+        "x": 18,
+        "y": 32,
+        "w": 3,
+        "h": 6
+      },
+      "datasource": {
+        "type": "questdb-questdb-datasource",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "questdb-questdb-datasource",
+            "uid": "${datasource}"
+          },
+          "queryType": "sql",
+          "format": 1,
+          "selectedFormat": 1,
+          "rawSql": "SELECT avg(rct_battery_soc_ratio) * 100 AS value\nFROM ${table}\nWHERE $__conditionalAll(device IN (${device:sqlstring}), $device)\nLATEST ON timestamp PARTITION BY device;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "value": 0,
+                "color": "dark-red"
+              },
+              {
+                "value": 30,
+                "color": "dark-orange"
+              },
+              {
+                "value": 50,
+                "color": "#EAB839"
+              },
+              {
+                "value": 70,
+                "color": "dark-green"
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      }
+    },
+    {
+      "id": 16,
+      "type": "stat",
+      "title": "🔋 Battery Temp.",
+      "description": "Average battery temperature across the selected device(s). Verified column: rct_battery_temperature_celsius (app/catalog/objects.json object_id 0x902AFAFB \"Battery temperature\", unit °C, preselected: true -> exported by default; app/observability/names.py maps unit \"°C\" to the \"celsius\" suffix).",
+      "gridPos": {
+        "x": 0,
+        "y": 35,
+        "w": 3,
+        "h": 3
+      },
+      "datasource": {
+        "type": "questdb-questdb-datasource",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "questdb-questdb-datasource",
+            "uid": "${datasource}"
+          },
+          "queryType": "sql",
+          "format": 1,
+          "selectedFormat": 1,
+          "rawSql": "SELECT avg(rct_battery_temperature_celsius) AS value\nFROM ${table}\nWHERE $__conditionalAll(device IN (${device:sqlstring}), $device)\nLATEST ON timestamp PARTITION BY device;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "celsius"
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      }
+    },
+    {
+      "id": 17,
+      "type": "stat",
+      "title": "🔋 Cycles",
+      "description": "Maximum reported battery cycle count across the selected device(s). Verified column: rct_battery_cycles (app/catalog/objects.json object_id 0xC0DF2978 \"battery.cycles\", t_int32, unit \"\" -> no unit suffix per app/observability/names.py prometheus_name(), preselected: true).",
+      "gridPos": {
+        "x": 3,
+        "y": 35,
+        "w": 3,
+        "h": 3
+      },
+      "datasource": {
+        "type": "questdb-questdb-datasource",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "questdb-questdb-datasource",
+            "uid": "${datasource}"
+          },
+          "queryType": "sql",
+          "format": 1,
+          "selectedFormat": 1,
+          "rawSql": "SELECT max(rct_battery_cycles) AS value\nFROM ${table}\nWHERE $__conditionalAll(device IN (${device:sqlstring}), $device)\nLATEST ON timestamp PARTITION BY device;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      }
+    },
+    {
+      "id": 15,
+      "type": "timeseries",
+      "title": "⚡Produktion",
+      "description": "PV production per string plus grid feed-in magnitude (same sign convention as panel 11), stacked area, summed across the selected device(s). This is an addition alongside panel 1 \"Live power flow\", not a replacement: panel 1 still shows grid/battery/PV-total/load together, this one restyles the PV+feed-in slice as a stacked area matching the reference dashboard's \"⚡Produktion\" panel.",
+      "gridPos": {
+        "x": 0,
+        "y": 38,
+        "w": 16,
+        "h": 8
+      },
+      "datasource": {
+        "type": "questdb-questdb-datasource",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "questdb-questdb-datasource",
+            "uid": "${datasource}"
+          },
+          "queryType": "sql",
+          "format": 0,
+          "selectedFormat": 0,
+          "rawSql": "SELECT timestamp AS time,\n       sum(rct_solar_a_power_watts) AS \"PV A\",\n       sum(rct_solar_b_power_watts) AS \"PV B\",\n       sum(CASE WHEN rct_grid_power_watts < 0 THEN -rct_grid_power_watts ELSE 0 END) AS \"Einspeisung\"\nFROM ${table}\nWHERE $__timeFilter(timestamp) AND $__conditionalAll(device IN (${device:sqlstring}), $device)\nGROUP BY timestamp\nORDER BY timestamp;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "watt",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 42,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 20,
+      "type": "gauge",
+      "title": "Autarkie (Total)",
+      "description": "Lifetime self-sufficiency: (consumed - drawn from grid) / consumed, aggregated across the selected device(s). Verified columns: rct_energy_e_load_total_watt_hours (object_id 0xEFF4B537 \"energy.e_load_total\", Wh, preselected: true) and rct_energy_grid_load_total_watt_hours (object_id 0x62FBE7DC \"Total energy grid load\", Wh, preselected: true).",
+      "gridPos": {
+        "x": 16,
+        "y": 38,
+        "w": 4,
+        "h": 8
+      },
+      "datasource": {
+        "type": "questdb-questdb-datasource",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "questdb-questdb-datasource",
+            "uid": "${datasource}"
+          },
+          "queryType": "sql",
+          "format": 1,
+          "selectedFormat": 1,
+          "rawSql": "SELECT (sum(load_total) - sum(grid_load_total)) / sum(load_total) * 100 AS value\nFROM (\n  SELECT device,\n         rct_energy_e_load_total_watt_hours AS load_total,\n         rct_energy_grid_load_total_watt_hours AS grid_load_total\n  FROM ${table}\n  WHERE $__conditionalAll(device IN (${device:sqlstring}), $device)\n  LATEST ON timestamp PARTITION BY device\n);"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "color": {
+            "mode": "continuous-BlYlRd"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      }
+    },
+    {
+      "id": 21,
+      "type": "stat",
+      "title": "Produktion (Total)",
+      "description": "Lifetime AC production total, summed across the selected device(s). Verified column: rct_energy_e_ac_total_sum (app/catalog/objects.json object_id 0x79C0A724 \"energy.e_ac_total_sum\"; this registry entry's unit is empty, so no unit suffix is appended per app/observability/names.py prometheus_name() -- unlike its day/month/year siblings this one is NOT recorded with unit Wh in the registry, verify the raw scale before trusting absolute values). NOTE: preselected is false, so this metric is not exported by default; add \"energy_e_ac_total_sum\" to periodic_metrics/metrics_exposed_names (operator setting) for this panel to show data -- flagged for the user's decision rather than left silently empty or fabricated.",
+      "gridPos": {
+        "x": 20,
+        "y": 38,
+        "w": 4,
+        "h": 4
+      },
+      "datasource": {
+        "type": "questdb-questdb-datasource",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "questdb-questdb-datasource",
+            "uid": "${datasource}"
+          },
+          "queryType": "sql",
+          "format": 1,
+          "selectedFormat": 1,
+          "rawSql": "SELECT sum(rct_energy_e_ac_total_sum) AS value\nFROM (\n  SELECT device, rct_energy_e_ac_total_sum\n  FROM ${table}\n  WHERE $__conditionalAll(device IN (${device:sqlstring}), $device)\n  LATEST ON timestamp PARTITION BY device\n);"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "watth"
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      }
+    },
+    {
+      "id": 22,
+      "type": "stat",
+      "title": "Eingespeist (Total)",
+      "description": "Lifetime grid feed-in total, summed across the selected device(s). Verified column: rct_energy_e_grid_feed_total_watt_hours (app/catalog/objects.json object_id 0x44D4C533 \"Total energy grid feed-in\", Wh, preselected: true -> exported by default). The protocol defines no sign for this counter; passed through unchanged.",
+      "gridPos": {
+        "x": 20,
+        "y": 42,
+        "w": 4,
+        "h": 4
+      },
+      "datasource": {
+        "type": "questdb-questdb-datasource",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "questdb-questdb-datasource",
+            "uid": "${datasource}"
+          },
+          "queryType": "sql",
+          "format": 1,
+          "selectedFormat": 1,
+          "rawSql": "SELECT sum(rct_energy_e_grid_feed_total_watt_hours) AS value\nFROM (\n  SELECT device, rct_energy_e_grid_feed_total_watt_hours\n  FROM ${table}\n  WHERE $__conditionalAll(device IN (${device:sqlstring}), $device)\n  LATEST ON timestamp PARTITION BY device\n);"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "watth"
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      }
+    },
+    {
+      "id": 18,
+      "type": "barchart",
+      "title": "Tagesstatistik",
+      "description": "Daily produced vs. consumed energy, kWh. QuestDB keyed SAMPLE BY groups by device plus the 1-day bucket; last() per device-day picks that device's day-counter value, which the device itself resets to 0 at local midnight, so last() already IS that day's total (no delta computation needed). Summed across the selected device(s). Verified columns: rct_energy_e_ac_day_watt_hours (object_id 0xBD55905F \"energy.e_ac_day\", Wh, preselected: true) and rct_energy_e_load_day_watt_hours (object_id 0x2F3C1D7D \"energy.e_load_day\", Wh, preselected: true).",
+      "gridPos": {
+        "x": 0,
+        "y": 46,
+        "w": 16,
+        "h": 8
+      },
+      "datasource": {
+        "type": "questdb-questdb-datasource",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "questdb-questdb-datasource",
+            "uid": "${datasource}"
+          },
+          "queryType": "sql",
+          "format": 0,
+          "selectedFormat": 0,
+          "rawSql": "SELECT time,\n       sum(produced) AS \"Produced (kWh)\",\n       sum(consumed) AS \"Consumed (kWh)\"\nFROM (\n  SELECT timestamp AS time, device,\n         last(rct_energy_e_ac_day_watt_hours) / 1000.0 AS produced,\n         last(rct_energy_e_load_day_watt_hours) / 1000.0 AS consumed\n  FROM ${table}\n  WHERE $__timeFilter(timestamp) AND $__conditionalAll(device IN (${device:sqlstring}), $device)\n  SAMPLE BY 1d ALIGN TO CALENDAR\n)\nGROUP BY time\nORDER BY time;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "kwatth",
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "stacking": "normal",
+        "legend": {
+          "showLegend": true,
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 19,
+      "type": "barchart",
+      "title": "Autarkie (pro Tag)",
+      "description": "Daily self-sufficiency: (consumed - drawn from grid) / consumed per day, same keyed-SAMPLE-BY day-counter approach as panel 18. Verified columns: rct_energy_e_load_day_watt_hours (see panel 18) and rct_energy_e_grid_load_day_watt_hours (object_id 0x867DEF7D \"energy.e_grid_load_day\", Wh, preselected: true).",
+      "gridPos": {
+        "x": 16,
+        "y": 46,
+        "w": 8,
+        "h": 8
+      },
+      "datasource": {
+        "type": "questdb-questdb-datasource",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "questdb-questdb-datasource",
+            "uid": "${datasource}"
+          },
+          "queryType": "sql",
+          "format": 0,
+          "selectedFormat": 0,
+          "rawSql": "SELECT time,\n       (sum(consumed) - sum(grid_draw)) / sum(consumed) * 100 AS \"Autarkie\"\nFROM (\n  SELECT timestamp AS time, device,\n         last(rct_energy_e_load_day_watt_hours) AS consumed,\n         last(rct_energy_e_grid_load_day_watt_hours) AS grid_draw\n  FROM ${table}\n  WHERE $__timeFilter(timestamp) AND $__conditionalAll(device IN (${device:sqlstring}), $device)\n  SAMPLE BY 1d ALIGN TO CALENDAR\n)\nGROUP BY time\nORDER BY time;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "max": 100
+        },
+        "overrides": []
+      },
+      "options": {
+        "stacking": "normal",
+        "legend": {
+          "showLegend": true,
+          "placement": "bottom"
+        }
+      }
+    }
+  ]
+}

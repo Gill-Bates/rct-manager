@@ -1,0 +1,138 @@
+{% extends "base.html" %}
+{% block title %}About – RCT Administration{% endblock %}
+{% block extra_css %}
+<link rel="stylesheet" href="/admin/static/css/about.css">{% endblock %}
+{% block content %}
+<div class="about-page">
+  <header class="page-heading">
+    <h1><span class="material-icons me-2" aria-hidden="true">info</span>About</h1>
+  </header>
+  <div class="row g-3 mt-1 align-items-start about-top-row">
+    <div class="col-12 col-lg-4">
+      <section class="card" aria-labelledby="about-details-heading">
+        <div class="card-header d-flex align-items-center"><span class="material-icons me-2"
+            aria-hidden="true">code</span>
+          <h2 id="about-details-heading" class="h6 mb-0">Application Details</h2>
+        </div>
+        <div class="card-body">
+          <table class="table table-sm table-borderless mb-0">
+            <thead class="visually-hidden">
+              <tr>
+                <th scope="col">Property</th>
+                <th scope="col">Value</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <th scope="row" class="fw-normal">Version</th>
+                <td class="text-end"><code>{{ app_version }}</code></td>
+              </tr>
+              <tr>
+                <th scope="row" class="fw-normal">Python</th>
+                <td class="text-end"><code>{{ python_version }}</code></td>
+              </tr>
+              <tr>
+                <th scope="row" class="fw-normal">License</th>
+                <td class="text-end">MIT</td>
+              </tr>
+            </tbody>
+          </table>
+          <hr>
+          <h3 class="h6 text-secondary">Author</h3>
+          <p class="mb-0"><span class="material-icons align-middle me-1" aria-hidden="true">person</span>Gill-Bates</p>
+        </div>
+      </section>
+    </div>
+    <div class="col-12 col-lg-4 d-flex flex-column gap-3 about-updates-column">
+      <section class="card about-update-card" aria-labelledby="about-updates-heading">
+        <div class="card-header d-flex align-items-center justify-content-between gap-2">
+          <h2 id="about-updates-heading" class="h6 mb-0"><span class="material-icons align-middle me-2"
+              aria-hidden="true">system_update</span>Check for Updates</h2>
+          <button type="button" class="btn btn-sm btn-outline-secondary text-nowrap" id="btn-check-updates">
+            <span class="material-icons align-middle me-1" aria-hidden="true">refresh</span>Check Now
+          </button>
+        </div>
+        <div class="card-body">
+          <div id="update-check-loading" class="text-center py-2" role="status">
+            <span class="spinner-border spinner-border-sm text-primary" aria-hidden="true"></span>
+            <span class="ms-2 text-secondary small">Checking for updates...</span>
+          </div>
+          <div id="update-check-result" class="d-none" aria-live="polite">
+            <div id="update-status-badge" class="mb-2"></div>
+            <table class="table table-sm table-borderless mb-0">
+              <thead class="visually-hidden"><tr><th scope="col">Field</th><th scope="col">Version value</th></tr></thead>
+              <tbody>
+                <tr><th scope="row" class="fw-normal">Current</th><td class="text-end"><code id="update-current-version">{{ app_version }}</code></td></tr>
+                <tr><th scope="row" class="fw-normal">Latest</th><td class="text-end"><code id="update-latest-version">–</code></td></tr>
+                <tr id="update-published-row" class="d-none"><th scope="row" class="fw-normal">Released</th>
+                  <td class="text-end"><code id="update-published-at">–</code></td></tr>
+              </tbody>
+            </table>
+            <div id="update-error" class="alert alert-warning py-1 mt-2 mb-0 small d-none" role="alert"></div>
+            <div id="update-available-section" class="d-none mt-2">
+              {# Default target for the releases overview. about.js drops this href at the start of
+                 every check and sets the specific release URL before it un-hides the section, so the
+                 fallback is never what an operator clicks; it only keeps the link meaningful in the
+                 server-rendered page (and without JavaScript). #}
+              <a id="update-release-link" class="btn btn-sm btn-primary w-100" target="_blank"
+                href="https://github.com/Gill-Bates/rct-rest-api/releases"
+                rel="noopener noreferrer"><span class="material-icons align-middle me-1" aria-hidden="true">open_in_new</span>View Release on GitHub</a>
+            </div>
+          </div>
+        </div>
+      </section>
+      <section class="card about-doc-card" aria-label="Documentation">
+        <div class="card-body d-flex align-items-center justify-content-center">
+          <a class="btn btn-outline-secondary w-100" href="https://gill-bates.github.io/rct-rest-api/"
+            target="_blank" rel="noopener noreferrer"><span class="material-icons align-middle me-1"
+              aria-hidden="true">description</span>Documentation<span class="material-icons align-middle ms-1"
+              aria-hidden="true">open_in_new</span><span class="visually-hidden"> (opens in a new tab)</span></a>
+        </div>
+      </section>
+    </div>
+    <div class="col-12 col-lg-4">
+      <section class="card" aria-labelledby="about-dependencies-heading">
+        <div class="card-header d-flex align-items-center"><span class="material-icons me-2"
+            aria-hidden="true">inventory_2</span>
+          <h2 id="about-dependencies-heading" class="h6 mb-0">Dependencies</h2>
+        </div>
+        <div class="card-body p-0 about-dependencies">
+          <div class="table-responsive" tabindex="0" aria-label="Installed dependencies">
+            <table class="table table-sm table-hover mb-0">
+              <thead>
+                <tr>
+                  <th scope="col">Package</th>
+                  <th scope="col" class="text-end">Version</th>
+                </tr>
+              </thead>
+              <tbody>{% for package, installed in dependencies %}<tr>
+                  <th scope="row" class="fw-normal"><code>{{ package }}</code></th>
+                  <td class="text-end"><code>{{ installed }}</code></td>
+                </tr>{% endfor %}</tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+    </div>
+  </div>
+  <section class="card mt-3" aria-labelledby="about-changelog-heading">
+    <div class="card-header d-flex align-items-center"><span class="material-icons me-2"
+        aria-hidden="true">history</span>
+      <h2 id="about-changelog-heading" class="h6 mb-0">Changelog</h2>
+    </div>
+    <div class="card-body about-changelog" tabindex="0" aria-label="Release history">
+      {% for release in changelog %}
+      <h3 class="h6">{{ release.title }}</h3>
+      {% for group in release.groups %}
+      <h4 class="small text-secondary text-uppercase mt-3">{{ group.title }}</h4>
+      <ul>{% for item in group["items"] %}<li>{% for text, code in item %}{% if code %}<code>{{ text }}</code>{% else
+          %}{{ text }}{% endif %}{% endfor %}</li>{% endfor %}</ul>
+      {% endfor %}
+      {% else %}
+      <p class="text-secondary mb-0">No changelog available.</p>
+      {% endfor %}
+    </div>
+  </section>
+</div>
+<script src="/admin/static/js/about.js" defer></script>
+{% endblock %}

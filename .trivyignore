@@ -1,0 +1,7 @@
+# .trivyignore
+#
+# Findings accepted for the Trivy scan of the docs dependencies in
+# .github/workflows/docs-build.yml. Format: `<id> exp:YYYY-MM-DD`, with the
+# reason in a comment above each entry.
+#
+# No exceptions are currently accepted.

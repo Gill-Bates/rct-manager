@@ -1,0 +1,5121 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "name": "rb485_f_grid_2",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "power_mng_schedule_0",
+      "data_type": "t_string"
+    },
+    {
+      "name": "grid_mon_0_u_over_time",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_cells_stat_3",
+      "data_type": "t_string"
+    },
+    {
+      "name": "cs_neg_2",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_placeholder_0_cells_stat_2_u_min_value",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "energy_e_ext_month",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_placeholder_0_module_sn_5",
+      "data_type": "t_string"
+    },
+    {
+      "name": "hw_test_state",
+      "data_type": "t_uint8",
+      "minimum": 0,
+      "maximum": 255
+    },
+    {
+      "name": "g_sync_p_ac_load_0",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_cells_stat_0_u_max_value",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "common_control_bits",
+      "data_type": "t_uint32",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    {
+      "name": "battery_placeholder_0_cells_stat_1_u_min_value",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "nsm_f_low_entry",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "frt_u_min_2",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_cells_stat_4_u_min_time",
+      "data_type": "t_uint32",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    {
+      "name": "battery_cells_stat_3_t_max_index",
+      "data_type": "t_uint8",
+      "minimum": 0,
+      "maximum": 255
+    },
+    {
+      "name": "hw_test_bt_power_6",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "logger_day_egrid_load_log_ts",
+      "data_type": "t_int32",
+      "minimum": -2147483648,
+      "maximum": 2147483647
+    },
+    {
+      "name": "battery_cells_stat_4_t_max_index",
+      "data_type": "t_uint8",
+      "minimum": 0,
+      "maximum": 255
+    },
+    {
+      "name": "logger_minutes_ubat_log_ts",
+      "data_type": "t_int32",
+      "minimum": -2147483648,
+      "maximum": 2147483647
+    },
+    {
+      "name": "battery_charged_amp_hours",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "wifi_ip",
+      "data_type": "t_string"
+    },
+    {
+      "name": "battery_placeholder_0_cells_stat_3_t_max_index",
+      "data_type": "t_uint8",
+      "minimum": 0,
+      "maximum": 255
+    },
+    {
+      "name": "rb485_phase_marker",
+      "data_type": "t_int16",
+      "minimum": -32768,
+      "maximum": 32767
+    },
+    {
+      "name": "battery_placeholder_0_max_cell_temperature",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_placeholder_0_cells_stat_3_u_max_index",
+      "data_type": "t_uint8",
+      "minimum": 0,
+      "maximum": 255
+    },
+    {
+      "name": "battery_cells_stat_4_u_max_index",
+      "data_type": "t_uint8",
+      "minimum": 0,
+      "maximum": 255
+    },
+    {
+      "name": "adc_u_ref_1_5v_0",
+      "data_type": "t_uint16",
+      "minimum": 0,
+      "maximum": 65535
+    },
+    {
+      "name": "net_id",
+      "data_type": "t_uint32",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    {
+      "name": "battery_stack_software_version_3",
+      "data_type": "t_uint32",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    {
+      "name": "hw_test_bt_time_2",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_placeholder_0_cells_stat_0_t_max_value",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "logger_minutes_ul3_log_ts",
+      "data_type": "t_int32",
+      "minimum": -2147483648,
+      "maximum": 2147483647
+    },
+    {
+      "name": "battery_placeholder_0_minimum_discharge_voltage_constant_u",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_cells_stat_3_t_min_index",
+      "data_type": "t_uint8",
+      "minimum": 0,
+      "maximum": 255
+    },
+    {
+      "name": "g_sync_u_zk_n_avg",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "p_rec_req_1",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "acc_conv_i_acc_lp_fast",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_placeholder_0_cells_stat_6_t_min_time",
+      "data_type": "t_uint32",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    {
+      "name": "wifi_sockb_protocol",
+      "data_type": "t_enum",
+      "minimum": 0,
+      "maximum": 255
+    },
+    {
+      "name": "battery_placeholder_0_cells_resist_0",
+      "data_type": "t_string"
+    },
+    {
+      "name": "net_load_reduction",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "energy_e_ext_day_sum",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "solar_b_power",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "nsm_u_q_u_3",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "detect_phase_shift_enable",
+      "data_type": "t_bool"
+    },
+    {
+      "name": "battery_stack_cycles_1",
+      "data_type": "t_uint16",
+      "minimum": 0,
+      "maximum": 65535
+    },
+    {
+      "name": "i_bottom_max",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_cells_stat_4",
+      "data_type": "t_string"
+    },
+    {
+      "name": "battery_placeholder_0_cells_stat_6_u_min_index",
+      "data_type": "t_uint8",
+      "minimum": 0,
+      "maximum": 255
+    },
+    {
+      "name": "battery_status2",
+      "data_type": "t_int32",
+      "minimum": -2147483648,
+      "maximum": 2147483647
+    },
+    {
+      "name": "logger_day_eb_log_ts",
+      "data_type": "t_int32",
+      "minimum": -2147483648,
+      "maximum": 2147483647
+    },
+    {
+      "name": "io_board_io1_polarity",
+      "data_type": "t_bool"
+    },
+    {
+      "name": "flash_rtc_time_stamp_set",
+      "data_type": "t_uint32",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    {
+      "name": "battery_placeholder_0_cells_stat_6_u_max_index",
+      "data_type": "t_uint8",
+      "minimum": 0,
+      "maximum": 255
+    },
+    {
+      "name": "io_board_rse_table_0",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_placeholder_0_stack_software_version_3",
+      "data_type": "t_uint32",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    {
+      "name": "battery_cells_stat_3_u_max_value",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "energy_e_ext_total_sum",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "logger_minutes_ub_log_ts",
+      "data_type": "t_int32",
+      "minimum": -2147483648,
+      "maximum": 2147483647
+    },
+    {
+      "name": "io_board_check_rs485_result",
+      "data_type": "t_uint8",
+      "minimum": 0,
+      "maximum": 255
+    },
+    {
+      "name": "battery_placeholder_0_maximum_discharge_current",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "nsm_cos_phi_p_3_1",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "nsm_u_q_u_0",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "max_phase_shift",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "energy_e_ac_month",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "power_mng_battery_power",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_cells_stat_4_u_min_index",
+      "data_type": "t_uint8",
+      "minimum": 0,
+      "maximum": 255
+    },
+    {
+      "name": "energy_e_grid_load_month",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "logger_minutes_temp2_log_ts",
+      "data_type": "t_int32",
+      "minimum": -2147483648,
+      "maximum": 2147483647
+    },
+    {
+      "name": "battery_cells_4",
+      "data_type": "t_string"
+    },
+    {
+      "name": "g_sync_p_ac_1",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "nsm_rpm_lock_out_power",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "power_mng_schedule_2",
+      "data_type": "t_string"
+    },
+    {
+      "name": "battery_module_sn_5",
+      "data_type": "t_string"
+    },
+    {
+      "name": "battery_placeholder_0_cells_stat_4_u_max_index",
+      "data_type": "t_uint8",
+      "minimum": 0,
+      "maximum": 255
+    },
+    {
+      "name": "battery_bms_sn",
+      "data_type": "t_string"
+    },
+    {
+      "name": "db_power_board_current_mean",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "adc_u_ref_1_5v_1",
+      "data_type": "t_uint16",
+      "minimum": 0,
+      "maximum": 65535
+    },
+    {
+      "name": "partition_1_last_id",
+      "data_type": "t_int32",
+      "minimum": -2147483648,
+      "maximum": 2147483647
+    },
+    {
+      "name": "rb485_version_boot",
+      "data_type": "t_uint32",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    {
+      "name": "battery_placeholder_0_soh",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "db_power_board_adc_p9v_meas",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_placeholder_0_cells_stat_0_u_max_value",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_placeholder_0_cells_stat_4_t_min_index",
+      "data_type": "t_uint8",
+      "minimum": 0,
+      "maximum": 255
+    },
+    {
+      "name": "battery_cells_stat_5_u_max_index",
+      "data_type": "t_uint8",
+      "minimum": 0,
+      "maximum": 255
+    },
+    {
+      "name": "battery_cells_stat_3_u_min_value",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "partition_3_last_id",
+      "data_type": "t_int32",
+      "minimum": -2147483648,
+      "maximum": 2147483647
+    },
+    {
+      "name": "logger_year_egrid_feed_log_ts",
+      "data_type": "t_int32",
+      "minimum": -2147483648,
+      "maximum": 2147483647
+    },
+    {
+      "name": "p_rec_req_0",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "household_load_power",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_bms_power_version",
+      "data_type": "t_uint32",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    {
+      "name": "io_board_check_rse_result",
+      "data_type": "t_uint16",
+      "minimum": 0,
+      "maximum": 65535
+    },
+    {
+      "name": "energy_e_grid_load_total_sum",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "grid_frequency",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "wifi_dns_address",
+      "data_type": "t_string"
+    },
+    {
+      "name": "power_mng_soc_charge_power",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "logger_minutes_eb_log_ts",
+      "data_type": "t_int32",
+      "minimum": -2147483648,
+      "maximum": 2147483647
+    },
+    {
+      "name": "battery_placeholder_0_cells_4",
+      "data_type": "t_string"
+    },
+    {
+      "name": "battery_placeholder_0_cells_stat_6_u_max_value",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_maximum_charge_current",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_placeholder_0_cells_stat_1_t_min_index",
+      "data_type": "t_uint8",
+      "minimum": 0,
+      "maximum": 255
+    },
+    {
+      "name": "battery_cells_stat_3_t_max_time",
+      "data_type": "t_uint32",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    {
+      "name": "db_power_board_calibr_value_mean",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_placeholder_0_cells_resist_4",
+      "data_type": "t_string"
+    },
+    {
+      "name": "battery_placeholder_0_cells_stat_2_t_max_value",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "switch_on_cond_u_min",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "hw_test_bt_time_9",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_placeholder_0_module_sn_4",
+      "data_type": "t_string"
+    },
+    {
+      "name": "prim_sm_island_next_repeat_timeout",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "logger_minutes_eac1_log_ts",
+      "data_type": "t_int32",
+      "minimum": -2147483648,
+      "maximum": 2147483647
+    },
+    {
+      "name": "battery_current",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "energy_e_dc_month_sum_1",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "rb485_u_l_grid_2",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "flash_rtc_rtc_mcc_quartz_max_diff",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "dc_conv_dc_conv_struct_0_u_target",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_placeholder_0_cells_stat_3_u_max_time",
+      "data_type": "t_uint32",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    {
+      "name": "frt_u_min_end",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "fault_1_flt",
+      "data_type": "t_uint32",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    {
+      "name": "switch_on_cond_f_min",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_placeholder_0_stack_software_version_1",
+      "data_type": "t_uint32",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    {
+      "name": "frt_t_min_1",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_placeholder_0_cells_stat_0",
+      "data_type": "t_string"
+    },
+    {
+      "name": "battery_cells_stat_5",
+      "data_type": "t_string"
+    },
+    {
+      "name": "net_command",
+      "data_type": "t_uint16",
+      "minimum": 0,
+      "maximum": 65535
+    },
+    {
+      "name": "g_sync_u_zk_sum_mov_avg",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_placeholder_0_min_cell_temperature",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "energy_e_dc_day_sum_1",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_placeholder_0_cells_resist_6",
+      "data_type": "t_string"
+    },
+    {
+      "name": "g_sync_u_l_rms_2",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_cells_stat_2_u_min_index",
+      "data_type": "t_uint8",
+      "minimum": 0,
+      "maximum": 255
+    },
+    {
+      "name": "battery_module_sn_3",
+      "data_type": "t_string"
+    },
+    {
+      "name": "nsm_cos_phi_p_1_0",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_cells_stat_1_t_max_index",
+      "data_type": "t_uint8",
+      "minimum": 0,
+      "maximum": 255
+    },
+    {
+      "name": "battery_cells_stat_2_t_max_time",
+      "data_type": "t_uint32",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    {
+      "name": "energy_e_grid_feed_year",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "cs_struct_is_tuned",
+      "data_type": "t_bool"
+    },
+    {
+      "name": "battery_placeholder_0_cells_stat_5_u_min_value",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "rb485_version_main",
+      "data_type": "t_uint32",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    {
+      "name": "g_sync_p_ac_load_1",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "g_sync_p_ac_sc_0",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_stack_cycles_6",
+      "data_type": "t_uint16",
+      "minimum": 0,
+      "maximum": 65535
+    },
+    {
+      "name": "energy_e_grid_feed_total_sum",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "performance_free_0",
+      "data_type": "t_uint32",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    {
+      "name": "grid_offset",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "display_struct_brightness",
+      "data_type": "t_uint8",
+      "minimum": 0,
+      "maximum": 255
+    },
+    {
+      "name": "io_board_rse_table_10",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_stack_cycles_5",
+      "data_type": "t_uint16",
+      "minimum": 0,
+      "maximum": 65535
+    },
+    {
+      "name": "logger_year_log_ts",
+      "data_type": "t_int32",
+      "minimum": -2147483648,
+      "maximum": 2147483647
+    },
+    {
+      "name": "battery_max_cell_voltage",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "energy_e_dc_day_0",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_discharged_amp_hours",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "net_net_tunnel_id",
+      "data_type": "t_uint32",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    {
+      "name": "io_board_home_relay_sw_off_delay",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_placeholder_0_cells_stat_0_t_max_index",
+      "data_type": "t_uint8",
+      "minimum": 0,
+      "maximum": 255
+    },
+    {
+      "name": "db_power_board_afi_t300",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_placeholder_0_cells_stat_2_u_min_time",
+      "data_type": "t_uint32",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    {
+      "name": "logger_month_ea_log_ts",
+      "data_type": "t_int32",
+      "minimum": -2147483648,
+      "maximum": 2147483647
+    },
+    {
+      "name": "energy_e_load_day",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_placeholder_0_cells_2",
+      "data_type": "t_string"
+    },
+    {
+      "name": "grid_mon_1_u_under_time",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_placeholder_0_cells_stat_5_u_min_index",
+      "data_type": "t_uint8",
+      "minimum": 0,
+      "maximum": 255
+    },
+    {
+      "name": "battery_placeholder_0_cells_stat_5_u_max_value",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "power_mng_bat_empty_full",
+      "data_type": "t_uint8",
+      "minimum": 0,
+      "maximum": 255
+    },
+    {
+      "name": "modbus_mode",
+      "data_type": "t_enum",
+      "minimum": 0,
+      "maximum": 255
+    },
+    {
+      "name": "nsm_cos_phi_p_0_1",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "frt_u_max_0",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_cells_stat_2_t_max_value",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_cells_stat_0_t_max_time",
+      "data_type": "t_uint32",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    {
+      "name": "switch_on_cond_test_time_fault",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "nsm_p_u_0_1",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_cells_stat_0",
+      "data_type": "t_string"
+    },
+    {
+      "name": "battery_cells_stat_2_u_max_index",
+      "data_type": "t_uint8",
+      "minimum": 0,
+      "maximum": 255
+    },
+    {
+      "name": "logger_year_eb_log_ts",
+      "data_type": "t_int32",
+      "minimum": -2147483648,
+      "maximum": 2147483647
+    },
+    {
+      "name": "net_index",
+      "data_type": "t_int8",
+      "minimum": -128,
+      "maximum": 127
+    },
+    {
+      "name": "battery_cells_stat_3_u_max_time",
+      "data_type": "t_uint32",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    {
+      "name": "nsm_p_u_3_1",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "nsm_startup_grad",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "net_prev_k",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "switch_on_cond_max_rnd_test_time_fault",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "prim_sm_island_flag",
+      "data_type": "t_uint16",
+      "minimum": 0,
+      "maximum": 65535
+    },
+    {
+      "name": "p_rec_req_2",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "power_mng_use_grid_power_enable",
+      "data_type": "t_bool"
+    },
+    {
+      "name": "battery_placeholder_0_cells_stat_6_u_min_time",
+      "data_type": "t_uint32",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    {
+      "name": "fault_0_flt",
+      "data_type": "t_uint32",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    {
+      "name": "battery_soh",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "db_power_board_afi_i60",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "nsm_f_low_rise_grad_storage",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "flash_rtc_flag_time_auto_switch",
+      "data_type": "t_bool"
+    },
+    {
+      "name": "logger_minutes_eext_log_ts",
+      "data_type": "t_int32",
+      "minimum": -2147483648,
+      "maximum": 2147483647
+    },
+    {
+      "name": "wifi_connect_to_server",
+      "data_type": "t_uint8",
+      "minimum": 0,
+      "maximum": 255
+    },
+    {
+      "name": "battery_placeholder_0_cells_stat_5_u_min_time",
+      "data_type": "t_uint32",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    {
+      "name": "power_spring_up",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "grid_lt_threshold",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_placeholder_0_cells_stat_2_u_max_value",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "g_sync_s_ac_lp_0",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_cells_stat_1_u_max_value",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "energy_e_ac_day_sum",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "energy_e_ext_year_sum",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "net_package",
+      "data_type": "t_string"
+    },
+    {
+      "name": "prim_sm_is_thin_layer",
+      "data_type": "t_bool"
+    },
+    {
+      "name": "bat_mng_struct_profile_pdc_max",
+      "data_type": "t_string"
+    },
+    {
+      "name": "rb485_f_wr_0",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "fault_2_flt",
+      "data_type": "t_uint32",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    {
+      "name": "battery_cells_stat_3_t_min_value",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "inv_struct_cosinus_phi",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "io_board_rse_table_8",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "energy_e_grid_feed_day",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "hw_test_bt_time_0",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "grid_mon_0_u_under_threshold",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "hw_test_bt_power_7",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "io_board_rse_table_6",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "bat_mng_struct_bat_calib_soc_thresh",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "grid_mon_1_f_under_threshold",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "power_spring_bat",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "db_power_board_relays_state",
+      "data_type": "t_uint16",
+      "minimum": 0,
+      "maximum": 65535
+    },
+    {
+      "name": "battery_cells_stat_5_t_max_index",
+      "data_type": "t_uint8",
+      "minimum": 0,
+      "maximum": 255
+    },
+    {
+      "name": "battery_power",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "g_sync_s_ac_lp_1",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "power_mng_schedule_6",
+      "data_type": "t_string"
+    },
+    {
+      "name": "battery_cells_6",
+      "data_type": "t_string"
+    },
+    {
+      "name": "frt_u_min_0",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_cells_stat_3_u_min_index",
+      "data_type": "t_uint8",
+      "minimum": 0,
+      "maximum": 255
+    },
+    {
+      "name": "battery_cells_stat_5_u_min_value",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "logger_month_eload_log_ts",
+      "data_type": "t_int32",
+      "minimum": -2147483648,
+      "maximum": 2147483647
+    },
+    {
+      "name": "g_sync_p_ac_0",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "rb485_available",
+      "data_type": "t_bool"
+    },
+    {
+      "name": "nsm_cos_phi_p_1_1",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "nsm_pf_delay",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "flash_state",
+      "data_type": "t_uint16",
+      "minimum": 0,
+      "maximum": 65535
+    },
+    {
+      "name": "db_power_board_afi_t60",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_cells_stat_4_t_min_time",
+      "data_type": "t_uint32",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    {
+      "name": "battery_cells_stat_0_t_max_index",
+      "data_type": "t_uint8",
+      "minimum": 0,
+      "maximum": 255
+    },
+    {
+      "name": "energy_e_grid_feed_total",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "can_bus_bms_update_response_0",
+      "data_type": "t_uint32",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    {
+      "name": "battery_placeholder_0_cells_stat_2_t_min_value",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "net_n_descendants",
+      "data_type": "t_int8",
+      "minimum": -128,
+      "maximum": 127
+    },
+    {
+      "name": "battery_placeholder_0_cells_stat_1_u_min_index",
+      "data_type": "t_uint8",
+      "minimum": 0,
+      "maximum": 255
+    },
+    {
+      "name": "flash_param_write_cycles",
+      "data_type": "t_uint32",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    {
+      "name": "battery_placeholder_0_cells_stat_2",
+      "data_type": "t_string"
+    },
+    {
+      "name": "iso_struct_rn",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_placeholder_0_cells_stat_3_t_max_value",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "power_mng_schedule_8",
+      "data_type": "t_string"
+    },
+    {
+      "name": "g_sync_u_ptp_rms_1",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "logger_minutes_ul2_log_ts",
+      "data_type": "t_int32",
+      "minimum": -2147483648,
+      "maximum": 2147483647
+    },
+    {
+      "name": "g_sync_i_dr_lp_2",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "power_spring_offset",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "energy_e_dc_year_sum_0",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "update_is_allowed_id",
+      "data_type": "t_uint8",
+      "minimum": 0,
+      "maximum": 255
+    },
+    {
+      "name": "nsm_p_u_3_0",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_placeholder_0_cells_stat_1",
+      "data_type": "t_string"
+    },
+    {
+      "name": "dc_conv_dc_conv_struct_1_mpp_mpp_step",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_prog_sn",
+      "data_type": "t_string"
+    },
+    {
+      "name": "buf_v_control_power_reduction_max_solar",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "energy_e_load_day_sum",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "cs_neg_1",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "logger_year_ea_log_ts",
+      "data_type": "t_int32",
+      "minimum": -2147483648,
+      "maximum": 2147483647
+    },
+    {
+      "name": "nsm_cos_phi_p_2_1",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "nsm_startup_grad_after_fault",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_min_cell_voltage",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_placeholder_0_cells_0",
+      "data_type": "t_string"
+    },
+    {
+      "name": "battery_cells_stat_5_u_max_value",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "switch_on_cond_f_max",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_placeholder_0_cells_stat_4_u_max_value",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_soc_update_since",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "flash_rtc_rtc_mcc_quartz_ppm_difference",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "hw_test_bt_power_0",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "phase_3_mode",
+      "data_type": "t_bool"
+    },
+    {
+      "name": "g_sync_p_ac_sum",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_module_sn_4",
+      "data_type": "t_string"
+    },
+    {
+      "name": "hw_test_bt_cycle",
+      "data_type": "t_uint8",
+      "minimum": 0,
+      "maximum": 255
+    },
+    {
+      "name": "logger_year_eext_log_ts",
+      "data_type": "t_int32",
+      "minimum": -2147483648,
+      "maximum": 2147483647
+    },
+    {
+      "name": "energy_e_load_year_sum",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "io_board_io2_usage",
+      "data_type": "t_enum",
+      "minimum": 0,
+      "maximum": 255
+    },
+    {
+      "name": "db_temp2",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_placeholder_0_module_sn_3",
+      "data_type": "t_string"
+    },
+    {
+      "name": "battery_placeholder_0_cells_stat_5_t_min_value",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_placeholder_0_stack_software_version_5",
+      "data_type": "t_uint32",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    {
+      "name": "battery_cells_resist_5",
+      "data_type": "t_string"
+    },
+    {
+      "name": "battery_cells_stat_6_u_min_index",
+      "data_type": "t_uint8",
+      "minimum": 0,
+      "maximum": 255
+    },
+    {
+      "name": "adc_u_ref_1_5v_3",
+      "data_type": "t_uint16",
+      "minimum": 0,
+      "maximum": 65535
+    },
+    {
+      "name": "logger_minutes_ea_log_ts",
+      "data_type": "t_int32",
+      "minimum": -2147483648,
+      "maximum": 2147483647
+    },
+    {
+      "name": "prim_sm_island_reset_retrials_counter_time",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_cells_stat_5_u_min_time",
+      "data_type": "t_uint32",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    {
+      "name": "battery_placeholder_0_stack_cycles_1",
+      "data_type": "t_uint16",
+      "minimum": 0,
+      "maximum": 65535
+    },
+    {
+      "name": "logger_minutes_soc_log_ts",
+      "data_type": "t_int32",
+      "minimum": -2147483648,
+      "maximum": 2147483647
+    },
+    {
+      "name": "battery_placeholder_0_cells_stat_2_u_max_index",
+      "data_type": "t_uint8",
+      "minimum": 0,
+      "maximum": 255
+    },
+    {
+      "name": "battery_cells_stat_0_t_max_value",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "wifi_connect_to_service",
+      "data_type": "t_uint8",
+      "minimum": 0,
+      "maximum": 255
+    },
+    {
+      "name": "nsm_p_u_0_0",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "logger_minutes_ul1_log_ts",
+      "data_type": "t_int32",
+      "minimum": -2147483648,
+      "maximum": 2147483647
+    },
+    {
+      "name": "grid_mon_1_u_over_threshold",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "p_rec_lim_1",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "g_sync_u_l_rms_1",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "io_board_rse_table_12",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "logger_minutes_eac2_log_ts",
+      "data_type": "t_int32",
+      "minimum": -2147483648,
+      "maximum": 2147483647
+    },
+    {
+      "name": "battery_stored_energy",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "g_sync_s_ac_2",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_max_cell_temperature",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "wifi_connect_to_wifi",
+      "data_type": "t_bool"
+    },
+    {
+      "name": "wifi_authentication_method",
+      "data_type": "t_string"
+    },
+    {
+      "name": "battery_placeholder_0_cells_stat_3_t_min_time",
+      "data_type": "t_uint32",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    {
+      "name": "battery_placeholder_0_maximum_charge_current",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "hw_test_bt_time_3",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_maximum_charge_voltage_constant_u",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "io_board_rse_table_2",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "io_board_check_state",
+      "data_type": "t_uint8",
+      "minimum": 0,
+      "maximum": 255
+    },
+    {
+      "name": "power_mng_schedule_4",
+      "data_type": "t_string"
+    },
+    {
+      "name": "power_mng_maximum_charge_voltage",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_module_sn_6",
+      "data_type": "t_string"
+    },
+    {
+      "name": "wifi_mask",
+      "data_type": "t_string"
+    },
+    {
+      "name": "battery_cells_stat_1_t_max_time",
+      "data_type": "t_uint32",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    {
+      "name": "wifi_mode",
+      "data_type": "t_string"
+    },
+    {
+      "name": "battery_stack_cycles_4",
+      "data_type": "t_uint16",
+      "minimum": 0,
+      "maximum": 65535
+    },
+    {
+      "name": "battery_cells_stat_4_t_min_value",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "power_mng_is_heiphoss",
+      "data_type": "t_uint8",
+      "minimum": 0,
+      "maximum": 255
+    },
+    {
+      "name": "battery_stack_cycles_2",
+      "data_type": "t_uint16",
+      "minimum": 0,
+      "maximum": 65535
+    },
+    {
+      "name": "dc_conv_dc_conv_struct_1_u_sg_lp",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "io_board_io1_s0_imp_per_kwh",
+      "data_type": "t_int16",
+      "minimum": -32768,
+      "maximum": 32767
+    },
+    {
+      "name": "battery_placeholder_0_status2",
+      "data_type": "t_int32",
+      "minimum": -2147483648,
+      "maximum": 2147483647
+    },
+    {
+      "name": "db_power_board_afi_t150",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "p_rec_available_2",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "net_use_network_filter",
+      "data_type": "t_bool"
+    },
+    {
+      "name": "logger_month_egrid_load_log_ts",
+      "data_type": "t_int32",
+      "minimum": -2147483648,
+      "maximum": 2147483647
+    },
+    {
+      "name": "net_update_slaves",
+      "data_type": "t_bool"
+    },
+    {
+      "name": "dc_conv_dc_conv_struct_1_mpp_fixed_voltage",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "io_board_alarm_home_relay_mode",
+      "data_type": "t_enum",
+      "minimum": 0,
+      "maximum": 255
+    },
+    {
+      "name": "battery_placeholder_0_cells_stat_0_u_max_index",
+      "data_type": "t_uint8",
+      "minimum": 0,
+      "maximum": 255
+    },
+    {
+      "name": "inverter_state",
+      "data_type": "t_uint8",
+      "minimum": 0,
+      "maximum": 255
+    },
+    {
+      "name": "g_sync_p_ac_sc_sum",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_placeholder_0_cells_6",
+      "data_type": "t_string"
+    },
+    {
+      "name": "battery_cells_stat_6_u_min_time",
+      "data_type": "t_uint32",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    {
+      "name": "logger_day_eext_log_ts",
+      "data_type": "t_int32",
+      "minimum": -2147483648,
+      "maximum": 2147483647
+    },
+    {
+      "name": "g_sync_s_ac_1",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_cells_stat_0_t_min_value",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_cells_stat_6_u_min_value",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "db_power_board_version_boot",
+      "data_type": "t_uint32",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    {
+      "name": "dc_conv_start_voltage",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_cells_5",
+      "data_type": "t_string"
+    },
+    {
+      "name": "energy_grid_load_total",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "g_sync_u_ptp_rms_0",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_placeholder_0_cells_stat_1_t_max_value",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_stack_software_version_0",
+      "data_type": "t_uint32",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    {
+      "name": "battery_cells_stat_1_u_min_index",
+      "data_type": "t_uint8",
+      "minimum": 0,
+      "maximum": 255
+    },
+    {
+      "name": "dc_conv_dc_conv_struct_0_mpp_enable_scan",
+      "data_type": "t_bool"
+    },
+    {
+      "name": "battery_cells_resist_0",
+      "data_type": "t_string"
+    },
+    {
+      "name": "g_sync_i_dr_eff_1",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_placeholder_0_cells_stat_3_t_min_index",
+      "data_type": "t_uint8",
+      "minimum": 0,
+      "maximum": 255
+    },
+    {
+      "name": "power_mng_schedule_3",
+      "data_type": "t_string"
+    },
+    {
+      "name": "flash_mem",
+      "data_type": "t_string"
+    },
+    {
+      "name": "energy_e_grid_feed_month",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_voltage",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "power_mng_n_batteries",
+      "data_type": "t_uint8",
+      "minimum": 0,
+      "maximum": 255
+    },
+    {
+      "name": "io_board_rse_table_14",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "logger_minutes_eac_log_ts",
+      "data_type": "t_int32",
+      "minimum": -2147483648,
+      "maximum": 2147483647
+    },
+    {
+      "name": "energy_e_ac_year_sum",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "power_mng_bat_calib_days_in_advance",
+      "data_type": "t_uint8",
+      "minimum": 0,
+      "maximum": 255
+    },
+    {
+      "name": "battery_placeholder_0_cells_stat_6_t_max_index",
+      "data_type": "t_uint8",
+      "minimum": 0,
+      "maximum": 255
+    },
+    {
+      "name": "dc_conv_dc_conv_struct_1_u_target",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "display_struct_display_dir",
+      "data_type": "t_bool"
+    },
+    {
+      "name": "net_slave_p_total",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "power_mng_battery_type",
+      "data_type": "t_enum",
+      "minimum": 0,
+      "maximum": 255
+    },
+    {
+      "name": "io_board_rse_table_9",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "io_board_io2_s0_imp_per_kwh",
+      "data_type": "t_int16",
+      "minimum": -32768,
+      "maximum": 32767
+    },
+    {
+      "name": "parameter_file",
+      "data_type": "t_string"
+    },
+    {
+      "name": "energy_e_dc_total_1",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_placeholder_0_module_sn_0",
+      "data_type": "t_string"
+    },
+    {
+      "name": "battery_stack_software_version_6",
+      "data_type": "t_uint32",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    {
+      "name": "can_bus_requested_id",
+      "data_type": "t_int32",
+      "minimum": -2147483648,
+      "maximum": 2147483647
+    },
+    {
+      "name": "battery_cells_2",
+      "data_type": "t_string"
+    },
+    {
+      "name": "logger_month_eb_log_ts",
+      "data_type": "t_int32",
+      "minimum": -2147483648,
+      "maximum": 2147483647
+    },
+    {
+      "name": "db_power_board_afi_i30",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "line_mon_u_max",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "hw_test_bt_power_2",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_placeholder_0_bms_power_version",
+      "data_type": "t_uint32",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    {
+      "name": "battery_placeholder_0_cells_stat_0_u_min_time",
+      "data_type": "t_uint32",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    {
+      "name": "modbus_address",
+      "data_type": "t_uint8",
+      "minimum": 0,
+      "maximum": 255
+    },
+    {
+      "name": "io_board_rse_table_1",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "i_dc_max",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "energy_e_dc_year_sum_1",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "cs_map_1",
+      "data_type": "t_uint8",
+      "minimum": 0,
+      "maximum": 255
+    },
+    {
+      "name": "battery_placeholder_0_cells_stat_0_t_min_value",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "wifi_sockb_port",
+      "data_type": "t_int32",
+      "minimum": -2147483648,
+      "maximum": 2147483647
+    },
+    {
+      "name": "battery_cells_stat_4_u_min_value",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "net_master_timeout",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "g_sync_p_ac_lp_1",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_cells_stat_5_u_max_time",
+      "data_type": "t_uint32",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    {
+      "name": "battery_placeholder_0_cells_stat_5_t_max_index",
+      "data_type": "t_uint8",
+      "minimum": 0,
+      "maximum": 255
+    },
+    {
+      "name": "battery_maximum_charge_voltage",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "logger_error_log_time_stamp",
+      "data_type": "t_int32",
+      "minimum": -2147483648,
+      "maximum": 2147483647
+    },
+    {
+      "name": "db_power_board_afi_i150",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "rb485_f_wr_1",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "energy_e_ext_month_sum",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "dc_conv_dc_conv_struct_0_enabled",
+      "data_type": "t_bool"
+    },
+    {
+      "name": "battery_cells_stat_1_t_min_index",
+      "data_type": "t_uint8",
+      "minimum": 0,
+      "maximum": 255
+    },
+    {
+      "name": "battery_bat_status",
+      "data_type": "t_int32",
+      "minimum": -2147483648,
+      "maximum": 2147483647
+    },
+    {
+      "name": "logger_year_eac_log_ts",
+      "data_type": "t_int32",
+      "minimum": -2147483648,
+      "maximum": 2147483647
+    },
+    {
+      "name": "grid_mon_0_f_under_time",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_cells_stat_5_t_min_index",
+      "data_type": "t_uint8",
+      "minimum": 0,
+      "maximum": 255
+    },
+    {
+      "name": "frt_u_min_begin",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "nsm_cos_phi_ts",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "adc_u_ref_1_5v_2",
+      "data_type": "t_uint16",
+      "minimum": 0,
+      "maximum": 65535
+    },
+    {
+      "name": "battery_status",
+      "data_type": "t_int32",
+      "minimum": -2147483648,
+      "maximum": 2147483647
+    },
+    {
+      "name": "hw_test_bt_power_4",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_cells_resist_1",
+      "data_type": "t_string"
+    },
+    {
+      "name": "g_sync_p_ac_lp_0",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "nsm_apm",
+      "data_type": "t_enum",
+      "minimum": 0,
+      "maximum": 255
+    },
+    {
+      "name": "battery_inv_cmd",
+      "data_type": "t_uint32",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    {
+      "name": "logger_minutes_ua_log_ts",
+      "data_type": "t_int32",
+      "minimum": -2147483648,
+      "maximum": 2147483647
+    },
+    {
+      "name": "flash_rtc_time_stamp_factory",
+      "data_type": "t_uint32",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    {
+      "name": "battery_module_sn_2",
+      "data_type": "t_string"
+    },
+    {
+      "name": "prim_sm_island_max_trials",
+      "data_type": "t_uint16",
+      "minimum": 0,
+      "maximum": 65535
+    },
+    {
+      "name": "db_power_board_afi_i300",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_cells_stat_2",
+      "data_type": "t_string"
+    },
+    {
+      "name": "prim_sm_island_reset_retrials_operation_time",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_placeholder_0_cells_stat_5_t_max_time",
+      "data_type": "t_uint32",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    {
+      "name": "hw_test_hw_switch_time",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "io_board_home_relay_sw_on_delay",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "logger_minutes_soc_targ_log_ts",
+      "data_type": "t_int32",
+      "minimum": -2147483648,
+      "maximum": 2147483647
+    },
+    {
+      "name": "wifi_encryption_algorithm",
+      "data_type": "t_string"
+    },
+    {
+      "name": "battery_cells_stat_0_u_max_index",
+      "data_type": "t_uint8",
+      "minimum": 0,
+      "maximum": 255
+    },
+    {
+      "name": "iso_struct_r_min",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_placeholder_0_minimum_discharge_voltage",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "hw_test_bt_time_5",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_placeholder_0_stack_software_version_0",
+      "data_type": "t_uint32",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    {
+      "name": "battery_placeholder_0_stack_cycles_6",
+      "data_type": "t_uint16",
+      "minimum": 0,
+      "maximum": 65535
+    },
+    {
+      "name": "battery_placeholder_0_cells_stat_3_u_min_time",
+      "data_type": "t_uint32",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    {
+      "name": "inverter_serial",
+      "data_type": "t_string"
+    },
+    {
+      "name": "battery_placeholder_0_cells_stat_4_t_min_time",
+      "data_type": "t_uint32",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    {
+      "name": "io_board_s0_direction",
+      "data_type": "t_enum",
+      "minimum": 0,
+      "maximum": 255
+    },
+    {
+      "name": "inv_struct_force_dh",
+      "data_type": "t_bool"
+    },
+    {
+      "name": "i_dc_slow_time",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "energy_e_ac_total_sum",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_placeholder_0_current",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_placeholder_0_cells_stat_6_t_min_index",
+      "data_type": "t_uint8",
+      "minimum": 0,
+      "maximum": 255
+    },
+    {
+      "name": "nsm_p_u_1_0",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "can_bus_bms_update_response_1",
+      "data_type": "t_uint32",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    {
+      "name": "rb485_u_l_grid_1",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "energy_e_dc_month_1",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "partition_2_last_id",
+      "data_type": "t_int32",
+      "minimum": -2147483648,
+      "maximum": 2147483647
+    },
+    {
+      "name": "power_mng_schedule_9",
+      "data_type": "t_string"
+    },
+    {
+      "name": "nsm_pu_mode",
+      "data_type": "t_bool"
+    },
+    {
+      "name": "wifi_gateway",
+      "data_type": "t_string"
+    },
+    {
+      "name": "battery_placeholder_0_cells_stat_6",
+      "data_type": "t_string"
+    },
+    {
+      "name": "battery_placeholder_0_stack_cycles_2",
+      "data_type": "t_uint16",
+      "minimum": 0,
+      "maximum": 65535
+    },
+    {
+      "name": "partition_5_last_id",
+      "data_type": "t_int32",
+      "minimum": -2147483648,
+      "maximum": 2147483647
+    },
+    {
+      "name": "io_board_io2_polarity",
+      "data_type": "t_bool"
+    },
+    {
+      "name": "g_sync_q_ac_sum_lp",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_placeholder_0_cells_3",
+      "data_type": "t_string"
+    },
+    {
+      "name": "battery_placeholder_0_cells_resist_2",
+      "data_type": "t_string"
+    },
+    {
+      "name": "db_power_board_version_main",
+      "data_type": "t_uint32",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    {
+      "name": "wifi_sockb_ip",
+      "data_type": "t_string"
+    },
+    {
+      "name": "energy_e_load_total_sum",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_cells_stat_0_u_max_time",
+      "data_type": "t_uint32",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    {
+      "name": "nsm_q_u_max_u_high_rel",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_cells_stat_6_u_max_index",
+      "data_type": "t_uint8",
+      "minimum": 0,
+      "maximum": 255
+    },
+    {
+      "name": "fault_3_flt",
+      "data_type": "t_uint32",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    {
+      "name": "battery_cells_stat_5_t_max_time",
+      "data_type": "t_uint32",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    {
+      "name": "battery_cells_stat_6_u_max_value",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "db_power_board_adc_p5v_w_meas",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_placeholder_0_cells_stat_1_u_max_value",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "energy_e_dc_total_sum_1",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_cells_stat_4_t_max_value",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "energy_e_dc_month_0",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "nsm_pu_use",
+      "data_type": "t_bool"
+    },
+    {
+      "name": "cs_neg_0",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "grid_mon_1_u_under_threshold",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "g_sync_q_ac_1",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "io_board_rse_data_delay",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_placeholder_0_cells_stat_4_t_min_value",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "nsm_cos_phi_p_0_0",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "frt_u_max_begin",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "energy_e_grid_feed_year_sum",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "p_rec_lim_0",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_placeholder_0_module_sn_6",
+      "data_type": "t_string"
+    },
+    {
+      "name": "hw_test_bt_power_9",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "energy_e_grid_load_day",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "io_board_load_set",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "current_sensor_max",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_placeholder_0_stack_software_version_2",
+      "data_type": "t_uint32",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    {
+      "name": "g_sync_s_ac_lp_2",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_cells_stat_6_t_min_value",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "g_sync_i_dr_lp_0",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_cells_stat_0_u_min_value",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_cells_stat_5_t_min_value",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "io_board_rse_table_15",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "nsm_q_u_max_u_high",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "frt_u_max_end",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "io_board_rse_data",
+      "data_type": "t_uint8",
+      "minimum": 0,
+      "maximum": 255
+    },
+    {
+      "name": "frt_t_max_0",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_stack_cycles_3",
+      "data_type": "t_uint16",
+      "minimum": 0,
+      "maximum": 65535
+    },
+    {
+      "name": "g_sync_i_dr_eff_0",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "g_sync_u_zk_sum_avg",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_placeholder_0_stack_cycles_4",
+      "data_type": "t_uint16",
+      "minimum": 0,
+      "maximum": 65535
+    },
+    {
+      "name": "battery_placeholder_0_soc",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_soc_target",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_cells_stat_6_t_min_time",
+      "data_type": "t_uint32",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    {
+      "name": "battery_placeholder_0_cells_stat_2_t_max_time",
+      "data_type": "t_uint32",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    {
+      "name": "wifi_result",
+      "data_type": "t_int8",
+      "minimum": -128,
+      "maximum": 127
+    },
+    {
+      "name": "nsm_f_low_exit",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "line_mon_u_min",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "dc_conv_dc_conv_struct_1_mpp_enable_scan",
+      "data_type": "t_bool"
+    },
+    {
+      "name": "battery_cells_stat_3_u_min_time",
+      "data_type": "t_uint32",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    {
+      "name": "iso_struct_rp",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "power_mng_soc_min_island",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_cells_stat_4_u_max_time",
+      "data_type": "t_uint32",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    {
+      "name": "display_struct_blink",
+      "data_type": "t_bool"
+    },
+    {
+      "name": "battery_cells_1",
+      "data_type": "t_string"
+    },
+    {
+      "name": "battery_cells_stat_6_t_max_time",
+      "data_type": "t_uint32",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    {
+      "name": "p_rec_available_1",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "com_service",
+      "data_type": "t_enum",
+      "allowed_values": [
+        0,
+        5,
+        9,
+        10,
+        12,
+        13,
+        14,
+        15,
+        16,
+        18
+      ]
+    },
+    {
+      "name": "battery_temperature",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "hw_test_bt_time_8",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "rb485_f_wr_2",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "grid_lt_granularity",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "wifi_connect_service_max_duration",
+      "data_type": "t_int32",
+      "minimum": -2147483648,
+      "maximum": 2147483647
+    },
+    {
+      "name": "battery_cells_stat_1_u_max_time",
+      "data_type": "t_uint32",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    {
+      "name": "battery_placeholder_0_cells_5",
+      "data_type": "t_string"
+    },
+    {
+      "name": "temperature_sink_temp_power_reduction",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_placeholder_0_stack_cycles_3",
+      "data_type": "t_uint16",
+      "minimum": 0,
+      "maximum": 65535
+    },
+    {
+      "name": "io_board_io1_usage",
+      "data_type": "t_enum",
+      "minimum": 0,
+      "maximum": 255
+    },
+    {
+      "name": "grid_mon_1_f_over_threshold",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "grid_power",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "energy_e_ext_year",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_cells_stat_0_t_min_time",
+      "data_type": "t_uint32",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    {
+      "name": "battery_cells_stat_6_t_max_value",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_placeholder_0_cells_stat_1_t_max_index",
+      "data_type": "t_uint8",
+      "minimum": 0,
+      "maximum": 255
+    },
+    {
+      "name": "hw_test_booster_test_index",
+      "data_type": "t_uint8",
+      "minimum": 0,
+      "maximum": 255
+    },
+    {
+      "name": "logger_month_egrid_feed_log_ts",
+      "data_type": "t_int32",
+      "minimum": -2147483648,
+      "maximum": 2147483647
+    },
+    {
+      "name": "logger_minutes_egrid_load_log_ts",
+      "data_type": "t_int32",
+      "minimum": -2147483648,
+      "maximum": 2147483647
+    },
+    {
+      "name": "svnversion_last_known",
+      "data_type": "t_string"
+    },
+    {
+      "name": "g_sync_i_dr_eff_2",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "grid_mon_0_f_over_time",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "switch_on_cond_u_max",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "frt_u_max_2",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "frt_t_max_2",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "power_mng_bat_calib_reqularity",
+      "data_type": "t_uint32",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    {
+      "name": "nsm_f_exit",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "rb485_u_l_grid_0",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "hw_test_bt_time_6",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_placeholder_0_cells_stat_0_t_min_index",
+      "data_type": "t_uint8",
+      "minimum": 0,
+      "maximum": 255
+    },
+    {
+      "name": "battery_placeholder_0_cells_stat_1_t_max_time",
+      "data_type": "t_uint32",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    {
+      "name": "rb485_f_grid_0",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_soc",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_placeholder_0_cells_stat_2_t_min_time",
+      "data_type": "t_uint32",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    {
+      "name": "battery_placeholder_0_cells_stat_4_u_max_time",
+      "data_type": "t_uint32",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    {
+      "name": "can_bus_bms_update_state",
+      "data_type": "t_uint8",
+      "minimum": 0,
+      "maximum": 255
+    },
+    {
+      "name": "nsm_cos_phi_p_2_0",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "flash_param_erase_cycles",
+      "data_type": "t_uint32",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    {
+      "name": "power_mng_stop_discharge_voltage_buffer",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "power_mng_soc_max",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_placeholder_0_cells_1",
+      "data_type": "t_string"
+    },
+    {
+      "name": "power_mng_is_grid",
+      "data_type": "t_bool"
+    },
+    {
+      "name": "power_mng_u_acc_lp",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_placeholder_0_max_cell_voltage",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "io_board_rse_table_4",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_module_sn_1",
+      "data_type": "t_string"
+    },
+    {
+      "name": "battery_cells_resist_3",
+      "data_type": "t_string"
+    },
+    {
+      "name": "db_power_board_adc_m9v_meas",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "power_mng_power_lim_src_index",
+      "data_type": "t_enum",
+      "minimum": 0,
+      "maximum": 255
+    },
+    {
+      "name": "power_mng_schedule_5",
+      "data_type": "t_string"
+    },
+    {
+      "name": "logger_log_rate",
+      "data_type": "t_uint16",
+      "minimum": 0,
+      "maximum": 65535
+    },
+    {
+      "name": "p_rec_lim_2",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_placeholder_0_stack_cycles_5",
+      "data_type": "t_uint16",
+      "minimum": 0,
+      "maximum": 65535
+    },
+    {
+      "name": "io_board_rse_table_7",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "frt_t_min_0",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "pas_period",
+      "data_type": "t_uint32",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    {
+      "name": "battery_bms_software_version",
+      "data_type": "t_uint32",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    {
+      "name": "bat_mng_struct_profile_load",
+      "data_type": "t_string"
+    },
+    {
+      "name": "dc_conv_dc_conv_struct_0_mpp_fixed_voltage",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_cells_stat_2_u_max_time",
+      "data_type": "t_uint32",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    {
+      "name": "power_mng_feed_asymmetrical",
+      "data_type": "t_bool"
+    },
+    {
+      "name": "battery_min_cell_temperature",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "line_mon_time_lim",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "energy_e_load_month_sum",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "phase_marker",
+      "data_type": "t_int16",
+      "minimum": -32768,
+      "maximum": 32767
+    },
+    {
+      "name": "wifi_service_port",
+      "data_type": "t_int32",
+      "minimum": -2147483648,
+      "maximum": 2147483647
+    },
+    {
+      "name": "battery_placeholder_0_cells_stat_6_t_min_value",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_placeholder_0_cells_stat_0_u_max_time",
+      "data_type": "t_uint32",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    {
+      "name": "logger_buffer",
+      "data_type": "t_string"
+    },
+    {
+      "name": "io_board_check_start",
+      "data_type": "t_uint8",
+      "minimum": 0,
+      "maximum": 255
+    },
+    {
+      "name": "nsm_q_u_hysteresis",
+      "data_type": "t_bool"
+    },
+    {
+      "name": "battery_cells_stat_2_t_min_value",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_stack_software_version_4",
+      "data_type": "t_uint32",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    {
+      "name": "nsm_p_u_2_0",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "energy_e_grid_feed_month_sum",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_stack_software_version_1",
+      "data_type": "t_uint32",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    {
+      "name": "energy_e_ext_total",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "logger_minutes_egrid_feed_log_ts",
+      "data_type": "t_int32",
+      "minimum": -2147483648,
+      "maximum": 2147483647
+    },
+    {
+      "name": "battery_soc_target_low",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "grid_mon_0_u_over_threshold",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_cells_stat_4_t_min_index",
+      "data_type": "t_uint8",
+      "minimum": 0,
+      "maximum": 255
+    },
+    {
+      "name": "battery_stack_cycles_0",
+      "data_type": "t_uint16",
+      "minimum": 0,
+      "maximum": 65535
+    },
+    {
+      "name": "temperature_bat_temp_power_reduction",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "relays_bits_real",
+      "data_type": "t_uint16",
+      "minimum": 0,
+      "maximum": 65535
+    },
+    {
+      "name": "logger_minutes_eload_log_ts",
+      "data_type": "t_int32",
+      "minimum": -2147483648,
+      "maximum": 2147483647
+    },
+    {
+      "name": "battery_cells_stat_2_t_max_index",
+      "data_type": "t_uint8",
+      "minimum": 0,
+      "maximum": 255
+    },
+    {
+      "name": "battery_placeholder_0_stack_software_version_6",
+      "data_type": "t_uint32",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    {
+      "name": "power_mng_u_acc_mix_lp",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_cells_stat_2_t_min_index",
+      "data_type": "t_uint8",
+      "minimum": 0,
+      "maximum": 255
+    },
+    {
+      "name": "battery_placeholder_0_cells_stat_1_u_min_time",
+      "data_type": "t_uint32",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    {
+      "name": "battery_placeholder_0_cells_stat_6_u_min_value",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_placeholder_0_cells_resist_5",
+      "data_type": "t_string"
+    },
+    {
+      "name": "battery_used_energy",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "grid_mon_0_f_under_threshold",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "power_mng_model_bat_power_change",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "power_spring_down",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_placeholder_0_cells_stat_4_t_max_value",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "dc_conv_dc_conv_struct_1_p_dc",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_cells_stat_4_t_max_time",
+      "data_type": "t_uint32",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    {
+      "name": "io_board_io1_s0_min_duration",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_placeholder_0_module_sn_1",
+      "data_type": "t_string"
+    },
+    {
+      "name": "io_board_rse_table_5",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_efficiency",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_placeholder_0_cells_stat_5_t_min_time",
+      "data_type": "t_uint32",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    {
+      "name": "power_mng_minimum_discharge_voltage",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "energy_e_dc_year_0",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "g_sync_u_sg_avg_1",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "db_power_board_status",
+      "data_type": "t_uint16",
+      "minimum": 0,
+      "maximum": 65535
+    },
+    {
+      "name": "hw_test_bt_power_5",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_minimum_discharge_voltage",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "acc_conv_i_charge_max",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_placeholder_0_cells_stat_1_t_min_time",
+      "data_type": "t_uint32",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    {
+      "name": "osci_struct_cmd_response_time",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_placeholder_0_cells_stat_4_u_min_value",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "energy_total",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "logger_day_egrid_feed_log_ts",
+      "data_type": "t_int32",
+      "minimum": -2147483648,
+      "maximum": 2147483647
+    },
+    {
+      "name": "g_sync_p_ac_sc_2",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_placeholder_0_cells_stat_3_t_max_time",
+      "data_type": "t_uint32",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    {
+      "name": "last_successfull_flash_op",
+      "data_type": "t_int16",
+      "minimum": -32768,
+      "maximum": 32767
+    },
+    {
+      "name": "solar_a_voltage",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "bat_mng_struct_k_trust",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_placeholder_0_cells_stat_4_u_min_index",
+      "data_type": "t_uint8",
+      "minimum": 0,
+      "maximum": 255
+    },
+    {
+      "name": "battery_placeholder_0_soc_update_since",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "acc_conv_i_acc_lp_slow",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "wifi_state",
+      "data_type": "t_uint8",
+      "minimum": 0,
+      "maximum": 255
+    },
+    {
+      "name": "p_rec_available_0",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_cells_stat_1_u_min_value",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "dc_conv_dc_conv_struct_0_p_dc",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "g_sync_u_sg_avg_0",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_ah_capacity",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_placeholder_0_cells_stat_3_u_max_value",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "power_mng_bat_next_calib_date",
+      "data_type": "t_uint32",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    {
+      "name": "db_power_board_current_ac_rms",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_placeholder_0_cells_stat_5_u_max_index",
+      "data_type": "t_uint8",
+      "minimum": 0,
+      "maximum": 255
+    },
+    {
+      "name": "nsm_cos_phi_const",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "energy_e_dc_total_sum_0",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "wifi_use_ethernet",
+      "data_type": "t_bool"
+    },
+    {
+      "name": "wifi_connect_service_timestamp",
+      "data_type": "t_int32",
+      "minimum": -2147483648,
+      "maximum": 2147483647
+    },
+    {
+      "name": "battery_cells_stat_2_u_min_time",
+      "data_type": "t_uint32",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    {
+      "name": "dc_conv_dc_conv_struct_1_rescan_correction",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_soc_target_high",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "adc_u_acc",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "io_board_rse_table_11",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "nsm_min_cos_phi",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "g_sync_p_ac_lp_2",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "energy_e_ext_day",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_cells_stat_5_u_min_index",
+      "data_type": "t_uint8",
+      "minimum": 0,
+      "maximum": 255
+    },
+    {
+      "name": "battery_placeholder_0_cells_stat_5_t_max_value",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "dc_conv_dc_conv_struct_0_mpp_mpp_step",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_cells_stat_1_t_min_time",
+      "data_type": "t_uint32",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    {
+      "name": "nsm_u_q_u_1",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "io_board_p_rse_rise_grad",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "g_sync_q_ac_2",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "io_board_home_relay_threshold",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "power_mng_battery_power_extern",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "power_mng_soc_charge",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "can_bus_set_cell_resist",
+      "data_type": "t_uint32",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    {
+      "name": "energy_e_ac_day",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "energy_e_dc_year_1",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_placeholder_0_ah_capacity",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_cells_stat_6_t_max_index",
+      "data_type": "t_uint8",
+      "minimum": 0,
+      "maximum": 255
+    },
+    {
+      "name": "io_board_rse_table_3",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "svnversion_factory",
+      "data_type": "t_string"
+    },
+    {
+      "name": "net_n_slaves",
+      "data_type": "t_uint8",
+      "minimum": 0,
+      "maximum": 255
+    },
+    {
+      "name": "g_sync_p_ac_2",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_placeholder_0_bms_software_version",
+      "data_type": "t_uint32",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    {
+      "name": "battery_cells_stat_2_t_min_time",
+      "data_type": "t_uint32",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    {
+      "name": "nsm_q_u_sel",
+      "data_type": "t_enum",
+      "minimum": 0,
+      "maximum": 255
+    },
+    {
+      "name": "db_power_board_afi_t30",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "energy_e_ac_year",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_cycles",
+      "data_type": "t_int32",
+      "minimum": -2147483648,
+      "maximum": 2147483647
+    },
+    {
+      "name": "g_sync_u_zk_p_avg",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "hw_test_bt_power_1",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "display_struct_variate_contrast",
+      "data_type": "t_uint8",
+      "minimum": 0,
+      "maximum": 255
+    },
+    {
+      "name": "db_core_temp",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "nsm_rpm",
+      "data_type": "t_enum",
+      "minimum": 0,
+      "maximum": 255
+    },
+    {
+      "name": "i_ac_max_set",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "i_ac_extern_connected",
+      "data_type": "t_bool"
+    },
+    {
+      "name": "hw_test_bt_time_4",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "partition_6_last_id",
+      "data_type": "t_int32",
+      "minimum": -2147483648,
+      "maximum": 2147483647
+    },
+    {
+      "name": "prim_sm_state_source",
+      "data_type": "t_uint32",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    {
+      "name": "battery_cells_stat_1_u_max_index",
+      "data_type": "t_uint8",
+      "minimum": 0,
+      "maximum": 255
+    },
+    {
+      "name": "nsm_u_lock_out",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "prim_sm_island_retrials",
+      "data_type": "t_uint16",
+      "minimum": 0,
+      "maximum": 65535
+    },
+    {
+      "name": "frt_u_min_1",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "logger_year_egrid_load_log_ts",
+      "data_type": "t_int32",
+      "minimum": -2147483648,
+      "maximum": 2147483647
+    },
+    {
+      "name": "battery_placeholder_0_cells_stat_4_t_max_index",
+      "data_type": "t_uint8",
+      "minimum": 0,
+      "maximum": 255
+    },
+    {
+      "name": "acc_conv_i_discharge_max",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_placeholder_0_temperature",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "hw_test_bt_time_1",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_cells_stat_6_u_max_time",
+      "data_type": "t_uint32",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    {
+      "name": "hw_test_bt_power_3",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_placeholder_0_cells_stat_2_t_min_index",
+      "data_type": "t_uint8",
+      "minimum": 0,
+      "maximum": 255
+    },
+    {
+      "name": "iso_struct_riso",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "power_mng_force_inv_class",
+      "data_type": "t_enum",
+      "minimum": 0,
+      "maximum": 255
+    },
+    {
+      "name": "io_board_s0_sum",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "energy_e_load_year",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_placeholder_0_cells_stat_4_t_max_time",
+      "data_type": "t_uint32",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    {
+      "name": "battery_cells_3",
+      "data_type": "t_string"
+    },
+    {
+      "name": "battery_cells_stat_0_u_min_time",
+      "data_type": "t_uint32",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    {
+      "name": "battery_stack_software_version_2",
+      "data_type": "t_uint32",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    {
+      "name": "battery_placeholder_0_maximum_charge_voltage",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_placeholder_0_stack_cycles_0",
+      "data_type": "t_uint16",
+      "minimum": 0,
+      "maximum": 65535
+    },
+    {
+      "name": "power_mng_is_island_only",
+      "data_type": "t_bool"
+    },
+    {
+      "name": "energy_e_dc_day_sum_0",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_placeholder_0_cells_stat_5_u_max_time",
+      "data_type": "t_uint32",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    {
+      "name": "logger_day_eload_log_ts",
+      "data_type": "t_int32",
+      "minimum": -2147483648,
+      "maximum": 2147483647
+    },
+    {
+      "name": "g_sync_s_ac_0",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "io_board_io2_s0_min_duration",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "frt_t_max_1",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_placeholder_0_cells_stat_3_u_min_value",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "nsm_q_const",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_placeholder_0_cells_stat_2_u_max_time",
+      "data_type": "t_uint32",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    {
+      "name": "logger_minutes_ebat_log_ts",
+      "data_type": "t_int32",
+      "minimum": -2147483648,
+      "maximum": 2147483647
+    },
+    {
+      "name": "hw_test_timer2",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "nsm_q_u_max_u_low",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_placeholder_0_cells_stat_3_t_min_value",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "power_mng_soc_min",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_placeholder_0_cells_stat_2_t_max_index",
+      "data_type": "t_uint8",
+      "minimum": 0,
+      "maximum": 255
+    },
+    {
+      "name": "prim_sm_phase_3_mode",
+      "data_type": "t_bool"
+    },
+    {
+      "name": "g_sync_u_l_rms_0",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_placeholder_0_stack_software_version_4",
+      "data_type": "t_uint32",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    {
+      "name": "battery_cells_stat_1_t_min_value",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "can_bus_set_cell_v_t",
+      "data_type": "t_uint32",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    {
+      "name": "flash_rtc_time_stamp",
+      "data_type": "t_uint32",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    {
+      "name": "power_mng_stop_charge_current",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "power_mng_soc_target_set",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_placeholder_0_cells_stat_4_u_min_time",
+      "data_type": "t_uint32",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    {
+      "name": "battery_placeholder_0_cells_stat_5_t_min_index",
+      "data_type": "t_uint8",
+      "minimum": 0,
+      "maximum": 255
+    },
+    {
+      "name": "net_soc_av",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "logger_minutes_temp_bat_log_ts",
+      "data_type": "t_int32",
+      "minimum": -2147483648,
+      "maximum": 2147483647
+    },
+    {
+      "name": "battery_placeholder_0_cells_stat_0_t_max_time",
+      "data_type": "t_uint32",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    {
+      "name": "cs_map_2",
+      "data_type": "t_uint8",
+      "minimum": 0,
+      "maximum": 255
+    },
+    {
+      "name": "io_board_rse_table_13",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "hw_test_bt_time_7",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "net_slave_timeout",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "frt_u_max_1",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "partition_4_last_id",
+      "data_type": "t_int32",
+      "minimum": -2147483648,
+      "maximum": 2147483647
+    },
+    {
+      "name": "wifi_use_wifi",
+      "data_type": "t_bool"
+    },
+    {
+      "name": "nsm_u_lock_in",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_cells_stat_1_u_min_time",
+      "data_type": "t_uint32",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    {
+      "name": "battery_placeholder_0_cells_stat_6_t_max_value",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_placeholder_0_cells_stat_3_u_min_index",
+      "data_type": "t_uint8",
+      "minimum": 0,
+      "maximum": 255
+    },
+    {
+      "name": "wifi_server_port",
+      "data_type": "t_int32",
+      "minimum": -2147483648,
+      "maximum": 2147483647
+    },
+    {
+      "name": "battery_placeholder_0_cells_stat_0_u_min_index",
+      "data_type": "t_uint8",
+      "minimum": 0,
+      "maximum": 255
+    },
+    {
+      "name": "nsm_pf_desc_grad",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "energy_e_grid_load_year_sum",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "grid_lt_timeframe",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "acc_conv_state_slow",
+      "data_type": "t_uint8",
+      "minimum": 0,
+      "maximum": 255
+    },
+    {
+      "name": "energy_e_grid_load_month_sum",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "osci_struct_error",
+      "data_type": "t_int16",
+      "minimum": -32768,
+      "maximum": 32767
+    },
+    {
+      "name": "io_board_p_rse_desc_grad",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "solar_a_power",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "ac_power",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "dc_conv_dc_conv_struct_0_rescan_correction",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "net_n_devices",
+      "data_type": "t_uint8",
+      "minimum": 0,
+      "maximum": 255
+    },
+    {
+      "name": "power_mng_state",
+      "data_type": "t_uint8",
+      "minimum": 0,
+      "maximum": 255
+    },
+    {
+      "name": "g_sync_s_ac_sum_lp",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "g_sync_i_dr_lp_1",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_cells_stat_0_t_min_index",
+      "data_type": "t_uint8",
+      "minimum": 0,
+      "maximum": 255
+    },
+    {
+      "name": "flash_rtc_time_stamp_update",
+      "data_type": "t_uint32",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    {
+      "name": "svnversion",
+      "data_type": "t_string"
+    },
+    {
+      "name": "energy_e_grid_load_year",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "bat_mng_struct_profile_pext",
+      "data_type": "t_string"
+    },
+    {
+      "name": "battery_cells_stat_5_t_max_value",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_cells_resist_4",
+      "data_type": "t_string"
+    },
+    {
+      "name": "battery_maximum_discharge_current",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "bat_mng_struct_profile_pdc",
+      "data_type": "t_string"
+    },
+    {
+      "name": "db_power_board_current_mean_mean_ac",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_cells_stat_6_t_min_index",
+      "data_type": "t_uint8",
+      "minimum": 0,
+      "maximum": 255
+    },
+    {
+      "name": "logger_day_eac_log_ts",
+      "data_type": "t_int32",
+      "minimum": -2147483648,
+      "maximum": 2147483647
+    },
+    {
+      "name": "cs_map_0",
+      "data_type": "t_uint8",
+      "minimum": 0,
+      "maximum": 255
+    },
+    {
+      "name": "i_dc_slow_max",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_placeholder_0_cells_stat_4",
+      "data_type": "t_string"
+    },
+    {
+      "name": "battery_placeholder_0_cells_resist_1",
+      "data_type": "t_string"
+    },
+    {
+      "name": "frt_t_min_2",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "power_mng_schedule_1",
+      "data_type": "t_string"
+    },
+    {
+      "name": "nsm_u_q_u_2",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "logger_minutes_eac3_log_ts",
+      "data_type": "t_int32",
+      "minimum": -2147483648,
+      "maximum": 2147483647
+    },
+    {
+      "name": "prim_sm_uzk_pump_grad_0",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "acc_conv_i_max",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "nsm_pf_rise_grad",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "logger_month_eext_log_ts",
+      "data_type": "t_int32",
+      "minimum": -2147483648,
+      "maximum": 2147483647
+    },
+    {
+      "name": "battery_placeholder_0_maximum_charge_voltage_constant_u",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "io_board_home_relay_off_threshold",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "logger_year_eload_log_ts",
+      "data_type": "t_int32",
+      "minimum": -2147483648,
+      "maximum": 2147483647
+    },
+    {
+      "name": "hw_test_bt_power_8",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_placeholder_0_module_sn_2",
+      "data_type": "t_string"
+    },
+    {
+      "name": "flash_result",
+      "data_type": "t_uint16",
+      "minimum": 0,
+      "maximum": 65535
+    },
+    {
+      "name": "nsm_pu_ts",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_cells_stat_2_u_max_value",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_bat_impedance_impedance_fine",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_placeholder_0_cells_stat_0_u_min_value",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "g_sync_q_ac_0",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "nsm_q_u_max_u_low_rel",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "io_board_s0_external_power",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "power_mng_amp_hours_measured",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_placeholder_0_min_cell_voltage",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_minimum_discharge_voltage_constant_u",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "energy_e_dc_month_sum_0",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_cells_resist_6",
+      "data_type": "t_string"
+    },
+    {
+      "name": "nsm_p_u_1_1",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_placeholder_0_bms_sn",
+      "data_type": "t_string"
+    },
+    {
+      "name": "android_description",
+      "data_type": "t_string"
+    },
+    {
+      "name": "grid_mon_0_f_over_threshold",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "switch_on_cond_test_time",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "nsm_pf_hysteresis",
+      "data_type": "t_bool"
+    },
+    {
+      "name": "battery_stack_software_version_5",
+      "data_type": "t_uint32",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    {
+      "name": "battery_placeholder_0_cells_stat_2_u_min_index",
+      "data_type": "t_uint8",
+      "minimum": 0,
+      "maximum": 255
+    },
+    {
+      "name": "battery_cells_stat_2_u_min_value",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "grid_mon_0_u_under_time",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_cells_stat_5_t_min_time",
+      "data_type": "t_uint32",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    {
+      "name": "energy_e_load_total",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "partition_0_last_id",
+      "data_type": "t_int32",
+      "minimum": -2147483648,
+      "maximum": 2147483647
+    },
+    {
+      "name": "battery_cells_stat_3_t_max_value",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "db_power_board_adc_p3v3_meas",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "grid_mon_1_u_over_time",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "bat_mng_struct_k",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "g_sync_p_ac_load_2",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "energy_e_load_month",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "power_mng_stop_discharge_current",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "power_mng_soc_strategy",
+      "data_type": "t_enum",
+      "minimum": 0,
+      "maximum": 255
+    },
+    {
+      "name": "battery_placeholder_0_cells_resist_3",
+      "data_type": "t_string"
+    },
+    {
+      "name": "grid_mon_1_f_under_time",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_placeholder_0_cells_stat_1_t_min_value",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "nsm_p_limit",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "display_struct_contrast",
+      "data_type": "t_uint8",
+      "minimum": 0,
+      "maximum": 255
+    },
+    {
+      "name": "nsm_cos_phi_p_3_0",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_cells_stat_1_t_max_value",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "g_sync_u_ptp_rms_2",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "logger_month_eac_log_ts",
+      "data_type": "t_int32",
+      "minimum": -2147483648,
+      "maximum": 2147483647
+    },
+    {
+      "name": "p_buf_available",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "power_mng_calib_charge_power",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "nsm_pf_use_p_max",
+      "data_type": "t_bool"
+    },
+    {
+      "name": "battery_cells_resist_2",
+      "data_type": "t_string"
+    },
+    {
+      "name": "io_board_alarm_home_value",
+      "data_type": "t_enum",
+      "minimum": 0,
+      "maximum": 255
+    },
+    {
+      "name": "battery_placeholder_0_cells_stat_0_t_min_time",
+      "data_type": "t_uint32",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    {
+      "name": "buf_v_control_power_reduction_max_solar_grid",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "nsm_p_u_2_1",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "power_mng_schedule_7",
+      "data_type": "t_string"
+    },
+    {
+      "name": "battery_cells_stat_4_u_max_value",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "g_sync_p_ac_sc_1",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "bat_mng_struct_k_reserve",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_placeholder_0_cells_stat_6_u_max_time",
+      "data_type": "t_uint32",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    {
+      "name": "battery_placeholder_0_cells_stat_1_u_max_time",
+      "data_type": "t_uint32",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    {
+      "name": "nsm_f_entry",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_placeholder_0_cells_stat_1_u_max_index",
+      "data_type": "t_uint8",
+      "minimum": 0,
+      "maximum": 255
+    },
+    {
+      "name": "logger_minutes_temp_log_ts",
+      "data_type": "t_int32",
+      "minimum": -2147483648,
+      "maximum": 2147483647
+    },
+    {
+      "name": "heat_sink_temperature",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "dc_conv_last_rescan",
+      "data_type": "t_uint32",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    {
+      "name": "battery_cells_0",
+      "data_type": "t_string"
+    },
+    {
+      "name": "wifi_connected_ap_ssid",
+      "data_type": "t_string"
+    },
+    {
+      "name": "battery_cells_stat_6",
+      "data_type": "t_string"
+    },
+    {
+      "name": "wifi_service_ip",
+      "data_type": "t_string"
+    },
+    {
+      "name": "battery_cells_stat_3_t_min_time",
+      "data_type": "t_uint32",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    {
+      "name": "io_board_check_s0_result",
+      "data_type": "t_uint16",
+      "minimum": 0,
+      "maximum": 65535
+    },
+    {
+      "name": "nsm_f_low_rise_grad",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "rb485_f_grid_1",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "bat_mng_struct_count",
+      "data_type": "t_string"
+    },
+    {
+      "name": "prim_sm_minigrid_flag",
+      "data_type": "t_bool"
+    },
+    {
+      "name": "battery_cells_stat_1",
+      "data_type": "t_string"
+    },
+    {
+      "name": "power_mng_amp_hours",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "energy_e_dc_day_1",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_module_sn_0",
+      "data_type": "t_string"
+    },
+    {
+      "name": "energy_e_grid_load_day_sum",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "energy_e_ac_month_sum",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_placeholder_0_cells_stat_6_t_max_time",
+      "data_type": "t_uint32",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    {
+      "name": "bat_mng_struct_bat_calib_soc_threshold",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "energy_e_dc_total_0",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_placeholder_0_voltage",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "nsm_rpm_lock_in_power",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "logger_day_ea_log_ts",
+      "data_type": "t_int32",
+      "minimum": -2147483648,
+      "maximum": 2147483647
+    },
+    {
+      "name": "grid_mon_1_f_over_time",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "frt_enabled",
+      "data_type": "t_bool"
+    },
+    {
+      "name": "energy_e_grid_feed_day_sum",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_cells_stat_3_u_max_index",
+      "data_type": "t_uint8",
+      "minimum": 0,
+      "maximum": 255
+    },
+    {
+      "name": "buf_v_control_power_reduction",
+      "data_type": "t_float",
+      "minimum": -3.4028234663852886e+38,
+      "maximum": 3.4028234663852886e+38
+    },
+    {
+      "name": "battery_placeholder_0_cells_stat_5",
+      "data_type": "t_string"
+    },
+    {
+      "name": "battery_cells_stat_0_u_min_index",
+      "data_type": "t_uint8",
+      "minimum": 0,
+      "maximum": 255
+    },
+    {
+      "name": "dc_conv_dc_conv_struct_1_enabled",
+      "data_type": "t_bool"
+    },
+    {
+      "name": "wifi_server_ip",
+      "data_type": "t_string"
+    }
+  ]
+}

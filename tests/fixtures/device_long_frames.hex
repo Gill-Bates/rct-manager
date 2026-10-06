@@ -1,0 +1,58 @@
+# Real device bytes, captured passively. Regression vectors for StreamParser.
+#
+# Origin:  RCT Power DC 10.0, firmware 2.3.5687, captured 2026-10-02 from two
+#          passive listening sessions (45 s and 55 s). Not a single byte was sent
+#          to the device: 0 reads, 0 writes, 0 periodic registrations. The frames
+#          are the device's answers to a foreign client, mirrored to all listeners.
+#
+# Content: one raw byte sequence per non-comment line, exactly as it appeared on
+#          the wire (escaped, starting with the start byte 0x2B for frames). Each
+#          sequence is introduced by a '# (x) ...' comment and is loaded by tag in
+#          tests/test_stream_device_frames.py.
+#
+# Anonymisation: only LONG RESPONSE frames (0x06) are taken. They carry nothing but
+#          logger timestamps and float values. The short 0x05 frames of the capture
+#          are deliberately NOT included because they carry the serial number and the
+#          device name (object ids 0x7924ABD9, 0xC0A7074F, 0x16A1F844, 0x68BC034D).
+#          Every sequence was checked for printable ASCII runs of four characters or
+#          more; a run found this way is replaced by 'X' of the same length, the CRC
+#          is recomputed with app.protocol.crc.crc16_ccitt and the body is re-escaped
+#          with app.protocol.escaping.escape_body.
+#
+# ASCII check result: (a) held two runs of four bytes each, ')`>?' and '(4>S', both
+#          float and timestamp bytes rather than text; they were replaced as described
+#          above, so (a) is a real device frame with four payload bytes substituted and
+#          a recomputed CRC. Its declared length (16) and its measured body length (32)
+#          are the originals, which is what the regression test exercises. (b) to (g)
+#          held no run and are byte-identical to the capture. The replacement bytes
+#          themselves form two runs of four 'X', which carry no information.
+#
+# The CRC of (a) to (e) verifies over the measured body, never over the declared one.
+
+# (a) LONG RESPONSE, object id 0x5293B668, capture 1 raw offset 978.
+#      Declared length 16, measured body 32 bytes, 28 bytes of payload. ASCII runs [')`>?', '(4>S'] replaced by 'X', CRC recomputed, body re-escaped.
+2b0600105293b6686ac0a7046ac058585858f0406ac058585858aae56ac027083e68d4908cc0
+
+# (b) LONG RESPONSE, object id 0x9247DB99, capture 2 raw offset 2423.
+#      Declared length 8, measured body 24 bytes, 20 bytes of payload.
+2b0600089247db996ac0a9826ac02d2bb83e5697096ac02a8c4211c0fbb86b
+
+# (c) LONG RESPONSE, object id 0xCBDAD315, capture 1 raw offset 1239.
+#      Declared length 488, measured body 16 bytes, 12 bytes of payload.
+2b0601e8cbdad3156ac0a7046ac02960000000043aa8
+
+# (d) LONG RESPONSE, object id 0xCBDAD315, capture 2 raw offset 2575.
+#      Declared length 488, measured body 8 bytes, 4 bytes of payload.
+2b0601e8cbdad3156ac0a98283e7
+
+# (e) LONG RESPONSE, object id 0x3906A1D0, capture 1 raw offset 1301.
+#      Declared length 480, measured body 480 bytes, 476 bytes of payload.
+2b0601e03906a1d06ac0a7046ac02960000000006ac02834000000006ac02708000000006ac025dc000000006ac024b0000000006ac02384000000006ac02258000000006ac0212c000000006ac02000000000006ac01ed4000000006ac01da8000000006ac01c7c000000006ac01b50000000006ac01a24000000006ac018f8000000006ac017cc000000006ac016a0000000006ac01574000000006ac01448000000006ac0131c000000006ac011f0000000006ac010c4000000006ac00f98000000006ac00e6c000000006ac00d40000000006ac00c14000000006ac00ae8000000006ac009bc000000006ac00890000000006ac00764000000006ac00638000000006ac0050c000000006ac003e0000000006ac002b4000000006ac00188000000006ac0005c000000006abfff30000000006abffe04000000006abffcd8000000006abffbac000000006abffa80000000006abff954000000006abff828000000006abff6fc000000006abff5d0000000006abff4a4000000006abff378000000006abff24c000000006abff120000000006abfeff4000000006abfeec8000000006abfed9c000000006abfec70000000006abfeb44000000006abfea18000000006abfe8ec000000006abfe7c0000000006abfe694000000006abfe568000000007163
+
+# (f) Serial-bridge burst, capture 2 raw offset 978, 26 bytes, no frame at all:
+#      '+++' followed by CR and UART framing noise. The separator null that follows
+#      it in the capture is listed separately as (g).
+2b2b2b0d2b2b2bf8781e78fe781e78fe781ef89e869e869e86e9
+
+# (g) A single separator null byte as it precedes a frame in the stream.
+00

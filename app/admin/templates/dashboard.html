@@ -1,0 +1,91 @@
+{% extends "base.html" %}
+{% block title %}Overview – RCT Administration{% endblock %}
+{% block content %}
+<div class="page-heading">
+  <div>
+    <h1>Overview</h1>
+    <p class="text-secondary mb-0">Connected inverters and server status</p>
+  </div>
+</div>
+<p id="dashboard-updated" class="text-secondary small mb-0" role="status" tabindex="-1"></p>
+<div class="kpi-grid my-4" id="dashboard-kpis" aria-live="polite">
+  <div class="card kpi-card">
+    <div class="card-body"><span class="material-icons text-primary" aria-hidden="true">devices</span>
+      <div>
+        <div class="text-secondary small">Inverters</div><strong id="device-count">–</strong>
+      </div>
+    </div>
+  </div>
+  <div class="card kpi-card">
+    <div class="card-body"><span class="material-icons text-success" aria-hidden="true">check_circle</span>
+      <div>
+        <div class="text-secondary small">Connected</div><strong id="connected-count">–</strong>
+      </div>
+    </div>
+  </div>
+  <div class="card kpi-card">
+    <div class="card-body"><span class="material-icons text-primary" aria-hidden="true">monitoring</span>
+      <div>
+        <div class="text-secondary small">Exposed metrics</div><strong id="metric-count">–</strong>
+      </div>
+    </div>
+  </div>
+  <div class="card kpi-card">
+    <div class="card-body"><span class="material-icons text-warning" aria-hidden="true">wb_sunny</span>
+      <div>
+        <div class="text-secondary small">PV power</div><strong id="pv-power">–</strong>
+      </div>
+    </div>
+  </div>
+  <div class="card kpi-card">
+    <div class="card-body"><span class="material-icons text-primary" aria-hidden="true">home</span>
+      <div>
+        <div class="text-secondary small">House consumption</div><strong id="house-power">–</strong>
+      </div>
+    </div>
+  </div>
+  <div class="card kpi-card">
+    <div class="card-body"><span class="material-icons text-primary" aria-hidden="true">electric_meter</span>
+      <div>
+        <div class="text-secondary small">Grid power</div><strong id="grid-power">–</strong>
+      </div>
+    </div>
+  </div>
+  <div class="card kpi-card">
+    <div class="card-body"><span class="material-icons text-success" aria-hidden="true">battery_charging_full</span>
+      <div>
+        <div class="text-secondary small">Battery level</div><strong id="battery-soc">–</strong>
+      </div>
+    </div>
+  </div>
+</div>
+<section>
+  <div class="d-flex align-items-center justify-content-between mb-3">
+    <h2 class="h5 mb-0">Inverters</h2><button id="add-inverter" class="btn btn-primary d-inline-flex align-items-center gap-1"
+      type="button" data-bs-toggle="modal" data-bs-target="#inverters-modal" title="Manage inverters"><span
+        class="material-icons" aria-hidden="true">add</span>Add inverter</button>
+  </div>
+  <div id="devices-list" class="device-grid" aria-live="polite">
+    <p class="text-secondary mb-0">Loading inverters …</p>
+  </div>
+</section>
+<div id="inverters-modal" class="modal fade" tabindex="-1" aria-labelledby="inverters-modal-title" aria-hidden="true">
+  <div class="modal-dialog modal-lg modal-dialog-scrollable">
+    <div class="modal-content">
+      <div class="modal-header">
+        <div>
+          <h2 id="inverters-modal-title" class="modal-title h5">Inverters</h2>
+          <p class="text-secondary small mb-0">Changes are saved automatically.</p>
+        </div><button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <div id="settings-sections" aria-live="polite">
+          <p class="text-secondary">Loading settings …</p>
+        </div>
+      </div>
+      <div class="modal-footer"><span id="save-state" class="save-state text-secondary small me-auto"
+          aria-live="polite"></span></div>
+    </div>
+  </div>
+</div>
+{% endblock %}

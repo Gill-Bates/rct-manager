@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block title %}Inverters – RCT Administration{% endblock %}
+{% block content %}
+<div class="page-heading">
+    <div>
+        <h1>Inverters</h1>
+        <p class="text-secondary mb-0">Manage write access and writable parameters. Changes are saved automatically.</p>
+    </div><span id="save-state" class="save-state text-secondary small" aria-live="polite"></span>
+</div>
+<div id="settings-sections" class="settings-grid mt-4" aria-live="polite">
+    <p class="text-secondary">Loading settings …</p>
+</div>
+<section class="card mt-4">
+    <div class="card-body">
+        <h2 class="h5">Writable parameters</h2>
+        <p class="text-secondary small">Only the selected writable parameters accept write requests, and only while
+            write access is enabled. Where the catalog documents a parameter, its explanation appears under the name.
+            Numeric limits are wire type limits, not safe operating limits.</p><label for="write-search"
+            class="form-label">Search writable parameters</label><input id="write-search" class="form-control mb-3"
+            type="search" autocomplete="off" placeholder="Name, description or explanation">
+        <div id="writable-list" class="parameter-list parameter-scroll" aria-label="Writable parameters" tabindex="0">
+        </div>
+    </div>
+</section>
+{% endblock %}
