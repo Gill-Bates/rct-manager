@@ -17,7 +17,6 @@
 | DELETE | `/api/v1/devices/{device_id}/battery/dispatch` | read/write | Stop dispatch and restore the previous inverter settings |
 | GET | `/api/v1/devices/{device_id}/energy` | read/write | Energy Manager state, readings, target window and action availability |
 | POST | `/api/v1/devices/{device_id}/energy/command` | read/write | One business action: charge, discharge, hold, auto |
-| PUT | `/api/v1/devices/{device_id}/energy/armed` | read/write | Switch the Energy Manager on or off for one inverter |
 | GET | `/api/v1/vendor/rct/objects`, `/transports`, `/devices/{device_id}/slaves` | read/write | RCT diagnostics |
 
 `/metrics` (Prometheus) and `/api/v1/metrics` (metric list) are different on
@@ -127,8 +126,8 @@ curl -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/jso
   http://127.0.0.1:8000/api/v1/devices/main/energy/command
 ```
 
-- `409 energy_manager_disarmed` — the Energy Manager is off for this inverter; switch it on with
-  `PUT .../energy/armed` first.
+- `409 energy_manager_disarmed` — the Energy Manager is off for this inverter; an operator has to switch it on
+  in the admin GUI first (arming is not part of the public API).
 - `409 energy_write_support_required` — write access must be enabled (and the four dispatch
   registers must be offered by the configured write allowlist) before the Energy Manager can be
   switched on.

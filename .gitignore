@@ -15,10 +15,10 @@ data/
 .hypothesis/
 .pytest_cache/
 .ruff_cache/
+*.zip
 
 # Documentation build output
 /site/
-*.zip/
 
 # Local agent state
 .omc/

@@ -752,123 +752,285 @@ body {
     flex: 1 1 auto;
 }
 
-/* Energy Manager cards get their own, narrower grid instead of reusing .settings-grid: that class
-   is shared with settings/prometheus pages, and halving its min width there would shrink cards
-   that were never asked for. 11rem (not an exact half of 19rem) keeps the command form's select,
-   number input and button from looking broken at the floor width; two cards still fit per row on
-   a typical desktop viewport, which is what was asked for. */
+/* Energy Manager: one panel per inverter, live flow on the left, control on the right. Everything
+   animated is driven by measured values only (see updateEnergyFlow in admin.js). */
 .energy-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(min(11rem, 100%), 1fr));
+    grid-template-columns: minmax(0, 1fr);
     gap: 1.25rem;
-    align-items: stretch;
 }
 
-.energy-grid>.card {
-    display: flex;
-    flex-direction: column;
-}
-
-.energy-grid>.card>.card-body {
-    flex: 1 1 auto;
-}
-
-/* Own containment context so the body-split and metric-grid container queries below react to the
-   card's own width, not the viewport - same technique as .device-item on the dashboard. */
-.energy-card {
+.energy-panel {
     container-type: inline-size;
     min-width: 0;
 }
 
-/* Content left, flow graphic right - same image-plus-content shape as .device-subcard-body, just
-   with the illustration on the trailing side since it is a secondary indicator here, not the
-   card's subject. */
-.energy-card-body {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) 4.5rem;
-    align-items: start;
-    gap: .85rem;
-    min-width: 0;
-}
-
-.energy-card-content {
-    min-width: 0;
-}
-
-@container (max-width: 20rem) {
-    .energy-card-body {
-        grid-template-columns: minmax(0, 1fr);
-    }
-
-    .energy-flow-graphic {
-        flex-direction: row;
-        justify-content: center;
-        margin-bottom: .75rem;
-    }
-}
-
-/* Scoped to the energy card: .device-metric-grid is shared with the dashboard's wider device-item
-   cards, which must keep their 2-column layout untouched. */
-@container (max-width: 16rem) {
-    .energy-card .device-metric-grid {
-        grid-template-columns: minmax(0, 1fr);
-    }
-}
-
-/* Battery icon, traveling arrow, pylon stand-in icon - .device-flow's colour/icon convention is
-   reused as-is (see gridFlow/flowNode), only the travelling animation is new here. */
-.energy-flow-graphic {
+.energy-head {
     display: flex;
-    flex-direction: column;
     align-items: center;
-    gap: .35rem;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: .75rem;
+}
+
+.energy-head-title {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: .6rem;
     min-width: 0;
 }
 
-.energy-flow-icon {
-    font-size: 1.6rem;
+.energy-switch {
+    display: flex;
+    align-items: center;
+    gap: .6rem;
+}
+
+.energy-switch .form-check-input {
+    width: 2.6rem;
+    height: 1.4rem;
+    margin: 0;
+    cursor: pointer;
+}
+
+.energy-switch-label {
+    font-weight: 600;
+    min-width: 8.5rem;
+}
+
+.energy-body {
+    display: grid;
+    grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr);
+    gap: 1.5rem;
+    align-items: start;
+}
+
+@container (max-width: 46rem) {
+    .energy-body {
+        grid-template-columns: minmax(0, 1fr);
+    }
+}
+
+.energy-flow-svg {
+    display: block;
+    width: 100%;
+    max-width: 30rem;
+    height: auto;
+    margin-inline: auto;
+}
+
+.flow-node-ring {
+    fill: var(--bs-body-bg);
+    stroke: var(--bs-border-color);
+    stroke-width: 2;
+}
+
+.flow-node-icon {
+    font-family: 'Material Icons', sans-serif;
+    font-size: 30px;
+    fill: var(--bs-secondary-color);
+    text-anchor: middle;
+    dominant-baseline: central;
+}
+
+.flow-node-label {
+    font-size: 12px;
+    fill: var(--bs-secondary-color);
+    text-anchor: middle;
+}
+
+.flow-node-value {
+    font-size: 15px;
+    font-weight: 600;
+    fill: var(--bs-body-color);
+    text-anchor: middle;
+    font-variant-numeric: tabular-nums;
+}
+
+.flow-node-sub {
+    font-size: 12px;
+    fill: var(--bs-secondary-color);
+    text-anchor: middle;
+    font-variant-numeric: tabular-nums;
+}
+
+.flow-node.is-stale .flow-node-value {
+    fill: var(--bs-secondary-color);
+}
+
+.flow-track {
+    fill: none;
+    stroke: var(--bs-border-color);
+    stroke-width: 3;
+    stroke-linecap: round;
+}
+
+.flow-dots {
+    fill: none;
+    stroke: var(--flow-color, var(--bs-secondary-color));
+    stroke-width: 5;
+    stroke-linecap: round;
+    stroke-dasharray: 0.1 14;
+    animation: energy-flow-dash var(--flow-dur, 1s) linear infinite;
+}
+
+.flow-arrow {
+    fill: var(--flow-color, var(--bs-secondary-color));
+}
+
+.flow-line.is-idle .flow-dots {
+    animation: none;
+    stroke-dasharray: none;
+    stroke: none;
+}
+
+.flow-line.is-idle .flow-arrow {
+    display: none;
+}
+
+.flow-line.is-reverse .flow-dots {
+    animation-direction: reverse;
+}
+
+.flow-line.flow-pv {
+    --flow-color: #d99a00;
+}
+
+.flow-line.flow-import {
+    --flow-color: #c2410c;
+}
+
+.flow-line.flow-export {
+    --flow-color: #198754;
+}
+
+.flow-line.flow-charge {
+    --flow-color: #0d6efd;
+}
+
+.flow-line.flow-discharge {
+    --flow-color: #198754;
+}
+
+[data-bs-theme="dark"] .flow-line.flow-pv {
+    --flow-color: #f2b632;
+}
+
+[data-bs-theme="dark"] .flow-line.flow-import {
+    --flow-color: #fb923c;
+}
+
+[data-bs-theme="dark"] .flow-line.flow-export,
+[data-bs-theme="dark"] .flow-line.flow-discharge {
+    --flow-color: #4ade80;
+}
+
+[data-bs-theme="dark"] .flow-line.flow-charge {
+    --flow-color: #6ea8fe;
+}
+
+/* One dash period (14 user units) per cycle; the duration is set per line from the measured power. */
+@keyframes energy-flow-dash {
+    to {
+        stroke-dashoffset: -14.1;
+    }
+}
+
+/* Dots stand still; the arrowhead on every active line keeps the direction readable. */
+@media (prefers-reduced-motion: reduce) {
+    .flow-dots {
+        animation: none;
+    }
+}
+
+.energy-status {
+    display: flex;
+    align-items: flex-start;
+    gap: .5rem;
+    padding: .6rem .8rem;
+    border: 1px solid var(--rct-line);
+    border-radius: .5rem;
+    margin-bottom: 1rem;
+}
+
+.energy-status.is-ready {
+    border-color: var(--bs-success-border-subtle);
+    background: var(--bs-success-bg-subtle);
+}
+
+.energy-status.is-blocked {
+    border-color: var(--bs-warning-border-subtle);
+    background: var(--bs-warning-bg-subtle);
+}
+
+.energy-compare {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: .75rem;
+    margin-bottom: 1rem;
+}
+
+.energy-compare-box {
+    border: 1px solid var(--rct-line);
+    border-radius: .5rem;
+    padding: .65rem .8rem;
+    min-width: 0;
+}
+
+.energy-compare-box h3 {
+    font-size: .75rem;
+    text-transform: uppercase;
+    letter-spacing: .04em;
+    color: var(--bs-secondary-color);
+    margin: 0 0 .35rem;
+}
+
+.energy-compare-main {
+    font-weight: 600;
+    overflow-wrap: anywhere;
+}
+
+.energy-actions {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: .5rem;
+}
+
+.energy-actions .energy-action-auto {
+    grid-column: 1 / -1;
+}
+
+.energy-actions .btn.is-selected {
+    background: var(--rct-brand);
+    border-color: var(--rct-brand);
+    color: #fff;
+}
+
+.energy-target {
+    margin-top: .9rem;
+}
+
+.energy-target .form-range {
+    width: 100%;
+}
+
+.energy-target-scale {
+    display: flex;
+    justify-content: space-between;
+    font-size: .8rem;
     color: var(--bs-secondary-color);
 }
 
-.energy-flow-middle {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: .15rem;
-    min-width: 0;
+.energy-advanced summary {
+    cursor: pointer;
+    color: var(--bs-secondary-color);
 }
 
-.energy-flow-value {
-    font-variant-numeric: tabular-nums;
-    white-space: nowrap;
-}
-
-/* Travels across the gap between battery and pylon and fades at each end rather than snapping
-   back, so it reads as flow instead of a shaking icon. Direction follows gridFlow's dir: feed
-   travels toward the pylon, draw reverses the same keyframes to travel toward the battery. */
-@keyframes energy-flow-travel {
-    0% {
-        transform: translateX(-.5rem);
-        opacity: 0;
-    }
-
-    15%,
-    85% {
-        opacity: 1;
-    }
-
-    100% {
-        transform: translateX(.5rem);
-        opacity: 0;
-    }
-}
-
-.energy-flow-arrow {
-    animation: energy-flow-travel 1.6s linear infinite;
-}
-
-.energy-flow-arrow-draw {
-    animation-direction: reverse;
+.energy-advanced-section {
+    border-top: 1px solid var(--rct-line);
+    padding-top: .9rem;
+    margin-top: .9rem;
 }
 
 .setting-row {
@@ -1155,22 +1317,17 @@ samp,
     user-select: all;
 }
 
-.token-row {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 1rem;
-    padding: .9rem 0;
-    border-top: 1px solid var(--rct-line);
+.token-table-wrap {
+    overflow-x: auto;
 }
 
-.token-row:first-child {
-    border-top: 0;
-}
-
-.token-row>div {
-    min-width: 0;
+.token-table th,
+.token-table td {
     overflow-wrap: anywhere;
+}
+
+.token-table .token-nowrap {
+    white-space: nowrap;
 }
 
 .toast-region {
@@ -1222,9 +1379,6 @@ samp,
         margin-left: auto;
     }
 
-    .token-row {
-        align-items: flex-start;
-    }
 }
 
 @media (prefers-reduced-motion: reduce) {

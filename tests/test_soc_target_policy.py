@@ -142,7 +142,7 @@ class FakeRctGateway:
     def __init__(self) -> None:
         self.writes: list[tuple[str, str, object]] = []
 
-    async def write_metric(self, device_id: str, name: str, value) -> WriteOutcome:
+    async def write_metric(self, device_id: str, name: str, value, *, system: bool = False) -> WriteOutcome:
         self.writes.append((device_id, name, value))
         return WriteOutcome(name, value, value, True, False, datetime(2026, 1, 1, tzinfo=UTC))
 

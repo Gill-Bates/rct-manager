@@ -2,16 +2,16 @@
 
 The Energy Manager turns one business decision — "charge to 80 % now" — into a battery dispatch
 command, and it is the surface a tariff-driven automation will use later. This page describes the
-API; it is not a description of a GUI page.
+API. The admin GUI page **Energy Manager** (live energy flow plus manual control) uses the same
+control path: `EnergyManager.command()` and nothing else.
 
-Three endpoints serve it, all under the same `read/write` token and the same write-support switch as
+Two endpoints serve it, all under the same `read/write` token and the same write-support switch as
 [battery dispatch](api/endpoints.md#battery-dispatch):
 
 | Method | Path | Purpose |
 | --- | --- | --- |
 | GET | `/api/v1/devices/{device_id}/energy` | State, readings, effective target window and per-action availability |
 | POST | `/api/v1/devices/{device_id}/energy/command` | One action: `charge`, `discharge`, `hold`, `auto` |
-| PUT | `/api/v1/devices/{device_id}/energy/armed` | Switch the Energy Manager on or off for one inverter |
 
 ## The four actions
 
@@ -61,9 +61,10 @@ process, no matter how much of its TTL was left.
 
 ## Arming the Energy Manager
 
-The Energy Manager is off per inverter until `PUT .../energy/armed` switches it on. A command to a
-device that is not armed answers 409 `energy_manager_disarmed`; arming while write support is
-disabled answers 409 `energy_write_support_required`.
+The Energy Manager is off per inverter until an operator switches it on in the admin GUI
+(**Energy Manager ON/OFF**). Arming is deliberately **not** part of the public API: a token cannot
+switch it on. A command to a device that is not armed answers 409 `energy_manager_disarmed`; arming
+while write support is disabled answers 409 `energy_write_support_required` in the GUI.
 
 Arming is additive and never destructive:
 
@@ -72,6 +73,11 @@ Arming is additive and never destructive:
 - it never resets, reorders or removes anything an operator selected,
 - disarming removes **no** approval. An operator who wants the approvals gone revokes them on the
   **Inverters** page.
+
+!!! warning "Arming widens the generic write allowlist"
+    The four dispatch registers are written to the global admin write allowlist, so arming in the admin GUI
+    also extends the generic
+    `PUT /api/v1/devices/{id}/metrics` for every write token. Disarming does not revert this.
 
 Disarming hands control back first. While the device is still controlled and the handback fails, the
 device stays armed and the call answers 409 `dispatch_restore_required`.
@@ -160,3 +166,23 @@ Full power under one policy and a trickle under the other would confirm the hypo
 device and firmware; charge power measured with the opposite sign points at the sign convention
 instead, which is a capability matter and not a policy matter. Until such a run exists,
 `business_target` stands as the shipped assumption and nothing is marked verified.
+
+## Readings: measured versus commanded
+
+`readings.battery_power_w` is the **measured** battery power in business convention: positive means
+the battery discharges, negative means it charges, `0` means it rests. `commanded_power_w` and
+`commanded_direction` are what the last command **requested**; the two differ while a command
+ramps up or when the inverter limits itself. The measured figures come from the cache only; how
+fresh they are is bounded by the periodic read interval (`PERIODIC_INTERVAL_SECONDS`, default 30 s).
+A per-metric faster interval is not supported by the polling architecture.
+
+## Admin GUI
+
+The page shows a live flow graphic (PV, grid, battery, house) animated exclusively from measured
+values (dot speed proportional to power, direction from the sign, grey and still below 20 W, static
+under `prefers-reduced-motion`) and the manual controls. The browser polls
+`/admin/api/energy/devices` every 3 s; that endpoint reads the cache only. Gate detail, SoC target
+policy, power limits, engineering mode and the hardware verification form (the three capabilities
+`write_path_convention`, `battery_power_sign_convention`, `grid_power_sign_convention`) sit in the
+collapsed **Advanced / Diagnostics** section. A verification is entered by an operator with the
+evidence measured on the device; nothing is verified by default.

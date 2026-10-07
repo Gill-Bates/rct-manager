@@ -428,7 +428,7 @@ async def test_admin_api_verified_capability_lifts_the_gate_for_exactly_that_dev
         put = await harness.client.put(
             "/admin/api/dispatch/devices/main/capabilities/battery_power_sign_convention",
             headers=headers,
-            json={"status": "verified", "verified_device_model": "RCT-Power-Storage-DC", "verified_firmware": "1.0.0"},
+            json={"status": "verified", "verified_device_model": "RCT-Power-Storage-DC", "verified_firmware": "1.0.0", "battery_discharge_positive": True},
         )
         assert put.status_code == 200
         assert put.json()["status"] == "verified"
@@ -545,30 +545,23 @@ async def test_admin_api_put_replaces_the_record_so_an_omitted_evidence_field_re
         assert first.status_code == 200
         assert first.json()["battery_discharge_positive"] is False
 
-        # Same request minus the evidence field: the stored False is not preserved.
-        resent = await harness.client.put(
-            route, headers=headers, json={k: v for k, v in verified.items() if k != "battery_discharge_positive"}
-        )
+        # Same request minus the evidence field (and not VERIFIED, which now demands it): the stored
+        # False is not preserved.
+        resent = await harness.client.put(route, headers=headers, json={"status": "unverified"})
         assert resent.status_code == 200
         assert resent.json()["battery_discharge_positive"] is True
 
 
-async def test_admin_api_keeps_the_assumption_default_when_the_governing_field_is_omitted(
-    tmp_path: Path,
-) -> None:
-    """Omitting a governed field is saying nothing, not setting it — and must not be refused."""
+async def test_admin_api_refuses_verified_sign_convention_without_explicit_flag(tmp_path: Path) -> None:
+    """The flag defaults to True, so an omitted value is no evidence."""
     async with _admin_harness(tmp_path) as (harness, headers):
         resp = await harness.client.put(
-            "/admin/api/dispatch/devices/main/capabilities/battery_power_sign_convention",
+            "/admin/api/dispatch/devices/main/capabilities/grid_power_sign_convention",
             headers=headers,
-            json={
-                "status": "verified",
-                "verified_device_model": "RCT-Power-Storage-DC",
-                "verified_firmware": "1.0.0",
-            },
+            json={"status": "verified", "verified_device_model": "RCT-Power-Storage-DC", "verified_firmware": "1.0.0"},
         )
-        assert resp.status_code == 200
-        assert resp.json()["battery_discharge_positive"] is True
+        assert resp.status_code == 400
+        assert "grid_import_positive" in resp.json()["detail"]
 
 
 @pytest.mark.parametrize("note", [None, "", "   "])
@@ -630,12 +623,12 @@ async def test_admin_api_copy_from_requires_matching_model_and_firmware(tmp_path
         await harness.client.put(
             "/admin/api/dispatch/devices/main/capabilities/grid_power_sign_convention",
             headers=headers,
-            json={"status": "verified", "verified_device_model": "RCT-Power-Storage-DC", "verified_firmware": "1.0.0"},
+            json={"status": "verified", "verified_device_model": "RCT-Power-Storage-DC", "verified_firmware": "1.0.0", "grid_import_positive": True},
         )
         await harness.client.put(
             "/admin/api/dispatch/devices/main/capabilities/battery_power_sign_convention",
             headers=headers,
-            json={"status": "verified", "verified_device_model": "RCT-Power-Storage-DC", "verified_firmware": "2.0.0"},
+            json={"status": "verified", "verified_device_model": "RCT-Power-Storage-DC", "verified_firmware": "2.0.0", "battery_discharge_positive": True},
         )
         # Matching model and firmware: the one capability recorded under that firmware is copied.
         copied = await harness.client.post(

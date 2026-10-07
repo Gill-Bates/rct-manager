@@ -39,7 +39,11 @@ from app.catalog.base import is_numeric
 from app.catalog.registry import RegistryCatalog
 from app.clock import Clock, SystemClock
 from app.config import DeviceEntry, Settings, url_host
-from app.dispatch.capabilities import CapabilityRegistry
+from app.dispatch.capabilities import (
+    CapabilityRecord,
+    CapabilityRegistry,
+    CapabilityStatus,
+)
 from app.dispatch.controller import DispatchController
 from app.dispatch.models import DeviceLimits, DispatchConfig
 from app.dispatch.soc_policy import SocTargetPolicyRegistry
@@ -342,13 +346,14 @@ def _with_dashboard_metric_names(periodic_names: list[str], catalog: RegistryCat
 
 _ENERGY_METRIC_NAMES = (
     "battery_soc", "grid_power", "solar_a_power", "solar_b_power", "household_load_power",
+    "battery_power",
 )  # fmt: skip
 
 
 def _with_energy_metric_names(
     periodic_names: list[str], catalog: RegistryCatalog, *, dispatch: bool
 ) -> list[str]:
-    """Pin the Energy Manager's four published figures, the way the dashboard pins its own values.
+    """Pin the Energy Manager's published figures, the way the dashboard pins its own values.
 
     A separate tuple and a separate function on purpose: the readings are cache-only, so a narrowed
     METRICS_EXPOSED_NAMES would otherwise leave the Energy Manager card dark with no diagnosis path.
@@ -556,7 +561,7 @@ def _lifespan(
                 return  # device jobs (export among them) are still held back by _await_password_change
             start_export_task()
 
-        async def reconfigure_devices() -> None:
+        async def _reconfigure_devices_unlocked() -> None:
             """Rebuild the whole device/endpoint graph from the current ``runtime.settings.devices``
             and swap it into the running gateway/scheduler, without an application restart. Same
             intent as ``restart_export`` for the device list: the admin UI's device add/remove flow
@@ -602,6 +607,15 @@ def _lifespan(
                 }
                 for device_id in removed | readdressed:
                     await runtime.dispatch.force_restore_or_raise(device_id)  # raises: abort, nothing torn down yet
+                for device_id in readdressed:
+                    # Evidence and arming were given for the old physical device, not the new one.
+                    for capability in runtime.dispatch.capabilities(device_id):
+                        if capability.status is CapabilityStatus.VERIFIED:
+                            await runtime.dispatch.set_capability(
+                                device_id, CapabilityRecord(device_id=device_id, name=capability.name)
+                            )
+                    if runtime.energy is not None and runtime.energy.armed(device_id):
+                        await runtime.energy.set_armed(device_id, armed=False, actor=None)
 
             old_tasks = [
                 *connect_tasks, *startup_tasks, *heartbeat_tasks, *periodic_tasks, *refresh_tasks, *dispatch_tasks,
@@ -619,7 +633,10 @@ def _lifespan(
             await asyncio.gather(*(s.stop() for s in parts.serializers), return_exceptions=True)
             await asyncio.gather(*(e.close() for e in parts.endpoints), return_exceptions=True)
 
-            periodic_names = _periodic_names(runtime.settings, runtime.catalog)
+            selected_exposed = getattr(app.state, "active_exposed_names", None)
+            if selected_exposed is None and store is not None:
+                selected_exposed = await asyncio.to_thread(store.get, "exposed_names")
+            periodic_names = _periodic_names(runtime.settings, runtime.catalog, selected_exposed)
             if not runtime.settings.periodic_metrics:
                 periodic_names = _with_dashboard_metric_names(periodic_names, runtime.catalog)
                 # Also here, not only at startup: this path runs on every Inverters-page save, and
@@ -705,6 +722,12 @@ def _lifespan(
                 # unchanged across the reconfiguration simply gets a new loop for the same state it
                 # already had.
                 start_dispatch_tasks(runtime.devices)
+
+        reconfigure_lock = asyncio.Lock()
+
+        async def reconfigure_devices() -> None:
+            async with reconfigure_lock:  # concurrent settings saves must not interleave teardown/rebuild
+                await _reconfigure_devices_unlocked()
 
         app.state.restart_export = restart_export
         app.state.reconfigure_devices = reconfigure_devices
@@ -890,7 +913,8 @@ def create_app(settings: Settings, *, clock: Clock | None = None, connector: Con
     if initial_allowlist is not None:
         app.state.default_write_entries = {name: initial_allowlist.entry(name) for name in catalog.names() if initial_allowlist.entry(name)}
         app.state.build_write_allowlist = lambda names: Allowlist(
-            {name: app.state.default_write_entries[name] for name in names}, catalog
+            {name: app.state.default_write_entries[name] for name in names if name in app.state.default_write_entries},
+            catalog,
         )
     if admin_store is not None:
         # Constructed after app.state.default_write_entries / build_write_allowlist exist, with
@@ -901,8 +925,9 @@ def create_app(settings: Settings, *, clock: Clock | None = None, connector: Con
         def _approve_writes(names: Iterable[str]) -> list[str]:
             """Exactly what the Inverters page does, add-only: persist, then widen the allowlist."""
             selected = list(names)
+            allowlist = app.state.build_write_allowlist(selected)  # build first: persist only what works
             admin_store.put_many({"write_names": selected})
-            runtime.gateway.set_allowlist(app.state.build_write_allowlist(selected))
+            runtime.gateway.set_allowlist(allowlist)
             return selected
 
         runtime.energy = EnergyManager(

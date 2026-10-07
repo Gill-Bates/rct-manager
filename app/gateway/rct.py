@@ -520,7 +520,7 @@ class RctGateway:
             raise WriteRejected("value_type_mismatch") from None
 
     async def _write(
-        self, binding: DeviceBinding, entry: RegistryEntry, key: tuple[str, str], payload: bytes
+        self, binding: DeviceBinding, entry: RegistryEntry, key: tuple[str, str], payload: bytes, *, system: bool = False
     ) -> tuple[TransactionResult, tuple[ScalarValue, bytes] | None]:
         """Send the write, drop the cache entry and read back; raises only before anything was sent.
 
@@ -528,19 +528,21 @@ class RctGateway:
         """
         lock = self._write_locks.setdefault((binding.entry.device_id, entry.object_id), asyncio.Lock())
         async with lock:
-            return await self._write_locked(binding, entry, key, payload)
+            return await self._write_locked(binding, entry, key, payload, system=system)
 
     async def _write_locked(
-        self, binding: DeviceBinding, entry: RegistryEntry, key: tuple[str, str], payload: bytes
+        self, binding: DeviceBinding, entry: RegistryEntry, key: tuple[str, str], payload: bytes, *, system: bool = False
     ) -> tuple[TransactionResult, tuple[ScalarValue, bytes] | None]:
         if binding.endpoint.maintenance():
             raise DeviceMaintenance()
-        charge = binding.serializer.reserve_budget(2)  # write plus readback, all or nothing (Requirement 6.10)
+        # System writes (dispatch/restore) are budget-exempt so a drained budget cannot block a restore.
+        origin = TransactionOrigin.SYSTEM_WRITE if system else TransactionOrigin.CALLER
+        charge = None if system else binding.serializer.reserve_budget(2)  # all or nothing (Requirement 6.10)
         write_charge = charge.take(1) if charge is not None else None
         request = TransactionRequest(
             binding.entry.key,
             make_frame(binding.entry.network_id, Command.WRITE, entry.object_id, payload),
-            TransactionOrigin.CALLER,
+            origin,
             "write",
             self._clock.now(),
             idempotent=entry.idempotent_write,
@@ -554,7 +556,7 @@ class RctGateway:
                 self._cache.invalidate(key)  # also when the outcome is unclear (Requirement 9.12)
             if not result.ok and not result.committed:
                 raise result.error or DeviceApiError()  # nothing left the send path: final and safe
-            return result, await self._read_into_cache(binding, entry, key, TransactionOrigin.CALLER, charge)
+            return result, await self._read_into_cache(binding, entry, key, origin, charge)
         finally:
             for handle in (write_charge, charge):
                 if handle is not None:
@@ -567,13 +569,15 @@ class RctGateway:
             value *= entry.scale
         return value
 
-    async def write_metric(self, device_id: str, name: str, value: ScalarValue) -> WriteOutcome:
+    async def write_metric(
+        self, device_id: str, name: str, value: ScalarValue, *, system: bool = False
+    ) -> WriteOutcome:
         binding = self._device(device_id)
         entry = self._metric(name)
         self._allowlist.check(name, value, action=False)  # before the serializer is touched
         payload = self._encode(entry, value)
         log.info("Write requested: device=%s metric=%s", device_id, name)
-        result, readback = await self._write(binding, entry, (device_id, name), payload)
+        result, readback = await self._write(binding, entry, (device_id, name), payload, system=system)
         read_value = readback[0] if readback else None
         matches = readback is not None and (
             read_value == value

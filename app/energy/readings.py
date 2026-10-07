@@ -4,7 +4,7 @@
 # Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
 #
 
-"""The four business figures the Energy Manager publishes with its status (design 2.3.2).
+"""The five business figures the Energy Manager publishes with its status (design 2.3.2).
 
 Vendor-neutral by construction: no register name appears here. Which RCT objects feed these values,
 and which sign convention applies, is the adapter's business (``app.gateway.energy_readings``).
@@ -30,20 +30,23 @@ class DeviceReading:
     stale: bool
 
 
+ABSENT = DeviceReading(None, None, True)
+
+
 @dataclass(frozen=True, slots=True)
 class EnergyReadings:
     battery_soc_percent: DeviceReading
     grid_power_w: DeviceReading  # positive = import (business convention)
     pv_power_w: DeviceReading
     house_load_w: DeviceReading
-
-
-ABSENT = DeviceReading(None, None, True)
+    # Measured battery power, business convention: positive = discharging, negative = charging.
+    # Distinct from the *commanded* power of a status; defaults to absent for four-figure callers.
+    battery_power_w: DeviceReading = ABSENT
 
 
 def absent_readings() -> EnergyReadings:
     """Every figure absent — what a device without cached values reads as."""
-    return EnergyReadings(ABSENT, ABSENT, ABSENT, ABSENT)
+    return EnergyReadings(ABSENT, ABSENT, ABSENT, ABSENT, ABSENT)
 
 
 class EnergyReadingsPort(Protocol):

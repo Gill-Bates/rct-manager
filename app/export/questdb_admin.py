@@ -160,10 +160,22 @@ class QuestDbProvisioner:
         if not self._view_current(view):
             log.warning("QuestDB rollup view '%s' is not refreshed yet; raw TTL is unchanged", view)
             return False
+        self._drop_stale_rollups(view)
         # The raw TTL only shortens once the rollup holds the data that it would drop.
         return self._apply_ttl(view, self.total_days, view=True) and self._apply_ttl(
             self.table, self.raw_days or 0, view=False
         )
+
+    def _drop_stale_rollups(self, current: str) -> None:
+        """Drop earlier service-created rollup views of this table once ``current`` is up to date."""
+        rows = self._exec(
+            f"SELECT view_name FROM materialized_views() WHERE base_table_name = {literal(self.table)};"
+        ).get("dataset") or []
+        prefix = f"{self.table}_rollup_"
+        for (name, *_) in rows:
+            if str(name).startswith(prefix) and name != current:
+                self._exec(f"DROP MATERIALIZED VIEW IF EXISTS {ident(name)};")
+                log.info("QuestDB dropped superseded rollup view '%s'", name)
 
     def _view_current(self, view: str) -> bool:
         rows = self._exec(

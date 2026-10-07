@@ -369,7 +369,7 @@ def _is_write_path(request: Request) -> bool:
             and request.method in {"POST", "GET", "DELETE"}
         )
         or (len(path) == 6 and path[5] == "energy" and request.method == "GET")
-        or (len(path) == 7 and path[5] == "energy" and path[6] in ("command", "armed"))
+        or (len(path) == 7 and path[5] == "energy" and path[6] == "command")
     )
 
 

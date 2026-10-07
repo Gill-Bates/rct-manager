@@ -147,3 +147,11 @@ def test_resolve_endpoint_scheme_wins_over_port_443(value, port, tls):
     else:
         endpoint = resolve_endpoint(value, None, False, 80, "host")
         assert (endpoint.port, endpoint.tls) == (port, tls)
+
+
+@pytest.mark.parametrize("value", ["host:8086", "http://user:pw@host", "http://user@host"])
+def test_resolve_endpoint_rejects_scheme_less_port_and_userinfo(value):
+    from app.export.endpoint import resolve_endpoint
+
+    with pytest.raises(ValueError):
+        resolve_endpoint(value, None, False, 80, "host")

@@ -65,6 +65,7 @@ _REQUIRED_FOR_VERIFIED: dict[CapabilityName, tuple[str, ...]] = {
     CapabilityName.EXPORT_LIMIT: ("export_limit_zero_blocks_export",),
     CapabilityName.SETPOINT_VOLATILITY: (),
 }
+_SIGN_FLAGS = ("battery_discharge_positive", "grid_import_positive")
 _TRUTHY_FLAGS = frozenset({"write_frame_layout_verified", "apply_sequence_verified"})
 # A value that is present but blank is no evidence: `note` carries the human-readable backing for
 # the strategy code, so an empty or whitespace-only string counts as missing.
@@ -275,20 +276,32 @@ async def put_capability(
     if body.status is CapabilityStatus.VERIFIED:
         if not body.verified_device_model or not body.verified_firmware:
             raise HTTPException(400, "verified_device_model and verified_firmware are required")
-        candidate = CapabilityRecord(device_id=device_id, name=name, **evidence)
+        try:
+            candidate = CapabilityRecord(device_id=device_id, name=name, **evidence)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
         missing = _missing_evidence(name, candidate)
+        # The sign flags default to True, so only an explicitly sent value counts as evidence.
+        missing += [
+            field_name
+            for field_name in _SIGN_FLAGS
+            if field_name in _REQUIRED_FOR_VERIFIED[name] and field_name not in body.model_fields_set
+        ]
         if missing:
             raise HTTPException(400, f"missing evidence for {name.value}: {', '.join(missing)}")
 
     now = request.app.state.runtime.clock.now()
-    record = CapabilityRecord(
-        device_id=device_id,
-        name=name,
-        verified_at=now if body.status is CapabilityStatus.VERIFIED else None,
-        verified_by=verified_by if body.status is CapabilityStatus.VERIFIED else None,
-        **evidence,
-        status=body.status,
-    )
+    try:
+        record = CapabilityRecord(
+            device_id=device_id,
+            name=name,
+            verified_at=now if body.status is CapabilityStatus.VERIFIED else None,
+            verified_by=verified_by if body.status is CapabilityStatus.VERIFIED else None,
+            **evidence,
+            status=body.status,
+        )
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
     # The active-operation guard (D2) lives in DispatchController.set_capability(), under the same
     # per-device lock as submit()/tick() — closes the former TOCTOU window (B1) and applies
     # unconditionally, regardless of the new status (closes the VERIFIED->VERIFIED bypass, B2).

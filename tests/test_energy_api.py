@@ -104,8 +104,10 @@ def seed_payloads(harness) -> None:
 
 
 async def arm(harness, device_id: str = "main") -> dict:
+    """Arm through the admin surface: the public API has no arming endpoint."""
+    headers = await admin_session(harness)
     response = await harness.client.put(
-        f"/api/v1/devices/{device_id}/energy/armed", headers=WRITER, json={"armed": True}
+        f"/admin/api/energy/devices/{device_id}/armed", headers=headers, json={"armed": True}
     )
     assert response.status_code == 200, response.text
     return response.json()
@@ -234,10 +236,23 @@ async def test_an_invalid_command_body_is_rejected_by_the_request_model(
 
 async def test_the_armed_flag_is_not_coerced_from_a_string(tmp_path: Path) -> None:
     async with running_app(energy_settings(tmp_path)) as harness:
+        headers = await admin_session(harness)
         response = await harness.client.put(
-            "/api/v1/devices/main/energy/armed", headers=WRITER, json={"armed": "true"}
+            "/admin/api/energy/devices/main/armed", headers=headers, json={"armed": "true"}
         )
         assert response.status_code == 422, response.text
+
+
+async def test_the_public_api_has_no_arming_endpoint(tmp_path: Path) -> None:
+    """Arming is a GUI decision: a token, even a write token, cannot switch the manager on."""
+    async with running_app(energy_settings(tmp_path)) as harness:
+        for headers in (WRITER, READER):
+            response = await harness.client.put(
+                "/api/v1/devices/main/energy/armed", headers=headers, json={"armed": True}
+            )
+            assert response.status_code in (403, 404, 405), response.text
+        status = await harness.client.get("/api/v1/devices/main/energy", headers=WRITER)
+        assert status.json()["armed"] is False
 
 
 # --- item 20: refusals ----------------------------------------------------------------------------
@@ -268,9 +283,6 @@ async def test_a_read_only_token_cannot_reach_the_energy_manager(tmp_path: Path)
             await harness.client.post(
                 "/api/v1/devices/main/energy/command", headers=READER, json={"action": "auto"}
             ),
-            await harness.client.put(
-                "/api/v1/devices/main/energy/armed", headers=READER, json={"armed": True}
-            ),
         ):
             assert response.status_code == 403, response.text
             assert response.json()["code"] == "insufficient_scope"
@@ -285,9 +297,6 @@ async def test_without_write_support_the_public_router_is_absent_and_the_admin_s
         for response in (
             await harness.client.get("/api/v1/devices/main/energy", headers=WRITER),
             await command(harness, {"action": "auto"}),
-            await harness.client.put(
-                "/api/v1/devices/main/energy/armed", headers=WRITER, json={"armed": True}
-            ),
         ):
             assert response.status_code == 404, response.text
             assert response.json()["code"] == "write_disabled"
@@ -315,7 +324,12 @@ async def test_revoking_the_register_approvals_disables_the_actions(tmp_path: Pa
         harness.app.state.admin_store.put("write_names", [])
         status = await harness.client.get("/api/v1/devices/main/energy", headers=WRITER)
         assert status.status_code == 200, status.text
-        assert {item["reason"] for item in status.json()["actions"]} == {"write_not_permitted"}
+        # The handback needs no write approval, so `auto` stays available.
+        by_action = {item["action"]: item for item in status.json()["actions"]}
+        assert by_action["auto"]["available"] is True
+        assert {item["reason"] for name, item in by_action.items() if name != "auto"} == {
+            "write_not_permitted"
+        }
         refused = await command(harness, {"action": "charge", "target_soc_percent": 80})
         assert refused.status_code == 409, refused.text
         assert refused.json()["code"] == "energy_action_unavailable"
@@ -343,13 +357,15 @@ async def test_the_status_get_serves_the_whole_card_in_one_call(tmp_path: Path) 
         readings = body["readings"]
         assert readings["battery_soc_percent"]["value"] == pytest.approx(50.0)
         assert readings["grid_power_w"]["value"] == pytest.approx(1200.0)
+        # Measured battery power (not the commanded one) is published next to the other figures.
+        assert "battery_power_w" in readings
         assert readings["pv_power_w"]["value"] == pytest.approx(2400.0)
         assert readings["house_load_w"]["value"] == pytest.approx(800.0)
         assert all(not readings[name]["stale"] for name in readings)
         assert [item["action"] for item in body["actions"]] == ["charge", "discharge", "hold", "auto"]
 
 
-async def test_a_device_without_any_cached_reading_answers_with_four_absent_figures(
+async def test_a_device_without_any_cached_reading_answers_with_five_absent_figures(
     tmp_path: Path,
 ) -> None:
     """AC-21/AC-24: absent is a published state, not an error — and never a device read."""
@@ -357,7 +373,7 @@ async def test_a_device_without_any_cached_reading_answers_with_four_absent_figu
         response = await harness.client.get("/api/v1/devices/slave1/energy", headers=WRITER)
         assert response.status_code == 200, response.text
         readings = response.json()["readings"]
-        assert len(readings) == 4
+        assert len(readings) == 5
         for reading in readings.values():
             assert reading == {"value": None, "age_seconds": None, "stale": True}
 
@@ -391,7 +407,7 @@ def fake_request(method: str, path: str) -> Request:
         ("DELETE", "/api/v1/devices/main/battery/dispatch", True),
         ("GET", "/api/v1/devices/main/energy", True),
         ("POST", "/api/v1/devices/main/energy/command", True),
-        ("PUT", "/api/v1/devices/main/energy/armed", True),
+        ("PUT", "/api/v1/devices/main/energy/armed", False),  # removed: arming is admin-only
         # Short paths must return False, not raise: this runs inside the global exception handler,
         # where an IndexError would turn a plain 404 into an unhandled 500.
         ("GET", "/api/v1/devices", False),
@@ -430,9 +446,6 @@ async def test_the_shutdown_drain_refuses_commands_on_both_surfaces_but_still_re
         try:
             refused = [
                 await command(harness, {"action": "charge", "target_soc_percent": 80}),
-                await harness.client.put(
-                    "/api/v1/devices/main/energy/armed", headers=WRITER, json={"armed": True}
-                ),
                 await harness.client.post(
                     "/admin/api/energy/devices/main/command",
                     headers=headers,
@@ -479,7 +492,15 @@ async def test_the_energy_metrics_are_pinned_at_startup_and_after_a_device_list_
 async def test_without_dispatch_the_energy_metrics_are_not_added(tmp_path: Path) -> None:
     settings = energy_settings(tmp_path, enable_write_support=False)
     async with running_app(settings) as harness:
-        assert not energy_object_ids(harness) & set(periodic_object_ids(harness))
+        catalog = RegistryCatalog.from_file(harness.runtime.settings.object_registry_path)
+        # battery_power is preselected in the shipped catalog, so it is periodic with or without
+        # dispatch; only the metrics the Energy Manager pins itself must stay absent.
+        pinned = {
+            catalog.object_entry(name).object_id
+            for name in _ENERGY_METRIC_NAMES
+            if name != "battery_power"
+        }
+        assert not pinned & set(periodic_object_ids(harness))
 
 
 async def test_with_periodic_reads_disabled_the_list_is_empty(tmp_path: Path) -> None:
@@ -553,6 +574,16 @@ async def test_the_admin_status_carries_the_raw_gate_detail_and_the_policy(tmp_p
         }
         assert entry["soc_target_policy"]["mode"] == "business_target"
         assert "readings" in entry  # the GUI needs exactly one poll per cycle
+        # Header block of the GUI: a name, the reachable flag and the host come with the same poll.
+        assert entry["device_name"]
+        assert entry["host"] == HOST
+        assert isinstance(entry["connected"], bool)
+        assert entry["limits"]["max_charge_power_w"] == 3000
+        assert {item["name"] for item in entry["capabilities"]} >= {
+            "write_path_convention",
+            "battery_power_sign_convention",
+            "grid_power_sign_convention",
+        }
 
         public = await harness.client.get("/api/v1/devices/main/energy", headers=WRITER)
         assert public.status_code == 200, public.text
@@ -609,7 +640,10 @@ def test_the_public_document_names_no_vendor_internal(tmp_path: Path, vendor: bo
     energy_paths = {
         path: item for path, item in document["paths"].items() if path.endswith(("/energy", "/energy/command", "/energy/armed"))
     }
-    assert len(energy_paths) == 3
+    assert sorted(energy_paths) == [
+        "/api/v1/devices/{device_id}/energy",
+        "/api/v1/devices/{device_id}/energy/command",
+    ]
     assert "byte_width" not in json.dumps(energy_paths)
     assert "grid_import_positive" not in json.dumps(energy_paths)
 
@@ -633,13 +667,11 @@ def test_only_the_rct_adapter_layer_names_the_soc_target_register() -> None:
 # place a released record may come from, and the list must not grow (AC-20).
 _VERIFIED_FIXTURES = {
     "tests/api_helpers.py",
-    "tests/test_dispatch_api.py",
     "tests/test_dispatch_capabilities.py",
     "tests/test_dispatch_core.py",
-    "tests/test_dispatch_models.py",
-    "tests/test_energy_store.py",
     "app/dispatch/capabilities.py",  # the enum member itself
     "app/admin/dispatch_api.py",  # the admin PUT that an operator uses to enter one
+    "app/api/app_factory.py",  # only resets a record when a device is re-addressed
 }
 _VERIFIED = re.compile(r"CapabilityStatus\.VERIFIED|\"status\"\s*:\s*\"verified\"|status=\"verified\"")
 

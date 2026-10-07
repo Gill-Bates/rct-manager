@@ -214,6 +214,9 @@ def test_token_expiry_uses_presets_with_a_ninety_day_default():
     assert "date.setFullYear(date.getFullYear() + 1)" in js
     # form.reset() snaps a select back to its markup default; the default is re-applied explicitly.
     assert "$('token-expires').value = EXPIRY_DEFAULT;" in js
+    # Tokens live in a modal over a table; the secret is cleared when the modal closes.
+    assert 'id="add-token-modal"' in html and 'id="new-token-box"' not in html
+    assert "hidden.bs.modal" in js and "$('new-token-value').textContent = '';" in js
 
 
 def test_parameter_action_buttons_have_touch_target_size():

@@ -120,14 +120,21 @@ class CountingGateway:
         raise AssertionError("the readings adapter must not read the device")
 
 
-def readings(rct: CountingGateway, *, grid_import_positive: bool = True) -> RctEnergyReadings:
+def readings(
+    rct: CountingGateway, *, grid_import_positive: bool = True, battery_discharge_positive: bool = True
+) -> RctEnergyReadings:
     registry = CapabilityRegistry(
         [
             CapabilityRecord(
                 device_id="main",
                 name=CapabilityName.GRID_POWER_SIGN,
                 grid_import_positive=grid_import_positive,
-            )
+            ),
+            CapabilityRecord(
+                device_id="main",
+                name=CapabilityName.BATTERY_POWER_SIGN,
+                battery_discharge_positive=battery_discharge_positive,
+            ),
         ]
     )
     return RctEnergyReadings(rct, capabilities=registry)  # type: ignore[arg-type]
@@ -171,12 +178,12 @@ def test_the_pv_figure_is_the_sum_of_both_strings() -> None:
     assert result.pv_power_w.stale is False
 
 
-def test_one_missing_string_still_yields_a_sum_but_marks_it_stale() -> None:
+def test_one_missing_string_still_yields_a_sum_and_stays_fresh() -> None:
     rct = CountingGateway(ManualClock())
     rct.put("solar_a_power", 1500.0)
     result = readings(rct).readings("main")
     assert result.pv_power_w.value == pytest.approx(1500.0)
-    assert result.pv_power_w.stale is True
+    assert result.pv_power_w.stale is False  # staleness covers present strings only
 
 
 def test_a_grace_value_is_published_with_its_age_and_marked_stale() -> None:
@@ -188,13 +195,14 @@ def test_a_grace_value_is_published_with_its_age_and_marked_stale() -> None:
     assert result.house_load_w.stale is True
 
 
-def test_an_entirely_empty_cache_reads_as_four_absent_figures() -> None:
+def test_an_entirely_empty_cache_reads_as_five_absent_figures() -> None:
     result = readings(CountingGateway(ManualClock())).readings("main")
     for reading in (
         result.battery_soc_percent,
         result.grid_power_w,
         result.pv_power_w,
         result.house_load_w,
+        result.battery_power_w,
     ):
         assert reading.value is None and reading.age_seconds is None and reading.stale is True
 
@@ -244,3 +252,23 @@ def test_the_measured_at_axis_is_not_used_for_the_age() -> None:
     clock.advance(2.0)
     sample = rct.cached_sample("main", "battery_soc")
     assert sample is not None and sample[1] == pytest.approx(2.0)
+
+
+@pytest.mark.parametrize(
+    ("raw", "discharge_positive", "expected"),
+    [(1500.0, True, 1500.0), (-1500.0, True, -1500.0), (1500.0, False, -1500.0), (-900.0, False, 900.0)],
+)
+def test_the_battery_figure_is_discharge_positive_in_business_terms(
+    raw: float, discharge_positive: bool, expected: float
+) -> None:
+    rct = CountingGateway(ManualClock())
+    rct.put("battery_power", raw)
+    result = readings(rct, battery_discharge_positive=discharge_positive).readings("main")
+    assert result.battery_power_w.value == pytest.approx(expected)
+    assert result.battery_power_w.stale is False
+
+
+def test_a_resting_battery_reads_as_zero() -> None:
+    rct = CountingGateway(ManualClock())
+    rct.put("battery_power", 0.0)
+    assert readings(rct, battery_discharge_positive=False).readings("main").battery_power_w.value == 0.0

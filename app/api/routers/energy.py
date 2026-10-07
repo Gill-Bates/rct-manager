@@ -20,11 +20,12 @@ from datetime import datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends
-from pydantic import BaseModel, ConfigDict, Field, StrictBool, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.api.problems import ErrorCode, ProblemError, problem_responses
 from app.api.runtime import RuntimeDep
 from app.dispatch.models import PowerDirection
+from app.energy.manager import MAX_POWER_W
 from app.energy.models import (
     TARGET_SOC_MAX_PERCENT,
     TARGET_SOC_MIN_PERCENT,
@@ -39,8 +40,6 @@ from app.security.dependencies import require_write
 from app.security.tokens import Principal
 
 router = APIRouter(prefix="/api/v1/devices/{device_id}/energy", tags=["energy-manager"])
-
-MAX_POWER_W = 50_000.0
 
 _COMMON = (
     ErrorCode.MISSING_TOKEN,
@@ -95,12 +94,6 @@ class EnergyCommandBody(BaseModel):
         return self
 
 
-class ArmedBody(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    armed: StrictBool  # no coercion from "true"/1: switching an inverter on is not a guess
-
-
 class ReadingResponse(BaseModel):
     value: float | None
     age_seconds: float | None
@@ -116,6 +109,8 @@ class ReadingsResponse(BaseModel):
     grid_power_w: ReadingResponse  # positive = import
     pv_power_w: ReadingResponse
     house_load_w: ReadingResponse
+    # Measured, not commanded: positive = battery discharging, negative = charging.
+    battery_power_w: ReadingResponse
 
     @classmethod
     def from_domain(cls, readings: EnergyReadings) -> "ReadingsResponse":
@@ -146,7 +141,7 @@ class EnergyStatusResponse(BaseModel):
     target_soc_percent: float | None
     power_limit_w: float | None  # null while idle and while holding: no power budget applies
     power_limit_clamped: bool
-    commanded_power_w: float
+    commanded_power_w: float  # requested by the last command; the measured value is readings.battery_power_w
     commanded_direction: PowerDirection
     until: datetime | None
     stop_reason: str | None
@@ -226,22 +221,4 @@ async def post_energy_command(
         EnergyCommand(body.action, body.target_soc_percent, body.max_power_w),
         actor=principal.token_id,
     )
-    return EnergyStatusResponse.from_domain(status)
-
-
-@router.put(
-    "/armed",
-    response_model=EnergyStatusResponse,
-    summary="Switch the Energy Manager on or off for one inverter",
-    responses=problem_responses(*_COMMON),
-)
-async def put_energy_armed(
-    device_id: str,
-    body: ArmedBody,
-    runtime: RuntimeDep,
-    principal: Annotated[Principal, Depends(require_write)],
-) -> EnergyStatusResponse:
-    runtime.device(device_id)
-    runtime.ensure_accepting()
-    status = await _manager(runtime).set_armed(device_id, armed=body.armed, actor=principal.token_id)
     return EnergyStatusResponse.from_domain(status)

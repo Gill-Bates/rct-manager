@@ -766,3 +766,22 @@ async def test_submit_rejects_a_new_dispatch_when_the_fresh_snapshot_read_is_sta
     status = await dispatch.status("main")
     assert status.state is DispatchState.IDLE
     assert status.restore_required is False
+
+
+async def test_submit_restores_after_a_non_device_error_during_apply(tmp_path: Path) -> None:
+    """Any failure after the first write (not only DeviceApiError) must roll the hardware back."""
+    clock = ManualClock()
+    gateway = FakeDispatchGateway(clock)
+    dispatch = controller(tmp_path, clock, gateway)
+
+    async def broken_grid_charge(device_id: str, *, enabled: bool):
+        raise ValueError("boom")
+
+    gateway.apply_grid_charge = broken_grid_charge  # type: ignore[method-assign]
+    with pytest.raises(ValueError, match="boom"):
+        await dispatch.submit(
+            "main",
+            DispatchCommand(DispatchMode.CHARGE_FROM_GRID, 80, 2000, clock.now() + timedelta(hours=1)),
+        )
+    assert [call for call in gateway.calls if call[0] == "restore"] == [("restore", step) for step in range(4)]
+    assert (await dispatch.status("main")).state is DispatchState.IDLE

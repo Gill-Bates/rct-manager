@@ -124,6 +124,7 @@ class RctDispatchGateway:
             device_id,
             "power_mng_battery_power_extern",
             self._battery_convention(device_id).target(setpoint),
+            system=True,
         )
 
     async def apply_soc_target(
@@ -141,7 +142,7 @@ class RctDispatchGateway:
             )
         except ValueError as exc:
             raise DeviceApiError("protocol_error", name="power_mng_soc_target_set") from exc
-        return await self._rct.write_metric(device_id, "power_mng_soc_target_set", ratio)
+        return await self._rct.write_metric(device_id, "power_mng_soc_target_set", ratio, system=True)
 
     async def apply_control_mode(self, device_id: str, *, external: bool):
         # Second, independent lock next to the controller's capability gate (defense in depth): a
@@ -149,10 +150,10 @@ class RctDispatchGateway:
         code = self._external_strategy_code(device_id)
         if not external or code is None:
             raise DeviceApiError("dispatch_unverified")
-        return await self._rct.write_metric(device_id, "power_mng_soc_strategy", code)
+        return await self._rct.write_metric(device_id, "power_mng_soc_strategy", code, system=True)
 
     async def apply_grid_charge(self, device_id: str, *, enabled: bool):
-        return await self._rct.write_metric(device_id, "power_mng_use_grid_power_enable", enabled)
+        return await self._rct.write_metric(device_id, "power_mng_use_grid_power_enable", enabled, system=True)
 
     async def restore(self, device_id: str, snapshot: DeviceControlSnapshot, step: int):
         if step == 0:
@@ -161,11 +162,11 @@ class RctDispatchGateway:
             return await self.apply_grid_charge(device_id, enabled=snapshot.grid_charge_enabled)
         if step == 2:
             return await self._rct.write_metric(
-                device_id, "power_mng_soc_target_set", float(snapshot.soc_target_ratio)
+                device_id, "power_mng_soc_target_set", float(snapshot.soc_target_ratio), system=True
             )
         if step == 3:
             return await self._rct.write_metric(
-                device_id, "power_mng_soc_strategy", snapshot.soc_strategy_code
+                device_id, "power_mng_soc_strategy", snapshot.soc_strategy_code, system=True
             )
         raise ValueError("invalid restore step")
 

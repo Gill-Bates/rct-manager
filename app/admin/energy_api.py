@@ -22,14 +22,16 @@ from datetime import datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StrictBool
 
 from app.admin.api import require_admin
-from app.api.routers.energy import ArmedBody, EnergyCommandBody, EnergyStatusResponse
+from app.api.routers.energy import EnergyCommandBody, EnergyStatusResponse
+from app.dispatch.capabilities import CapabilityStatus
 from app.dispatch.controller import CapabilityConflict
 from app.dispatch.soc_policy import NOTE_MAX_LENGTH, SocTargetMode, SocTargetPolicy
 from app.energy.base import EnergyAdminPort
 from app.energy.models import EnergyAction, EnergyCommand
+from app.gateway.base import DeviceState
 
 
 def _require_admin_read(request: Request) -> dict | None:
@@ -70,6 +72,14 @@ def _dispatch_or_503(request: Request):
     return runtime.dispatch
 
 
+class ArmedBody(BaseModel):
+    """Arming exists on the admin surface only: the public API cannot switch a device on."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    armed: StrictBool  # no coercion from "true"/1: switching an inverter on is not a guess
+
+
 class GateView(BaseModel):
     """One ``GateDecision``, field for field. ``unverified`` carries the raw capability names: this
     is the admin surface, which is exactly where they are allowed to appear.
@@ -102,11 +112,38 @@ class SocTargetPolicyView(BaseModel):
         )
 
 
+class LimitsView(BaseModel):
+    max_charge_power_w: float
+    max_discharge_power_w: float
+    engineering_mode: bool
+
+
+class CapabilityView(BaseModel):
+    """One capability row for the Advanced section: status and the evidence the form prefills."""
+
+    name: str
+    status: CapabilityStatus
+    verified_device_model: str | None
+    verified_firmware: str | None
+    soc_strategy_external_code: int | None
+    enum_byte_width: int | None
+    bool_byte_width: int | None
+    battery_discharge_positive: bool
+    grid_import_positive: bool
+    note: str | None
+
+
 class AdminEnergyDeviceStatus(EnergyStatusResponse):
     """The public status plus the admin-only blocks the GUI needs (design 2.8)."""
 
+    device_name: str
+    host: str
+    connected: bool  # the inverter answers (state ok or degraded)
+    connection_state: str
     gates: list[GateView]
     soc_target_policy: SocTargetPolicyView
+    limits: LimitsView | None
+    capabilities: list[CapabilityView]
     added_write_names: list[str]  # what arming contributed, display only
     armed_at: datetime | None
     armed_by: str | None
@@ -117,8 +154,16 @@ async def _admin_status(request: Request, device_id: str) -> AdminEnergyDeviceSt
     dispatch = _dispatch_or_503(request)
     public = EnergyStatusResponse.from_domain(await energy.status(device_id))
     record = energy.armed_record(device_id)
+    runtime = request.app.state.runtime
+    limits = dispatch.device_limits(device_id)
+    device = runtime.devices[device_id]
+    state = runtime.gateway.device_status(device_id).state
     return AdminEnergyDeviceStatus(
         **public.model_dump(),
+        device_name=device.display_name or runtime.gateway.reported_name(device_id) or device_id,
+        host=device.host,
+        connected=state in (DeviceState.OK, DeviceState.DEGRADED),
+        connection_state=state.value,
         gates=[
             GateView(
                 action=action,
@@ -130,6 +175,28 @@ async def _admin_status(request: Request, device_id: str) -> AdminEnergyDeviceSt
             for action, decision in energy.gate_decisions(device_id)
         ],
         soc_target_policy=SocTargetPolicyView.from_domain(dispatch.soc_target_policy(device_id)),
+        limits=None
+        if limits is None
+        else LimitsView(
+            max_charge_power_w=limits.max_charge_power_w,
+            max_discharge_power_w=limits.max_discharge_power_w,
+            engineering_mode=limits.engineering_mode,
+        ),
+        capabilities=[
+            CapabilityView(
+                name=record.name.value,
+                status=record.status,
+                verified_device_model=record.verified_device_model,
+                verified_firmware=record.verified_firmware,
+                soc_strategy_external_code=record.soc_strategy_external_code,
+                enum_byte_width=record.enum_byte_width,
+                bool_byte_width=record.bool_byte_width,
+                battery_discharge_positive=record.battery_discharge_positive,
+                grid_import_positive=record.grid_import_positive,
+                note=record.note,
+            )
+            for record in dispatch.capabilities(device_id)
+        ],
         added_write_names=list(record.added_write_names),
         armed_at=record.armed_at,
         armed_by=record.armed_by,
@@ -203,13 +270,13 @@ async def put_soc_target_policy(
     del admin
     _device_or_404(request, device_id)
     dispatch = _dispatch_or_503(request)
-    policy = SocTargetPolicy(
-        device_id=device_id,
-        mode=body.mode,
-        below_margin_percent=body.below_margin_percent,
-        note=body.note,
-    )
     try:
+        policy = SocTargetPolicy(
+            device_id=device_id,
+            mode=body.mode,
+            below_margin_percent=body.below_margin_percent,
+            note=body.note,
+        )
         await dispatch.set_soc_target_policy(device_id, policy)
     except CapabilityConflict as exc:
         raise HTTPException(

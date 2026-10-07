@@ -25,6 +25,8 @@ from app.cache import CacheFreshness
 from app.catalog.base import is_numeric
 from app.config import Settings
 from app.dispatch.controller import ReconfigurationRejected
+from app.dispatch.models import DispatchState
+from app.gateway.rct_dispatch import RctDispatchGateway
 from app.security.dependencies import source_address
 
 router = APIRouter(prefix="/admin/api", include_in_schema=False)
@@ -417,7 +419,8 @@ def _reconfigure_devices(request: Request) -> None:
         return
     future = asyncio.run_coroutine_threadsafe(reconfigure(), loop)
     try:
-        future.result(timeout=5.0)
+        # No timeout: giving up while the coroutine keeps running would skip the rollback below.
+        future.result()
     except ReconfigurationRejected as exc:
         raise HTTPException(
             409,
@@ -829,6 +832,20 @@ def get_parameters(request: Request) -> dict:
     return _parameter_view(request)
 
 
+def _dispatch_in_use(request: Request) -> bool:
+    runtime = request.app.state.runtime
+    energy = runtime.energy
+    if energy is not None and any(energy.armed(device_id) for device_id in runtime.devices):
+        return True
+    dispatch_store = getattr(request.app.state, "dispatch_store", None)
+    if dispatch_store is None:
+        return False
+    return any(
+        record.state is not DispatchState.IDLE or record.restore_required or record.intent is not None
+        for record in dispatch_store.all()
+    )
+
+
 @router.put("/parameters")
 def put_parameters(body: ParameterSelection, request: Request) -> dict:
     require_admin(request, mutation=True)
@@ -840,6 +857,10 @@ def put_parameters(body: ParameterSelection, request: Request) -> dict:
     if len(set(body.write_names)) != len(body.write_names) or set(body.write_names) - write_allowed:
         raise HTTPException(400, "Invalid writable metrics")
     store = _store(request)
+    revoked = set(RctDispatchGateway.REQUIRED_WRITES) & set(store.get("write_names") or []) - set(body.write_names)
+    if revoked and _dispatch_in_use(request):
+        # A restore writes these registers; revoking them now would leave it rejected forever.
+        raise HTTPException(409, "Required dispatch writes cannot be revoked while a device is armed or dispatching")
     _parameter_view(request)  # pins the selection the running collector started with
     store.put_many({"exposed_names": body.exposed_names, "write_names": body.write_names})
     if runtime.exporter is not None:

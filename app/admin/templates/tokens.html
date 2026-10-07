@@ -6,48 +6,89 @@
         <h1>API tokens</h1>
         <p class="text-secondary mb-0">Create and revoke personal access tokens</p>
     </div>
+    <button id="open-add-token" class="btn btn-primary d-inline-flex align-items-center gap-1" type="button"
+        data-bs-toggle="modal" data-bs-target="#add-token-modal"><span class="material-icons"
+            aria-hidden="true">add</span>Add token</button>
 </div>
-<div class="row g-4 mt-1">
-    <div class="col-12 col-xl-4">
-        <section class="card">
-            <div class="card-body">
-                <h2 class="h5">New token</h2>
-                <p class="text-secondary small">The token is shown only once after creation.</p>
+<section class="card mt-4" aria-labelledby="tokens-title">
+    <div class="card-body">
+        <h2 id="tokens-title" class="h5 mb-3">Existing tokens</h2>
+        <div class="token-table-wrap" aria-live="polite">
+            <table class="table table-hover align-middle mb-0 token-table">
+                <thead>
+                    <tr>
+                        <th scope="col">Name</th>
+                        <th scope="col">Permission</th>
+                        <th scope="col">Created</th>
+                        <th scope="col">Last used</th>
+                        <th scope="col">Expires</th>
+                        <th scope="col"><span class="visually-hidden">Actions</span></th>
+                    </tr>
+                </thead>
+                <tbody id="tokens-list">
+                    <tr>
+                        <td colspan="6" class="text-secondary">Loading tokens …</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+</section>
+<div id="add-token-modal" class="modal fade" tabindex="-1" aria-labelledby="add-token-title" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-scrollable">
+        <div class="modal-content">
+            <div id="token-form-state">
                 <form id="token-form">
-                    <div class="mb-3"><label for="token-name" class="form-label">Name</label><input id="token-name"
-                            class="form-control" maxlength="64" required autocomplete="off"
-                            placeholder="e.g. Monitoring"></div>
-                    <div class="mb-3"><label for="token-role" class="form-label">Permission</label><select
-                            id="token-role" class="form-select">
-                            <option value="read">Read</option>
-                            <option value="read/write">Read and write</option>
-                        </select></div>
-                    <div class="mb-3"><label for="token-expires" class="form-label">Expiry</label><select
-                            id="token-expires" class="form-select">
-                            <option value="30d">30 days</option>
-                            <option value="90d" selected>90 days</option>
-                            <option value="1y">1 year</option>
-                            <option value="never">Never expires</option>
-                        </select></div><button type="submit" class="btn btn-primary">Create token</button>
+                    <div class="modal-header">
+                        <div>
+                            <h2 id="add-token-title" class="modal-title h5">Add token</h2>
+                            <p class="text-secondary small mb-0">The token is shown only once after creation.</p>
+                        </div>
+                        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                    </div>
+                    <div class="modal-body">
+                        <div class="mb-3"><label for="token-name" class="form-label">Name</label><input
+                                id="token-name" class="form-control" maxlength="64" required autocomplete="off"
+                                placeholder="e.g. Monitoring"></div>
+                        <div class="mb-3"><label for="token-role" class="form-label">Permission</label><select
+                                id="token-role" class="form-select">
+                                <option value="read">Read</option>
+                                <option value="read/write">Read and write</option>
+                            </select></div>
+                        <div class="mb-0"><label for="token-expires" class="form-label">Expiry</label><select
+                                id="token-expires" class="form-select">
+                                <option value="30d">30 days</option>
+                                <option value="90d" selected>90 days</option>
+                                <option value="1y">1 year</option>
+                                <option value="never">Never expires</option>
+                            </select></div>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-outline-secondary"
+                            data-bs-dismiss="modal">Cancel</button>
+                        <button type="submit" class="btn btn-primary">Create token</button>
+                    </div>
                 </form>
-                <div id="new-token-box" class="alert alert-success mt-4" hidden>
-                    <p class="mb-2"><strong>Copy the token now.</strong> It will not be shown again.</p>
+            </div>
+            <div id="new-token-result" hidden>
+                <div class="modal-header">
+                    <div>
+                        <h2 id="token-created-title" class="modal-title h5">Token created</h2>
+                        <p class="text-secondary small mb-0">Copy this token now. It will not be shown again.</p>
+                    </div>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
                     <div class="d-flex gap-2 flex-wrap"><code id="new-token-value"
                             class="token-value flex-grow-1"></code><button id="copy-token"
-                            class="btn btn-outline-success" type="button">Copy</button></div>
+                            class="btn btn-outline-secondary" type="button">Copy</button></div>
+                </div>
+                <div class="modal-footer">
+                    <button id="token-done" type="button" class="btn btn-primary"
+                        data-bs-dismiss="modal">Done</button>
                 </div>
             </div>
-        </section>
-    </div>
-    <div class="col-12 col-xl-8">
-        <section class="card">
-            <div class="card-body">
-                <h2 class="h5">Existing tokens</h2>
-                <div id="tokens-list" aria-live="polite">
-                    <p class="text-secondary">Loading tokens …</p>
-                </div>
-            </div>
-        </section>
+        </div>
     </div>
 </div>
 {% endblock %}

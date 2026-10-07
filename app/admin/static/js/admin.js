@@ -843,25 +843,50 @@
     return new Intl.DateTimeFormat(undefined, time ? { dateStyle: 'medium', timeStyle: 'short' } : { dateStyle: 'medium' }).format(date);
   }
 
+  function tokenEmptyRow() {
+    const row = element('tr');
+    const cell = element('td', 'text-secondary', 'No API tokens created yet.');
+    cell.colSpan = 6;
+    row.append(cell);
+    return row;
+  }
+
   async function loadTokens() {
     const host = $('tokens-list');
     const data = await api('tokens');
     host.replaceChildren();
-    if (!data.tokens?.length) { host.append(element('p', 'text-secondary mb-0', 'No tokens created yet.')); return; }
+    if (!data.tokens?.length) { host.append(tokenEmptyRow()); return; }
     for (const token of data.tokens) {
-      const row = element('div', 'token-row');
-      const details = element('div');
-      details.append(element('strong', 'd-block', token.name), element('small', 'd-block text-secondary', `${token.role === 'read' ? 'Read' : 'Read and write'} · Created: ${formatDate(token.created_at)} · Last used: ${formatDate(token.last_used_at, { time: true, empty: 'Never' })} · Expires: ${formatDate(token.expires_at)}`));
-      const revoke = element('button', 'btn btn-outline-danger btn-sm', 'Revoke');
+      const row = element('tr');
+      const nowrap = (text, extra = '') => element('td', `token-nowrap${extra}`, text);
+      const actions = element('td', 'text-end token-nowrap');
+      const menu = element('div', 'dropdown');
+      const toggle = element('button', 'btn btn-outline-secondary btn-sm');
+      toggle.type = 'button'; toggle.dataset.bsToggle = 'dropdown'; toggle.dataset.bsStrategy = 'fixed';
+      toggle.setAttribute('aria-expanded', 'false');
+      toggle.setAttribute('aria-label', `Actions for token ${token.name}`);
+      toggle.append(element('span', 'material-icons', 'more_vert'));
+      toggle.firstChild.setAttribute('aria-hidden', 'true');
+      const options = element('ul', 'dropdown-menu dropdown-menu-end');
+      const item = element('li');
+      const revoke = element('button', 'dropdown-item text-danger', 'Revoke token');
       revoke.type = 'button';
       revoke.setAttribute('aria-label', `Revoke token ${token.name}`);
       revoke.addEventListener('click', async () => {
         if (!confirm(`Really revoke token "${token.name}"?`)) return;
         revoke.disabled = true;
-        try { await api(`tokens/${encodeURIComponent(token.id)}`, { method: 'DELETE' }); row.remove(); toast('Token revoked.'); if (!host.childElementCount) host.append(element('p', 'text-secondary mb-0', 'No tokens created yet.')); }
+        try { await api(`tokens/${encodeURIComponent(token.id)}`, { method: 'DELETE' }); row.remove(); toast('Token revoked.'); if (!host.childElementCount) host.append(tokenEmptyRow()); }
         catch (error) { revoke.disabled = false; toast(messageFrom(error), 'danger'); }
       });
-      row.append(details, revoke);
+      item.append(revoke); options.append(item); menu.append(toggle, options); actions.append(menu);
+      row.append(
+        element('td', '', token.name),
+        element('td', '', token.role === 'read' ? 'Read' : 'Read and write'),
+        nowrap(formatDate(token.created_at)),
+        nowrap(formatDate(token.last_used_at, { time: true, empty: 'Never' })),
+        nowrap(formatDate(token.expires_at)),
+        actions,
+      );
       host.append(row);
     }
   }
@@ -881,23 +906,27 @@
 
   function initTokens() {
     loadTokens().catch((error) => toast(messageFrom(error), 'danger'));
-    $('token-form').addEventListener('submit', async (event) => {
-      event.preventDefault();
-      const form = event.currentTarget;
-      submitState(form, true);
-      $('new-token-box').hidden = true;
+    const modal = $('add-token-modal');
+    const form = $('token-form');
+    const showResult = (shown) => { $('token-form-state').hidden = shown; $('new-token-result').hidden = !shown; };
+    modal.addEventListener('shown.bs.modal', () => { if (!$('token-form-state').hidden) $('token-name').focus(); });
+    // Closing by any path wipes the plaintext secret from the DOM and restores the form state.
+    modal.addEventListener('hidden.bs.modal', () => {
       $('new-token-value').textContent = '';
+      showResult(false);
+      form.reset();
+      $('token-expires').value = EXPIRY_DEFAULT;
+    });
+    form.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      submitState(form, true);
       const expiry = expiryFromPreset($('token-expires').value);
       const body = { name: $('token-name').value.trim(), role: $('token-role').value };
       if (expiry) body.expires_at = expiry;
       try {
         const result = await api('tokens', { method: 'POST', body: JSON.stringify(body) });
         $('new-token-value').textContent = result.token || '';
-        $('new-token-box').hidden = false;
-        form.reset();
-        // reset() restores the markup default, which is the 90-day option; set it explicitly so a
-        // later markup reorder cannot silently default new tokens to "Never expires".
-        $('token-expires').value = EXPIRY_DEFAULT;
+        showResult(true);
         await loadTokens();
         toast('Token created. Please copy it now.');
       } catch (error) { toast(messageFrom(error), 'danger'); }
@@ -910,260 +939,696 @@
   }
 
   // Business labels for the Energy Manager's own enums (app/energy/models.py); the admin API never
-  // sends a register name or a raw dispatch mode, so no further decoding happens here.
-  const ENERGY_ACTION_LABELS = { charge: 'Charge', discharge: 'Discharge', hold: 'Hold', auto: 'Automatic' };
+  // sends a register name or a raw dispatch mode, except in the Advanced section.
+  const ENERGY_ACTION_LABELS = { charge: 'Charge', discharge: 'Discharge', hold: 'Hold', auto: 'Return to automatic' };
   const ENERGY_STATE_LABELS = {
     automatic: 'Automatic', starting: 'Starting', charging: 'Charging', discharging: 'Discharging',
     holding: 'Holding', stopping: 'Stopping', fault: 'Fault',
   };
   const ENERGY_REASON_LABELS = {
-    not_armed: 'Not armed', write_not_permitted: 'Write not permitted', limits_missing: 'Limits missing',
-    hardware_not_verified: 'Hardware not verified', restore_required: 'Restore required',
+    not_armed: 'Energy Manager is off', write_not_permitted: 'write access was revoked',
+    limits_missing: 'power limits are not configured', hardware_not_verified: 'hardware is not verified',
+    restore_required: 'the inverter must be handed back first',
   };
   const ENERGY_POLICY_MODES = [['business_target', 'Business target'], ['below_current_soc', 'Below current SoC']];
-  const ENERGY_TARGET_ACTIONS = ['charge', 'discharge'];
+  const ENERGY_POLL_MS = 3000;
+  const ENERGY_IDLE_WATTS = 20; // below this a flow counts as standing still
+  const ENERGY_DASH_PERIOD = 14; // user units; must match the dasharray in admin.css
+  const SVG_NS = 'http://www.w3.org/2000/svg';
+  const energyPanels = new Map();
+  let energyPolling = false;
 
-  function energyReadingCell(label, reading, unit) {
-    const node = element('div', 'device-metric-card');
-    const hasValue = reading && reading.value !== null && reading.value !== undefined;
-    const dd = element('dd', 'mb-0', hasValue ? formatMetric(Number(reading.value), unit) : 'n/a');
-    if (hasValue && reading.stale) setClass(dd, 'text-secondary', true);
-    node.append(element('dt', 'fw-normal', label), dd);
+  function svgEl(tag, attrs = {}, text) {
+    const node = document.createElementNS(SVG_NS, tag);
+    for (const [key, value] of Object.entries(attrs)) node.setAttribute(key, String(value));
+    if (text !== undefined) node.textContent = String(text);
     return node;
   }
 
-  function energyCommandForm(device) {
-    const form = element('form', 'row g-2 align-items-end mb-3');
-    const actionId = `energy-action-${device.device_id}`;
-    const actionCol = element('div', 'col-auto');
-    const actionLabel = element('label', 'form-label', 'Action');
-    actionLabel.htmlFor = actionId;
-    const actionSelect = element('select', 'form-select');
-    actionSelect.id = actionId;
-    for (const item of device.actions) {
-      const option = element('option', null, ENERGY_ACTION_LABELS[item.action] || item.action);
-      option.value = item.action;
-      option.disabled = !item.available;
-      if (!item.available && item.reason) option.textContent += ` (${ENERGY_REASON_LABELS[item.reason] || item.reason})`;
-      actionSelect.append(option);
-    }
-    actionSelect.value = device.action || 'auto';
-    actionCol.append(actionLabel, actionSelect);
-
-    const targetId = `energy-target-${device.device_id}`;
-    const targetCol = element('div', 'col-auto');
-    const targetLabel = element('label', 'form-label', 'Target SoC %');
-    targetLabel.htmlFor = targetId;
-    const targetInput = element('input', 'form-control');
-    targetInput.type = 'number';
-    targetInput.id = targetId;
-    targetInput.min = String(device.target_soc_window.min);
-    targetInput.max = String(device.target_soc_window.max);
-    targetInput.step = '1';
-    if (device.target_soc_percent !== null && device.target_soc_percent !== undefined) targetInput.value = String(device.target_soc_percent);
-    targetCol.append(targetLabel, targetInput);
-
-    const toggleTarget = () => { targetCol.hidden = !ENERGY_TARGET_ACTIONS.includes(actionSelect.value); };
-    actionSelect.addEventListener('change', toggleTarget);
-    toggleTarget();
-
-    const submitCol = element('div', 'col-auto');
-    const submitButton = element('button', 'btn btn-primary', 'Send command');
-    submitButton.type = 'submit';
-    submitCol.append(submitButton);
-    form.append(actionCol, targetCol, submitCol);
-
-    form.addEventListener('submit', async (event) => {
-      event.preventDefault();
-      const body = { action: actionSelect.value };
-      if (ENERGY_TARGET_ACTIONS.includes(actionSelect.value)) {
-        if (targetInput.value === '') { toast('Target SoC is required for charge and discharge.', 'danger'); return; }
-        body.target_soc_percent = Number(targetInput.value);
-      }
-      submitButton.disabled = true;
-      try {
-        await api(`energy/devices/${encodeURIComponent(device.device_id)}/command`, { method: 'POST', body: JSON.stringify(body) });
-        toast('Command sent.');
-        await loadEnergyDevices();
-      } catch (error) { toast(messageFrom(error), 'danger'); submitButton.disabled = false; }
-    });
-    return form;
+  function readingValue(reading) {
+    return reading && reading.value !== null && reading.value !== undefined && Number.isFinite(Number(reading.value))
+      ? Number(reading.value) : null;
   }
 
-  function energyPolicyForm(device) {
-    const policy = device.soc_target_policy;
-    const form = element('form', 'row g-2 align-items-end');
-    const modeId = `energy-policy-mode-${device.device_id}`;
-    const modeCol = element('div', 'col-auto');
-    const modeLabel = element('label', 'form-label', 'SoC target policy');
-    modeLabel.htmlFor = modeId;
-    const modeSelect = element('select', 'form-select');
-    modeSelect.id = modeId;
+  // A stale or absent figure is never animated: the flow only shows what was measured recently.
+  function liveValue(reading) {
+    return reading && !reading.stale ? readingValue(reading) : null;
+  }
+
+  function formatPower(watts) {
+    if (!Number.isFinite(watts)) return '–';
+    const abs = Math.abs(watts);
+    return abs >= 1000 ? `${(abs / 1000).toFixed(2)} kW` : `${Math.round(abs)} W`;
+  }
+
+  function formatPercent(value) {
+    return Number.isFinite(value) ? `${Math.round(value)} %` : '–';
+  }
+
+  function energyFlowGraphic() {
+    const svg = svgEl('svg', { viewBox: '0 0 420 290', class: 'energy-flow-svg', role: 'img' });
+    const lines = {};
+    // Each path runs in the direction of the "positive" flow; a negative value reverses the animation.
+    const lineDefs = [
+      ['pv', 'M210 114 V154', 210, 134, 90],
+      ['grid', 'M94 190 H172', 133, 190, 0],
+      ['battery', 'M326 190 H248', 287, 190, 180],
+    ];
+    for (const [key, d, mx, my, angle] of lineDefs) {
+      const group = svgEl('g', { class: 'flow-line is-idle' });
+      const track = svgEl('path', { class: 'flow-track', d });
+      const dots = svgEl('path', { class: 'flow-dots', d });
+      const arrow = svgEl('polygon', { class: 'flow-arrow', points: '-7,-6 7,0 -7,6' });
+      group.append(track, dots, arrow);
+      svg.append(group);
+      lines[key] = { group, dots, arrow, mx, my, angle };
+    }
+    const nodes = {};
+    const nodeDefs = [
+      ['pv', 210, 78, 'wb_sunny', 'PV', 'top'],
+      ['grid', 56, 190, 'electrical_services', 'Grid', 'bottom'],
+      ['house', 210, 190, 'home', 'House', 'bottom'],
+      ['battery', 364, 190, 'battery_charging_full', 'Battery', 'bottom'],
+    ];
+    for (const [key, cx, cy, icon, label, place] of nodeDefs) {
+      const group = svgEl('g', { class: 'flow-node' });
+      group.append(svgEl('circle', { class: 'flow-node-ring', cx, cy, r: 34 }));
+      group.append(svgEl('text', { class: 'flow-node-icon', x: cx, y: cy, 'aria-hidden': 'true' }, icon));
+      const top = place === 'top';
+      group.append(svgEl('text', { class: 'flow-node-label', x: cx, y: top ? 16 : cy + 50 }, label));
+      const value = svgEl('text', { class: 'flow-node-value', x: cx, y: top ? 34 : cy + 68 }, '–');
+      const sub = svgEl('text', { class: 'flow-node-sub', x: cx, y: cy + 84 }, '');
+      group.append(value, sub);
+      svg.append(group);
+      nodes[key] = { group, value, sub };
+    }
+
+    // Duration is derived from the power so the dot speed is proportional to it, within a readable range.
+    function setLine(key, watts, positiveKind, negativeKind) {
+      const line = lines[key];
+      const active = Number.isFinite(watts) && Math.abs(watts) >= ENERGY_IDLE_WATTS;
+      setClass(line.group, 'is-idle', !active);
+      if (!active) return;
+      const reverse = watts < 0;
+      setClass(line.group, 'is-reverse', reverse);
+      for (const kind of new Set([positiveKind, negativeKind])) setClass(line.group, kind, kind === (reverse ? negativeKind : positiveKind));
+      const speed = Math.min(Math.max(Math.abs(watts) / 1000 * 30, 8), 160);
+      const duration = (ENERGY_DASH_PERIOD / speed).toFixed(2);
+      if (line.duration !== duration) {
+        line.dots.style.setProperty('--flow-dur', `${duration}s`);
+        line.duration = duration;
+      }
+      line.arrow.setAttribute('transform', `translate(${line.mx} ${line.my}) rotate(${line.angle + (reverse ? 180 : 0)})`);
+    }
+
+    function setNode(key, text, sub, stale) {
+      const node = nodes[key];
+      node.value.textContent = text;
+      node.sub.textContent = sub;
+      setClass(node.group, 'is-stale', stale);
+    }
+
+    function update(device) {
+      const r = device.readings;
+      const pv = readingValue(r.pv_power_w);
+      const grid = readingValue(r.grid_power_w);
+      const battery = readingValue(r.battery_power_w);
+      const house = readingValue(r.house_load_w);
+      const soc = readingValue(r.battery_soc_percent);
+
+      setLine('pv', liveValue(r.pv_power_w), 'flow-pv', 'flow-pv');
+      setLine('grid', liveValue(r.grid_power_w), 'flow-import', 'flow-export');
+      setLine('battery', liveValue(r.battery_power_w), 'flow-discharge', 'flow-charge');
+
+      const gridWord = grid === null ? '' : Math.abs(grid) < ENERGY_IDLE_WATTS ? 'Idle' : grid > 0 ? 'Import' : 'Export';
+      const batteryWord = battery === null ? '' : Math.abs(battery) < ENERGY_IDLE_WATTS ? 'Idle' : battery > 0 ? 'Discharging' : 'Charging';
+      setNode('pv', pv === null ? '–' : formatPower(pv), '', !!r.pv_power_w.stale);
+      setNode('grid', grid === null ? '–' : formatPower(grid), gridWord, !!r.grid_power_w.stale);
+      setNode('house', house === null ? '–' : formatPower(house), '', !!r.house_load_w.stale);
+      setNode('battery', battery === null ? '–' : formatPower(battery),
+        [batteryWord, soc === null ? '' : formatPercent(soc)].filter(Boolean).join(' · '), !!r.battery_power_w.stale);
+      svg.setAttribute('aria-label', [
+        `PV ${pv === null ? 'unknown' : formatPower(pv)}`,
+        `grid ${grid === null ? 'unknown' : `${formatPower(grid)} ${gridWord.toLowerCase()}`}`,
+        `battery ${battery === null ? 'unknown' : `${formatPower(battery)} ${batteryWord.toLowerCase()}`}`,
+        `house ${house === null ? 'unknown' : formatPower(house)}`,
+      ].join(', '));
+    }
+
+    return { svg, update };
+  }
+
+  function energyAvailability(device, action) {
+    return (device.actions || []).find((item) => item.action === action) || { available: false, reason: null };
+  }
+
+  // The one sentence the status box shows: ready, or why manual control is not available.
+  function energyControlState(device) {
+    if (!device.connected) return { ready: false, text: 'Control unavailable', detail: `Inverter not connected (${device.connection_state}).` };
+    if (!device.armed) return { ready: false, text: 'Energy Manager is OFF', detail: 'Switch it on to control the battery manually.' };
+    if (device.state === 'fault') {
+      return { ready: false, text: 'Control unavailable', detail: `Device fault${device.stop_reason ? `: ${device.stop_reason}` : ''}.` };
+    }
+    const reasons = [];
+    for (const action of ['charge', 'discharge', 'hold']) {
+      const item = energyAvailability(device, action);
+      if (item.available) continue;
+      let text = ENERGY_REASON_LABELS[item.reason] || 'not available';
+      const gate = (device.gates || []).find((entry) => entry.action === action);
+      if (item.reason === 'hardware_not_verified' && gate && gate.reject_detail) text += ` (${gate.reject_detail})`;
+      reasons.push(`${ENERGY_ACTION_LABELS[action]}: ${text}`);
+    }
+    if (reasons.length) return { ready: false, text: 'Control unavailable', detail: [...new Set(reasons)].join('; ') };
+    return { ready: true, text: 'Ready', detail: '' };
+  }
+
+  function energyRequestedText(device) {
+    const label = ENERGY_STATE_LABELS[device.state] || device.state;
+    if (device.state === 'automatic') return 'Automatic (inverter decides)';
+    if (device.target_soc_percent !== null && device.target_soc_percent !== undefined && ['charging', 'discharging', 'starting'].includes(device.state)) {
+      return `${label} to ${Math.round(device.target_soc_percent)} %`;
+    }
+    return label;
+  }
+
+  function energyActualText(device) {
+    const battery = readingValue(device.readings.battery_power_w);
+    if (battery === null) return 'No measurement';
+    if (Math.abs(battery) < ENERGY_IDLE_WATTS) return 'Battery idle';
+    return `${battery > 0 ? 'Discharging' : 'Charging'} ${formatPower(battery)}`;
+  }
+
+  function energyTargetRange(device, action) {
+    const soc = readingValue(device.readings.battery_soc_percent);
+    const window = device.target_soc_window;
+    let lo = Math.ceil(window.min);
+    let hi = Math.floor(window.max);
+    if (soc !== null && action === 'charge') lo = Math.max(lo, Math.floor(soc) + 1);
+    if (soc !== null && action === 'discharge') hi = Math.min(hi, Math.ceil(soc) - 1);
+    return { lo, hi, valid: lo <= hi };
+  }
+
+  function createEnergyPanel(first) {
+    const id = first.device_id;
+    const path = `energy/devices/${encodeURIComponent(id)}`;
+    let device = first;
+    let selected = null; // 'charge' | 'discharge' while its target slider is open
+    let busy = false;
+    const touched = { charge: false, discharge: false };
+
+    const card = element('section', 'card energy-panel');
+    const body = element('div', 'card-body');
+    card.append(body);
+
+    // Header: name, connection, master switch.
+    const head = element('div', 'energy-head mb-3');
+    const title = element('div', 'energy-head-title');
+    const nameNode = element('h2', 'h5 mb-0');
+    const dot = element('span', 'status-dot');
+    const connection = element('span', 'small text-secondary');
+    title.append(nameNode, dot, connection);
+    const switchBox = element('div', 'energy-switch form-check form-switch');
+    const armedInput = element('input', 'form-check-input');
+    armedInput.type = 'checkbox';
+    armedInput.setAttribute('role', 'switch');
+    armedInput.id = `energy-armed-${id}`;
+    const armedLabel = element('label', 'form-check-label energy-switch-label');
+    armedLabel.htmlFor = armedInput.id;
+    switchBox.append(armedInput, armedLabel);
+    head.append(title, switchBox);
+    body.append(head);
+
+    const layout = element('div', 'energy-body');
+    const flow = energyFlowGraphic();
+    const control = element('div', 'energy-control');
+    layout.append(flow.svg, control);
+    body.append(layout);
+
+    const statusBox = element('div', 'energy-status');
+    const statusIcon = element('span', 'material-icons');
+    statusIcon.setAttribute('aria-hidden', 'true');
+    const statusText = element('div');
+    const statusMain = element('div', 'fw-semibold');
+    const statusDetail = element('div', 'small text-secondary');
+    statusText.append(statusMain, statusDetail);
+    statusBox.append(statusIcon, statusText);
+
+    const compare = element('div', 'energy-compare');
+    const requestedBox = element('div', 'energy-compare-box');
+    const requestedMain = element('div', 'energy-compare-main');
+    const requestedSub = element('div', 'small text-secondary');
+    requestedBox.append(element('h3', null, 'Requested'), requestedMain, requestedSub);
+    const actualBox = element('div', 'energy-compare-box');
+    const actualMain = element('div', 'energy-compare-main');
+    const actualSub = element('div', 'small text-secondary');
+    actualBox.append(element('h3', null, 'Actual'), actualMain, actualSub);
+    compare.append(requestedBox, actualBox);
+
+    const actions = element('div', 'energy-actions');
+    const buttons = {};
+    for (const action of ['charge', 'hold', 'discharge', 'auto']) {
+      const button = element('button', action === 'auto' ? 'btn btn-outline-secondary' : 'btn btn-outline-primary', ENERGY_ACTION_LABELS[action]);
+      button.type = 'button';
+      if (action === 'auto') button.classList.add('energy-action-auto');
+      buttons[action] = button;
+      actions.append(button);
+    }
+
+    const target = element('div', 'energy-target');
+    target.hidden = true;
+    const targetLabel = element('label', 'form-label d-flex justify-content-between mb-1');
+    const targetName = element('span', null, 'Target SoC');
+    const targetOutput = element('output', 'fw-semibold');
+    targetLabel.append(targetName, targetOutput);
+    const range = element('input', 'form-range');
+    range.type = 'range';
+    range.step = '1';
+    range.id = `energy-target-${id}`;
+    targetLabel.htmlFor = range.id;
+    const scale = element('div', 'energy-target-scale');
+    const scaleLo = element('span');
+    const scaleHi = element('span');
+    scale.append(scaleLo, scaleHi);
+    const targetNote = element('p', 'small text-secondary mb-0');
+    targetNote.hidden = true;
+    const confirm = element('button', 'btn btn-primary mt-2 w-100');
+    confirm.type = 'button';
+    target.append(targetLabel, range, scale, targetNote, confirm);
+
+    control.append(statusBox, compare, actions, target);
+
+    const advanced = energyAdvanced(id, () => device, (next) => panel.update(next));
+    body.append(advanced.node);
+
+    function setBusy(value) {
+      busy = value;
+      render();
+    }
+
+    async function send(payload) {
+      setBusy(true);
+      try {
+        const result = await api(`${path}/command`, { method: 'POST', body: JSON.stringify(payload) });
+        toast('Command sent.');
+        selected = null;
+        touched.charge = false;
+        touched.discharge = false;
+        panel.update(result);
+      } catch (error) { toast(messageFrom(error), 'danger'); }
+      finally { setBusy(false); }
+    }
+
+    armedInput.addEventListener('change', async () => {
+      const wanted = armedInput.checked;
+      setBusy(true);
+      try {
+        const result = await api(`${path}/armed`, { method: 'PUT', body: JSON.stringify({ armed: wanted }) });
+        toast(wanted ? 'Energy Manager is on.' : 'Energy Manager is off; the inverter is back in automatic operation.');
+        if (!wanted) selected = null;
+        panel.update(result);
+      } catch (error) { toast(messageFrom(error), 'danger'); }
+      finally { setBusy(false); }
+    });
+
+    buttons.hold.addEventListener('click', () => send({ action: 'hold' }));
+    buttons.auto.addEventListener('click', () => send({ action: 'auto' }));
+    for (const action of ['charge', 'discharge']) {
+      buttons[action].addEventListener('click', () => { selected = selected === action ? null : action; render(); });
+    }
+    range.addEventListener('input', () => { if (selected) touched[selected] = true; renderTarget(); });
+    confirm.addEventListener('click', () => {
+      if (!selected) return;
+      send({ action: selected, target_soc_percent: Number(range.value) });
+    });
+
+    function renderTarget() {
+      target.hidden = selected === null;
+      if (selected === null) return;
+      const limits = energyTargetRange(device, selected);
+      const soc = readingValue(device.readings.battery_soc_percent);
+      range.hidden = scale.hidden = !limits.valid;
+      targetNote.hidden = limits.valid;
+      confirm.hidden = !limits.valid;
+      targetName.textContent = selected === 'charge' ? 'Charge up to' : 'Discharge down to';
+      if (!limits.valid) {
+        targetOutput.textContent = '';
+        targetNote.textContent = selected === 'charge'
+          ? `The battery (${formatPercent(soc)}) is already at the highest allowed target.`
+          : `The battery (${formatPercent(soc)}) is already at the lowest allowed target.`;
+        return;
+      }
+      range.min = String(limits.lo);
+      range.max = String(limits.hi);
+      const current = Number(range.value);
+      if (!touched[selected] || !(current >= limits.lo && current <= limits.hi)) {
+        const wanted = selected === 'charge' ? 80 : 20;
+        range.value = String(Math.min(Math.max(wanted, limits.lo), limits.hi));
+      }
+      scaleLo.textContent = `${limits.lo} %`;
+      scaleHi.textContent = `${limits.hi} %`;
+      targetOutput.textContent = `${range.value} %`;
+      confirm.textContent = `${ENERGY_ACTION_LABELS[selected]} to ${range.value} %`;
+      confirm.disabled = busy;
+    }
+
+    function render() {
+      const readyState = energyControlState(device);
+      nameNode.textContent = device.device_name;
+      dot.className = `status-dot ${device.connected ? 'online' : 'offline'}`;
+      connection.textContent = `${device.connected ? 'Connected' : 'Not connected'} · ${device.host}`;
+      armedInput.checked = device.armed;
+      armedInput.disabled = busy;
+      armedLabel.textContent = `Energy Manager ${device.armed ? 'ON' : 'OFF'}`;
+
+      statusBox.className = `energy-status ${readyState.ready ? 'is-ready' : 'is-blocked'}`;
+      statusIcon.textContent = readyState.ready ? 'check_circle' : 'info';
+      statusMain.textContent = readyState.text;
+      statusDetail.textContent = readyState.ready ? '' : readyState.detail;
+      statusDetail.hidden = readyState.ready;
+
+      requestedMain.textContent = energyRequestedText(device);
+      const requestedLines = [];
+      if (device.power_limit_w !== null && device.power_limit_w !== undefined) {
+        requestedLines.push(`Max power ${formatPower(device.power_limit_w)}${device.power_limit_clamped ? ' (clamped)' : ''}`);
+      }
+      if (device.commanded_power_w > 0) requestedLines.push(`Commanded ${formatPower(device.commanded_power_w)}`);
+      if (device.until) requestedLines.push(`Until ${hhmm(new Date(device.until))}${device.time_limited ? ' (time-limited)' : ''}`);
+      if (device.stop_reason) requestedLines.push(`Last stop: ${device.stop_reason.replaceAll('_', ' ')}`);
+      requestedSub.textContent = requestedLines.join(' · ');
+      actualMain.textContent = energyActualText(device);
+      const soc = readingValue(device.readings.battery_soc_percent);
+      actualSub.textContent = soc === null ? '' : `Battery ${formatPercent(soc)}`;
+
+      for (const action of ['charge', 'hold', 'discharge', 'auto']) {
+        const item = energyAvailability(device, action);
+        const enabled = device.armed && item.available && !busy && device.connected;
+        buttons[action].disabled = !enabled;
+        buttons[action].title = enabled ? '' : (ENERGY_REASON_LABELS[item.reason] || '');
+        setClass(buttons[action], 'is-selected', selected === action);
+        buttons[action].setAttribute('aria-pressed', action === 'charge' || action === 'discharge' ? String(selected === action) : 'false');
+      }
+      if (selected && buttons[selected].disabled) selected = null;
+      renderTarget();
+      flow.update(device);
+      advanced.update(device);
+    }
+
+    const panel = {
+      root: card,
+      update(next) { device = next; render(); },
+    };
+    render();
+    return panel;
+  }
+
+  // Everything an operator rarely needs: gate detail, SoC-target policy, limits and engineering
+  // mode, hardware verification and the sign conventions. Raw names are fine on this admin surface.
+  function energyAdvanced(id, getDevice, onChange) {
+    const path = `energy/devices/${encodeURIComponent(id)}`;
+    const details = element('details', 'energy-advanced mt-3');
+    details.append(element('summary', 'small', 'Advanced / Diagnostics'));
+    const inner = element('div', 'energy-advanced-inner');
+    details.append(inner);
+
+    const field = (labelText, input, extra) => {
+      const col = element('div', extra || 'col-auto');
+      const label = element('label', 'form-label small mb-1', labelText);
+      input.id = `energy-${id}-${labelText.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`;
+      label.htmlFor = input.id;
+      col.append(label, input);
+      return col;
+    };
+    const numberInput = (min, max, step) => {
+      const input = element('input', 'form-control form-control-sm');
+      input.type = 'number';
+      input.min = String(min);
+      input.max = String(max);
+      input.step = String(step);
+      return input;
+    };
+    const textInput = (maxLength) => {
+      const input = element('input', 'form-control form-control-sm');
+      input.type = 'text';
+      input.maxLength = maxLength;
+      return input;
+    };
+    const checkbox = (labelText) => {
+      const wrap = element('div', 'form-check');
+      const input = element('input', 'form-check-input');
+      input.type = 'checkbox';
+      input.id = `energy-${id}-${labelText.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`;
+      const label = element('label', 'form-check-label small', labelText);
+      label.htmlFor = input.id;
+      wrap.append(input, label);
+      return { wrap, input };
+    };
+    const section = (heading, hint) => {
+      const node = element('div', 'energy-advanced-section');
+      node.append(element('h3', 'h6', heading));
+      if (hint) node.append(element('p', 'small text-secondary', hint));
+      inner.append(node);
+      return node;
+    };
+    const guarded = (button, task) => async (event) => {
+      event.preventDefault();
+      button.disabled = true;
+      try { await task(); await onChange(await api('energy/devices').then((list) => list.find((item) => item.device_id === id) || getDevice())); }
+      catch (error) { toast(messageFrom(error), 'danger'); }
+      finally { button.disabled = false; }
+    };
+
+    // 1. Gate detail
+    const gateSection = section('Gate detail', 'Raw decision per action; unverified capability names are listed as the dispatch layer reports them.');
+    const gateHost = element('div', 'table-responsive');
+    gateHost.tabIndex = 0;
+    gateHost.setAttribute('aria-label', 'Gate detail');
+    gateSection.append(gateHost);
+
+    // 2. Capabilities and sign conventions
+    const capSection = section('Hardware capabilities and sign conventions',
+      'Charge, hold and discharge need all three capabilities verified; otherwise only the time-limited engineering mode releases them.');
+    const capHost = element('div', 'table-responsive');
+    capHost.tabIndex = 0;
+    capHost.setAttribute('aria-label', 'Hardware capabilities');
+    capSection.append(capHost);
+
+    // 3. Hardware verification
+    const verifySection = section('Hardware verification',
+      'Enter what you measured on this inverter. The server stamps who verified it and when; a verification applies to this device only.');
+    const verifyForm = element('form', 'row g-2 align-items-end');
+    const model = textInput(128);
+    const firmware = textInput(64);
+    const code = numberInput(0, 255, 1);
+    const enumWidth = numberInput(1, 4, 1);
+    const boolWidth = numberInput(1, 4, 1);
+    const batterySign = element('select', 'form-select form-select-sm');
+    for (const [value, text] of [['true', 'Positive value discharges the battery'], ['false', 'Positive value charges the battery']]) {
+      const option = element('option', null, text);
+      option.value = value;
+      batterySign.append(option);
+    }
+    const gridSign = element('select', 'form-select form-select-sm');
+    for (const [value, text] of [['true', 'Positive value is grid import'], ['false', 'Positive value is grid export']]) {
+      const option = element('option', null, text);
+      option.value = value;
+      gridSign.append(option);
+    }
+    const note = textInput(200);
+    const frame = checkbox('Write frame layout verified');
+    const sequence = checkbox('Apply sequence verified');
+    const attest = checkbox('I verified these values on the hardware');
+    const verifyButton = element('button', 'btn btn-sm btn-primary', 'Mark hardware as verified');
+    verifyButton.type = 'submit';
+    const revokeButton = element('button', 'btn btn-sm btn-outline-secondary', 'Revoke verification');
+    revokeButton.type = 'button';
+    const checks = element('div', 'col-12');
+    checks.append(frame.wrap, sequence.wrap, attest.wrap);
+    const buttonRow = element('div', 'col-12 d-flex gap-2');
+    buttonRow.append(verifyButton, revokeButton);
+    verifyForm.append(
+      field('Device model', model, 'col-sm-6 col-lg-3'), field('Firmware', firmware, 'col-sm-6 col-lg-3'),
+      field('Strategy code', code), field('Enum byte width', enumWidth), field('Bool byte width', boolWidth),
+      field('Battery power sign', batterySign, 'col-sm-6'), field('Grid power sign', gridSign, 'col-sm-6'),
+      field('Evidence note', note, 'col-12'), checks, buttonRow,
+    );
+    verifySection.append(verifyForm);
+
+    const evidence = (extra) => ({
+      status: 'verified', verified_device_model: model.value.trim(), verified_firmware: firmware.value.trim(), ...extra,
+    });
+    verifyForm.addEventListener('submit', guarded(verifyButton, async () => {
+      if (!attest.input.checked) throw new Error('Confirm that the values were verified on the hardware.');
+      const numbers = [code, enumWidth, boolWidth];
+      if (numbers.some((input) => input.value === '')) throw new Error('Strategy code and both byte widths are required.');
+      const base = `dispatch/devices/${encodeURIComponent(id)}/capabilities`;
+      const put = (name, body) => api(`${base}/${name}`, { method: 'PUT', body: JSON.stringify(body) });
+      await put('write_path_convention', evidence({
+        soc_strategy_external_code: Number(code.value), enum_byte_width: Number(enumWidth.value),
+        bool_byte_width: Number(boolWidth.value), write_frame_layout_verified: frame.input.checked,
+        apply_sequence_verified: sequence.input.checked, note: note.value,
+      }));
+      await put('battery_power_sign_convention', evidence({ battery_discharge_positive: batterySign.value === 'true' }));
+      await put('grid_power_sign_convention', evidence({ grid_import_positive: gridSign.value === 'true' }));
+      attest.input.checked = false;
+      toast('Hardware verification saved.');
+    }));
+    revokeButton.addEventListener('click', guarded(revokeButton, async () => {
+      const base = `dispatch/devices/${encodeURIComponent(id)}/capabilities`;
+      for (const name of ['write_path_convention', 'battery_power_sign_convention', 'grid_power_sign_convention']) {
+        await api(`${base}/${name}`, { method: 'PUT', body: JSON.stringify({ status: 'unverified' }) });
+      }
+      toast('Verification revoked.');
+    }));
+
+    // 4. Limits and engineering mode
+    const limitSection = section('Power limits and engineering mode',
+      'Engineering mode releases unverified hardware for short, time-capped commands. It is not needed once the hardware is verified.');
+    const limitForm = element('form', 'row g-2 align-items-end');
+    const maxCharge = numberInput(1, 100000, 1);
+    const maxDischarge = numberInput(1, 100000, 1);
+    const engineering = checkbox('Engineering mode');
+    const limitButton = element('button', 'btn btn-sm btn-outline-primary', 'Save limits');
+    limitButton.type = 'submit';
+    const limitButtonCol = element('div', 'col-auto');
+    limitButtonCol.append(limitButton);
+    const engineeringCol = element('div', 'col-auto');
+    engineeringCol.append(engineering.wrap);
+    limitForm.append(field('Max charge (W)', maxCharge), field('Max discharge (W)', maxDischarge), engineeringCol, limitButtonCol);
+    limitSection.append(limitForm);
+    limitForm.addEventListener('submit', guarded(limitButton, async () => {
+      await api(`dispatch/devices/${encodeURIComponent(id)}`, {
+        method: 'PUT',
+        body: JSON.stringify({
+          max_charge_power_w: Number(maxCharge.value), max_discharge_power_w: Number(maxDischarge.value),
+          engineering_mode: engineering.input.checked,
+        }),
+      });
+      toast('Limits saved.');
+    }));
+
+    // 5. SoC target policy
+    const policySection = section('SoC target policy', 'How the business target is translated into the inverter\'s own SoC target.');
+    const policyForm = element('form', 'row g-2 align-items-end');
+    const policyMode = element('select', 'form-select form-select-sm');
     for (const [value, text] of ENERGY_POLICY_MODES) {
       const option = element('option', null, text);
       option.value = value;
-      modeSelect.append(option);
+      policyMode.append(option);
     }
-    modeSelect.value = policy.mode;
-    modeCol.append(modeLabel, modeSelect);
+    const policyMargin = numberInput(0, 50, 0.1);
+    const policyButton = element('button', 'btn btn-sm btn-outline-primary', 'Save policy');
+    policyButton.type = 'submit';
+    const policyButtonCol = element('div', 'col-auto');
+    policyButtonCol.append(policyButton);
+    policyForm.append(field('Policy', policyMode), field('Margin %', policyMargin), policyButtonCol);
+    policySection.append(policyForm);
+    policyForm.addEventListener('submit', guarded(policyButton, async () => {
+      const policy = getDevice().soc_target_policy;
+      await api(`${path}/soc-target-policy`, {
+        method: 'PUT',
+        body: JSON.stringify({ mode: policyMode.value, below_margin_percent: Number(policyMargin.value), note: policy.note || null }),
+      });
+      toast('SoC target policy saved.');
+    }));
 
-    const marginId = `energy-policy-margin-${device.device_id}`;
-    const marginCol = element('div', 'col-auto');
-    const marginLabel = element('label', 'form-label', 'Margin %');
-    marginLabel.htmlFor = marginId;
-    const marginInput = element('input', 'form-control');
-    marginInput.type = 'number';
-    marginInput.id = marginId;
-    marginInput.min = '0';
-    marginInput.max = '50';
-    marginInput.step = '0.1';
-    marginInput.value = String(policy.below_margin_percent);
-    marginCol.append(marginLabel, marginInput);
+    const simpleTable = (headers, rows) => {
+      const table = element('table', 'table table-sm table-borderless mb-0');
+      const headRow = element('tr');
+      for (const label of headers) headRow.append(element('th', 'text-secondary small fw-normal', label));
+      const thead = element('thead');
+      thead.append(headRow);
+      table.append(thead);
+      const bodyEl = element('tbody');
+      for (const cells of rows) {
+        const row = element('tr');
+        for (const [text, className] of cells) row.append(element('td', `small ${className || ''}`, text));
+        bodyEl.append(row);
+      }
+      table.append(bodyEl);
+      return table;
+    };
 
-    const submitCol = element('div', 'col-auto');
-    const submitButton = element('button', 'btn btn-outline-primary', 'Save policy');
-    submitButton.type = 'submit';
-    submitCol.append(submitButton);
-    form.append(modeCol, marginCol, submitCol);
-
-    form.addEventListener('submit', async (event) => {
-      event.preventDefault();
-      submitButton.disabled = true;
-      try {
-        await api(`energy/devices/${encodeURIComponent(device.device_id)}/soc-target-policy`, {
-          method: 'PUT',
-          body: JSON.stringify({ mode: modeSelect.value, below_margin_percent: Number(marginInput.value), note: policy.note || null }),
-        });
-        toast('SoC target policy saved.');
-        await loadEnergyDevices();
-      } catch (error) { toast(messageFrom(error), 'danger'); submitButton.disabled = false; }
-    });
-    return form;
-  }
-
-  // Admin-only diagnostic (energy.html's own subtitle: "shows the raw gate detail behind each
-  // action"), so a refusal's capability names and reject_detail are shown raw, never softened.
-  function energyGatesBlock(device) {
-    const details = element('details', 'mt-2');
-    details.append(element('summary', 'text-secondary small', 'Gate detail (admin diagnostic)'));
-    const table = element('table', 'table table-sm table-borderless mb-0');
-    const head = element('thead');
-    const headRow = element('tr');
-    for (const label of ['Action', 'Allowed', 'Engineering mode', 'Unverified', 'Reject detail']) {
-      headRow.append(element('th', 'text-secondary small fw-normal', label));
+    let prefilled = false;
+    function prefill(device) {
+      const write = device.capabilities.find((item) => item.name === 'write_path_convention');
+      const battery = device.capabilities.find((item) => item.name === 'battery_power_sign_convention');
+      const grid = device.capabilities.find((item) => item.name === 'grid_power_sign_convention');
+      if (write) {
+        model.value = write.verified_device_model || '';
+        firmware.value = write.verified_firmware || '';
+        code.value = write.soc_strategy_external_code ?? '';
+        enumWidth.value = write.enum_byte_width ?? '';
+        boolWidth.value = write.bool_byte_width ?? '';
+        note.value = write.note || '';
+      }
+      if (battery) batterySign.value = String(battery.battery_discharge_positive);
+      if (grid) gridSign.value = String(grid.grid_import_positive);
+      if (device.limits) {
+        maxCharge.value = device.limits.max_charge_power_w;
+        maxDischarge.value = device.limits.max_discharge_power_w;
+        engineering.input.checked = device.limits.engineering_mode;
+      }
+      policyMode.value = device.soc_target_policy.mode;
+      policyMargin.value = device.soc_target_policy.below_margin_percent;
     }
-    head.append(headRow);
-    const bodyEl = element('tbody');
-    for (const gate of device.gates) {
-      const row = element('tr');
-      row.append(element('td', 'small', ENERGY_ACTION_LABELS[gate.action] || gate.action));
-      const allowedCell = element('td', `small ${gate.allowed ? 'text-success' : 'text-danger'}`, gate.allowed ? 'Yes' : 'No');
-      row.append(allowedCell);
-      row.append(element('td', 'small', gate.engineering_mode ? 'Yes' : 'No'));
-      row.append(element('td', 'small', gate.unverified.join(', ') || '–'));
-      row.append(element('td', 'small', gate.reject_detail || '–'));
-      bodyEl.append(row);
+
+    function update(device) {
+      // Inputs are filled once and never overwritten by a poll, so typing is not interrupted.
+      if (!prefilled) { prefill(device); prefilled = true; }
+      gateHost.replaceChildren(simpleTable(
+        ['Action', 'Allowed', 'Engineering mode', 'Unverified', 'Reject detail'],
+        device.gates.map((gate) => [
+          [ENERGY_ACTION_LABELS[gate.action] || gate.action], [gate.allowed ? 'Yes' : 'No', gate.allowed ? 'text-success' : 'text-danger'],
+          [gate.engineering_mode ? 'Yes' : 'No'], [gate.unverified.join(', ') || '–'], [gate.reject_detail || '–'],
+        ]),
+      ));
+      capHost.replaceChildren(simpleTable(
+        ['Capability', 'Status', 'Model / firmware', 'Sign convention'],
+        device.capabilities.map((item) => [
+          [item.name], [item.status, item.status === 'verified' ? 'text-success' : 'text-danger'],
+          [item.verified_device_model ? `${item.verified_device_model} / ${item.verified_firmware || '–'}` : '–'],
+          [item.name === 'battery_power_sign_convention' ? (item.battery_discharge_positive ? 'positive = discharging' : 'positive = charging')
+            : item.name === 'grid_power_sign_convention' ? (item.grid_import_positive ? 'positive = import' : 'positive = export') : '–'],
+        ]),
+      ));
     }
-    table.append(head, bodyEl);
-    // The 5-column table no longer fits the halved card width; scroll instead of clipping, same
-    // pattern as about.html's dependency table.
-    const scroller = element('div', 'table-responsive');
-    scroller.tabIndex = 0;
-    scroller.setAttribute('aria-label', 'Gate detail');
-    scroller.append(table);
-    details.append(scroller);
-    return details;
+
+    return { node: details, update };
   }
 
-  // Battery-to-pylon illustration beside the card content. Direction/colour/label reuse gridFlow's
-  // feed-vs-draw convention as-is; only the travelling animation itself is new here.
-  function energyFlowGraphic(device) {
-    const graphic = element('div', 'energy-flow-graphic');
-    graphic.setAttribute('role', 'img');
-    const battery = element('span', 'material-icons energy-flow-icon', 'battery_charging_full');
-    battery.setAttribute('aria-hidden', 'true');
-    const pylon = element('span', 'material-icons energy-flow-icon', 'electrical_services');
-    pylon.setAttribute('aria-hidden', 'true');
-
-    const gridReading = device.readings.grid_power_w;
-    const gridValue = gridReading && gridReading.value !== null && gridReading.value !== undefined ? Number(gridReading.value) : NaN;
-    const flow = gridFlow(gridValue);
-
-    const middle = element('div', 'energy-flow-middle');
-    const arrowIcon = element('span', `material-icons energy-flow-arrow ${flow && flow.dir === 'draw' ? 'energy-flow-arrow-draw' : ''}`, flow ? flow.icon : 'remove');
-    arrowIcon.setAttribute('aria-hidden', 'true');
-    if (flow) setClass(arrowIcon, `device-flow-${flow.dir}`, true);
-    const value = element('span', 'small text-secondary energy-flow-value', formatMetric(Math.abs(gridValue), 'W'));
-    middle.append(arrowIcon, value);
-
-    graphic.setAttribute('aria-label', flow ? flow.label : 'No grid power flow');
-    graphic.title = flow ? flow.label : 'No grid power flow';
-    graphic.append(battery, middle, pylon);
-    return graphic;
-  }
-
-  function createEnergyCard(device) {
-    const card = element('section', 'card energy-card');
-    const body = element('div', 'card-body energy-card-body');
-    const content = element('div', 'energy-card-content');
-
-    const head = element('div', 'd-flex align-items-center justify-content-between flex-wrap gap-2 mb-3');
-    head.append(element('h2', 'h5 mb-0', device.device_id));
-    const armedId = `energy-armed-${device.device_id}`;
-    const armedInput = element('input', 'form-check-input');
-    armedInput.type = 'checkbox';
-    armedInput.id = armedId;
-    armedInput.checked = device.armed;
-    const armedLabel = element('label', 'form-check-label', device.armed ? 'Armed' : 'Disarmed');
-    armedLabel.htmlFor = armedId;
-    armedInput.addEventListener('change', async () => {
-      const wanted = armedInput.checked;
-      armedInput.disabled = true;
-      try {
-        await api(`energy/devices/${encodeURIComponent(device.device_id)}/armed`, { method: 'PUT', body: JSON.stringify({ armed: wanted }) });
-        toast(wanted ? 'Energy Manager armed.' : 'Energy Manager disarmed.');
-        await loadEnergyDevices();
-      } catch (error) { armedInput.checked = !wanted; armedInput.disabled = false; toast(messageFrom(error), 'danger'); }
-    });
-    const armedSwitch = element('div', 'form-check form-switch d-flex align-items-center gap-2');
-    armedSwitch.append(armedInput, armedLabel);
-    head.append(armedSwitch);
-    content.append(head);
-
-    const stateParts = [`State: ${ENERGY_STATE_LABELS[device.state] || device.state}`];
-    if (device.action) stateParts.push(`Action: ${ENERGY_ACTION_LABELS[device.action] || device.action}`);
-    if (device.stop_reason) stateParts.push(`Stopped: ${device.stop_reason}`);
-    content.append(element('p', 'text-secondary small mb-3', stateParts.join(' · ')));
-
-    const grid = element('dl', 'device-metric-grid mb-3');
-    grid.append(
-      energyReadingCell('Battery SoC', device.readings.battery_soc_percent, '%'),
-      energyReadingCell('Grid power', device.readings.grid_power_w, 'W'),
-      energyReadingCell('PV power', device.readings.pv_power_w, 'W'),
-      energyReadingCell('House load', device.readings.house_load_w, 'W'),
-    );
-    content.append(grid);
-
-    content.append(energyCommandForm(device));
-    content.append(energyPolicyForm(device));
-    content.append(energyGatesBlock(device));
-    body.append(content, energyFlowGraphic(device));
-    card.append(body);
-    return card;
-  }
-
-  async function loadEnergyDevices() {
+  async function pollEnergy() {
+    if (energyPolling) return;
+    energyPolling = true;
     const host = $('energy-list');
-    let devices;
-    try { devices = await api('energy/devices'); }
-    catch (error) { host.replaceChildren(element('p', 'text-danger mb-0', messageFrom(error))); return; }
-    host.replaceChildren();
-    if (!devices.length) { host.append(element('p', 'text-secondary mb-0', 'No inverters configured yet.')); return; }
-    for (const device of devices) host.append(createEnergyCard(device));
+    const status = $('energy-poll-status');
+    try {
+      const devices = await api('energy/devices');
+      const ids = devices.map((item) => item.device_id);
+      if (ids.join('\n') !== [...energyPanels.keys()].join('\n')) {
+        energyPanels.clear();
+        host.replaceChildren();
+        for (const device of devices) {
+          const panel = createEnergyPanel(device);
+          energyPanels.set(device.device_id, panel);
+          host.append(panel.root);
+        }
+        if (!devices.length) host.append(element('p', 'text-secondary mb-0', 'No inverters configured yet.'));
+      } else {
+        for (const device of devices) energyPanels.get(device.device_id).update(device);
+      }
+      status.textContent = `Live · updated ${new Date().toLocaleTimeString('en-GB')}`;
+      setClass(status, 'text-danger', false);
+    } catch (error) {
+      status.textContent = `Update failed: ${messageFrom(error)}`;
+      setClass(status, 'text-danger', true);
+    } finally { energyPolling = false; }
   }
 
+  // Reads the cache only (server side), so the poll rate does not load the inverter.
   function initEnergy() {
-    loadEnergyDevices().catch((error) => toast(messageFrom(error), 'danger'));
+    pollEnergy();
+    setInterval(() => { if (!document.hidden) pollEnergy(); }, ENERGY_POLL_MS);
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) pollEnergy(); });
   }
 
   const settingFields = [

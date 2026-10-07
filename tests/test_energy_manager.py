@@ -601,8 +601,13 @@ async def test_a_revoked_approval_blocks_every_action_and_refuses_the_command() 
     # Armed, but the operator removed the register approvals on the Inverters page afterwards.
     service = manager(port, approvals=ApprovalSpy(EXISTING_WRITES))
     status = await service.status("main")
-    assert [item.available for item in status.actions] == [False, False, False, False]
-    assert {item.reason for item in status.actions} == {ActionReason.WRITE_NOT_PERMITTED}
+    # The handback needs no write approval, so `auto` stays available.
+    available = {item.action: item.available for item in status.actions}
+    assert available.pop(EnergyAction.AUTO) is True
+    assert not any(available.values())
+    assert {item.reason for item in status.actions if item.action is not EnergyAction.AUTO} == {
+        ActionReason.WRITE_NOT_PERMITTED
+    }
     with pytest.raises(EnergyRejected) as info:
         await service.command("main", EnergyCommand(EnergyAction.CHARGE, 80.0), actor=None)
     assert info.value.code == "energy_action_unavailable"
@@ -669,7 +674,7 @@ async def test_a_pending_restore_leaves_auto_as_the_retry() -> None:
 # --- items 17 and 17b: a failing restore, against the real controller -----------------------------
 
 
-def live_manager(port, store: DispatchStore, clock: ManualClock) -> EnergyManager:
+def live_manager(port, store: DispatchStore, clock: ManualClock, armed: bool = True) -> EnergyManager:
     spy = ApprovalSpy(EXISTING_WRITES + REQUIRED_WRITES)
     return EnergyManager(
         port=port,
@@ -683,7 +688,7 @@ def live_manager(port, store: DispatchStore, clock: ManualClock) -> EnergyManage
         approved_writes=spy.read,
         allowlist_candidates=lambda: frozenset(REQUIRED_WRITES),
         required_writes=REQUIRED_WRITES,
-        armed={"main": ArmedRecord("main", armed=True)},
+        armed={"main": ArmedRecord("main", armed=armed)},
     )
 
 
@@ -748,6 +753,20 @@ async def test_disarming_with_a_failing_restore_stays_armed(tmp_path: Path) -> N
     assert info.value.code == "dispatch_restore_required"
     assert service.armed("main") is True
     assert port._store.get("main").state is DispatchState.FAULT_RESTORE_PENDING
+
+
+async def test_disarming_a_never_armed_device_leaves_an_expert_dispatch_alone(tmp_path: Path) -> None:
+    clock = ManualClock()
+    gateway = FakeDispatchGateway(clock)
+    port = controller(tmp_path, clock, gateway)
+    await live_manager(port, port._store, clock).command(
+        "main", EnergyCommand(EnergyAction.CHARGE, 80.0), actor="tester"
+    )
+    calls = list(gateway.calls)
+    unarmed = live_manager(port, port._store, clock, armed=False)
+    await unarmed.set_armed("main", armed=False, actor="tester")
+    assert port._store.get("main").state is not DispatchState.IDLE
+    assert gateway.calls == calls  # no cancel, no restore write
 
 
 async def test_an_already_reached_target_is_accepted_without_a_device_write(tmp_path: Path) -> None:

@@ -7,7 +7,6 @@
 """Battery dispatch state machine and recovery loop (REQ-100..REQ-125)."""
 
 import asyncio
-import contextlib
 import logging
 import math
 import uuid
@@ -262,13 +261,16 @@ class DispatchController:
             )
             await self._put(record)  # durable intent before the first hardware access
             if record.snapshot is None:
-                record.snapshot = await self._gateway.read_snapshot(device_id)
-                if not record.snapshot.all_fresh:
+                snapshot = await self._gateway.read_snapshot(device_id)
+                if not snapshot.all_fresh:
                     # D5: a snapshot that is not fully fresh must not become the basis of a new
                     # dispatch (it may later be restored from). The half-written intent above is
                     # cleaned up the same way a device error during apply is: via _restore().
+                    # The stale snapshot stays local: nothing was written, so there is nothing
+                    # to restore and _restore() takes its no-snapshot reset-to-IDLE path.
                     await self._restore(record, StopReason.SNAPSHOT_STALE)
                     raise DispatchRejected("dispatch_snapshot_stale")
+                record.snapshot = snapshot
             record.state = DispatchState.REPLACING if replacing else DispatchState.APPLYING
             record.restore_required = True
             steps = ["control_mode"]
@@ -283,7 +285,7 @@ class DispatchController:
                 # The SoC submit() already read is handed down: _apply() adds no device read, and
                 # the derivation of the device-level SoC target needs the measured value.
                 await self._apply(record, soc_percent=soc)
-            except DeviceApiError as exc:
+            except Exception as exc:
                 await self._restore(record, StopReason.DEVICE_ERROR, getattr(exc, "code", "internal_error"))
                 raise
             record.state = _STATE_FOR_MODE[command.mode]
@@ -392,6 +394,11 @@ class DispatchController:
                 if record.next_restore_at is not None and self._clock.now() >= record.next_restore_at:
                     await self._restore(record, record.stop_reason or StopReason.DEVICE_ERROR, record.fault_code)
                 return self._status(record)
+            if record.state in (DispatchState.APPLYING, DispatchState.REPLACING, DispatchState.RESTORING):
+                # An interrupted apply/restore (failed _put, unexpected error) left hardware
+                # half-written; submit() holds this lock while it runs, so this is never live.
+                await self._restore(record, StopReason.DEVICE_ERROR, "recovery_required")
+                return self._status(record)
             if record.state not in (
                 DispatchState.CHARGING,
                 DispatchState.DISCHARGING,
@@ -440,7 +447,7 @@ class DispatchController:
                     await self._put(record)
             except asyncio.CancelledError:
                 raise
-            except DeviceApiError as exc:
+            except Exception as exc:  # noqa: BLE001
                 await self._restore(record, StopReason.DEVICE_ERROR, getattr(exc, "code", "internal_error"))
             return self._status(record)
 
@@ -476,7 +483,7 @@ class DispatchController:
                 )
         except asyncio.CancelledError:
             raise
-        except DeviceApiError as exc:
+        except Exception as exc:  # noqa: BLE001
             record.state = DispatchState.FAULT_RESTORE_PENDING
             record.restore_required = True
             record.fault_code = getattr(exc, "code", fault_code or "internal_error")
@@ -624,5 +631,10 @@ class DispatchController:
     async def run(self, device_id: str) -> None:
         while True:
             await self._clock.sleep(self._config.cycle_interval_seconds)
-            with contextlib.suppress(DeviceApiError):
+            try:
                 await self.tick(device_id)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # A dead loop would stop TTL/stale/target handling for good; log and keep going.
+                logging.getLogger(__name__).exception("dispatch tick failed for %s", device_id)

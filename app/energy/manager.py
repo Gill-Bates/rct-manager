@@ -199,7 +199,8 @@ class EnergyManager:
                 # device has nothing left to hand back.
                 log.info("Energy command refused: device %s is not armed", device_id)
                 raise EnergyRejected("energy_manager_disarmed", device_id=device_id)
-            missing = self._missing_write_names()
+            # AUTO is the handback and needs no write approval, so a revoked one must not block it.
+            missing = self._missing_write_names() if command.action is not EnergyAction.AUTO else []
             if missing:
                 log.warning(
                     "Energy command refused: write approval for %s was revoked (device=%s)",
@@ -354,7 +355,12 @@ class EnergyManager:
         )
         if record == current:
             return  # arming twice is idempotent: no approval, no commit, no new timestamp
-        await asyncio.to_thread(self._store.put_energy_state, record)
+        try:
+            await asyncio.to_thread(self._store.put_energy_state, record)
+        except Exception:
+            if missing:
+                self._approve_writes(existing)  # a failed commit must not leave the widened approval
+            raise
         self._armed_states[device_id] = record  # memory only after the commit returned
         log.warning(
             "Energy Manager armed: device=%s added_writes=%s actor=%s",
@@ -367,12 +373,12 @@ class EnergyManager:
         on those registers.
         """
         current = self._record(device_id)
+        if not current.armed:
+            return  # a never-armed device is a true no-op: an expert-API dispatch stays untouched
         if self._port is not None:
             status = await self._port.status(device_id)
             if status.state is not DispatchState.IDLE or status.restore_required:
                 await self._handback(device_id)  # raises dispatch_restore_required, stays armed
-        if not current.armed:
-            return
         if self._store is None:
             raise EnergyRejected("dispatch_store_unavailable", device_id=device_id)
         record = ArmedRecord(
@@ -484,6 +490,7 @@ class EnergyManager:
         return tuple(
             ActionAvailability(action, available=False, reason=reason)
             if reason is not None
+            and not (action is EnergyAction.AUTO and reason is ActionReason.WRITE_NOT_PERMITTED)
             else self._availability(device_id, action, status)
             for action in EnergyAction
         )

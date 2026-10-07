@@ -4,11 +4,10 @@
 <div class="page-heading">
     <div>
         <h1>Energy Manager</h1>
-        <p class="text-secondary mb-0">Arm devices, issue hold/charge/discharge commands and set the SoC target
-            policy. Admin-only: shows the raw gate detail behind each action.</p>
+        <p class="text-secondary mb-0">Live energy flow and manual battery control. Switch the Energy Manager on to
+            charge, hold or discharge the battery; external tools use the same control path through the REST API.</p>
     </div>
 </div>
-<div id="energy-list" class="energy-grid mt-4" aria-live="polite">
-    <p class="text-secondary">Loading Energy Manager status …</p>
-</div>
+<p id="energy-poll-status" class="small text-secondary mt-3 mb-0">Loading …</p>
+<div id="energy-list" class="energy-grid mt-2"></div>
 {% endblock %}

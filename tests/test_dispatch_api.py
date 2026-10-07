@@ -313,5 +313,7 @@ async def test_reconfiguration_succeeds_and_rebuilds_limits_after_a_clean_restor
                 "valid_until": (datetime.now(UTC) + timedelta(hours=1)).isoformat(),
             },
         )
-        assert dispatch_response.status_code == 200, dispatch_response.text
-        assert dispatch_response.json()["state"] == "charging"
+        # A re-addressed device is a different physical device: its VERIFIED capabilities were reset,
+        # so it is refused as unverified (not for missing limits).
+        assert dispatch_response.status_code == 409, dispatch_response.text
+        assert dispatch_response.json()["code"] == "dispatch_unverified"

@@ -66,6 +66,13 @@ class Target:
         return cls(endpoint.base_url, "/write", headers, settings.questdb_verify_tls, exec_path="/exec")
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Refuse redirects so the Authorization header is never forwarded to another host."""
+
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
 def _request(target: Target, path: str, data: bytes | None) -> bytes:
     request = urllib.request.Request(target.base_url + path, data=data, headers=target.headers)
     if data is not None:
@@ -76,7 +83,8 @@ def _request(target: Target, path: str, data: bytes | None) -> bytes:
         context.check_hostname = False
         context.verify_mode = ssl.CERT_NONE
     try:
-        with urllib.request.urlopen(request, timeout=HTTP_TIMEOUT_SECONDS, context=context) as response:
+        opener = urllib.request.build_opener(_NoRedirect, urllib.request.HTTPSHandler(context=context))
+        with opener.open(request, timeout=HTTP_TIMEOUT_SECONDS) as response:
             return response.read(_RESPONSE_LIMIT)
     except urllib.error.HTTPError as exc:
         detail = exc.read(_BODY_LIMIT).decode("utf-8", "replace").strip()
