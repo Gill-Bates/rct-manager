@@ -968,10 +968,6 @@ body {
     background: var(--bs-warning-bg-subtle);
 }
 
-.energy-switch-help {
-    margin: -.4rem 0 1rem;
-}
-
 /* Operate: current mode + one plain sentence (design §8/§10). */
 .energy-mode {
     margin-bottom: 1rem;

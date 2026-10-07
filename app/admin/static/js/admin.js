@@ -1298,11 +1298,6 @@
     head.append(title, switchBox);
     body.append(head);
 
-    // Helper under the Manual-control toggle: enabling allows commands, it does not drive the battery.
-    const armedHelp = element('p', 'small text-secondary energy-switch-help mb-0',
-      'Enabled means manual commands are allowed. It does not by itself charge or discharge the battery.');
-    body.append(armedHelp);
-
     const layout = element('div', 'energy-body');
     const control = element('div', 'energy-control');
     layout.append(control);
