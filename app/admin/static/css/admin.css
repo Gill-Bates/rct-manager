@@ -752,6 +752,125 @@ body {
     flex: 1 1 auto;
 }
 
+/* Energy Manager cards get their own, narrower grid instead of reusing .settings-grid: that class
+   is shared with settings/prometheus pages, and halving its min width there would shrink cards
+   that were never asked for. 11rem (not an exact half of 19rem) keeps the command form's select,
+   number input and button from looking broken at the floor width; two cards still fit per row on
+   a typical desktop viewport, which is what was asked for. */
+.energy-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(11rem, 100%), 1fr));
+    gap: 1.25rem;
+    align-items: stretch;
+}
+
+.energy-grid>.card {
+    display: flex;
+    flex-direction: column;
+}
+
+.energy-grid>.card>.card-body {
+    flex: 1 1 auto;
+}
+
+/* Own containment context so the body-split and metric-grid container queries below react to the
+   card's own width, not the viewport - same technique as .device-item on the dashboard. */
+.energy-card {
+    container-type: inline-size;
+    min-width: 0;
+}
+
+/* Content left, flow graphic right - same image-plus-content shape as .device-subcard-body, just
+   with the illustration on the trailing side since it is a secondary indicator here, not the
+   card's subject. */
+.energy-card-body {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 4.5rem;
+    align-items: start;
+    gap: .85rem;
+    min-width: 0;
+}
+
+.energy-card-content {
+    min-width: 0;
+}
+
+@container (max-width: 20rem) {
+    .energy-card-body {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    .energy-flow-graphic {
+        flex-direction: row;
+        justify-content: center;
+        margin-bottom: .75rem;
+    }
+}
+
+/* Scoped to the energy card: .device-metric-grid is shared with the dashboard's wider device-item
+   cards, which must keep their 2-column layout untouched. */
+@container (max-width: 16rem) {
+    .energy-card .device-metric-grid {
+        grid-template-columns: minmax(0, 1fr);
+    }
+}
+
+/* Battery icon, traveling arrow, pylon stand-in icon - .device-flow's colour/icon convention is
+   reused as-is (see gridFlow/flowNode), only the travelling animation is new here. */
+.energy-flow-graphic {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: .35rem;
+    min-width: 0;
+}
+
+.energy-flow-icon {
+    font-size: 1.6rem;
+    color: var(--bs-secondary-color);
+}
+
+.energy-flow-middle {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: .15rem;
+    min-width: 0;
+}
+
+.energy-flow-value {
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+
+/* Travels across the gap between battery and pylon and fades at each end rather than snapping
+   back, so it reads as flow instead of a shaking icon. Direction follows gridFlow's dir: feed
+   travels toward the pylon, draw reverses the same keyframes to travel toward the battery. */
+@keyframes energy-flow-travel {
+    0% {
+        transform: translateX(-.5rem);
+        opacity: 0;
+    }
+
+    15%,
+    85% {
+        opacity: 1;
+    }
+
+    100% {
+        transform: translateX(.5rem);
+        opacity: 0;
+    }
+}
+
+.energy-flow-arrow {
+    animation: energy-flow-travel 1.6s linear infinite;
+}
+
+.energy-flow-arrow-draw {
+    animation-direction: reverse;
+}
+
 .setting-row {
     padding: .9rem 0;
     border-top: 1px solid var(--rct-line);
@@ -1118,6 +1237,9 @@ samp,
         animation-duration: .01ms !important;
     }
 }
+
+/* Covered by the blanket reduce-motion rule above (animation-duration: .01ms), listed separately
+   only so the new keyframe's intent - a travelling arrow, not a decorative pulse - is documented. */
 
 .export-layout {
     grid-column: 1 / -1;

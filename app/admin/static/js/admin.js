@@ -1065,13 +1065,47 @@
       bodyEl.append(row);
     }
     table.append(head, bodyEl);
-    details.append(table);
+    // The 5-column table no longer fits the halved card width; scroll instead of clipping, same
+    // pattern as about.html's dependency table.
+    const scroller = element('div', 'table-responsive');
+    scroller.tabIndex = 0;
+    scroller.setAttribute('aria-label', 'Gate detail');
+    scroller.append(table);
+    details.append(scroller);
     return details;
   }
 
+  // Battery-to-pylon illustration beside the card content. Direction/colour/label reuse gridFlow's
+  // feed-vs-draw convention as-is; only the travelling animation itself is new here.
+  function energyFlowGraphic(device) {
+    const graphic = element('div', 'energy-flow-graphic');
+    graphic.setAttribute('role', 'img');
+    const battery = element('span', 'material-icons energy-flow-icon', 'battery_charging_full');
+    battery.setAttribute('aria-hidden', 'true');
+    const pylon = element('span', 'material-icons energy-flow-icon', 'electrical_services');
+    pylon.setAttribute('aria-hidden', 'true');
+
+    const gridReading = device.readings.grid_power_w;
+    const gridValue = gridReading && gridReading.value !== null && gridReading.value !== undefined ? Number(gridReading.value) : NaN;
+    const flow = gridFlow(gridValue);
+
+    const middle = element('div', 'energy-flow-middle');
+    const arrowIcon = element('span', `material-icons energy-flow-arrow ${flow && flow.dir === 'draw' ? 'energy-flow-arrow-draw' : ''}`, flow ? flow.icon : 'remove');
+    arrowIcon.setAttribute('aria-hidden', 'true');
+    if (flow) setClass(arrowIcon, `device-flow-${flow.dir}`, true);
+    const value = element('span', 'small text-secondary energy-flow-value', formatMetric(Math.abs(gridValue), 'W'));
+    middle.append(arrowIcon, value);
+
+    graphic.setAttribute('aria-label', flow ? flow.label : 'No grid power flow');
+    graphic.title = flow ? flow.label : 'No grid power flow';
+    graphic.append(battery, middle, pylon);
+    return graphic;
+  }
+
   function createEnergyCard(device) {
-    const card = element('section', 'card');
-    const body = element('div', 'card-body');
+    const card = element('section', 'card energy-card');
+    const body = element('div', 'card-body energy-card-body');
+    const content = element('div', 'energy-card-content');
 
     const head = element('div', 'd-flex align-items-center justify-content-between flex-wrap gap-2 mb-3');
     head.append(element('h2', 'h5 mb-0', device.device_id));
@@ -1094,12 +1128,12 @@
     const armedSwitch = element('div', 'form-check form-switch d-flex align-items-center gap-2');
     armedSwitch.append(armedInput, armedLabel);
     head.append(armedSwitch);
-    body.append(head);
+    content.append(head);
 
     const stateParts = [`State: ${ENERGY_STATE_LABELS[device.state] || device.state}`];
     if (device.action) stateParts.push(`Action: ${ENERGY_ACTION_LABELS[device.action] || device.action}`);
     if (device.stop_reason) stateParts.push(`Stopped: ${device.stop_reason}`);
-    body.append(element('p', 'text-secondary small mb-3', stateParts.join(' · ')));
+    content.append(element('p', 'text-secondary small mb-3', stateParts.join(' · ')));
 
     const grid = element('dl', 'device-metric-grid mb-3');
     grid.append(
@@ -1108,11 +1142,12 @@
       energyReadingCell('PV power', device.readings.pv_power_w, 'W'),
       energyReadingCell('House load', device.readings.house_load_w, 'W'),
     );
-    body.append(grid);
+    content.append(grid);
 
-    body.append(energyCommandForm(device));
-    body.append(energyPolicyForm(device));
-    body.append(energyGatesBlock(device));
+    content.append(energyCommandForm(device));
+    content.append(energyPolicyForm(device));
+    content.append(energyGatesBlock(device));
+    body.append(content, energyFlowGraphic(device));
     card.append(body);
     return card;
   }
