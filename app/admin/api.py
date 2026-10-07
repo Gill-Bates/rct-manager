@@ -603,6 +603,14 @@ def _battery_tower_present(runtime, device_id: str, prefix: str, populated_modul
     return False
 
 
+def _clean_module_serial(value: str) -> str:
+    """Strip control characters (not just whitespace) that an unpopulated t_string register can
+    decode to on real hardware - e.g. a slot full of non-NUL control bytes that str.strip() leaves
+    untouched because strip() only removes whitespace by default. What is left is what a real
+    serial number actually looks like: printable characters."""
+    return re.sub(r"[\x00-\x1f\x7f]", "", value).strip()
+
+
 def _battery_populated_module_slots(runtime, device_id: str, prefix: str) -> list[int]:
     """Indices of the module_sn slots that carry a non-empty serial; all slots are read, not just 6."""
     populated = []
@@ -611,7 +619,7 @@ def _battery_populated_module_slots(runtime, device_id: str, prefix: str) -> lis
         if not runtime.catalog.exists(name):
             continue
         reading = runtime.gateway.cached_reading(device_id, name)
-        if reading is not None and isinstance(reading[0], str) and reading[0].strip():
+        if reading is not None and isinstance(reading[0], str) and _clean_module_serial(reading[0]):
             populated.append(i)
     return populated
 

@@ -79,6 +79,21 @@ def test_blank_serials_do_not_count_as_populated() -> None:
     assert report["module_count_status"] == "ok"
 
 
+def test_null_and_control_byte_garbage_does_not_count_as_populated() -> None:
+    # Real hardware can decode an unpopulated t_string register to garbage that is not an empty
+    # string after .strip() - e.g. a run of non-NUL control characters - rather than "". Such a
+    # slot must still be treated as unpopulated, not as a real module serial.
+    serials = {
+        "battery_module_sn_0": "SN-0",
+        "battery_module_sn_1": "\x00\x00\x00\x00",
+        "battery_module_sn_2": "\x01\x02\x03",
+    }
+    report = _report(_runtime(serials), "battery")
+    assert report["module_count"] == 1
+    assert report["module_count_status"] == "ok"
+    assert report["populated_module_slots"] == [0]
+
+
 def test_all_seven_slots_populated_is_an_anomaly_not_a_seven_module_tower(caplog) -> None:
     report = _report(_runtime(_slots("battery", RCT_MODULE_SN_SLOTS)), "battery")
     assert report["module_count"] is None, "seven populated slots must not be reported as seven modules"
