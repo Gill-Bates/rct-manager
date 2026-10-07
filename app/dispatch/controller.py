@@ -10,11 +10,13 @@ import asyncio
 import logging
 import math
 import uuid
+from collections.abc import Iterable
 from datetime import timedelta
 
 from app.clock import Clock
 from app.dispatch.base import BatteryDispatchGateway
 from app.dispatch.capabilities import (
+    CapabilityName,
     CapabilityRecord,
     CapabilityRegistry,
     evaluate_gate,
@@ -53,6 +55,11 @@ _STATE_FOR_MODE = {
 
 class DispatchRejected(DeviceApiError):
     pass
+
+
+def _guarded_names(mode: DispatchMode) -> frozenset[CapabilityName]:
+    # limit_export=True is a superset of limit_export=False (it only adds EXPORT_LIMIT).
+    return required_for(mode, limit_export=True)
 
 
 class CapabilityConflict(DeviceApiError):
@@ -308,6 +315,23 @@ class DispatchController:
             return None
         return record.intent.mode if record.intent is not None else None
 
+    async def _raise_if_active(self, device_id: str, names: Iterable[CapabilityName] | None = None) -> None:
+        """Refuse a gate change while an operation of the device is active; the caller holds the lock.
+
+        ``names`` limits the refusal to capabilities the active mode depends on; ``None`` refuses
+        any change.
+        """
+        current = await self._get(device_id)
+        blocking_mode = self._active_mode_blocking(current)
+        if blocking_mode is None:
+            return
+        if names is not None:
+            guarded = _guarded_names(blocking_mode)
+            if not any(name in guarded for name in names):
+                return
+        assert current.intent is not None
+        raise CapabilityConflict(device_id, current.intent.operation_id, blocking_mode)
+
     async def _step(self, record: DispatchRecord, index: int, write) -> None:
         record.plan[index]["status"] = "sent"
         await self._put(record)
@@ -524,16 +548,10 @@ class DispatchController:
         if record.device_id != device_id:
             raise ValueError("capability record belongs to another device")
         async with self._lock(device_id):
-            current = await self._get(device_id)
-            blocking_mode = self._active_mode_blocking(current)
-            if blocking_mode is not None and record.name in (
-                required_for(blocking_mode, limit_export=True) | required_for(blocking_mode, limit_export=False)
-            ):
-                # D2 (variant A, immutable during an active operation): unconditional — this also
-                # closes the VERIFIED->VERIFIED bypass, which only ever existed because the old
-                # admin-layer check skipped the VERIFIED branch entirely.
-                assert current.intent is not None
-                raise CapabilityConflict(device_id, current.intent.operation_id, blocking_mode)
+            # D2 (variant A, immutable during an active operation): unconditional — this also
+            # closes the VERIFIED->VERIFIED bypass, which only ever existed because the old
+            # admin-layer check skipped the VERIFIED branch entirely.
+            await self._raise_if_active(device_id, [record.name])
             await asyncio.to_thread(self._store.put_capability, record)
             self._capabilities.replace(record)
 
@@ -546,13 +564,7 @@ class DispatchController:
         if any(record.device_id != device_id for record in records):
             raise ValueError("capability record belongs to another device")
         async with self._lock(device_id):
-            current = await self._get(device_id)
-            blocking_mode = self._active_mode_blocking(current)
-            if blocking_mode is not None:
-                blocked = required_for(blocking_mode, limit_export=True) | required_for(blocking_mode, limit_export=False)
-                if any(record.name in blocked for record in records):
-                    assert current.intent is not None
-                    raise CapabilityConflict(device_id, current.intent.operation_id, blocking_mode)
+            await self._raise_if_active(device_id, [record.name for record in records])
             await asyncio.to_thread(self._store.put_capabilities, records)
             for record in records:
                 self._capabilities.replace(record)
@@ -560,14 +572,9 @@ class DispatchController:
     async def set_device_limits(self, device_id: str, limits: DeviceLimits) -> None:
         """Persist the power limits and the engineering-mode switch of one device, then take over."""
         async with self._lock(device_id):
-            current = await self._get(device_id)
-            blocking_mode = self._active_mode_blocking(current)
-            if blocking_mode is not None:
-                # A limits/engineering-mode change could invalidate the effective_power the
-                # controller already applied for the active operation on this device (same hazard
-                # class as a capability flip) — block it under the same lock, unconditionally.
-                assert current.intent is not None
-                raise CapabilityConflict(device_id, current.intent.operation_id, blocking_mode)
+            # A limits/engineering-mode change could invalidate the effective_power the controller
+            # already applied for the active operation (same hazard class as a capability flip).
+            await self._raise_if_active(device_id)
             await asyncio.to_thread(self._store.put_device_config, device_id, limits)
             self._limits[device_id] = limits
 
@@ -582,11 +589,7 @@ class DispatchController:
         if policy.device_id != device_id:
             raise ValueError("soc target policy belongs to another device")
         async with self._lock(device_id):
-            current = await self._get(device_id)
-            blocking_mode = self._active_mode_blocking(current)
-            if blocking_mode is not None:
-                assert current.intent is not None
-                raise CapabilityConflict(device_id, current.intent.operation_id, blocking_mode)
+            await self._raise_if_active(device_id)
             await asyncio.to_thread(self._store.put_soc_target_policy, policy)
             self._soc_target_policies.replace(policy)
 
@@ -657,4 +660,4 @@ class DispatchController:
                 raise
             except Exception:
                 # A dead loop would stop TTL/stale/target handling for good; log and keep going.
-                logging.getLogger(__name__).exception("dispatch tick failed for %s", device_id)
+                log.exception("dispatch tick failed for %s", device_id)

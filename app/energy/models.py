@@ -19,7 +19,13 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 
-from app.dispatch.models import DispatchMode, DispatchState, PowerDirection, StopReason
+from app.dispatch.models import (
+    DispatchMode,
+    DispatchState,
+    PowerDirection,
+    StopReason,
+    check_printable_ascii,
+)
 from app.energy.readings import EnergyReadings
 
 TARGET_SOC_MIN_PERCENT = 7.0  # hard bound of the product's target range
@@ -90,11 +96,7 @@ class ArmedRecord:
     armed_by: str | None = None
 
     def __post_init__(self) -> None:
-        if self.armed_by is not None:
-            if len(self.armed_by) > ARMED_BY_MAX_LENGTH:
-                raise ValueError(f"armed_by must contain at most {ARMED_BY_MAX_LENGTH} characters")
-            if any(ord(char) < 32 or ord(char) > 126 for char in self.armed_by):
-                raise ValueError("armed_by must contain printable ASCII")
+        check_printable_ascii(self.armed_by, "armed_by", ARMED_BY_MAX_LENGTH)
 
 
 # The three projection tables below are the published contract. They are dicts, and a test asserts
@@ -124,6 +126,7 @@ _ACTION_FOR_MODE: dict[DispatchMode, EnergyAction | None] = {
     DispatchMode.HOLD: EnergyAction.HOLD,
     DispatchMode.EXPORT_TO_GRID: None,
 }
+
 
 @dataclass(frozen=True, slots=True)
 class ActionAvailability:

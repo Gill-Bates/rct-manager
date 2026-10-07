@@ -12,6 +12,18 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Literal
 
+NOTE_MAX_LENGTH = 200
+
+
+def check_printable_ascii(value: str | None, field: str, max_len: int) -> None:
+    """Reject a free-text field that is too long or holds a non-printable or non-ASCII character."""
+    if value is None:
+        return
+    if len(value) > max_len:
+        raise ValueError(f"{field} must contain at most {max_len} characters")
+    if any(ord(char) < 32 or ord(char) > 126 for char in value):
+        raise ValueError(f"{field} must contain printable ASCII")
+
 
 class DispatchRecordCorrupt(ValueError):
     """A persisted ``DispatchRecord`` is incomplete, inconsistent, or otherwise untrustworthy.
@@ -288,11 +300,8 @@ def validate_record_invariants(record: "DispatchRecord") -> None:
             raise DispatchRecordCorrupt("state is idle but intent is present")
         if record.restore_required:
             raise DispatchRecordCorrupt("state is idle but restore_required is set")
-    # PRECHECK is briefly reachable with no intent yet: submit() writes the durable intent before
-    # advancing the state in the very same put() call is not possible here, but recover()'s own
-    # handling of a crash in that narrow window constructs exactly this combination directly
-    # (DispatchRecord(device_id, state=PRECHECK) with no intent at all) and relies on from_dict()
-    # being able to round-trip it back out again.
+    # PRECHECK without an intent is legal: recover() builds and persists exactly that combination,
+    # so from_dict() must be able to round-trip it.
     elif record.state is not DispatchState.PRECHECK and record.intent is None:
         raise DispatchRecordCorrupt(f"state is {record.state.value} but intent is missing")
     if record.state in (DispatchState.RESTORING, DispatchState.FAULT_RESTORE_PENDING) and not record.restore_required:

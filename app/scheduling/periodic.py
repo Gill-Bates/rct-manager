@@ -137,7 +137,7 @@ class PeriodicManager:
             self.period_enabled = True
             # One setup round belongs to exactly one connection; a reconnect during the READ
             # PERIODICALLY loop below must restart it rather than mix registrations made on
-            # different connections (Finding P2-1). The baseline is taken only now, once the
+            # different connections. The baseline is taken only now, once the
             # confirmed pas.period write has established the connection the loop runs on; taking
             # it before that write would always "change" on a first-ever connect.
             epoch = self._endpoint.connection_epoch

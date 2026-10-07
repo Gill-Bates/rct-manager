@@ -27,7 +27,7 @@ _DEFAULT_ENV_FILE = Path(__file__).resolve().parent.parent / "settings.env"
 
 
 def _secure_existing_permissions(path: Path) -> None:
-    """Repair overly permissive bits on a file already holding the secret (Finding P3-3).
+    """Repair overly permissive bits on a file already holding the secret.
 
     Opens with O_NOFOLLOW first and changes permissions on the resulting file descriptor, the
     same FD-based check creation uses, so a symlink swapped in between the stat() that found the

@@ -39,6 +39,7 @@ def _require_admin_read(request: Request) -> dict | None:
 def _require_admin_write(request: Request) -> dict | None:
     return require_admin(request, mutation=True)
 
+
 router = APIRouter(prefix="/admin/api/dispatch", include_in_schema=False)
 log = logging.getLogger(__name__)
 
@@ -127,6 +128,15 @@ def _dispatch_or_503(request: Request):
     if runtime.dispatch is None:
         raise HTTPException(503, "Battery dispatch is not configured")
     return runtime.dispatch
+
+
+def _conflict(
+    exc: CapabilityConflict, detail: str = "dispatch_capability_conflict: an operation of this device is active"
+) -> HTTPException:
+    return HTTPException(
+        409,
+        {"detail": detail, "operation_id": exc.operation_id, "mode": exc.mode.value},
+    )
 
 
 class CapabilityUpdate(BaseModel):
@@ -308,14 +318,7 @@ async def put_capability(
     try:
         await dispatch.set_capability(device_id, record)
     except CapabilityConflict as exc:
-        raise HTTPException(
-            409,
-            {
-                "detail": "dispatch_capability_conflict: an operation of this device is active",
-                "operation_id": exc.operation_id,
-                "mode": exc.mode.value,
-            },
-        ) from exc
+        raise _conflict(exc) from exc
     log.warning(
         "Dispatch capability updated: device=%s name=%s status=%s model=%s firmware=%s admin=%s",
         device_id, name.value, body.status.value, body.verified_device_model, body.verified_firmware, verified_by,
@@ -357,13 +360,8 @@ async def copy_from(
         try:
             await dispatch.set_capability(device_id, new_record)
         except CapabilityConflict as exc:
-            raise HTTPException(
-                409,
-                {
-                    "detail": f"dispatch_capability_conflict: an operation of {device_id} is active",
-                    "operation_id": exc.operation_id,
-                    "mode": exc.mode.value,
-                },
+            raise _conflict(
+                exc, f"dispatch_capability_conflict: an operation of {device_id} is active"
             ) from exc
         copied.append(CapabilityResponse.from_domain(new_record))
         log.warning(
@@ -392,14 +390,7 @@ async def put_device_limits(
     try:
         await dispatch.set_device_limits(device_id, limits)
     except CapabilityConflict as exc:
-        raise HTTPException(
-            409,
-            {
-                "detail": "dispatch_capability_conflict: an operation of this device is active",
-                "operation_id": exc.operation_id,
-                "mode": exc.mode.value,
-            },
-        ) from exc
+        raise _conflict(exc) from exc
     log.warning(
         "Dispatch device limits updated: device=%s charge_w=%s discharge_w=%s engineering_mode=%s",
         device_id, limits.max_charge_power_w, limits.max_discharge_power_w, limits.engineering_mode,

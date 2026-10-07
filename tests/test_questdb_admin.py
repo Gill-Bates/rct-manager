@@ -33,7 +33,10 @@ class FakeQuestDb:
             return {"dataset": [[k, v] for k, v in self.columns.items()]}
         if "materialized_views()" in sql:
             view = rollup_view_name("rct", PRESETS["medium"], schema_signature(self.columns))
-            return {"dataset": [[view, "rct", "valid", 5, 5 if self.view_ok else 9]]}
+            rows = [[view, "rct", "valid", 5, 5 if self.view_ok else 9]]
+            if "WHERE base_table_name" in sql:
+                rows.append(["rct_rollup_1m_vold", "rct", "valid", 5, 5])
+            return {"dataset": rows}
         if "ttlValue" in sql:
             return {"dataset": [[self.ttl[0], self.ttl[1]]]}
         if "LATEST ON" in sql:
@@ -130,6 +133,13 @@ def test_rollup_view_follows_a_changed_column_set() -> None:
     assert second_view != first_view
     assert any(f'"{second_view}"' in s for s in db2.sql if s.startswith("CREATE MATERIALIZED"))
     assert any('"rct_new_metric_avg"' in s for s in db2.sql if s.startswith("CREATE MATERIALIZED"))
+
+
+def test_superseded_rollup_views_are_dropped_with_their_state() -> None:
+    db = FakeQuestDb()
+    assert QuestDbProvisioner(db, "rct", "medium", 3, 90).run()
+    assert 'DROP MATERIALIZED VIEW IF EXISTS "rct_rollup_1m_vold";' in db.sql
+    assert any(s.startswith('UPDATE "_rct_export_state" SET ttl_days = NULL') and "rct_rollup_1m_vold" in s for s in db.sql)
 
 
 def test_raw_ttl_waits_for_a_current_view_and_for_data() -> None:

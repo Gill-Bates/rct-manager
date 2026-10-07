@@ -203,7 +203,7 @@ class AccessSerializer:
                 request.abandoned = True
                 self._release(item)
                 # Remove the item right away: a timed-out caller must not keep binding a queue
-                # slot until the worker's FIFO turn reaches and skips it (Finding P3-2).
+                # slot until the worker's FIFO turn reaches and skips it.
                 await self._queue.discard(item)
                 raise QueueTimeout() from None
         except asyncio.CancelledError:

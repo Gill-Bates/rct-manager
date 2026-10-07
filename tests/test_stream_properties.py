@@ -92,7 +92,7 @@ def test_crc_error_is_counted_not_raised() -> None:
 
 
 def test_crc_error_does_not_smuggle_an_escaped_inner_frame(caplog) -> None:
-    """Finding P2-1: a CRC-defective outer frame may carry a syntactically complete, correctly
+    """A CRC-defective outer frame may carry a syntactically complete, correctly
     escaped frame inside its payload. Discarding the outer frame must not let a resync that finds
     no further start byte fall back before the end of that already-consumed payload, or the inner
     frame is accepted as a new one once the preceding bytes are gone."""
@@ -197,7 +197,7 @@ def test_oversize_frame_is_dropped_and_logged(caplog) -> None:
 
 
 def test_long_frame_recovery_logs_framing_error_not_oversize(caplog) -> None:
-    """Finding P3-2: an invalid escape pair hit while recovering a long frame's end must be
+    """An invalid escape pair hit while recovering a long frame's end must be
     logged as a framing error, not misreported as an oversize frame."""
     header = bytes([int(Command.LONG_RESPONSE)]) + (50).to_bytes(2, "big")
     body = b"\x01\x02" + bytes([STOP_BYTE, 0x99]) + b"\x03" * 10  # invalid escape pair 0x2D 0x99
@@ -307,7 +307,7 @@ def test_foreign_responses_count_as_foreign_access_but_never_force_a_reconnect()
 
 
 def test_foreign_response_flood_window_memory_is_bucketed_not_per_event() -> None:
-    """Finding P2-2: a window counter must not grow by one entry per event however many land in
+    """A window counter must not grow by one entry per event however many land in
     the same instant, or an unlimited stream of well-formed foreign responses (exempt from the
     flood-reconnect limit) could grow the deque without bound."""
     from app.transport.counters import EndpointCounters

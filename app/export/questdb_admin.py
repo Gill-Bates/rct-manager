@@ -58,6 +58,13 @@ def effective_raw_days(downsampling: str, raw_days: int | None, total_days: int)
     return min(days, total_days) if total_days > 0 else days  # an explicit raw value is validated against total
 
 
+def _split_columns(columns: dict[str, str]) -> tuple[list[str], list[str]]:
+    """Sorted SYMBOL (dimension) and DOUBLE (value) column names."""
+    dims = sorted(name for name, kind in columns.items() if kind == "SYMBOL")
+    values = sorted(name for name, kind in columns.items() if kind == "DOUBLE")
+    return dims, values
+
+
 def schema_signature(columns: dict[str, str]) -> str:
     """Short, stable hash of the SYMBOL/DOUBLE columns a rollup view projects.
 
@@ -66,8 +73,7 @@ def schema_signature(columns: dict[str, str]) -> str:
     the old view is never silently kept pointed at a stale projection (Requirement: no data loss
     once the raw TTL is shortened).
     """
-    dims = sorted(name for name, kind in columns.items() if kind == "SYMBOL")
-    values = sorted(name for name, kind in columns.items() if kind == "DOUBLE")
+    dims, values = _split_columns(columns)
     digest = hashlib.sha256(("|".join(dims) + "::" + "|".join(values)).encode()).hexdigest()
     return digest[:10]
 
@@ -92,8 +98,7 @@ def create_state_table_sql() -> str:
 
 def rollup_ddl(table: str, preset: Preset, columns: dict[str, str], view: str) -> str:
     """Materialized view over the symbol and DOUBLE columns present in the table."""
-    dims = sorted(name for name, kind in columns.items() if kind == "SYMBOL")
-    values = sorted(name for name, kind in columns.items() if kind == "DOUBLE")
+    dims, values = _split_columns(columns)
     if not values:
         raise ValueError("no numeric columns to roll up yet")
     projections = ["timestamp", *(ident(name) for name in dims)]
@@ -153,8 +158,7 @@ class QuestDbProvisioner:
         if not any(kind == "DOUBLE" for kind in columns.values()):
             log.info("QuestDB rollup waits for the first data in '%s'", self.table)
             return False
-        # The view name is derived from the current column set, so a newly exported metric gets a
-        # new view automatically instead of silently staying out of an old, now-stale projection.
+        # The view name follows the column set (see schema_signature).
         view = rollup_view_name(self.table, preset, schema_signature(columns))
         self._exec(rollup_ddl(self.table, preset, columns, view))
         if not self._view_current(view):
@@ -175,6 +179,11 @@ class QuestDbProvisioner:
         for (name, *_) in rows:
             if str(name).startswith(prefix) and name != current:
                 self._exec(f"DROP MATERIALIZED VIEW IF EXISTS {ident(name)};")
+                # QuestDB has no DELETE; a NULL TTL retires the recorded state of the dropped view.
+                self._exec(
+                    f"UPDATE {ident(STATE_TABLE)} SET ttl_days = NULL WHERE measurement = {literal(self.table)} "
+                    f"AND object = {literal(name)};"
+                )
                 log.info("QuestDB dropped superseded rollup view '%s'", name)
 
     def _view_current(self, view: str) -> bool:
@@ -195,7 +204,7 @@ class QuestDbProvisioner:
             f"SELECT ttl_days FROM {ident(STATE_TABLE)} WHERE measurement = {literal(self.table)} "
             f"AND object = {literal(name)} LATEST ON timestamp PARTITION BY object;"
         ).get("dataset") or []
-        return int(rows[0][0]) if rows else None
+        return int(rows[0][0]) if rows and rows[0][0] is not None else None
 
     def _apply_ttl(self, name: str, days: int, *, view: bool) -> bool:
         """Set the TTL on an object without one, or on one this service set earlier; never override."""

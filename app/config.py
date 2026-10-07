@@ -29,6 +29,7 @@ from pydantic import (
 from pydantic.dataclasses import dataclass
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from app.errors import ConfigError
 from app.export.endpoint import Endpoint, resolve_endpoint
 
 log = logging.getLogger(__name__)
@@ -107,9 +108,8 @@ class DeviceEntry(BaseModel):
     def _check_host(cls, value: str) -> str:
         value = value.strip()
         if value.startswith("[") and value.endswith("]"):
-            # Brackets are URL syntax for an IPv6 literal, not part of the socket host (Finding
-            # P3-2): stripping them here makes text config and structured/admin config agree on
-            # the same canonical value instead of relying on each caller to do it separately.
+            # Brackets are URL syntax for an IPv6 literal, not part of the socket host; strip them
+            # here so text and structured/admin config agree on one canonical value.
             value = value[1:-1]
         if not value or any(c.isspace() for c in value):
             raise ValueError("host must not be empty or contain whitespace")
@@ -485,9 +485,10 @@ class Settings(BaseSettings):
             raise ValueError("FORWARDED_HEADER must name a single-address header such as X-Forwarded-For")
         if self.forwarded_header and not self.trusted_proxies:
             raise ValueError("FORWARDED_HEADER requires a non-empty TRUSTED_PROXIES")
-        if not ip_address(str(self.bind_address)).is_loopback and not self.allow_non_loopback_bind:
+        loopback = ip_address(str(self.bind_address)).is_loopback
+        if not loopback and not self.allow_non_loopback_bind:
             raise ValueError("ALLOW_NON_LOOPBACK_BIND=true is required for a non-loopback BIND_ADDRESS")
-        if not ip_address(str(self.bind_address)).is_loopback and not self.behind_reverse_proxy:
+        if not loopback and not self.behind_reverse_proxy:
             log.warning(
                 "BIND_ADDRESS is not loopback and 'behind reverse proxy' is off: terminate TLS in front of "
                 "the service and enable it in the admin GUI"
@@ -660,8 +661,6 @@ def _legacy_secret_in_use(settings: Settings) -> bool:
 
 def load_settings(env_file: Path | str | None = None) -> Settings:
     """Load and validate settings; raises ConfigError with a sanitised message."""
-    from app.errors import ConfigError
-
     warn_ignored_settings(env_file)
     try:
         settings = Settings(_env_file=env_file) if env_file else Settings()

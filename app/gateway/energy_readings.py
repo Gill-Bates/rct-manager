@@ -22,7 +22,11 @@ from app.cache import CacheFreshness
 from app.dispatch.capabilities import CapabilityName, CapabilityRegistry
 from app.dispatch.models import PowerDirection
 from app.energy.readings import ABSENT, DeviceReading, EnergyReadings
-from app.gateway.conventions import RctBatteryPowerConvention, RctGridPowerConvention
+from app.gateway.conventions import (
+    RctBatteryPowerConvention,
+    RctGridPowerConvention,
+    soc_percent,
+)
 from app.gateway.rct import RctGateway
 
 _BATTERY_SOC = "battery_soc"
@@ -63,10 +67,7 @@ class RctEnergyReadings:
         reading = self._sample(device_id, _BATTERY_SOC)
         if reading.value is None:
             return reading
-        # The catalog reports battery_soc as a ratio; the published figure is a percentage. Same
-        # rule RctDispatchGateway.read_soc() uses, so both cannot disagree about the unit.
-        value = reading.value * 100.0 if reading.value <= 1.5 else reading.value
-        return DeviceReading(value, reading.age_seconds, reading.stale)
+        return DeviceReading(soc_percent(reading.value), reading.age_seconds, reading.stale)
 
     def _grid(self, device_id: str) -> DeviceReading:
         reading = self._sample(device_id, _GRID_POWER)

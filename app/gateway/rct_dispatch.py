@@ -19,6 +19,7 @@ from app.gateway.conventions import (
     RctBatteryPowerConvention,
     RctGridPowerConvention,
     RctSocTargetConvention,
+    soc_percent,
 )
 from app.gateway.rct import RctGateway
 
@@ -37,14 +38,8 @@ class RctDispatchGateway:
         *,
         capabilities: CapabilityRegistry,
         soc_target_policies: SocTargetPolicyRegistry,
-        write_soc_target: bool = False,
-        limit_export_during_discharge: bool = False,
     ) -> None:
         self._rct = gateway
-        # Deployment decisions: they do not change at runtime, and required_metric_names() needs
-        # them without a DispatchConfig at hand.
-        self._write_soc_target = write_soc_target
-        self._limit_export_during_discharge = limit_export_during_discharge
         # The capability values are read per call and per device instead: they differ between the
         # devices of one process, and a verification has to take effect live, without a restart.
         self._capabilities = capabilities
@@ -73,7 +68,7 @@ class RctDispatchGateway:
         reading = await self._rct.read_system(device_id, "battery_soc")
         # The catalog reports battery_soc as a ratio. The public dispatch contract uses percent.
         value = self._number(reading.value, reading.name)
-        return value * 100.0 if value <= 1.5 else value
+        return soc_percent(value)
 
     async def read_control_telemetry(self, device_id: str) -> ControlTelemetry:
         soc = await self._rct.read_system(device_id, "battery_soc")
@@ -82,7 +77,7 @@ class RctDispatchGateway:
         load = await self._rct.read_system(device_id, "household_load_power")
         soc_value = self._number(soc.value, soc.name)
         return ControlTelemetry(
-            soc_percent=soc_value * 100.0 if soc_value <= 1.5 else soc_value,
+            soc_percent=soc_percent(soc_value),
             soc_age_seconds=soc.age_seconds,
             soc_source=soc.source,
             grid_import_w=self._grid_convention(device_id).import_watts(

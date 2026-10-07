@@ -103,7 +103,7 @@ def test_string_ends_at_first_nul_and_replaces_invalid_bytes() -> None:
 
 
 def test_fixed_width_string_round_trips_through_nul_padding() -> None:
-    """Finding P3-3: a decoder that cuts at the first NUL and an encoder that required the text
+    """A decoder that cuts at the first NUL and an encoder that required the text
     itself to fill byte_width exactly made a byte_width-constrained string unwritable even for
     values the decoder had just produced from it. The encoder now NUL-pads instead."""
     encoded = encode_value(DataType.STRING, "RCT", byte_width=16)

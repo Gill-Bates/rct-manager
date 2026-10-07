@@ -107,7 +107,7 @@ async def test_read_timeout_still_drops_the_connection() -> None:
 
 
 async def test_receiver_credits_a_frame_with_its_real_arrival_not_the_later_read_call() -> None:
-    """Finding P2-1: bytes buffered in the StreamReader before the Commit_Point must not be
+    """Bytes buffered in the StreamReader before the Commit_Point must not be
     credited with a later arrival time just because reader.read() only drains them afterwards."""
     times = iter([5.0, 20.0])  # 5.0: feed_data of the stale frame; 20.0: the send's Commit_Point
 

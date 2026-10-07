@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 # One-second buckets bound a window counter's memory to roughly window_seconds entries,
-# regardless of how many events land in it (Finding P2-2): a flood of well-formed foreign
+# regardless of how many events land in it: a flood of well-formed foreign
 # RESPONSE frames, exempt from the flood-reconnect limit, could otherwise grow its deque by one
 # float per frame for as long as the peer kept sending.
 _BUCKET_SECONDS = 1.0

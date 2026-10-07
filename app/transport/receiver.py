@@ -30,7 +30,7 @@ class ReceiverExit(StrEnum):
 
 
 class ArrivalLedger:
-    """Tracks the monotonic instant each chunk entered the reader via ``feed_data`` (Finding P2-1).
+    """Tracks the monotonic instant each chunk entered the reader via ``feed_data``.
 
     A timestamp taken after the caller's read call returns is too late: bytes may already have
     sat in the reader's internal buffer, delivered by ``data_received``, before the caller got
@@ -53,7 +53,7 @@ class ArrivalLedger:
         reader.feed_data = tracked_feed_data  # instance-level wrap; the transport stays the sole caller
         if reader.feed_data is not tracked_feed_data:
             # Fails loudly if a future interpreter stops honoring instance-attribute overrides on
-            # StreamReader, instead of silently reintroducing the arrival-time race (Finding M1).
+            # StreamReader, instead of silently reintroducing the arrival-time race.
             raise RuntimeError("ArrivalLedger could not install its feed_data wrapper")
 
     def earliest_arrival(self, consumed: int) -> float:
@@ -104,16 +104,16 @@ class Receiver:
         self.unexpected_samples: deque[tuple[int, int, int | None]] = deque(maxlen=4)
         # Oldest arrival instant still unresolved in the parser buffer, carried across reads so a
         # frame assembled from an earlier, pre-commit chunk is not credited with a later chunk's
-        # arrival time (Finding P2-1, second case). Reset to None once the buffer fully drains.
+        # arrival time. Reset to None once the buffer fully drains.
         self._pending_since: float | None = None
 
     async def run(self, reader: asyncio.StreamReader, ledger: "ArrivalLedger") -> ReceiverExit:
         """Read until the connection ends or must be rebuilt. Never drains the buffer wholesale.
 
         ``ledger`` must already be wrapping ``reader.feed_data`` before this call starts, so no
-        chunk delivered between connecting and the receiver task actually running escapes it
-        (Finding P2-1): the caller sets it up synchronously, with no intervening await, right
-        after the connection is established.
+        chunk delivered between connecting and the receiver task actually running escapes it: the
+        caller sets it up synchronously, with no intervening await, right after the connection is
+        established.
         """
         while True:
             data = await reader.read(self._chunk)
@@ -127,7 +127,7 @@ class Receiver:
             # before the Commit_Point even though read() only drains them afterwards. Frames
             # extracted from a tail still containing bytes older than this chunk inherit that
             # older instant, so a frame assembled across several reads keeps its true arrival
-            # time instead of its last chunk's (Finding P2-1).
+            # time instead of its last chunk's.
             chunk_earliest = ledger.earliest_arrival(len(data))
             received_monotonic = self._pending_since if self._pending_since is not None else chunk_earliest
             frames = self._parser.feed(data)

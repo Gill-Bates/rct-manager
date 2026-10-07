@@ -223,8 +223,7 @@ class TransportEndpoint:
                     await asyncio.wait_for(writer.wait_closed(), 1.0)
                 raise DeviceUnreachable("socket_setup_failed") from None
             # Wrapped synchronously, with no await since obtaining ``reader``, so no chunk that
-            # arrives for this connection ever reaches the parser without a ledger entry
-            # (Finding P2-1).
+            # arrives for this connection ever reaches the parser without a ledger entry.
             ledger = ArrivalLedger(reader, self._clock.monotonic)
             self._reader, self._writer = reader, writer
             self._epoch += 1
@@ -369,7 +368,7 @@ class TransportEndpoint:
                     # read-back runs on it (Requirement 9.18). This is not a transport failure: the
                     # caller still sees TransactionResult.ok == False because no frame was received,
                     # but failure statistics and device state must not be dragged down by a routine
-                    # write (Finding P3-1).
+                    # write.
                     return TransactionResult(outcome)
                 # The response is still in flight and carries no transaction id, so only a new
                 # connection keeps it from answering the next transaction.

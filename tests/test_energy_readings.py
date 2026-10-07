@@ -150,7 +150,7 @@ def test_a_soc_ratio_becomes_a_percentage() -> None:
 
 
 def test_a_soc_already_in_percent_is_left_alone() -> None:
-    """Same `value <= 1.5` rule the dispatch adapter uses, so the two cannot disagree on the unit."""
+    """A value above 1.5 is already a percentage; the shared soc_percent rule leaves it alone."""
     rct = CountingGateway(ManualClock())
     rct.put("battery_soc", 54.0)
     assert readings(rct).readings("main").battery_soc_percent.value == pytest.approx(54.0)

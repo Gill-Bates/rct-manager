@@ -31,6 +31,7 @@ from app.security.dependencies import source_address
 
 router = APIRouter(prefix="/admin/api", include_in_schema=False)
 _COOKIE = "rct_admin_session"
+_CSRF_COOKIE = "rct_admin_csrf"
 
 # Community-observed bit meanings for battery.status2 (OID 0xDE3D20D, t_int32). RCT's own protocol
 # document (docs/reference) has no bit table for this object; these flags come from user-reported
@@ -67,7 +68,8 @@ def _battery_status2_label(value: int) -> str:
 def _humanize_enum_label(label: str) -> str:
     """``inverter_state`` enum labels are lower snake_case; this is purely cosmetic formatting."""
     return label.replace("_", " ").capitalize()
-_CSRF_COOKIE = "rct_admin_csrf"
+
+
 # The push exporter task reads these from runtime.settings only when it (re)starts, so a saved
 # change needs the exporter restarted (not a full process restart) to take effect.
 _EXPORT_RESTART_KEYS = frozenset({
@@ -741,6 +743,18 @@ def _battery_metric_names(runtime, prefix: str, *, include_device_wide: bool) ->
     return names
 
 
+DEVICE_CARD_METRIC_NAMES = (
+    "inverter_state", "battery_status2", "battery_placeholder_0_status2",
+    "battery_soc_target", "power_mng_bat_next_calib_date",
+    "heat_sink_temperature",  # inverter-side actual temperature, not the sink_temp power-reduction target
+    "battery_temperature",  # battery pack temperature, distinct from the inverter's heat_sink_temperature
+    "battery_cycles",  # battery.cycles - aggregate pack charge-cycle counter
+    # Second tower's own readings: without them the battery_placeholder_0 card had nothing but
+    # shared values to show and repeated the first tower's numbers.
+    "battery_placeholder_0_soc", "battery_placeholder_0_temperature",
+)
+
+
 @router.get("/devices")
 def devices(request: Request) -> dict:
     require_admin(request)
@@ -751,16 +765,8 @@ def devices(request: Request) -> dict:
     # Card values are independent of the Prometheus export selection.
     preferred = ("solar_a_power", "solar_b_power", "household_load_power", "grid_power", "battery_soc",
                  "ac_power")
-    card_names = (
-        "inverter_state", "battery_status2", "battery_placeholder_0_status2",
-        "battery_soc_target", "power_mng_bat_next_calib_date", "heat_sink_temperature",
-        "battery_temperature", "battery_cycles",
-        # Second tower's own readings: without them the battery_placeholder_0 card had nothing but
-        # shared values to show and repeated the first tower's numbers.
-        "battery_placeholder_0_soc", "battery_placeholder_0_temperature",
-    )
     selected = [name for name in preferred if name in exposed]
-    selected += [name for name in card_names if runtime.catalog.exists(name)]
+    selected += [name for name in DEVICE_CARD_METRIC_NAMES if runtime.catalog.exists(name)]
     for item in runtime.devices.values():
         status = runtime.gateway.device_status(item.device_id)
         readings = []

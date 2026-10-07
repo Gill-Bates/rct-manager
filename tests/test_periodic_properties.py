@@ -4,7 +4,7 @@
 # Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
 #
 
-"""Regression for Finding 4: a partial periodic registration must not count as available."""
+"""Regression: a partial periodic registration must not count as available."""
 
 import asyncio
 from datetime import timedelta
@@ -60,14 +60,14 @@ def test_partial_registration_leaves_available_false_until_retried() -> None:
     assert first is False
     # The timeout on the failing object drops the connection (Requirement 9.18), so the next
     # object in this same setup round reconnects on a new epoch. A setup round belongs to one
-    # epoch (Finding P2-1): the mid-round reconnect discards every registration made so far
+    # epoch: the mid-round reconnect discards every registration made so far
     # instead of keeping ones made on the now-dead connection.
     assert registrations_after_partial == 0
     assert second is True
 
 
 def test_reconnect_during_setup_discards_registrations_from_the_old_connection() -> None:
-    """Finding P2-1: a setup round must not mix registrations made on different connections."""
+    """A setup round must not mix registrations made on different connections."""
 
     async def scenario() -> tuple[bool, int, bool]:
         clock = AutoClock()

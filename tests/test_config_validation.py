@@ -299,7 +299,7 @@ def test_endpoint_id_is_the_direct_device_id_without_address() -> None:
 
 
 def test_structured_device_entry_strips_ipv6_brackets_like_the_text_parser() -> None:
-    """Finding P3-2: a DeviceEntry built directly from structured data must canonicalize the host
+    """A DeviceEntry built directly from structured data must canonicalize the host
     the same way the text parser already does, so the transport never receives bracket syntax."""
     from app.config import DeviceEntry
 

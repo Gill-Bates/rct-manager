@@ -39,6 +39,11 @@ class RctGridPowerConvention:
         return watts if self.import_positive else -watts
 
 
+def soc_percent(value: float) -> float:
+    """The catalog reports ``battery_soc`` as a ratio; the dispatch contract and the UI use percent."""
+    return value * 100.0 if value <= 1.5 else value
+
+
 def _finite_percent(value: object, name: str) -> float:
     """A percentage this derivation may compute with. NaN would survive every clamp below."""
     if isinstance(value, bool) or not isinstance(value, int | float) or not math.isfinite(value):

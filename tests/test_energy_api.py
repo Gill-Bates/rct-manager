@@ -670,6 +670,32 @@ async def test_revoking_the_verification_changes_only_the_status(tmp_path: Path)
         assert again.status_code == 200, again.text
 
 
+async def test_hardware_verification_keeps_a_note_already_stored_on_a_sign_record(tmp_path: Path) -> None:
+    """The form has no note field for the sign records, so a verification must not erase theirs."""
+    async with running_app(energy_settings(tmp_path)) as harness:
+        headers = await admin_session(harness)
+        seeded = await harness.client.put(
+            "/admin/api/dispatch/devices/main/capabilities/battery_power_sign_convention",
+            headers=headers,
+            json={
+                "status": "verified",
+                "verified_device_model": "RCT-Power-Storage-DC",
+                "verified_firmware": "1.0.0",
+                "battery_discharge_positive": True,
+                "note": "clamp meter on PV string, 2026-01-04",
+            },
+        )
+        assert seeded.status_code == 200, seeded.text
+
+        saved = await harness.client.put(VERIFICATION_URL, headers=headers, json=VERIFICATION)
+        assert saved.status_code == 200, saved.text
+        caps = _capabilities(saved.json())
+        assert caps["battery_power_sign_convention"]["note"] == "clamp meter on PV string, 2026-01-04"
+        # The body note documents the write path; it must not spread onto a sign record.
+        assert caps["write_path_convention"]["note"] == VERIFICATION["note"]
+        assert caps["grid_power_sign_convention"]["note"] is None
+
+
 async def test_hardware_verification_needs_a_session_and_validates_the_body(tmp_path: Path) -> None:
     async with running_app(energy_settings(tmp_path)) as harness:
         assert (await harness.client.put(VERIFICATION_URL, json=VERIFICATION)).status_code == 401

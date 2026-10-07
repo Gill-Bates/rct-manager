@@ -173,7 +173,7 @@ class StreamParser:
                 nxt = buf[pos + 1]
                 if nxt not in (START_BYTE, STOP_BYTE):
                     # Same framing rule as _take(): an escape pair the normal decoder would
-                    # reject must not be tolerated here either (Finding P3-1).
+                    # reject must not be tolerated here either.
                     raise _Resync(pos + 1, framing=True)
                 pos += 2
             else:
@@ -306,7 +306,7 @@ class StreamParser:
         ``end`` from ``_take(pos, length + 2)``), not the raw offset after command and length -
         a scan that cannot find a real next start byte must not fall back before that point, or a
         masked start byte still inside the discarded frame could be treated as the start of a new
-        one (Finding P2-1).
+        one.
         """
         try:
             end = self._scan_to_next_start(body_start)

@@ -350,7 +350,7 @@ def test_frequent_noise_warns_once_and_clears(caplog: pytest.LogCaptureFixture) 
 
 
 def test_frame_window_memory_is_bucketed_not_per_event() -> None:
-    """Finding P2-2: many frames arriving in the same instant must cost one bucket, not one deque
+    """Many frames arriving in the same instant must cost one bucket, not one deque
     entry each, or a high-rate stream could grow _frames without bound."""
     monitor = StreamNoiseMonitor(WINDOW)
     for _ in range(5000):

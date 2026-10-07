@@ -1236,7 +1236,7 @@ await shot('prometheus-master-toggle-on');
   ep.on('request', (r) => { if (r.method() === 'POST' && r.url().endsWith('/command')) commands.push(r.postDataJSON()); });
   // The simulator ships unverified hardware; verify it first, as an operator would in Advanced.
   const csrf = await ep.evaluate(async () => (await (await fetch('/admin/api/session')).json()).csrf_token);
-  const verified = await ep.request.put(`${energyBase}/admin/api/energy/devices/sim/hardware-verification`, {
+  const verification = await ep.request.put(`${energyBase}/admin/api/energy/devices/sim/hardware-verification`, {
     headers: { 'X-CSRF-Token': csrf },
     data: {
       verified_device_model: 'Simulator', verified_firmware: '1.0', note: 'e2e simulator',
@@ -1245,7 +1245,7 @@ await shot('prometheus-master-toggle-on');
       battery_discharge_positive: true, grid_import_positive: true,
     },
   });
-  check('hardware verification endpoint accepts the evidence', verified.ok(), String(verified.status()));
+  check('hardware verification endpoint accepts the evidence', verification.ok(), String(verification.status()));
   await ep.reload();
   await ep.waitForSelector('.energy-panel .energy-flow-svg');
   const armToggle = ep.locator('.energy-switch input');

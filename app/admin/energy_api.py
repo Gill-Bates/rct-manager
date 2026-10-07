@@ -14,7 +14,7 @@ semantics only.
 
 No business logic lives here. Every decision is taken by ``EnergyManager`` or by the dispatch port;
 this module only authenticates, validates the body and projects the result. ``app.admin.api`` is
-imported read-only (``require_admin``), exactly as ``app.admin.dispatch_api`` does it.
+imported read-only through ``app.admin.dispatch_api``, which owns the shared admin helpers.
 """
 
 import logging
@@ -25,7 +25,14 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, StrictBool
 
-from app.admin.api import require_admin
+from app.admin.dispatch_api import (
+    _ADMIN_ACTOR,
+    _conflict,
+    _device_or_404,
+    _dispatch_or_503,
+    _require_admin_read,
+    _require_admin_write,
+)
 from app.api.routers.energy import EnergyCommandBody, EnergyStatusResponse
 from app.dispatch.capabilities import CapabilityName, CapabilityRecord, CapabilityStatus
 from app.dispatch.controller import CapabilityConflict
@@ -34,26 +41,8 @@ from app.energy.base import EnergyAdminPort
 from app.energy.models import EnergyAction, EnergyCommand
 from app.gateway.base import DeviceState
 
-
-def _require_admin_read(request: Request) -> dict | None:
-    return require_admin(request)
-
-
-def _require_admin_write(request: Request) -> dict | None:
-    return require_admin(request, mutation=True)
-
-
 router = APIRouter(prefix="/admin/api/energy", include_in_schema=False)
 log = logging.getLogger(__name__)
-
-# This instance has exactly one admin account; its session carries no username, so "admin" is the
-# only possible actor — the same constant app/admin/dispatch_api.py records.
-_ADMIN_ACTOR = "admin"
-
-
-def _device_or_404(request: Request, device_id: str) -> None:
-    if device_id not in request.app.state.runtime.devices:
-        raise HTTPException(404, "Unknown device")
 
 
 def _energy_or_503(request: Request) -> EnergyAdminPort:
@@ -64,13 +53,6 @@ def _energy_or_503(request: Request) -> EnergyAdminPort:
     if runtime.energy is None:
         raise HTTPException(503, "The Energy Manager is not configured")
     return runtime.energy
-
-
-def _dispatch_or_503(request: Request):
-    runtime = request.app.state.runtime
-    if runtime.dispatch is None:
-        raise HTTPException(503, "Battery dispatch is not configured")
-    return runtime.dispatch
 
 
 class ArmedBody(BaseModel):
@@ -280,17 +262,6 @@ async def put_armed(
     return await _admin_status(request, device_id)
 
 
-def _conflict(exc: CapabilityConflict) -> HTTPException:
-    return HTTPException(
-        409,
-        {
-            "detail": "dispatch_capability_conflict: an operation of this device is active",
-            "operation_id": exc.operation_id,
-            "mode": exc.mode.value,
-        },
-    )
-
-
 @router.put("/devices/{device_id}/hardware-verification")
 async def put_hardware_verification(
     request: Request,
@@ -310,6 +281,9 @@ async def put_hardware_verification(
     if missing:
         raise HTTPException(400, f"missing evidence for write_path_convention: {', '.join(missing)}")
     now = request.app.state.runtime.clock.now()
+    # A sign record's note is evidence this endpoint has no input field for; carry it over instead
+    # of dropping it when the records are rewritten. body.note documents the write path only.
+    kept_notes = {record.name: record.note for record in dispatch.capabilities(device_id)}
     stamp = {
         "status": CapabilityStatus.VERIFIED,
         "verified_device_model": body.verified_device_model,
@@ -334,12 +308,14 @@ async def put_hardware_verification(
                 device_id=device_id,
                 name=CapabilityName.BATTERY_POWER_SIGN,
                 battery_discharge_positive=body.battery_discharge_positive,
+                note=kept_notes.get(CapabilityName.BATTERY_POWER_SIGN),
                 **stamp,
             ),
             CapabilityRecord(
                 device_id=device_id,
                 name=CapabilityName.GRID_POWER_SIGN,
                 grid_import_positive=body.grid_import_positive,
+                note=kept_notes.get(CapabilityName.GRID_POWER_SIGN),
                 **stamp,
             ),
         ]
@@ -406,14 +382,7 @@ async def put_soc_target_policy(
         )
         await dispatch.set_soc_target_policy(device_id, policy)
     except CapabilityConflict as exc:
-        raise HTTPException(
-            409,
-            {
-                "detail": "dispatch_capability_conflict: an operation of this device is active",
-                "operation_id": exc.operation_id,
-                "mode": exc.mode.value,
-            },
-        ) from exc
+        raise _conflict(exc) from exc
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
     log.warning(

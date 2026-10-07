@@ -201,9 +201,9 @@ class EnergyManager:
                 raise EnergyRejected("energy_manager_disarmed", device_id=device_id)
             # AUTO only ends our operation and replays the stored snapshot; it never submits a new
             # write command, so this preflight does not apply. The restore itself still passes the
-            # gateway write allowlist (system=True skips only the request budget). Admin revocation
-            # of the dispatch registers is refused while a device is armed or dispatching, so a
-            # needed restore normally stays permitted; if not, the handback fails closed below.
+            # gateway write allowlist (system=True skips only the request budget). The admin
+            # Parameters endpoint refuses to revoke a required dispatch write name while any device
+            # is armed or has an unfinished dispatch; if not, the handback fails closed below.
             missing = self._missing_write_names() if command.action is not EnergyAction.AUTO else []
             if missing:
                 log.warning(

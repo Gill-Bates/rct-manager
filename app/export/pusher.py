@@ -149,9 +149,7 @@ class PushExporter:
             lines = build_lines(self._exporter.collect(), self.measurement, time.time_ns())
             await asyncio.to_thread(self._push_lines, lines)
             if self._provisioner is not None:
-                # Re-run every cycle: a newly exported metric adds a DOUBLE column at any time, and
-                # run() derives the rollup view name from the live column set, so a stale rollup
-                # projection is replaced instead of kept once provisioning first succeeded.
+                # Re-run every cycle: a new metric adds a DOUBLE column, and run() renames the view.
                 await asyncio.to_thread(self._provisioner.run)
         except PushError as exc:
             self._record_failure(str(exc))

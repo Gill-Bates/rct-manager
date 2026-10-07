@@ -26,9 +26,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Literal
 
-from app.dispatch.models import DispatchMode
-
-NOTE_MAX_LENGTH = 200
+from app.dispatch.models import NOTE_MAX_LENGTH, DispatchMode, check_printable_ascii
 
 
 class CapabilityName(StrEnum):
@@ -81,11 +79,7 @@ class CapabilityRecord:
     note: str | None = None
 
     def __post_init__(self) -> None:
-        if self.note is not None:
-            if len(self.note) > NOTE_MAX_LENGTH:
-                raise ValueError(f"note must contain at most {NOTE_MAX_LENGTH} characters")
-            if any(ord(char) < 32 or ord(char) > 126 for char in self.note):
-                raise ValueError("note must contain printable ASCII")
+        check_printable_ascii(self.note, "note", NOTE_MAX_LENGTH)
 
     def to_dict(self) -> dict:
         """JSON-capable projection for the encrypted part of ``dispatch_capabilities``."""
