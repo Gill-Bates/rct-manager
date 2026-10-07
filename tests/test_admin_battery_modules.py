@@ -6,10 +6,18 @@
 
 """Battery module counting and per-tower metric mapping for the dashboard device cards.
 
-The point of these tests is the distinction the card payload has to keep: the catalog carries seven
-module_sn slots (RCT_MODULE_SN_SLOTS) while the documented hardware takes at most six modules per
-tower (RCT_MAX_MODULES_PER_TOWER). Seven populated slots are therefore a data anomaly, never a
-seven-module tower.
+The point of these tests is twofold:
+
+1. The catalog carries seven module_sn slots (RCT_MODULE_SN_SLOTS) while the documented hardware
+   takes at most six modules per tower (RCT_MAX_MODULES_PER_TOWER). Seven populated slots are
+   therefore a data anomaly, never a seven-module tower.
+2. A slot that was never read (cached_reading() returns None) is UNKNOWN, not EMPTY. The periodic
+   loop fills all seven slots over several poll cycles, so a mid-scan read has some slots UNKNOWN
+   and must never be interpreted as a smaller real tower - the completeness gate in
+   `_raw_battery_module_report` only derives a topology once every slot has been read, and
+   `_stabilize_battery_module_report` holds the previously established (last-known-good) topology
+   while a scan is incomplete, exactly the behaviour that stops the dashboard tower from flickering
+   between e.g. 3 and 6 modules while the slots are still being filled in.
 """
 
 from types import SimpleNamespace
@@ -20,6 +28,7 @@ from app.admin.api import (
     RCT_MODULE_SN_SLOTS,
     _battery_metric_names,
     _battery_module_report,
+    _battery_module_slot_states,
     _battery_populated_module_slots,
     _battery_tower_present,
 )
@@ -27,7 +36,13 @@ from app.cache import CacheFreshness
 
 
 def _runtime(serials: dict[str, str], *, known: set[str] | None = None):
-    """Runtime stub whose catalog knows `known` (default: every battery name used here)."""
+    """Runtime stub whose catalog knows `known` (default: every battery name used here).
+
+    A slot name present in `serials` is a slot that WAS read (even if its value is blank/garbage -
+    "empty", not "unknown"). A slot name absent from `serials` but present in `known`/unrestricted
+    catalog existence is a slot that is defined but never read yet - UNKNOWN - matching
+    cached_reading()'s real None-means-unread contract.
+    """
     names = known if known is not None else None
 
     def exists(name: str) -> bool:
@@ -43,13 +58,24 @@ def _runtime(serials: dict[str, str], *, known: set[str] | None = None):
 
 
 def _slots(prefix: str, count: int) -> dict[str, str]:
+    """A COMPLETE read of `count` populated slots followed by explicitly-read-empty slots up to
+    RCT_MODULE_SN_SLOTS - i.e. a finished scan, not a mid-scan snapshot. Use `_partial_slots` to
+    build a snapshot that still has UNKNOWN slots."""
+    populated = {f"{prefix}_module_sn_{i}": f"SN-{i}" for i in range(count)}
+    rest_empty = {f"{prefix}_module_sn_{i}": "" for i in range(count, RCT_MODULE_SN_SLOTS)}
+    return {**populated, **rest_empty}
+
+
+def _partial_slots(prefix: str, count: int) -> dict[str, str]:
+    """A read of `count` populated slots with the remaining slots still UNREAD (not in the dict at
+    all) - the mid-scan state the periodic loop produces while the other slots have not been
+    refreshed yet."""
     return {f"{prefix}_module_sn_{i}": f"SN-{i}" for i in range(count)}
 
 
 def _report(runtime, prefix: str = "battery") -> dict:
-    """Same two-step devices() performs: collect the populated slots, then interpret them."""
-    populated = _battery_populated_module_slots(runtime, "dev", prefix)
-    return _battery_module_report(runtime, "dev", prefix, populated)
+    """Same step devices() performs: capture the slot-state snapshot, then interpret/stabilize it."""
+    return _battery_module_report(runtime, "dev", prefix)
 
 
 def test_catalog_slots_and_hardware_limit_are_separate_numbers() -> None:
@@ -74,7 +100,10 @@ def test_no_serial_read_yet_is_pending_not_zero_modules() -> None:
 
 
 def test_blank_serials_do_not_count_as_populated() -> None:
-    serials = {"battery_module_sn_0": "SN-0", "battery_module_sn_1": "   ", "battery_module_sn_2": ""}
+    # All seven slots READ (completeness gate satisfied): one real serial, the rest read as blank.
+    serials = {"battery_module_sn_0": "SN-0", "battery_module_sn_1": "   ", "battery_module_sn_2": "",
+               "battery_module_sn_3": "", "battery_module_sn_4": "", "battery_module_sn_5": "",
+               "battery_module_sn_6": ""}
     report = _report(_runtime(serials), "battery")
     assert report["module_count"] == 1
     assert report["module_count_status"] == "ok"
@@ -83,11 +112,14 @@ def test_blank_serials_do_not_count_as_populated() -> None:
 def test_null_and_control_byte_garbage_does_not_count_as_populated() -> None:
     # Real hardware can decode an unpopulated t_string register to garbage that is not an empty
     # string after .strip() - e.g. a run of non-NUL control characters - rather than "". Such a
-    # slot must still be treated as unpopulated, not as a real module serial.
+    # slot must still be treated as unpopulated, not as a real module serial. All seven slots are
+    # READ here so the completeness gate does not mask the assertion.
     serials = {
         "battery_module_sn_0": "SN-0",
         "battery_module_sn_1": "\x00\x00\x00\x00",
         "battery_module_sn_2": "\x01\x02\x03",
+        "battery_module_sn_3": "", "battery_module_sn_4": "", "battery_module_sn_5": "",
+        "battery_module_sn_6": "",
     }
     report = _report(_runtime(serials), "battery")
     assert report["module_count"] == 1
@@ -103,7 +135,10 @@ def test_all_seven_slots_populated_is_an_anomaly_not_a_seven_module_tower(caplog
 
 
 def test_a_gap_in_the_middle_is_an_anomaly() -> None:
-    serials = {"battery_module_sn_0": "a", "battery_module_sn_1": "b", "battery_module_sn_4": "e"}
+    # Complete read (all 7 slots): 0, 1, 4 populated, 2, 3, 5, 6 explicitly read as empty.
+    serials = {"battery_module_sn_0": "a", "battery_module_sn_1": "b", "battery_module_sn_4": "e",
+               "battery_module_sn_2": "", "battery_module_sn_3": "", "battery_module_sn_5": "",
+               "battery_module_sn_6": ""}
     report = _report(_runtime(serials), "battery")
     assert report["module_count"] is None
     assert report["module_count_status"] == "anomaly"
@@ -111,7 +146,10 @@ def test_a_gap_in_the_middle_is_an_anomaly() -> None:
 
 
 def test_a_populated_slot_six_alone_is_an_anomaly() -> None:
-    report = _report(_runtime({"battery_module_sn_6": "x"}), "battery")
+    serials = {"battery_module_sn_6": "x", "battery_module_sn_0": "", "battery_module_sn_1": "",
+               "battery_module_sn_2": "", "battery_module_sn_3": "", "battery_module_sn_4": "",
+               "battery_module_sn_5": ""}
+    report = _report(_runtime(serials), "battery")
     assert report["module_count"] is None
     assert report["module_count_status"] == "anomaly"
     assert report["populated_module_slots"] == [6]
@@ -154,21 +192,100 @@ def test_first_tower_carries_the_device_wide_roles_and_the_second_does_not() -> 
 
 def test_placeholder_tower_needs_a_module_serial_but_the_primary_one_does_not() -> None:
     # A device answers a periodic read for an unwired register with a value, so soc/temperature alone
-    # cannot prove a second tower exists; a populated module serial can.
+    # cannot prove a second tower exists; a populated module serial can. Presence is decided from the
+    # TRUSTED (stabilized) report's populated_module_slots, same as devices() does.
     readings = {"battery_soc": "0.5", "battery_placeholder_0_soc": "0.0"}
     runtime = _runtime(readings)
-    primary_slots = _battery_populated_module_slots(runtime, "dev", "battery")
-    placeholder_slots = _battery_populated_module_slots(runtime, "dev", "battery_placeholder_0")
+    primary_slots = _battery_populated_module_slots(_battery_module_slot_states(runtime, "dev", "battery"))
+    placeholder_slots = _battery_populated_module_slots(
+        _battery_module_slot_states(runtime, "dev", "battery_placeholder_0"))
     assert _battery_tower_present(runtime, "dev", "battery", primary_slots) is True
     assert _battery_tower_present(runtime, "dev", "battery_placeholder_0", placeholder_slots) is False
     with_serial = _runtime({**readings, **_slots("battery_placeholder_0", 4)})
-    slots = _battery_populated_module_slots(with_serial, "dev", "battery_placeholder_0")
-    assert _battery_tower_present(with_serial, "dev", "battery_placeholder_0", slots) is True
+    trusted = _report(with_serial, "battery_placeholder_0")
+    assert _battery_tower_present(with_serial, "dev", "battery_placeholder_0",
+                                   trusted["populated_module_slots"]) is True
+
+
+def test_second_tower_does_not_vanish_on_a_single_transient_missing_serial() -> None:
+    # The scenario the user-reported bug names explicitly: an established second tower must not
+    # disappear just because one poll's serial read for it came back empty/incomplete.
+    serials = {**_slots("battery", 5), **_slots("battery_placeholder_0", 4)}
+    runtime = _runtime(serials)
+    trusted = _report(runtime, "battery_placeholder_0")
+    assert _battery_tower_present(runtime, "dev", "battery_placeholder_0",
+                                   trusted["populated_module_slots"]) is True
+    # One poll loses every placeholder serial (transient read failure/mid-refresh).
+    for i in range(RCT_MODULE_SN_SLOTS):
+        serials.pop(f"battery_placeholder_0_module_sn_{i}", None)
+    flaky = _report(runtime, "battery_placeholder_0")
+    assert flaky["module_count"] == 4, "last-known-good must be held, not dropped to pending"
+    assert _battery_tower_present(runtime, "dev", "battery_placeholder_0",
+                                   flaky["populated_module_slots"]) is True, \
+        "the second tower card must not vanish on a transient missing serial"
 
 
 def test_metric_names_skip_roles_the_catalog_does_not_carry() -> None:
     runtime = _runtime({}, known={"battery_soc"})
     assert _battery_metric_names(runtime, "battery", include_device_wide=True) == {"soc": "battery_soc"}
+
+
+# --- Completeness gate -------------------------------------------------------------------------
+#
+# This is the actual root-cause fix: a mid-scan snapshot (some slots UNKNOWN, i.e. never read -
+# not "read as empty") must never be interpreted as a smaller real tower, no matter how clean the
+# slots that HAVE been read look.
+
+
+def test_an_unread_slot_is_unknown_not_empty() -> None:
+    states = _battery_module_slot_states(_runtime({"battery_module_sn_0": "SN-0"}), "dev", "battery")
+    assert states[0] == "populated"
+    assert states[1] == "unknown"  # never read - cached_reading() returned None
+    assert all(state == "unknown" for state in states[2:])
+
+
+def test_a_slot_the_catalog_does_not_carry_is_empty_not_unknown() -> None:
+    # A registry without module_sn slots at all must still reach "complete" eventually (keeps
+    # compatibility with older/simpler registries), so a slot the catalog never defines is EMPTY,
+    # not UNKNOWN - it can never be read and must not block completeness forever.
+    states = _battery_module_slot_states(_runtime({}, known=set()), "dev", "battery")
+    assert all(state == "empty" for state in states)
+
+
+def test_a_partial_scan_reports_pending_not_a_smaller_real_count() -> None:
+    # Three of seven slots read as populated, the rest never read yet - this is the exact "3 of 6
+    # modules present so far" mid-scan snapshot that used to be wrongly accepted as a real
+    # 3-module tower. It must come back pending/None, never module_count == 3.
+    runtime = _runtime(_partial_slots("battery", 3))
+    report = _report(runtime, "battery")
+    assert report["module_count"] is None
+    assert report["module_count_status"] == "pending"
+
+
+def test_an_established_topology_is_held_while_a_later_scan_is_incomplete() -> None:
+    # Full lifecycle: establish 6 modules from a complete snapshot, then simulate the scan
+    # restarting (e.g. after a reconnect) with only 3 of the 7 slots re-read so far. The reported
+    # topology must stay 6, never drop to 3 or to pending, until a new COMPLETE snapshot arrives.
+    serials = _slots("battery", 6)
+    runtime = _runtime(serials)
+    trusted = _report(runtime, "battery")
+    assert trusted["module_count"] == 6
+    mid_scan = {f"battery_module_sn_{i}": f"SN-{i}" for i in range(3)}  # slots 3..6 now UNKNOWN
+    runtime_mid_scan = _runtime(mid_scan)
+    runtime_mid_scan.gateway = runtime.gateway  # same gateway instance -> same stability state
+    held = _report(runtime_mid_scan, "battery")
+    assert held["module_count"] == 6, "an incomplete re-scan must hold the established topology"
+    assert held["module_count_status"] == "ok"
+
+
+def test_a_single_complete_but_different_read_is_not_enough_either() -> None:
+    # Completeness alone does not bypass the stability debounce: a complete snapshot that differs
+    # from the trusted one must still repeat _BATTERY_MODULE_STABILITY_READS times.
+    runtime = _runtime(_slots("battery", 6))
+    assert _report(runtime, "battery")["module_count"] == 6
+    runtime.gateway.cached_reading = _runtime(_slots("battery", 3)).gateway.cached_reading
+    once = _report(runtime, "battery")
+    assert once["module_count"] == 6, "one complete-but-different read must not override immediately"
 
 
 # --- Stability across polls -------------------------------------------------------------------

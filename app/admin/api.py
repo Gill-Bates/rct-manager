@@ -26,6 +26,7 @@ from app.catalog.base import is_numeric
 from app.config import Settings
 from app.dispatch.controller import ReconfigurationRejected
 from app.dispatch.models import DispatchState
+from app.energy.readings import EnergyReadings, absent_readings
 from app.gateway.rct_dispatch import RctDispatchGateway
 from app.security.dependencies import source_address
 
@@ -596,8 +597,11 @@ _BATTERY_DEVICE_METRIC_NAMES = {
 _BATTERY_PRESENCE_SUFFIXES = ("soc", "temperature", "cycles", "status2")
 
 
-def _battery_tower_present(runtime, device_id: str, prefix: str, populated_module_slots: list[int]) -> bool:
-    if populated_module_slots:
+def _battery_tower_present(runtime, device_id: str, prefix: str, trusted_module_slots: list[int]) -> bool:
+    """`trusted_module_slots` must be the STABILIZED report's populated_module_slots (see
+    _battery_module_report), never the current poll's raw _battery_populated_module_slots() - a
+    transient missing/incomplete serial read must not make an established second tower vanish."""
+    if trusted_module_slots:
         return True
     if prefix != "battery":
         return False  # a placeholder tower with no module serials is not installed
@@ -616,48 +620,84 @@ def _clean_module_serial(value: str) -> str:
     return re.sub(r"[\x00-\x1f\x7f]", "", value).strip()
 
 
-def _battery_populated_module_slots(runtime, device_id: str, prefix: str) -> list[int]:
-    """Indices of the module_sn slots that carry a non-empty serial; all slots are read, not just 6."""
-    populated = []
+# A slot's cached_reading() answer distinguishes three states, not two. cached_reading() returns
+# None for a slot that has never been read (or whose cache entry expired) - that is UNKNOWN, not
+# "empty". Only a slot that WAS read and decoded to a blank/garbage string is EMPTY. The periodic
+# loop fills all seven module_sn slots over several poll cycles (see _battery_module_report's
+# docstring), so a mid-scan snapshot has some slots at one of these states and the rest still
+# UNKNOWN; conflating UNKNOWN with EMPTY is exactly what let a 3-of-6-read tower be accepted as a
+# genuine 3-module tower before the rest had been read.
+_SLOT_UNKNOWN = "unknown"
+_SLOT_EMPTY = "empty"
+_SLOT_POPULATED = "populated"
+
+
+def _battery_module_slot_states(runtime, device_id: str, prefix: str) -> list[str]:
+    """One of _SLOT_UNKNOWN/_SLOT_EMPTY/_SLOT_POPULATED per protocol slot (index = slot number). A
+    slot the catalog does not carry at all can never resolve to anything else, so it is EMPTY
+    rather than UNKNOWN - it must not block a registry without module_sn slots from ever being
+    judged "complete"."""
+    states = []
     for i in range(RCT_MODULE_SN_SLOTS):
         name = f"{prefix}_module_sn_{i}"
         if not runtime.catalog.exists(name):
+            states.append(_SLOT_EMPTY)
             continue
         reading = runtime.gateway.cached_reading(device_id, name)
-        if reading is not None and isinstance(reading[0], str) and _clean_module_serial(reading[0]):
-            populated.append(i)
-    return populated
+        if reading is None:
+            states.append(_SLOT_UNKNOWN)
+            continue
+        value = reading[0]
+        if isinstance(value, str) and _clean_module_serial(value):
+            states.append(_SLOT_POPULATED)
+        else:
+            states.append(_SLOT_EMPTY)
+    return states
 
 
-def _raw_battery_module_report(populated: list[int]) -> dict:
-    """Pure classification of one read's populated slots - no memory of any previous read.
+def _battery_populated_module_slots(states: list[str]) -> list[int]:
+    """Indices of the slots classified POPULATED in a slot-state snapshot."""
+    return [i for i, state in enumerate(states) if state == _SLOT_POPULATED]
 
-    Which slots are populated matters, not only how many: a contiguous run 0..n-1 with the rest
-    empty is unambiguous and is trusted. Anything else - a gap in the middle, or more populated
-    slots than the documented hardware takes - is a data anomaly and not a taller tower, so the
-    count becomes None and the card renders the battery without a module-accurate tower instead of
-    claiming a tower no documented RCT product has.
+
+def _raw_battery_module_report(states: list[str]) -> dict:
+    """Pure classification of one read's slot-state snapshot - no memory of any previous read.
+
+    Completeness gates everything else: while any slot is still UNKNOWN, the snapshot is a
+    mid-scan read and no topology may be derived from it at all, no matter how clean the slots that
+    HAVE been read look - a 3-module tower mid-scan looks identical to a genuine 3-module tower
+    that finished scanning first. Only once every slot has been read (none UNKNOWN left) does the
+    populated-slot pattern get interpreted: a contiguous run 0..n-1 with the rest empty is
+    unambiguous and is trusted; anything else - a gap in the middle, or more populated slots than
+    the documented hardware takes - is a data anomaly and not a taller tower.
 
     `module_count_status` tells the client which case it is looking at:
-      "ok"      - trusted count, render that many modules
-      "pending" - no serial read yet; the periodic loop fills seven string slots over several
-                  cycles, so this is the normal startup state, not an error
-      "anomaly" - populated slots that cannot describe a documented tower; diagnostic case
+      "ok"      - complete snapshot, trusted count, render that many modules
+      "pending" - either the snapshot is still incomplete (slots arrive over several poll cycles,
+                  the normal startup state), or it is complete but genuinely empty
+      "anomaly" - complete snapshot whose populated slots cannot describe a documented tower
 
-    See `_battery_module_report` for the stability layer built on top of this: a single read here
-    can catch the multi-cycle slot refresh mid-flight, so this function alone is not what callers
-    should poll on repeatedly.
+    The internal "_complete" key drives `_stabilize_battery_module_report`'s last-known-good hold
+    and is stripped before a report reaches a caller outside this module (see
+    `_battery_module_report`).
     """
+    complete = _SLOT_UNKNOWN not in states
+    populated = _battery_populated_module_slots(states)
+    if not complete:
+        return {"module_count": None, "module_count_status": "pending",
+                "populated_module_slots": populated, "_complete": False}
     if not populated:
-        return {"module_count": None, "module_count_status": "pending", "populated_module_slots": []}
+        return {"module_count": None, "module_count_status": "pending",
+                "populated_module_slots": [], "_complete": True}
     contiguous = populated == list(range(len(populated)))
     if contiguous and len(populated) <= RCT_MAX_MODULES_PER_TOWER:
-        # A count of 1 is below the documented minimum of 2, but a read that has only partly
-        # completed looks exactly like this. Rendering what was actually read is the
-        # non-destructive choice; discarding it would hide a real serial the device reported.
+        # A count of 1 is below the documented minimum of 2, but that is a legitimate complete
+        # read (e.g. a tower stripped down to one module for service), not a mid-scan artifact -
+        # the completeness gate above already ruled the mid-scan case out.
         return {"module_count": len(populated), "module_count_status": "ok",
-                "populated_module_slots": populated}
-    return {"module_count": None, "module_count_status": "anomaly", "populated_module_slots": populated}
+                "populated_module_slots": populated, "_complete": True}
+    return {"module_count": None, "module_count_status": "anomaly",
+            "populated_module_slots": populated, "_complete": True}
 
 
 # How many consecutive reads of a *changed* classification are required before the reported count
@@ -685,6 +725,15 @@ def _battery_report_signature(report: dict) -> tuple:
 
 
 def _stabilize_battery_module_report(runtime, device_id: str, prefix: str, raw: dict) -> dict:
+    """Holds the last-known-good topology against two things that must never flip it: a mid-scan
+    (incomplete) snapshot, and a single changed-but-complete read that has not repeated yet.
+
+    An incomplete `raw` (`raw["_complete"] is False`) can never become trusted and never even
+    starts a candidate - the scan that produced it has not finished, so there is nothing yet to
+    debounce. Only a COMPLETE snapshot may start or advance a candidate, and - same as before -
+    it must repeat `_BATTERY_MODULE_STABILITY_READS` times before replacing the trusted topology,
+    so a single flaky complete-looking read is not enough either.
+    """
     key = (device_id, prefix)
     with _battery_module_lock:
         per_gateway = getattr(runtime.gateway, _BATTERY_MODULE_STATE_ATTR, None)
@@ -693,9 +742,17 @@ def _stabilize_battery_module_report(runtime, device_id: str, prefix: str, raw: 
             setattr(runtime.gateway, _BATTERY_MODULE_STATE_ATTR, per_gateway)
         state = per_gateway.get(key)
         if state is None:
+            # Nothing established yet - even an incomplete read becomes the initial state, since
+            # there is no better answer to show while the first scan is still in progress.
             per_gateway[key] = {"trusted": raw, "candidate": None, "candidate_count": 0}
             return raw
         trusted = state["trusted"]
+        if not raw["_complete"]:
+            # Mid-scan snapshot: hold last-known-good and drop any in-progress candidate, because
+            # the scan behind that candidate has not finished either.
+            state["candidate"] = None
+            state["candidate_count"] = 0
+            return trusted
         if _battery_report_signature(raw) == _battery_report_signature(trusted):
             state["candidate"] = None
             state["candidate_count"] = 0
@@ -714,11 +771,13 @@ def _stabilize_battery_module_report(runtime, device_id: str, prefix: str, raw: 
         return raw
 
 
-def _battery_module_report(runtime, device_id: str, prefix: str, populated: list[int]) -> dict:
-    """Module count for one tower, with counting kept separate from hardware validation and
-    debounced across polls so it does not flap on every single read (see
-    `_stabilize_battery_module_report`)."""
-    raw = _raw_battery_module_report(populated)
+def _battery_module_report(runtime, device_id: str, prefix: str) -> dict:
+    """Trusted module-count report for one tower: captures the current slot-state snapshot (see
+    `_battery_module_slot_states`), classifies it (`_raw_battery_module_report`), and runs it
+    through the last-known-good stabilizer so neither a mid-scan nor a single flaky complete read
+    can override an already-established topology (see `_stabilize_battery_module_report`)."""
+    states = _battery_module_slot_states(runtime, device_id, prefix)
+    raw = _raw_battery_module_report(states)
     report = _stabilize_battery_module_report(runtime, device_id, prefix, raw)
     if report is raw and report["module_count_status"] == "anomaly":
         log.warning(
@@ -727,7 +786,7 @@ def _battery_module_report(runtime, device_id: str, prefix: str, populated: list
             prefix, device_id, report["populated_module_slots"], RCT_MAX_MODULES_PER_TOWER, RCT_MODULE_SN_SLOTS,
             RCT_MAX_MODULES_PER_TOWER,
         )
-    return report
+    return {k: v for k, v in report.items() if k != "_complete"}
 
 
 def _battery_metric_names(runtime, prefix: str, *, include_device_wide: bool) -> dict[str, str]:
@@ -753,6 +812,25 @@ DEVICE_CARD_METRIC_NAMES = (
     # shared values to show and repeated the first tower's numbers.
     "battery_placeholder_0_soc", "battery_placeholder_0_temperature",
 )
+
+
+def _energy_flow_view(readings: EnergyReadings | None) -> dict:
+    """Maps the cache-only, sign-normalized EnergyReadings onto the dashboard projection.
+
+    Always a five-key object (falls back to absent_readings()), independent of dispatch/Energy
+    Manager state, so a device with no cache simply yields all-null/all-stale sub-fields.
+    """
+    source = readings if readings is not None else absent_readings()
+    return {
+        field_name: {"value": reading.value, "stale": reading.stale, "age_seconds": reading.age_seconds}
+        for field_name, reading in (
+            ("pv_power_w", source.pv_power_w),
+            ("grid_power_w", source.grid_power_w),
+            ("house_load_w", source.house_load_w),
+            ("battery_power_w", source.battery_power_w),
+            ("battery_soc_percent", source.battery_soc_percent),
+        )
+    }
 
 
 @router.get("/devices")
@@ -790,22 +868,30 @@ def devices(request: Request) -> dict:
         # semantics and never sees them.
         batteries = []
         for prefix in _BATTERY_TOWER_PREFIXES:
-            populated_module_slots = _battery_populated_module_slots(runtime, item.device_id, prefix)
-            if not _battery_tower_present(runtime, item.device_id, prefix, populated_module_slots):
+            # Trusted (last-known-good) report FIRST, tower-presence decision from ITS populated
+            # slots - never from the current poll's raw read - so a transiently missing/incomplete
+            # serial cannot make an established tower (especially the second one) vanish.
+            module_report = _battery_module_report(runtime, item.device_id, prefix)
+            if not _battery_tower_present(runtime, item.device_id, prefix,
+                                           module_report["populated_module_slots"]):
                 continue
             tower = {
                 "id": prefix,
                 "title": f"Battery {len(batteries) + 1}",
                 "metrics": _battery_metric_names(runtime, prefix, include_device_wide=not batteries),
             }
-            tower.update(_battery_module_report(runtime, item.device_id, prefix, populated_module_slots))
+            tower.update(module_report)
             batteries.append(tower)
         reported = runtime.gateway.reported_name(item.device_id)
+        # Read-only, cache-only, dispatch-independent: present for every device unconditionally, so
+        # the dashboard flow graphic works with write support/dispatch/Energy Manager disabled.
+        flow = runtime.energy_readings.readings(item.device_id) if runtime.energy_readings else None
         result.append({
             "id": item.device_id, "name": item.display_name or reported or item.device_id,
             "status": status.state.value, "host": item.host, "port": item.port,
             "last_success_at": status.last_success_at.isoformat() if status.last_success_at else None,
             "queue_length": status.queue_length, "metrics": readings, "batteries": batteries,
+            "energy_flow": _energy_flow_view(flow),
         })
     return {"devices": result, "tsdb": _tsdb_view(runtime)}
 

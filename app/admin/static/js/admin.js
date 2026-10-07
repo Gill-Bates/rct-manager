@@ -89,10 +89,11 @@
       const detail = data.detail;
       // dispatch_capability_conflict (409) carries a structured detail {detail, operation_id, mode}
       // instead of a plain string; naming the blocking operation is what makes the refusal useful.
-      if (detail && typeof detail === 'object') {
-        throw new Error(`${detail.detail || 'Conflict.'} (operation ${detail.operation_id}, mode ${detail.mode})`);
-      }
-      throw new Error(typeof detail === 'string' ? detail : `Request failed (${response.status}).`);
+      const error = (detail && typeof detail === 'object')
+        ? new Error(`${detail.detail || 'Conflict.'} (operation ${detail.operation_id}, mode ${detail.mode})`)
+        : new Error(typeof detail === 'string' ? detail : `Request failed (${response.status}).`);
+      error.status = response.status; // callers (e.g. the Energy poll) branch on 503 vs transient
+      throw error;
     }
     return data;
   }
@@ -399,20 +400,31 @@
     return nodes;
   }
 
-  // How many module slices a tower descriptor may render. The catalog's seven serial slots are the
-  // size of a data structure; the documented hardware takes at most six modules per tower, so six is
-  // the hard visual ceiling here as well. A count that cannot be trusted renders no tower at all
-  // (see patchBatteryTower) rather than a fabricated one.
+  // Hardware limit (server-side validation concept, used only for the diagnostic note text below):
+  // the catalog's seven serial slots are the size of a data structure, the documented hardware
+  // takes at most six modules per tower.
   const BATTERY_MAX_MODULES_PER_TOWER = 6;
 
-  // null -> nothing renderable. "pending" (no serial read yet - the seven string slots arrive over
-  // several poll cycles) keeps the previous behaviour of a single-module placeholder tower so the
-  // card does not flicker between states during startup.
+  // GRAPHIC ceiling — a different concept from the hardware limit above. The drawn tower contract
+  // is exactly 1 top cap + 1..5 battery segments + 1 bottom cap, so this is the hard cap on what
+  // buildBatteryStack() is ever asked to draw, independent of how many modules the server trusts.
+  const BATTERY_TOWER_MAX_SEGMENTS = 5;
+
+  // Maps a trusted backend module count onto a drawn segment count. A count within the graphic's
+  // ceiling maps 1:1; a count above it is a real, trusted tower the graphic contract does not cover
+  // and is therefore not drawn as a fabricated maximum-size stand-in.
+  function renderableSegmentCount(moduleCount) {
+    if (typeof moduleCount !== 'number' || moduleCount < 1) return null;
+    if (moduleCount > BATTERY_TOWER_MAX_SEGMENTS) return null;
+    return moduleCount;
+  }
+
+  // null -> nothing renderable (patchBatteryCard shows a neutral note instead of a tower). No
+  // module tower is fabricated for "pending" (no complete serial scan yet) — see patchBatteryCard
+  // for the "detecting modules…" placeholder text that covers that case instead of a drawn tower.
   function renderableModuleCount(tower) {
-    if (tower.moduleCountStatus === 'pending') return 1;
-    if (typeof tower.moduleCount !== 'number' || tower.moduleCount < 1) return null;
-    if (tower.moduleCount > BATTERY_MAX_MODULES_PER_TOWER) return null;
-    return tower.moduleCount;
+    if (tower.moduleCountStatus === 'pending') return null;
+    return renderableSegmentCount(tower.moduleCount);
   }
 
   // Reconciles a parent's children with the wanted nodes in order; untouched nodes are not re-inserted.
@@ -552,10 +564,16 @@
 
   function createDeviceVisual() {
     const wrap = element('div', 'device-visual');
+    const flow = energyFlowGraphic();
+    const flowBox = element('div', 'device-flow-graphic');
+    flowBox.hidden = true;
+    flowBox.append(flow.svg);
+    const cards = element('div', 'device-visual-cards');
     const inverterCard = createPowerCard();
-    wrap.append(inverterCard.node);
+    cards.append(inverterCard.node);
+    wrap.append(flowBox, cards);
     // batteries grows to match batteryTowers() on the first patch; see patchDeviceVisual.
-    return { node: wrap, inverterCard, batteries: [] };
+    return { node: wrap, flow, flowBox, cards, inverterCard, batteries: [] };
   }
 
   // Shows the server-decoded status text as a compact chip. A status that needs an explanation
@@ -616,10 +634,9 @@
     if (card.renderedModules !== wanted) {
       card.renderedModules = wanted;
       if (wanted === null) {
-        // Diagnostic case: the populated serial slots do not describe a documented tower (a gap in
-        // the middle, or more populated slots than the hardware takes). The card keeps its readings
-        // but shows no tower, because any drawn tower here would be a claim about the hardware that
-        // the data does not support - and a seven-storey tower in particular does not exist.
+        // Either "pending" (no complete serial scan yet - a neutral, temporary state, not a
+        // fabricated tower) or "anomaly" (a complete scan whose populated slots do not describe a
+        // documented tower). Both show no tower; the note text below tells them apart.
         card.stack.replaceChildren();
         card.note.hidden = false;
       } else {
@@ -628,12 +645,27 @@
       }
     }
     if (wanted === null) {
-      const slots = tower.populatedModuleSlots || [];
-      setText(card.note, 'Module layout unclear');
-      const detail = slots.length
-        ? `The battery reports module serials in slots ${slots.join(', ')}, which does not describe a documented tower (at most ${BATTERY_MAX_MODULES_PER_TOWER} modules, numbered without gaps). No module tower is drawn for it.`
-        : 'No usable module serials were reported, so no module tower is drawn.';
-      if (card.note.title !== detail) card.note.title = detail;
+      if (tower.moduleCountStatus === 'pending') {
+        setText(card.note, 'Detecting modules…');
+        const detail = 'The battery has not finished reporting its module serials yet; the module tower will '
+          + 'appear once the scan completes.';
+        if (card.note.title !== detail) card.note.title = detail;
+      } else if (tower.moduleCountStatus === 'ok') {
+        // A trusted count above the graphic's drawn ceiling (BATTERY_TOWER_MAX_SEGMENTS) — real
+        // hardware the tower graphic contract (1 top + 1..5 segments + 1 bottom) does not cover,
+        // not a data anomaly, so it gets its own message rather than "layout unclear".
+        setText(card.note, `${tower.moduleCount} modules`);
+        const detail = `This tower has ${tower.moduleCount} modules; the tower graphic currently shows at most `
+          + `${BATTERY_TOWER_MAX_SEGMENTS}.`;
+        if (card.note.title !== detail) card.note.title = detail;
+      } else {
+        const slots = tower.populatedModuleSlots || [];
+        setText(card.note, 'Module layout unclear');
+        const detail = slots.length
+          ? `The battery reports module serials in slots ${slots.join(', ')}, which does not describe a documented tower (at most ${BATTERY_MAX_MODULES_PER_TOWER} modules, numbered without gaps). No module tower is drawn for it.`
+          : 'No usable module serials were reported, so no module tower is drawn.';
+        if (card.note.title !== detail) card.note.title = detail;
+      }
     }
     patchCardStatus(card.head, metrics, card.statusMetric);
     const metric = card.socMetric ? metrics.get(card.socMetric) : undefined;
@@ -671,8 +703,21 @@
       patchBatteryCard(visual.batteries[index], metrics, tower);
     });
     // Drives the column count of the card grid, so one tower fills the row and two share it.
-    visual.node.style.setProperty('--battery-count', String(towers.length));
-    syncChildren(visual.node, [visual.inverterCard.node, ...visual.batteries.map((card) => card.node)]);
+    visual.cards.style.setProperty('--battery-count', String(towers.length));
+    syncChildren(visual.cards, [visual.inverterCard.node, ...visual.batteries.map((card) => card.node)]);
+    patchDeviceFlow(visual, device);
+    syncChildren(visual.node, [visual.flowBox, visual.cards]);
+  }
+
+  // Feeds the shared flow graphic from device.energy_flow on the /admin/api/devices response
+  // (business-signed, server-normalized, dispatch-independent) — never from device.metrics, which
+  // is device-signed and has no battery_power. Hidden when the device has no energy_flow or every
+  // reading in it is absent, so a device without energy data shows no graphic.
+  function patchDeviceFlow(visual, device) {
+    const readings = device.energy_flow;
+    const hasReading = readings && Object.values(readings).some((reading) => reading && reading.value != null);
+    visual.flowBox.hidden = !hasReading;
+    if (hasReading) visual.flow.update(readings);
   }
 
   function createDeviceCard() {
@@ -758,7 +803,7 @@
     if (!tsdb.export_enabled) {
       icon.textContent = 'pause_circle';
       icon.classList.add('text-secondary');
-      label.textContent = 'Export paused';
+      label.textContent = '–';
     } else if (tsdb.healthy) {
       icon.textContent = 'cloud_done';
       icon.classList.add('text-success');
@@ -802,6 +847,8 @@
     dashboardController = controller;
     const timer = setTimeout(() => controller.abort(Object.assign(new Error('The dashboard request timed out.'), { name: 'TimeoutError' })), DASHBOARD_TIMEOUT_MS);
     try {
+      // One network leg: the flow graphic is fed from device.energy_flow on this same response, a
+      // dispatch-independent projection, not from a second energy/devices fetch.
       const data = await api('devices', { signal: controller.signal });
       if (generation !== dashboardGeneration) return 'skipped';
       dashboardPollFailing = false;
@@ -944,17 +991,29 @@
   }
 
   // Business labels for the Energy Manager's own enums (app/energy/models.py); the admin API never
-  // sends a register name or a raw dispatch mode, except in the Advanced section.
-  const ENERGY_ACTION_LABELS = { charge: 'Charge', discharge: 'Discharge', hold: 'Hold', auto: 'Return to automatic' };
+  // sends a register name or a raw dispatch mode, except in the Diagnostics section. These are
+  // presentation-only — the REST action names (charge/discharge/hold/auto) are unchanged on the wire.
+  const ENERGY_ACTION_LABELS = {
+    charge: 'Charge battery', discharge: 'Discharge battery', hold: 'Keep battery idle',
+    auto: 'Return to automatic',
+  };
   const ENERGY_STATE_LABELS = {
     automatic: 'Automatic', starting: 'Starting', charging: 'Charging', discharging: 'Discharging',
     holding: 'Holding', stopping: 'Stopping', fault: 'Fault',
   };
   const ENERGY_REASON_LABELS = {
-    not_armed: 'Energy Manager is off', write_not_permitted: 'write access was revoked',
+    not_armed: 'manual control is off', write_not_permitted: 'write access was revoked',
     limits_missing: 'power limits are not configured', hardware_not_verified: 'hardware is not verified',
     restore_required: 'the inverter must be handed back first',
   };
+  // The register approvals every manual command needs (RctDispatchGateway.REQUIRED_WRITES).
+  // The Setup checklist's "Write access enabled" row is REQUIRED_WRITES ⊆ approved_write_names.
+  const ENERGY_REQUIRED_WRITES = [
+    'power_mng_soc_strategy', 'power_mng_soc_target_set',
+    'power_mng_battery_power_extern', 'power_mng_use_grid_power_enable',
+  ];
+  // The three capabilities that must all be verified before manual control is released.
+  const ENERGY_REQUIRED_CAPABILITIES = ['write_path_convention', 'battery_power_sign_convention', 'grid_power_sign_convention'];
   const ENERGY_POLICY_MODES = [['business_target', 'Business target'], ['below_current_soc', 'Below current SoC']];
   const ENERGY_POLL_MS = 3000;
   const ENERGY_IDLE_WATTS = 20; // below this a flow counts as standing still
@@ -984,6 +1043,14 @@
     if (!Number.isFinite(watts)) return '–';
     const abs = Math.abs(watts);
     return abs >= 1000 ? `${(abs / 1000).toFixed(2)} kW` : `${Math.round(abs)} W`;
+  }
+
+  // Operate and Setup show power in kW; the backend keeps transmitting/storing watts. Rounding
+  // boundary is pinned (design §11): < 10000 W -> two decimals (e.g. "0.90 kW"), >= 10000 W -> one.
+  function formatPowerKw(watts) {
+    if (!Number.isFinite(watts)) return '–';
+    const abs = Math.abs(watts);
+    return `${(abs / 1000).toFixed(abs < 10000 ? 2 : 1)} kW`;
   }
 
   function formatPercent(value) {
@@ -1053,8 +1120,8 @@
       setClass(node.group, 'is-stale', stale);
     }
 
-    function update(device) {
-      const r = device.readings;
+    function update(readings) {
+      const r = readings;
       const pv = readingValue(r.pv_power_w);
       const grid = readingValue(r.grid_power_w);
       const battery = readingValue(r.battery_power_w);
@@ -1087,47 +1154,105 @@
     return (device.actions || []).find((item) => item.action === action) || { available: false, reason: null };
   }
 
-  // The one sentence the status box shows: ready, or why manual control is not available.
-  function energyControlState(device) {
-    if (!device.connected) return { ready: false, text: 'Control unavailable', detail: `Inverter not connected (${device.connection_state}).` };
-    if (!device.armed) return { ready: false, text: 'Energy Manager is OFF', detail: 'Switch it on to control the battery manually.' };
+  // The state-independent readiness checklist (design §12). Every row is derived from a field that
+  // is authoritative in all arm states, so a disarmed/never-armed device still reports it correctly
+  // (unlike device.actions[].reason, which collapses to not_armed while disarmed). Shared by the
+  // Operate "needs setup" banner (§9) and the Setup block renderer (§12).
+  function energyChecklist(device) {
+    const approved = new Set(device.approved_write_names || []);
+    const writeAccess = ENERGY_REQUIRED_WRITES.every((name) => approved.has(name));
+    const verified = ENERGY_REQUIRED_CAPABILITIES.every((name) => {
+      const cap = (device.capabilities || []).find((item) => item.name === name);
+      return cap && cap.status === 'verified';
+    });
+    return {
+      connected: Boolean(device.connected),
+      limits: device.limits !== null && device.limits !== undefined,
+      writeAccess,
+      hardwareVerified: verified,
+    };
+  }
+
+  // The first unmet checklist item in the fixed order the Setup CTA targets (design §12).
+  function energyFirstUnmet(checklist) {
+    if (!checklist.connected) return 'connection';
+    if (!checklist.limits) return 'limits';
+    if (!checklist.writeAccess) return 'write_access';
+    if (!checklist.hardwareVerified) return 'hardware';
+    return null;
+  }
+
+  // "Needs setup" is any unmet item among write-access / power-limits / hardware-verified (connection
+  // is handled by its own branch). Used to place the §9 banner above the !armed branch.
+  function energyNeedsSetup(checklist) {
+    return !checklist.limits || !checklist.writeAccess || !checklist.hardwareVerified;
+  }
+
+  // The one human-readable Operate status (design §9). No raw register/capability text or
+  // reject_detail — those live only in Diagnostics. `poll503` renders the config empty-state.
+  function energyControlState(device, poll503) {
+    if (poll503) {
+      return { ready: false, kind: 'config', text: 'Manual battery control requires write support to be enabled.', detail: '' };
+    }
+    if (!device.connected) {
+      return { ready: false, kind: 'blocked', text: 'Not connected.', detail: '' };
+    }
     if (device.state === 'fault') {
-      return { ready: false, text: 'Control unavailable', detail: `Device fault${device.stop_reason ? `: ${device.stop_reason}` : ''}.` };
+      return { ready: false, kind: 'blocked', text: 'The inverter reports a fault.', detail: '' };
     }
-    const reasons = [];
-    for (const action of ['charge', 'discharge', 'hold']) {
-      const item = energyAvailability(device, action);
-      if (item.available) continue;
-      let text = ENERGY_REASON_LABELS[item.reason] || 'not available';
-      const gate = (device.gates || []).find((entry) => entry.action === action);
-      if (item.reason === 'hardware_not_verified' && gate && gate.reject_detail) text += ` (${gate.reject_detail})`;
-      reasons.push(`${ENERGY_ACTION_LABELS[action]}: ${text}`);
+    const checklist = energyChecklist(device);
+    if (energyNeedsSetup(checklist)) {
+      return { ready: false, kind: 'setup', text: 'Manual control needs setup.', detail: '', firstUnmet: energyFirstUnmet(checklist) };
     }
-    if (reasons.length === 3) return { ready: false, text: 'Control unavailable', detail: [...new Set(reasons)].join('; ') };
-    if (reasons.length) {
-      const open = ['charge', 'discharge', 'hold'].filter((action) => energyAvailability(device, action).available);
-      const names = open.map((action) => ENERGY_ACTION_LABELS[action]).join(', ');
-      return { ready: true, limited: true, text: 'Limited', detail: `${names} available · ${[...new Set(reasons)].join('; ')}` };
+    if (!device.armed) {
+      return { ready: false, kind: 'disabled', text: 'Manual control is disabled.', detail: '' };
     }
-    return { ready: true, text: 'Ready', detail: '' };
+    return { ready: true, kind: 'ready', text: '', detail: '' };
   }
 
-  function energyRequestedText(device) {
-    const label = ENERGY_STATE_LABELS[device.state] || device.state;
-    if (device.state === 'automatic') return 'Automatic (inverter decides)';
-    if (device.target_soc_percent !== null && device.target_soc_percent !== undefined && ['charging', 'discharging', 'starting'].includes(device.state)) {
-      return `${label} to ${Math.round(device.target_soc_percent)} %`;
-    }
-    return label;
-  }
-
-  function energyActualText(device) {
+  // Current mode line + one plain sentence (design §10). While running, a non-stale battery reading
+  // adds the measured rate in kW; a stale reading omits the rate rather than show a stale number.
+  function energyModeSentence(device) {
+    const target = device.target_soc_percent;
+    const hasTarget = target !== null && target !== undefined;
     const reading = device.readings.battery_power_w;
-    const battery = readingValue(reading);
-    if (battery === null) return 'No measurement';
-    if (reading.stale) return `Last known: ${formatPower(battery)} (stale)`;
-    if (Math.abs(battery) < ENERGY_IDLE_WATTS) return 'Battery idle';
-    return `${battery > 0 ? 'Discharging' : 'Charging'} ${formatPower(battery)}`;
+    const live = liveValue(reading); // null when absent or stale
+    const rate = live !== null && Math.abs(live) >= ENERGY_IDLE_WATTS ? ` ${formatPowerKw(live)}` : '';
+    switch (device.state) {
+      case 'automatic':
+        return { mode: 'Automatic', sentence: 'Automatic — the inverter decides.' };
+      case 'charging':
+        return {
+          mode: hasTarget ? `Charging to ${Math.round(target)} %` : 'Charging',
+          sentence: `Charging${hasTarget ? ` to ${Math.round(target)} %` : ''}.${rate ? ` Charging at${rate}.` : ''}`
+        };
+      case 'discharging':
+        return {
+          mode: hasTarget ? `Discharging to ${Math.round(target)} %` : 'Discharging',
+          sentence: `Discharging${hasTarget ? ` to ${Math.round(target)} %` : ''}.${rate ? ` Discharging at${rate}.` : ''}`
+        };
+      case 'holding':
+        return { mode: 'Keeping battery idle', sentence: 'Keeping battery idle.' };
+      case 'starting':
+        return { mode: 'Starting', sentence: 'Starting…' };
+      case 'stopping':
+        return { mode: 'Stopping', sentence: 'Stopping…' };
+      default:
+        return { mode: ENERGY_STATE_LABELS[device.state] || device.state, sentence: '' };
+    }
+  }
+
+  // The Operate freshness note (design §13): nothing when healthy; a soft note only on a problem.
+  function energyFreshnessNote(device, pollFailed) {
+    const shown = [device.readings.battery_soc_percent, device.readings.battery_power_w];
+    const stale = shown.some((reading) => reading && reading.stale && reading.value !== null && reading.value !== undefined);
+    if (stale) {
+      const ages = shown.map((reading) => reading && reading.age_seconds).filter(Number.isFinite);
+      const n = ages.length ? Math.round(Math.max(...ages)) : 0;
+      return `Measurements are ${n} seconds old.`;
+    }
+    if (pollFailed) return 'Live data unavailable.';
+    return '';
   }
 
   function energyTargetRange(device, action) {
@@ -1147,6 +1272,8 @@
     let device = first;
     let selected = null; // 'charge' | 'discharge' while its target slider is open
     let busy = false;
+    let lastPoll503 = false;   // the Operate poll returned 503 (write support disabled) — §9.2
+    let lastPollFailed = false; // a non-503 transient poll failure — §13 freshness note
     const touched = { charge: false, discharge: false };
 
     const card = element('section', 'card energy-panel');
@@ -1171,11 +1298,27 @@
     head.append(title, switchBox);
     body.append(head);
 
+    // Helper under the Manual-control toggle: enabling allows commands, it does not drive the battery.
+    const armedHelp = element('p', 'small text-secondary energy-switch-help mb-0',
+      'Enabled means manual commands are allowed. It does not by itself charge or discharge the battery.');
+    body.append(armedHelp);
+
     const layout = element('div', 'energy-body');
-    const flow = energyFlowGraphic();
     const control = element('div', 'energy-control');
-    layout.append(flow.svg, control);
+    layout.append(control);
     body.append(layout);
+
+    // The state-independent Setup checklist (design §12), shown only when a prerequisite is unmet.
+    const setupBox = element('div', 'energy-setup');
+    setupBox.hidden = true;
+    const setupHeading = element('h3', 'h6 mb-2', 'Manual battery control needs setup');
+    const setupList = element('ul', 'energy-setup-list');
+    const setupButton = element('button', 'btn btn-sm btn-primary mt-2', 'Set up manual control');
+    setupButton.type = 'button';
+    const setupHint = element('p', 'small text-secondary mt-2 mb-0');
+    setupHint.hidden = true;
+    setupBox.append(setupHeading, setupList, setupButton, setupHint);
+    control.append(setupBox);
 
     const statusBox = element('div', 'energy-status');
     const statusIcon = element('span', 'material-icons');
@@ -1183,19 +1326,20 @@
     const statusText = element('div');
     const statusMain = element('div', 'fw-semibold');
     const statusDetail = element('div', 'small text-secondary');
-    statusText.append(statusMain, statusDetail);
+    const statusButton = element('button', 'btn btn-sm btn-primary mt-2', 'Complete setup');
+    statusButton.type = 'button';
+    statusButton.hidden = true;
+    statusText.append(statusMain, statusDetail, statusButton);
     statusBox.append(statusIcon, statusText);
 
-    const compare = element('div', 'energy-compare');
-    const requestedBox = element('div', 'energy-compare-box');
-    const requestedMain = element('div', 'energy-compare-main');
-    const requestedSub = element('div', 'small text-secondary');
-    requestedBox.append(element('h3', null, 'Requested'), requestedMain, requestedSub);
-    const actualBox = element('div', 'energy-compare-box');
-    const actualMain = element('div', 'energy-compare-main');
-    const actualSub = element('div', 'small text-secondary');
-    actualBox.append(element('h3', null, 'Actual'), actualMain, actualSub);
-    compare.append(requestedBox, actualBox);
+    // One plain-language block: current mode + a single human sentence (design §10).
+    const modeBox = element('div', 'energy-mode');
+    const modeLine = element('div', 'small text-secondary');
+    const modeSentence = element('div', 'fw-semibold');
+    const socLine = element('div', 'small text-secondary energy-soc');
+    const freshness = element('p', 'small text-secondary energy-freshness mb-0');
+    freshness.hidden = true;
+    modeBox.append(modeLine, modeSentence, socLine, freshness);
 
     const actions = element('div', 'energy-actions');
     const buttons = {};
@@ -1228,10 +1372,28 @@
     confirm.type = 'button';
     target.append(targetLabel, range, scale, targetNote, confirm);
 
-    control.append(statusBox, compare, actions, target);
+    control.append(statusBox, modeBox, actions, target);
 
     const advanced = energyAdvanced(id, () => device, (next) => panel.update(next));
-    body.append(advanced.node);
+    body.append(advanced.expert, advanced.diagnostics);
+
+    // Setup CTA routing (design §12): point the operator at the first unmet step.
+    function routeSetup(firstUnmet) {
+      if (firstUnmet === 'limits') { advanced.openExpert(); advanced.focusLimits(); }
+      else if (firstUnmet === 'hardware') { advanced.openExpert(); advanced.focusVerification(); }
+      else if (firstUnmet === 'write_access') {
+        setupHint.hidden = false;
+        setupHint.textContent = 'Approve the required register writes on the Inverters page, then they appear here as enabled.';
+      } else {
+        setupHint.hidden = false;
+        setupHint.textContent = 'Check the inverter connection on the Inverters page.';
+      }
+    }
+    setupButton.addEventListener('click', () => routeSetup(energyFirstUnmet(energyChecklist(device))));
+    statusButton.addEventListener('click', () => {
+      const state = energyControlState(device, lastPoll503);
+      routeSetup(state.firstUnmet || energyFirstUnmet(energyChecklist(device)));
+    });
 
     function setBusy(value) {
       busy = value;
@@ -1256,7 +1418,7 @@
       setBusy(true);
       try {
         const result = await api(`${path}/armed`, { method: 'PUT', body: JSON.stringify({ armed: wanted }) });
-        toast(wanted ? 'Energy Manager is on.' : 'Energy Manager is off; the inverter is back in automatic operation.');
+        toast(wanted ? 'Manual control is enabled.' : 'Manual control is disabled; the inverter is back in automatic operation.');
         if (!wanted) selected = null;
         panel.update(result);
       } catch (error) { toast(messageFrom(error), 'danger'); }
@@ -1304,65 +1466,117 @@
       confirm.disabled = busy;
     }
 
+    // Which Setup rows the checklist renders, in display order.
+    const SETUP_ROWS = [
+      ['connected', 'Inverter connected'],
+      ['writeAccess', 'Write access enabled'],
+      ['limits', 'Power limits configured'],
+      ['hardwareVerified', 'Hardware control verified'],
+    ];
+
+    function renderSetup(checklist, bannerOwnsCta) {
+      const unmet = SETUP_ROWS.some(([key]) => !checklist[key]);
+      setupBox.hidden = !unmet;
+      if (!unmet) return;
+      setupList.replaceChildren();
+      for (const [key, label] of SETUP_ROWS) {
+        const met = checklist[key];
+        const row = element('li', `energy-setup-item ${met ? 'is-met' : 'is-unmet'}`);
+        const icon = element('span', 'material-icons', met ? 'check_circle' : 'radio_button_unchecked');
+        icon.setAttribute('aria-hidden', 'true');
+        row.append(icon, element('span', null, label));
+        setupList.append(row);
+      }
+      // Exactly one CTA (design §9/§12): when the §9 banner owns it, the §12 button is suppressed.
+      setupButton.hidden = bannerOwnsCta;
+      if (bannerOwnsCta) { setupHint.hidden = true; }
+    }
+
     function render() {
-      const readyState = energyControlState(device);
+      const readyState = energyControlState(device, lastPoll503);
       nameNode.textContent = device.device_name;
       dot.className = `status-dot ${device.connected ? 'online' : 'offline'}`;
       connection.textContent = `${device.connected ? 'Connected' : 'Not connected'} · ${device.host}`;
       armedInput.checked = device.armed;
-      armedInput.disabled = busy;
-      armedLabel.textContent = `Energy Manager ${device.armed ? 'ON' : 'OFF'}`;
+      armedInput.disabled = busy || lastPoll503;
+      armedLabel.textContent = `Manual control: ${device.armed ? 'Enabled' : 'Disabled'}`;
+
+      // The §9 banner owns the single CTA whenever it reads "needs setup".
+      const bannerOwnsCta = readyState.kind === 'setup';
+      renderSetup(energyChecklist(device), bannerOwnsCta);
 
       statusBox.className = `energy-status ${readyState.ready ? 'is-ready' : 'is-blocked'}`;
-      statusIcon.textContent = readyState.ready ? 'check_circle' : 'info';
+      statusBox.hidden = readyState.ready; // nothing shown when healthy
+      statusIcon.textContent = readyState.kind === 'config' ? 'info' : 'info';
       statusMain.textContent = readyState.text;
-      const showDetail = !readyState.ready || Boolean(readyState.limited);
-      statusDetail.textContent = showDetail ? readyState.detail : '';
-      statusDetail.hidden = !showDetail;
+      statusDetail.textContent = readyState.detail || '';
+      statusDetail.hidden = !readyState.detail;
+      statusButton.hidden = readyState.kind !== 'setup';
 
-      requestedMain.textContent = energyRequestedText(device);
-      const requestedLines = [];
-      if (device.power_limit_w !== null && device.power_limit_w !== undefined) {
-        requestedLines.push(`Max power ${formatPower(device.power_limit_w)}${device.power_limit_clamped ? ' (clamped)' : ''}`);
+      // Mode + one plain sentence; the whole block is hidden until manual control is ready.
+      const operable = readyState.ready;
+      modeBox.hidden = !operable;
+      if (operable) {
+        const mode = energyModeSentence(device);
+        modeLine.textContent = `Current mode: ${mode.mode}`;
+        modeSentence.textContent = mode.sentence;
+        const soc = readingValue(device.readings.battery_soc_percent);
+        socLine.textContent = soc === null ? '' : `Battery ${formatPercent(soc)}`;
+        socLine.hidden = soc === null;
+        const note = energyFreshnessNote(device, lastPollFailed);
+        freshness.textContent = note;
+        freshness.hidden = !note;
       }
-      if (device.commanded_power_w > 0) requestedLines.push(`Commanded ${formatPower(device.commanded_power_w)}`);
-      if (device.until) requestedLines.push(`Until ${hhmm(new Date(device.until))}${device.time_limited ? ' (time-limited)' : ''}`);
-      if (device.stop_reason) requestedLines.push(`Last stop: ${device.stop_reason.replaceAll('_', ' ')}`);
-      requestedSub.textContent = requestedLines.join(' · ');
-      actualMain.textContent = energyActualText(device);
-      const soc = readingValue(device.readings.battery_soc_percent);
-      actualSub.textContent = soc === null ? '' : `Battery ${formatPercent(soc)}`;
 
+      // Actions + target are usable only once ready.
+      actions.hidden = !operable;
       for (const action of ['charge', 'hold', 'discharge', 'auto']) {
         const item = energyAvailability(device, action);
-        const enabled = device.armed && item.available && !busy && device.connected;
+        const enabled = operable && device.armed && item.available && !busy && device.connected;
         buttons[action].disabled = !enabled;
         buttons[action].title = enabled ? '' : (ENERGY_REASON_LABELS[item.reason] || '');
         setClass(buttons[action], 'is-selected', selected === action);
         buttons[action].setAttribute('aria-pressed', action === 'charge' || action === 'discharge' ? String(selected === action) : 'false');
       }
+      if (!operable && selected) selected = null;
       if (selected && buttons[selected].disabled) selected = null;
       renderTarget();
-      flow.update(device);
       advanced.update(device);
     }
 
     const panel = {
       root: card,
-      update(next) { device = next; render(); },
+      update(next, flags) {
+        device = next;
+        if (flags) { lastPoll503 = Boolean(flags.poll503); lastPollFailed = Boolean(flags.pollFailed); }
+        render();
+      },
+      // Lets pollEnergy signal a 503/transient failure without a fresh device payload.
+      setPollState(flags) { lastPoll503 = Boolean(flags.poll503); lastPollFailed = Boolean(flags.pollFailed); render(); },
+      setTimestamp(text) { advanced.setTimestamp(text); },
     };
     render();
     return panel;
   }
 
-  // Everything an operator rarely needs: gate detail, SoC-target policy, limits and engineering
-  // mode, hardware verification and the sign conventions. Raw names are fine on this admin surface.
+  // Two disclosures (design §13). Expert: hardware verification, engineering mode + kW power limits,
+  // and the SoC-target policy — rarely needed, behind a warning. Diagnostics: the gate/capability
+  // tables (the ONLY place raw reject_detail / capability names appear), write approvals, per-reading
+  // age/stale values and the poll timestamp. Raw register names are fine on this admin surface.
   function energyAdvanced(id, getDevice, onChange) {
     const path = `energy/devices/${encodeURIComponent(id)}`;
-    const details = element('details', 'energy-advanced mt-3');
-    details.append(element('summary', 'small', 'Advanced / Diagnostics'));
-    const inner = element('div', 'energy-advanced-inner');
-    details.append(inner);
+
+    const expert = element('details', 'energy-expert mt-3');
+    expert.append(element('summary', 'small', 'Expert settings…'));
+    const expertInner = element('div', 'energy-advanced-inner');
+    expert.append(element('p', 'small text-warning energy-expert-warning',
+      'Advanced hardware settings. Changing these can stop the battery from responding.'));
+    expert.append(expertInner);
+
+    const diagnostics = element('details', 'energy-diagnostics mt-3');
+    diagnostics.append(element('summary', 'small', 'Diagnostics…'));
+    const diagInner = element('div', 'energy-advanced-inner');
+    diagnostics.append(diagInner);
 
     const field = (labelText, input, extra) => {
       const col = element('div', extra || 'col-auto');
@@ -1396,11 +1610,11 @@
       wrap.append(input, label);
       return { wrap, input };
     };
-    const section = (heading, hint) => {
+    const section = (parent, heading, hint) => {
       const node = element('div', 'energy-advanced-section');
       node.append(element('h3', 'h6', heading));
       if (hint) node.append(element('p', 'small text-secondary', hint));
-      inner.append(node);
+      parent.append(node);
       return node;
     };
     const guarded = (button, task) => async (event) => {
@@ -1411,23 +1625,37 @@
       finally { button.disabled = false; }
     };
 
-    // 1. Gate detail
-    const gateSection = section('Gate detail', 'Raw decision per action; unverified capability names are listed as the dispatch layer reports them.');
+    // 1. Gate detail (Diagnostics)
+    const gateSection = section(diagInner, 'Gate detail', 'Raw decision per action; unverified capability names are listed as the dispatch layer reports them.');
     const gateHost = element('div', 'table-responsive');
     gateHost.tabIndex = 0;
     gateHost.setAttribute('aria-label', 'Gate detail');
     gateSection.append(gateHost);
 
-    // 2. Capabilities and sign conventions
-    const capSection = section('Hardware capabilities and sign conventions',
+    // 2. Capabilities and sign conventions (Diagnostics)
+    const capSection = section(diagInner, 'Hardware capabilities and sign conventions',
       'Charge, hold and discharge need all three capabilities verified; otherwise only the time-limited engineering mode releases them.');
     const capHost = element('div', 'table-responsive');
     capHost.tabIndex = 0;
     capHost.setAttribute('aria-label', 'Hardware capabilities');
     capSection.append(capHost);
 
-    // 3. Hardware verification
-    const verifySection = section('Hardware verification',
+    // 2b. Write approvals and freshness (Diagnostics)
+    const writeSection = section(diagInner, 'Write approvals',
+      'The live approved register set and what arming itself contributed.');
+    const writeApproved = element('p', 'small mb-1');
+    const writeAdded = element('p', 'small mb-0 text-secondary');
+    writeSection.append(writeApproved, writeAdded);
+
+    const freshSection = section(diagInner, 'Freshness', 'Per-reading age and staleness, and the last poll time.');
+    const freshHost = element('div', 'table-responsive');
+    freshHost.tabIndex = 0;
+    freshHost.setAttribute('aria-label', 'Reading freshness');
+    const pollStamp = element('p', 'small text-secondary mb-0', 'Updated –');
+    freshSection.append(freshHost, pollStamp);
+
+    // 3. Hardware verification (Expert)
+    const verifySection = section(expertInner, 'Hardware verification',
       'Enter what you measured on this inverter. The server stamps who verified it and when; a verification applies to this device only.');
     const verifyForm = element('form', 'row g-2 align-items-end');
     const model = textInput(128);
@@ -1495,12 +1723,12 @@
       toast('Verification revoked.');
     }));
 
-    // 4. Limits and engineering mode
-    const limitSection = section('Power limits and engineering mode',
+    // 4. Limits and engineering mode (Expert). Shown/entered in kW; converted to watts on submit.
+    const limitSection = section(expertInner, 'Power limits and engineering mode',
       'Engineering mode releases unverified hardware for short, time-capped commands. It is not needed once the hardware is verified.');
     const limitForm = element('form', 'row g-2 align-items-end');
-    const maxCharge = numberInput(1, 100000, 1);
-    const maxDischarge = numberInput(1, 100000, 1);
+    const maxCharge = numberInput(0.001, 100, 0.01);
+    const maxDischarge = numberInput(0.001, 100, 0.01);
     const engineering = checkbox('Engineering mode');
     const limitButton = element('button', 'btn btn-sm btn-outline-primary', 'Save limits');
     limitButton.type = 'submit';
@@ -1508,21 +1736,24 @@
     limitButtonCol.append(limitButton);
     const engineeringCol = element('div', 'col-auto');
     engineeringCol.append(engineering.wrap);
-    limitForm.append(field('Max charge (W)', maxCharge), field('Max discharge (W)', maxDischarge), engineeringCol, limitButtonCol);
+    limitForm.append(field('Max charge (kW)', maxCharge), field('Max discharge (kW)', maxDischarge), engineeringCol, limitButtonCol);
     limitSection.append(limitForm);
+    limitSection.append(element('p', 'small text-secondary mb-0', 'Entered in kW; the inverter is controlled in watts.'));
     limitForm.addEventListener('submit', guarded(limitButton, async () => {
       await api(`dispatch/devices/${encodeURIComponent(id)}`, {
         method: 'PUT',
         body: JSON.stringify({
-          max_charge_power_w: Number(maxCharge.value), max_discharge_power_w: Number(maxDischarge.value),
+          max_charge_power_w: Math.round(Number(maxCharge.value) * 1000),
+          max_discharge_power_w: Math.round(Number(maxDischarge.value) * 1000),
           engineering_mode: engineering.input.checked,
         }),
       });
       toast('Limits saved.');
     }));
 
-    // 5. SoC target policy
-    const policySection = section('SoC target policy', 'How the business target is translated into the inverter\'s own SoC target.');
+    // 5. SoC target policy (Expert)
+    const policySection = section(expertInner, 'SoC target policy',
+      'How the business target is translated into the inverter\'s own SoC target. "Below current SoC" is an unverified hypothesis.');
     const policyForm = element('form', 'row g-2 align-items-end');
     const policyMode = element('select', 'form-select form-select-sm');
     for (const [value, text] of ENERGY_POLICY_MODES) {
@@ -1581,8 +1812,8 @@
       if (battery) batterySign.value = String(battery.battery_discharge_positive);
       if (grid) gridSign.value = String(grid.grid_import_positive);
       if (device.limits) {
-        maxCharge.value = device.limits.max_charge_power_w;
-        maxDischarge.value = device.limits.max_discharge_power_w;
+        maxCharge.value = (device.limits.max_charge_power_w / 1000).toFixed(2);
+        maxDischarge.value = (device.limits.max_discharge_power_w / 1000).toFixed(2);
         engineering.input.checked = device.limits.engineering_mode;
       }
       policyMode.value = device.soc_target_policy.mode;
@@ -1608,9 +1839,26 @@
             : item.name === 'grid_power_sign_convention' ? (item.grid_import_positive ? 'positive = import' : 'positive = export') : '–'],
         ]),
       ));
+      writeApproved.textContent = `Approved writes: ${(device.approved_write_names || []).join(', ') || '–'}`;
+      writeAdded.textContent = `Added by arming: ${(device.added_write_names || []).join(', ') || '–'}`;
+      freshHost.replaceChildren(simpleTable(
+        ['Reading', 'Age (s)', 'Stale'],
+        Object.entries(device.readings || {}).map(([name, reading]) => [
+          [name], [Number.isFinite(reading && reading.age_seconds) ? Math.round(reading.age_seconds) : '–'],
+          [reading && reading.stale ? 'Yes' : 'No', reading && reading.stale ? 'text-danger' : ''],
+        ]),
+      ));
     }
 
-    return { node: details, update };
+    // Relocated poll timestamp (design §13): fed from pollEnergy, shown only in Diagnostics.
+    function setTimestamp(text) { pollStamp.textContent = text; }
+
+    return {
+      expert, diagnostics, update, setTimestamp,
+      openExpert() { expert.open = true; },
+      focusLimits() { try { maxCharge.focus(); } catch { /* not visible yet */ } },
+      focusVerification() { try { model.focus(); } catch { /* not visible yet */ } },
+    };
   }
 
   async function pollEnergy() {
