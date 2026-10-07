@@ -1,4 +1,4 @@
-## [1.01] - 2026-xx-xx
+## [1.0.1] - 2026-xx-xx
 
 - Energy Manager admin page rebuilt as "Live Flow + Battery Control": animated flow graphic, manual
   charge/hold/discharge/automatic control, Advanced / Diagnostics section (hardware verification, limits).

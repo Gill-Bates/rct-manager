@@ -656,6 +656,18 @@ async def test_admin_api_copy_from_requires_matching_model_and_firmware(tmp_path
         assert refused.status_code == 200
         assert {row["name"] for row in refused.json()} == set()
 
+        # Copying a device onto itself is a client error, not a no-op rewrite of its own evidence.
+        itself = await harness.client.post(
+            "/admin/api/dispatch/devices/main/capabilities:copy-from",
+            headers=headers,
+            json={
+                "source_device_id": "main",
+                "target_device_model": "RCT-Power-Storage-DC",
+                "target_firmware": "1.0.0",
+            },
+        )
+        assert itself.status_code == 400
+
 
 async def test_admin_api_withdraws_an_idle_capability_without_force(tmp_path: Path) -> None:
     async with _admin_harness(tmp_path) as (harness, headers):

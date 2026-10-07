@@ -726,7 +726,11 @@ def _battery_module_slot_states(runtime, device_id: str, prefix: str) -> list[st
             continue
         reading = runtime.gateway.cached_reading(device_id, name)
         if reading is None:
-            states.append(_SLOT_UNKNOWN)
+            # A register the device repeatedly leaves unanswered (e.g. slot 6 on a 6-module tower)
+            # is never going to be cached; counting it UNKNOWN would hold "pending" forever.
+            read_failed = getattr(runtime.gateway, "read_failed", None)
+            unanswered = read_failed is not None and read_failed(device_id, name)
+            states.append(_SLOT_EMPTY if unanswered else _SLOT_UNKNOWN)
             continue
         value = reading[0]
         if isinstance(value, str) and _clean_module_serial(value):
@@ -852,6 +856,24 @@ def _stabilize_battery_module_report(runtime, device_id: str, prefix: str, raw: 
         return raw
 
 
+_PENDING_LOG_INTERVAL_SECONDS = 60.0
+_pending_log_last: dict[tuple[str, str], float] = {}
+
+
+def _log_pending_slots(device_id: str, prefix: str, states: list[str]) -> None:
+    """Rate-limited diagnosis of slots that stay UNKNOWN, i.e. keep the tower on "Detecting modules"."""
+    unknown = [i for i, state in enumerate(states) if state == _SLOT_UNKNOWN]
+    if not unknown:
+        return
+    now = time.monotonic()
+    key = (device_id, prefix)
+    with _battery_module_lock:
+        if now - _pending_log_last.get(key, -_PENDING_LOG_INTERVAL_SECONDS) < _PENDING_LOG_INTERVAL_SECONDS:
+            return
+        _pending_log_last[key] = now
+    log.info("%s on %s: module serial slots %s never read yet (states: %s)", prefix, device_id, unknown, states)
+
+
 def _battery_module_report(runtime, device_id: str, prefix: str) -> dict:
     """Trusted module-count report for one tower: captures the current slot-state snapshot (see
     `_battery_module_slot_states`), classifies it (`_raw_battery_module_report`), and runs it
@@ -859,6 +881,7 @@ def _battery_module_report(runtime, device_id: str, prefix: str) -> dict:
     can override an already-established topology (see `_stabilize_battery_module_report`)."""
     states = _battery_module_slot_states(runtime, device_id, prefix)
     raw = _raw_battery_module_report(states)
+    _log_pending_slots(device_id, prefix, states)
     report = _stabilize_battery_module_report(runtime, device_id, prefix, raw)
     if report is raw and report["module_count_status"] == "anomaly":
         log.warning(

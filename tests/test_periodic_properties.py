@@ -268,3 +268,29 @@ async def test_pushed_values_cause_no_refresh_reads_and_the_cycle_is_limited() -
         # (heat_sink_temperature, battery_temperature) to the periodic set instead of one, so one
         # more non-pushed id needs its own read within the same "each id once per interval" bound.
         assert await gateway.refresh_stale_periodic("main", limit=8) + total <= 8 + 1
+
+
+async def test_unanswered_register_is_confirmed_after_repeated_failed_refreshes_and_cleared_on_success() -> None:
+    settings = make_settings(periodic_interval_seconds=1, cache_ttl_seconds=0.05, cache_grace_seconds=0.5)
+    entry = _float_entry(settings)
+    async with running_app(settings, settle=False) as h:
+        await _registered(h)
+        gateway = h.runtime.gateway
+        real_read = gateway._read_into_cache
+        answer = False
+
+        async def read(binding, e, key, *args, **kwargs):
+            return await real_read(binding, e, key, *args, **kwargs) if answer or e.name != entry.name else None
+
+        gateway._read_into_cache = read
+        h.net.behavior = lambda f: "ignore" if f.object_id == entry.object_id else "respond"
+        for _ in range(3):
+            assert not gateway.read_failed("main", entry.name)
+            await asyncio.sleep(2.2)
+            await gateway.refresh_stale_periodic("main", limit=64)
+        assert gateway.read_failed("main", entry.name)
+        answer = True
+        h.net.behavior = lambda f: "respond"
+        await asyncio.sleep(1.1)
+        await gateway.refresh_stale_periodic("main", limit=64)
+        assert not gateway.read_failed("main", entry.name)

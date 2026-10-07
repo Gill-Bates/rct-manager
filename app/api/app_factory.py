@@ -345,18 +345,14 @@ _ENERGY_METRIC_NAMES = (
 )  # fmt: skip
 
 
-def _with_energy_metric_names(
-    periodic_names: list[str], catalog: RegistryCatalog, *, dispatch: bool
-) -> list[str]:
-    """Pin the Energy Manager's published figures, the way the dashboard pins its own values.
+def _with_energy_metric_names(periodic_names: list[str], catalog: RegistryCatalog) -> list[str]:
+    """Pin the energy-flow figures, the way the dashboard pins its own values.
 
-    A separate tuple and a separate function on purpose: the readings are cache-only, so a narrowed
-    METRICS_EXPOSED_NAMES would otherwise leave the Energy Manager card dark with no diagnosis path.
-    No-op without dispatch — a read-only deployment gains no periodic reads it did not ask for — and
-    bounded by MAX_PERIODIC_PER_DEVICE, where extra names are skipped silently rather than turning a
-    display nicety into a startup failure.
+    The readings are cache-only and feed the dashboard flow graphic as well as the Energy Manager,
+    so they are pinned regardless of write support: a narrowed METRICS_EXPOSED_NAMES would otherwise
+    let them expire. Bounded by MAX_PERIODIC_PER_DEVICE; extra names are skipped silently.
     """
-    if not periodic_names or not dispatch:
+    if not periodic_names:
         return periodic_names
     extra = [n for n in _ENERGY_METRIC_NAMES if catalog.exists(n) and n not in periodic_names]
     room = MAX_PERIODIC_PER_DEVICE - len(periodic_names)
@@ -394,8 +390,9 @@ def _effective_periodic_names(
     names = _periodic_names(settings, catalog, selected_exposed)
     if settings.periodic_metrics:  # a programmatic periodic_metrics list (not env-settable) is kept as given
         return names
-    names = _with_dashboard_metric_names(names, catalog)
-    return _with_energy_metric_names(names, catalog, dispatch=_dispatch_enabled(settings))
+    # Order is the cap priority: flow metrics before card metrics before module serials.
+    names = _with_energy_metric_names(names, catalog)
+    return _with_dashboard_metric_names(names, catalog)
 
 
 def _seed_limits(settings: Settings, stored: dict[str, DeviceLimits]) -> dict[str, DeviceLimits]:

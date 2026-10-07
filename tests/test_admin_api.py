@@ -152,13 +152,21 @@ async def test_admin_writes_need_admin_session_or_read_write_pat(tmp_path, auth_
                                   ("POST", "/admin/api/tokens", {"name": "x", "role": "read"})):
             assert (await client.request(method, url, json=body)).status_code == 401
             assert (await client.request(method, url, json=body, headers=bearer(read_pat))).status_code == 403
-            assert (await client.request(method, url, json=body, headers=bearer("pat_" + "A" * 46))).status_code == 401
+            invalid = await client.request(method, url, json=body, headers=bearer("pat_" + "A" * 46))
+            # Session-only endpoints refuse any PAT before looking at it.
+            assert invalid.status_code == (403 if url.endswith("/tokens") else 401)
         assert (await client.get("/admin/api/settings")).status_code == 401
-        assert (await client.get("/admin/api/settings", headers=bearer(read_pat))).status_code == 200
+        # Every administration endpoint needs the read/write role, reads included.
+        assert (await client.get("/admin/api/settings", headers=bearer(read_pat))).status_code == 403
+        assert (await client.get("/admin/api/tokens", headers=bearer(read_pat))).status_code == 403
         done = await client.put("/admin/api/settings", json=change, headers=bearer(write_pat))
         assert done.status_code == 200 and done.json()["settings"]["docs_public"] is True
+        # Tokens and trust/authentication settings are never reachable with a PAT, only a session.
         made = await client.post("/admin/api/tokens", json={"name": "x", "role": "read"}, headers=bearer(write_pat))
-        assert made.status_code == 201
+        assert made.status_code == 403
+        for key, value in (("auth_required", False), ("trusted_proxies", ["10.0.0.0/8"])):
+            denied = await client.put("/admin/api/settings", json={key: value}, headers=bearer(write_pat))
+            assert denied.status_code == 403
 
 
 def test_admin_password_minimum_is_eight_characters():

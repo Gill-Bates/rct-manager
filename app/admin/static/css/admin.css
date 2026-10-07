@@ -459,52 +459,105 @@ body {
     background: #b4232e;
 }
 
-/* The card grid inside one inverter: the power card, then one column per battery tower, all of
-   equal width — one tower gives the requested 50/50 split, two give thirds, and so on.
-   --battery-count is set by patchDeviceVisual() from the towers the device actually reports, so a
-   single tower fills the rest of the row (no empty third column) and two share it evenly. The
-   tracks use minmax(0, …) rather than a pixel minimum: a pixel minimum larger than the available
-   width is exactly what pushes a grid past its container and creates a horizontal ghost scroll,
-   so the narrow cases are handled by the container queries below instead. */
+/* Main area of one inverter card, mobile first: a single column (flow graphic, power card, then
+   one card per battery tower). Wider cards switch layout through the container queries below,
+   because the card's own width, not the viewport, is what decides whether columns fit. */
 .device-visual {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 1rem;
+    align-items: stretch;
+    min-width: 0;
+}
+
+/* The flow graphic shares the SVG of the Energy page's own .energy-flow-svg; only the panel around
+   it lives here. Hidden (not removed) when the device has no energy reading, so patchDeviceFlow()
+   can toggle it without rebuilding the SVG. The panel fills the row height and centres the graphic
+   so it never floats at the top of an empty box. */
+.device-flow-graphic {
+    min-width: 0;
     display: flex;
-    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: .75rem;
+    border: 1px solid var(--rct-line);
+    border-radius: .6rem;
+    background: var(--bs-tertiary-bg);
+}
+
+.device-flow-graphic .energy-flow-svg {
+    max-width: 34rem;
+}
+
+/* Power card, then the battery grid. Mobile: both are plain grid items of this panel. */
+.device-detail-panel {
+    min-width: 0;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    align-content: start;
     gap: 1rem;
 }
 
-/* The flow graphic shares the SVG and sizing of the Energy page's own .energy-flow-svg; only the
-   dashboard-specific box around it lives here. Hidden (not removed) when the device has no energy
-   reading, so patchDeviceFlow() can toggle it without rebuilding the SVG. */
-.device-flow-graphic {
-    display: flex;
-    justify-content: center;
-}
-
-.device-visual-cards {
+/* Battery cards fill the available width: one tower takes the full row, several share it in
+   columns of at least 16rem, so any number of towers wraps instead of squeezing. */
+.device-battery-grid {
     min-width: 0;
     display: grid;
-    grid-template-columns: repeat(calc(var(--battery-count, 1) + 1), minmax(0, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(min(16rem, 100%), 1fr));
     align-items: stretch;
     gap: 1rem;
 }
 
-/* Two columns once the card is too narrow for power plus every tower side by side, then a single
-   column on a phone. Container queries, not viewport ones: the card's own width is what decides
-   whether the columns fit, and it already differs from the viewport by sidebar and padding. */
-@container (max-width: 56rem) {
-    .device-visual-cards {
+.device-battery-grid:empty {
+    display: none;
+}
+
+/* Tablet: flow graphic on its own row, then power and batteries in two columns. The battery grid
+   dissolves into the panel grid so its cards flow next to the power card. */
+@container (min-width: 40rem) {
+    .device-detail-panel {
         grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .device-battery-grid {
+        display: contents;
     }
 }
 
-@container (max-width: 34rem) {
-    .device-visual-cards {
+/* Desktop: flow graphic left (about 42%), details right (about 58%) with the power card on top and
+   the battery grid below it. */
+@container (min-width: 64rem) {
+    .device-visual.has-flow {
+        grid-template-columns: minmax(0, 42fr) minmax(0, 58fr);
+    }
+
+    .device-detail-panel {
         grid-template-columns: minmax(0, 1fr);
+    }
+
+    .device-battery-grid {
+        display: grid;
+    }
+
+    .device-battery-grid:empty {
+        display: none;
+    }
+}
+
+/* Without a flow graphic the details use the full width in the tablet layout. */
+@container (min-width: 64rem) {
+    .device-visual:not(.has-flow) .device-detail-panel {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .device-visual:not(.has-flow) .device-battery-grid {
+        display: contents;
     }
 }
 
 .device-subcard {
     min-width: 0;
+    container-type: inline-size;
     display: flex;
     flex-direction: column;
     gap: .75rem;
@@ -727,13 +780,13 @@ body {
     color: var(--bs-secondary-color);
 }
 
-/* Narrow card: the image moves above the readings so the value columns keep their width. Width
+/* Narrow subcard: the image moves above the readings so the value columns keep their width. Width
    becomes auto so the illustration keeps its own aspect ratio instead of being stretched across
-   the full row, which left the tall battery tower as a thin sliver in a wide empty box. */
-@container (max-width: 22rem) {
+   the full row. Keyed to the subcard's own width: it differs from the card's in every layout. */
+@container (max-width: 19rem) {
 
     /* Matches the specificity of the per-subcard image-column rules above, otherwise those would
-       keep their two-track grid here and the single-column mobile layout would never apply. */
+       keep their two-track grid here and the stacked layout would never apply. */
     .device-subcard-body,
     .device-subcard-power .device-subcard-body,
     .device-subcard-battery .device-subcard-body {

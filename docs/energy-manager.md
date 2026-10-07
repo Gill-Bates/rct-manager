@@ -66,7 +66,7 @@ An action whose hardware capability is unverified reports `available: false` wit
 
 The live energy-flow graphic (PV, grid, battery, house) lives on the **dashboard**, animated from the
 measured, sign-normalized readings each inverter card already receives; the Energy Manager page is
-pure battery control. The browser polls the cache every 3 s.
+pure battery control. The dashboard refreshes approximately every 10 s; the Energy Manager page polls every 3 s.
 
 Two orthogonal facts are kept separate on the page:
 

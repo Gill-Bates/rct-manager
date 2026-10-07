@@ -76,6 +76,7 @@ log = logging.getLogger(__name__)
 MAX_SLAVES = 31  # network ids the plant network can hold (Requirement 18.10)
 _INVERTER_NAME_OBJECT_ID = 0xEBC62737
 REFRESH_MAX_PER_CYCLE = 8  # reads per refresh cycle and device (Requirement 17.28)
+REFRESH_FAILURES_CONFIRMED = 3  # consecutive failed refresh reads after which a value counts as unanswered
 
 _STALE_REASONS: tuple[tuple[type[DeviceApiError], StaleReason], ...] = (
     (DeviceMaintenance, StaleReason.DEVICE_MAINTENANCE),
@@ -151,6 +152,14 @@ class RctGateway:
         self._by_address: dict[tuple[EndpointKey, int | None], str] = {}
         cache.extend_ttl_when(self._fresh_window)
         self._refresh_attempts: dict[tuple[str, str], float] = {}
+        self._refresh_failures: dict[tuple[str, str], int] = {}  # consecutive failed refresh reads per key
+
+    def read_failed(self, device_id: str, name: str, *, min_failures: int = REFRESH_FAILURES_CONFIRMED) -> bool:
+        """True once refresh reads of this value failed repeatedly in a row (each already retried).
+
+        Lets a consumer tell "the device does not answer this register" from "not read yet".
+        """
+        return self._refresh_failures.get((device_id, name), 0) >= min_failures
 
     def _fresh_window(self, key: tuple[str, str]) -> float | None:
         """Cache hook: bounded freshness window of a live periodic registration (Requirement 17.29)."""
@@ -171,7 +180,9 @@ class RctGateway:
         """
         binding = self._device(device_id)
         periodic = binding.periodic
-        if periodic is None or not periodic.available:
+        # A partial registration (some objects refused) must not switch refreshing off for the
+        # registered rest: their values would otherwise never reach the cache.
+        if periodic is None or not (periodic.available or periodic.registered_object_ids):
             return 0
         older_than = REFRESH_AFTER_FACTOR * periodic.interval_seconds
         now = self._clock.monotonic()
@@ -185,7 +196,9 @@ class RctGateway:
             age = age_seconds(cached, now) if cached is not None else math.inf
             if age > older_than and now - self._refresh_attempts.get(key, -math.inf) >= periodic.interval_seconds:
                 due.append((age, entry))
-        due.sort(key=lambda item: item[0], reverse=True)
+        # Keys that keep failing go last, so a few unanswered registers cannot starve the others
+        # behind the two-failure stop below.
+        due.sort(key=lambda item: (self._refresh_failures.get((device_id, item[1].name), 0) > 0, -item[0]))
         sent = failures = 0
         for _, entry in due[:limit]:
             parked = binding.endpoint.maintenance() and not binding.endpoint.probe_due()
@@ -196,8 +209,15 @@ class RctGateway:
             sent += 1
             if await self._read_into_cache(binding, entry, key, TransactionOrigin.SYSTEM_READ) is not None:
                 failures = 0
-            elif (failures := failures + 1) >= 2:
-                break
+                self._refresh_failures.pop(key, None)
+            else:
+                if not binding.endpoint.maintenance():  # an outage says nothing about this register
+                    count = self._refresh_failures.get(key, 0) + 1
+                    self._refresh_failures[key] = count
+                    if count == REFRESH_FAILURES_CONFIRMED:
+                        log.warning("Device %s does not answer %s (%d refresh reads failed)", device_id, entry.name, count)
+                if (failures := failures + 1) >= 2:
+                    break
         if sent:
             log.debug("Refreshed %d stale periodic value(s) on device %s (%d due)", sent, device_id, len(due))
         return sent

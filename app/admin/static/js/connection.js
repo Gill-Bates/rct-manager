@@ -47,6 +47,11 @@
     const element = document.getElementById('reconnect-modal');
     if (!element || !window.bootstrap?.Modal) return null;
     reconnectModal = new window.bootstrap.Modal(element);
+    // Bootstrap ignores hide() while the show transition runs, so a very fast recovery would
+    // leave the modal stuck open; close it as soon as the transition has finished.
+    element.addEventListener('shown.bs.modal', () => {
+      if (!reconnectState.active) safeHideModal(reconnectModal);
+    });
     return reconnectModal;
   }
 

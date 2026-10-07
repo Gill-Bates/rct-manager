@@ -156,6 +156,41 @@ def test_timed_out_entries_free_their_queue_slot_immediately() -> None:
     assert asyncio.run(scenario()) == [True, True, True]
 
 
+def test_system_writes_jump_the_queue_and_survive_a_full_queue_and_stop_unblocks_drain() -> None:
+    """A restore write must not queue behind caller reads (or time out in them); stop() must not
+    leave drain() waiting for items it removed.
+    """
+
+    async def scenario() -> list[str]:
+        _budget, serializer, release = await _skipped_and_blocked(queue_max_length=1)
+        order: list[str] = []
+        running = asyncio.create_task(serializer.submit(_request(serializer)))
+        async with asyncio.timeout(1):
+            while serializer._current is None:
+                await asyncio.sleep(0)
+        queued_read = asyncio.create_task(serializer.submit(_request(serializer)))
+        await asyncio.sleep(0)  # fills the single slot; its 0.05 s wait is about to run out
+        write = TransactionRequest(
+            DeviceKey(KEY), Frame(Command.WRITE, 1), TransactionOrigin.SYSTEM_WRITE, "write"
+        )
+        write_task = asyncio.create_task(serializer.submit(write))
+        await asyncio.sleep(0.1)  # longer than queue_max_wait_seconds
+        assert not write_task.done() and serializer._queue._items[0].request is write
+        order.append("write-waits-ahead")
+        with pytest.raises(QueueTimeout):
+            await queued_read
+        release.set()
+        await running
+        await write_task
+        await serializer.stop()
+        async with asyncio.timeout(1):
+            await serializer.drain()
+        order.append("drain-returns")
+        return order
+
+    assert asyncio.run(scenario()) == ["write-waits-ahead", "drain-returns"]
+
+
 async def _gateway(limit: int, fail_connects: int = 0):
     clock = AutoClock()
     net = FakeNetwork(clock, fail_connects=fail_connects)

@@ -570,18 +570,21 @@
     };
   }
 
+  // Main area of a device card: the flow graphic panel and the detail panel (power card plus a
+  // grid of battery cards). Both panels are created once; polls only patch their contents.
   function createDeviceVisual() {
-    const wrap = element('div', 'device-visual');
+    const wrap = element('div', 'device-visual device-item-main');
     const flow = energyFlowGraphic();
-    const flowBox = element('div', 'device-flow-graphic');
+    const flowBox = element('div', 'device-flow-graphic device-flow-panel');
     flowBox.hidden = true;
     flowBox.append(flow.svg);
-    const cards = element('div', 'device-visual-cards');
+    const cards = element('div', 'device-visual-cards device-detail-panel');
     const inverterCard = createPowerCard();
-    cards.append(inverterCard.node);
+    const batteryGrid = element('div', 'device-battery-grid');
+    cards.append(inverterCard.node, batteryGrid);
     wrap.append(flowBox, cards);
     // batteries grows to match batteryTowers() on the first patch; see patchDeviceVisual.
-    return { node: wrap, flow, flowBox, cards, inverterCard, batteries: [] };
+    return { node: wrap, flow, flowBox, cards, batteryGrid, inverterCard, batteries: [] };
   }
 
   // Shows the server-decoded status text as a compact chip. A status that needs an explanation
@@ -710,9 +713,8 @@
       setText(visual.batteries[index].head.titleText, tower.title);
       patchBatteryCard(visual.batteries[index], metrics, tower);
     });
-    // Drives the column count of the card grid, so one tower fills the row and two share it.
-    visual.cards.style.setProperty('--battery-count', String(towers.length));
-    syncChildren(visual.cards, [visual.inverterCard.node, ...visual.batteries.map((card) => card.node)]);
+    visual.batteryGrid.style.setProperty('--battery-count', String(towers.length));
+    syncChildren(visual.batteryGrid, visual.batteries.map((card) => card.node));
     patchDeviceFlow(visual, device);
     syncChildren(visual.node, [visual.flowBox, visual.cards]);
   }
@@ -725,6 +727,7 @@
     const readings = device.energy_flow;
     const hasReading = readings && Object.values(readings).some((reading) => reading && reading.value != null);
     visual.flowBox.hidden = !hasReading;
+    setClass(visual.node, 'has-flow', Boolean(hasReading));
     if (hasReading) visual.flow.update(readings);
   }
 

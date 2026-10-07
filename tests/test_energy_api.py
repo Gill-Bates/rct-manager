@@ -19,8 +19,13 @@ import pytest
 from starlette.requests import Request
 
 from app.admin.store import AdminStore
-from app.api.app_factory import _ENERGY_METRIC_NAMES, create_app
+from app.api.app_factory import (
+    _ENERGY_METRIC_NAMES,
+    _effective_periodic_names,
+    create_app,
+)
 from app.api.problems import _is_write_path
+from app.catalog.base import is_numeric
 from app.catalog.registry import RegistryCatalog
 from app.scheduling.shutdown import ShutdownPlan
 from tests.api_helpers import (
@@ -489,18 +494,32 @@ async def test_the_energy_metrics_are_pinned_at_startup_and_after_a_device_list_
         assert wanted <= set(periodic_object_ids(harness))
 
 
-async def test_without_dispatch_the_energy_metrics_are_not_added(tmp_path: Path) -> None:
+async def test_without_dispatch_the_flow_metrics_are_still_pinned(tmp_path: Path) -> None:
+    # The dashboard flow graphic reads the same cache-only figures, so a narrowed exposed list must
+    # not drop them when write support is off.
     settings = energy_settings(tmp_path, enable_write_support=False)
     async with running_app(settings) as harness:
         catalog = RegistryCatalog.from_file(harness.runtime.settings.object_registry_path)
-        # battery_power is preselected in the shipped catalog, so it is periodic with or without
-        # dispatch; only the metrics the Energy Manager pins itself must stay absent.
-        pinned = {
-            catalog.object_entry(name).object_id
-            for name in _ENERGY_METRIC_NAMES
-            if name != "battery_power"
-        }
-        assert not pinned & set(periodic_object_ids(harness))
+        pinned = {catalog.object_entry(name).object_id for name in _ENERGY_METRIC_NAMES}
+        assert pinned <= set(periodic_object_ids(harness))
+
+
+def test_the_periodic_cap_prefers_flow_metrics_over_card_and_module_metrics(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = energy_settings(tmp_path, enable_write_support=False)
+    catalog = RegistryCatalog.from_file(settings.object_registry_path)
+    filler = [
+        e.name for e in catalog.entries()
+        if e.name not in _ENERGY_METRIC_NAMES and is_numeric(e.value_type)
+    ]
+    # Room for exactly the flow metrics on top of the selection: nothing else may squeeze in.
+    cap = len(filler) + len(_ENERGY_METRIC_NAMES)
+    monkeypatch.setattr("app.api.app_factory.MAX_PERIODIC_PER_DEVICE", cap)
+    names = _effective_periodic_names(settings, catalog, filler)
+    assert len(names) == cap
+    assert set(_ENERGY_METRIC_NAMES) <= set(names)
+    assert not any("module_sn" in n for n in names)
 
 
 async def test_with_periodic_reads_disabled_the_list_is_empty(tmp_path: Path) -> None:

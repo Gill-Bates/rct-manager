@@ -405,3 +405,21 @@ def test_anomaly_is_only_logged_once_the_transition_is_actually_confirmed(caplog
     assert confirmed["module_count"] is None
     assert confirmed["module_count_status"] == "anomaly"
     assert any(record.levelname == "WARNING" for record in caplog.records)
+
+
+def test_slots_the_device_repeatedly_leaves_unanswered_do_not_hold_pending_forever() -> None:
+    serials = _partial_slots("battery", 3)
+    runtime = _runtime(serials)
+    unanswered = {f"battery_module_sn_{i}" for i in range(3, RCT_MODULE_SN_SLOTS)}
+    runtime.gateway.read_failed = lambda device_id, name: name in unanswered
+    states = _battery_module_slot_states(runtime, "dev", "battery")
+    assert states[3:] == ["empty"] * (RCT_MODULE_SN_SLOTS - 3)
+    for _ in range(_BATTERY_MODULE_STABILITY_READS):
+        report = _report(runtime)
+    assert (report["module_count"], report["module_count_status"]) == (3, "ok")
+
+
+def test_a_slot_not_yet_confirmed_unanswered_still_counts_as_unknown() -> None:
+    runtime = _runtime(_partial_slots("battery", 3))
+    runtime.gateway.read_failed = lambda device_id, name: False
+    assert _battery_module_slot_states(runtime, "dev", "battery")[3] == "unknown"
