@@ -21,7 +21,14 @@ from app.errors import UnknownDevice
 from app.gateway.base import DeviceState
 from app.security.tokens import TokenStore
 from app.transport.endpoint import EndpointState
-from tests.api_helpers import HOST, PORT, WRITE_TOKEN, make_settings, running_app
+from tests.api_helpers import (
+    HOST,
+    PORT,
+    WRITE_TOKEN,
+    admin_session_headers,
+    make_settings,
+    running_app,
+)
 
 NEW_HOST = "192.0.2.78"
 NEW_PORT = 48900
@@ -64,6 +71,7 @@ async def test_adding_a_device_takes_effect_without_a_restart(tmp_path):
         devices=[DeviceEntry(device_id="main", host=HOST, port=PORT)],
     )
     async with _prepare_real_store(settings) as store, running_app(settings) as h:
+        HEADERS = await admin_session_headers(h.client, "a much stronger password")
         h.app.state.security.tokens = TokenStore(auth_required=settings.auth_required, admin_store=store)
         current = (await h.client.get("/admin/api/settings", headers=HEADERS)).json()["settings"]["devices"]
 
@@ -94,6 +102,7 @@ async def test_removing_a_device_takes_effect_without_a_restart_and_closes_its_c
         ],
     )
     async with _prepare_real_store(settings) as store, running_app(settings) as h:
+        HEADERS = await admin_session_headers(h.client, "a much stronger password")
         h.app.state.security.tokens = TokenStore(auth_required=settings.auth_required, admin_store=store)
         removed_endpoint = h.runtime.gateway._devices["extra"].endpoint
         current = (await h.client.get("/admin/api/settings", headers=HEADERS)).json()["settings"]["devices"]
@@ -117,6 +126,7 @@ async def test_repeated_add_remove_cycle_does_not_leak_tasks_or_connections(tmp_
         devices=[DeviceEntry(device_id="main", host=HOST, port=PORT)],
     )
     async with _prepare_real_store(settings) as store, running_app(settings) as h:
+        HEADERS = await admin_session_headers(h.client, "a much stronger password")
         h.app.state.security.tokens = TokenStore(auth_required=settings.auth_required, admin_store=store)
         baseline_tasks = len(h.runtime.tasks)
         baseline_open = h.net.open_now

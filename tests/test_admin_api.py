@@ -7,6 +7,7 @@
 """Admin bootstrap, browser session, PAT and encrypted persistence behavior."""
 
 import re
+from ipaddress import ip_network
 from unittest.mock import patch
 
 import httpx
@@ -161,12 +162,31 @@ async def test_admin_writes_need_admin_session_or_read_write_pat(tmp_path, auth_
         assert (await client.get("/admin/api/tokens", headers=bearer(read_pat))).status_code == 403
         done = await client.put("/admin/api/settings", json=change, headers=bearer(write_pat))
         assert done.status_code == 200 and done.json()["settings"]["docs_public"] is True
-        # Tokens and trust/authentication settings are never reachable with a PAT, only a session.
+        # Token endpoints and trust/authentication settings (read or write) are session-only; a PAT
+        # may read the other settings but never sees those values.
+        assert (await client.get("/admin/api/tokens", headers=bearer(write_pat))).status_code == 403
+        seen = (await client.get("/admin/api/settings", headers=bearer(write_pat))).json()["settings"]
+        assert "docs_public" in seen
+        assert not ({"auth_required", "trusted_proxies", "bind_address", "behind_reverse_proxy",
+                     "forwarded_header", "metrics_require_token", "metrics_trusted_sources"} & set(seen))
         made = await client.post("/admin/api/tokens", json={"name": "x", "role": "read"}, headers=bearer(write_pat))
         assert made.status_code == 403
-        for key, value in (("auth_required", False), ("trusted_proxies", ["10.0.0.0/8"])):
+        for key, value in (
+            ("auth_required", not auth_required), ("trusted_proxies", ["10.0.0.0/8"]),
+            ("enable_write_support", True), ("devices", [{"host": "192.0.2.99", "port": 8899}]),
+        ):
             denied = await client.put("/admin/api/settings", json={key: value}, headers=bearer(write_pat))
-            assert denied.status_code == 403
+            assert denied.status_code == 403, key
+        # Echoing the current value of a protected field is not a change.
+        echo = await client.put("/admin/api/settings", json={"auth_required": auth_required},
+                                headers=bearer(write_pat))
+        assert echo.status_code == 200
+        # Widening the write allowlist needs the session too.
+        widened = await client.put(
+            "/admin/api/parameters", headers=bearer(write_pat),
+            json={"exposed_names": [], "write_names": ["power_mng_soc_target_set"]},
+        )
+        assert widened.status_code == 403
 
 
 def test_admin_password_minimum_is_eight_characters():
@@ -346,3 +366,62 @@ def test_devices_and_energy_manager_share_one_rct_energy_readings_instance(tmp_p
     # The shared instance's registry is the live dispatch registry, not an empty default.
     assert isinstance(runtime2.energy_readings._capabilities, CapabilityRegistry)
     assert runtime2.energy_readings._capabilities is runtime2.dispatch._capabilities
+
+
+def _fake_request(peer: str, forwarded_proto: str | None, scheme: str = "http", behind_proxy: bool = False):
+    from types import SimpleNamespace
+
+    from app.security.client_ip import ClientIpResolver
+
+    resolver = ClientIpResolver([ip_network("127.0.0.0/8"), ip_network("fd00::/8")], "x-forwarded-for")
+    headers = {"x-forwarded-proto": forwarded_proto} if forwarded_proto else {}
+    state = SimpleNamespace(
+        security=SimpleNamespace(client_ip=resolver),
+        runtime=SimpleNamespace(settings=SimpleNamespace(behind_reverse_proxy=behind_proxy)),
+    )
+    return SimpleNamespace(
+        client=SimpleNamespace(host=peer), headers=headers, url=SimpleNamespace(scheme=scheme),
+        app=SimpleNamespace(state=state),
+    )
+
+
+@pytest.mark.parametrize(("peer", "proto", "expected"), [
+    ("127.0.0.1", "https", "https"),     # trusted proxy: the browser scheme counts
+    ("fd00::5", "https, http", "https"),  # IPv6 trusted proxy, first hop wins
+    ("192.0.2.9", "https", "http"),       # untrusted peer cannot claim https
+    ("2001:db8::1", "https", "http"),
+    ("127.0.0.1", "gopher", "http"),      # unknown value ignored
+    ("127.0.0.1", None, "http"),
+])
+def test_public_scheme_trusts_forwarded_proto_only_from_a_trusted_proxy(peer, proto, expected):
+    from app.admin.api import _public_scheme, _secure_cookies
+
+    request = _fake_request(peer, proto)
+    assert _public_scheme(request) == expected
+    assert _secure_cookies(request) is (expected == "https")
+
+
+def test_secure_cookies_follow_behind_reverse_proxy_even_for_an_untrusted_peer():
+    from app.admin.api import _secure_cookies
+
+    assert _secure_cookies(_fake_request("192.0.2.9", None, behind_proxy=True)) is True
+
+
+def test_stored_display_name_that_is_too_long_or_has_control_characters_still_loads():
+    from app.config import DeviceEntry
+
+    entry = DeviceEntry(device_id="main", host="10.0.0.1", display_name="x" * 100)
+    assert entry.display_name == "x" * 64
+    assert DeviceEntry(device_id="main", host="10.0.0.1", display_name="a\x00b\nc").display_name == "a b c"
+
+
+def test_admin_input_for_a_display_name_is_still_rejected_strictly():
+    from fastapi import HTTPException
+
+    from app.admin.api import _display_name
+
+    assert _display_name("") is None and _display_name("Garage") == "Garage"
+    for bad in ("x" * 65, "a\x00b"):
+        with pytest.raises(HTTPException) as excinfo:
+            _display_name(bad)
+        assert excinfo.value.status_code == 400

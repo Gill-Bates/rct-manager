@@ -11,6 +11,7 @@ import pytest
 
 from app.api.app_factory import create_app
 from app.config import Settings
+from tests.api_helpers import admin_session_headers
 
 
 @pytest.mark.asyncio
@@ -132,9 +133,8 @@ async def test_stored_address_display_name_is_repaired_once_and_a_chosen_name_su
                                              display_name="10.40.0.188:8899")])
     app = create_app(settings)
     app.state.admin_store.change_password(app.state.first_start_password, "a much stronger password")
-    token = app.state.admin_store.create_token("devices", "read/write", None)[1]
-    headers = {"Authorization": f"Bearer {token}"}
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver") as client:
+        headers = await admin_session_headers(client, "a much stronger password")  # devices are session-only
         app.state.runtime.gateway.set_reported_name("main", "Garage Inverter")
         listed = (await client.get("/admin/api/devices", headers=headers)).json()["devices"]
         assert listed[0]["name"] == "Garage Inverter"  # the address-shaped name no longer wins

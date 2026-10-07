@@ -866,6 +866,43 @@ async def test_failed_restore_backs_off_exponentially_with_a_cap(tmp_path: Path)
         clock.advance(delays[-1])
         await dispatch.tick("main")
     assert delays[:4] == [1, 2, 4, 8]
-    assert max(delays) == 300
+    assert max(delays) == 30
     record = await dispatch._get("main")
     assert record.restore_attempts == 13
+
+
+async def test_restore_retry_info_exposes_attempts_and_next_retry(tmp_path: Path) -> None:
+    clock = ManualClock()
+    gateway = FakeDispatchGateway(clock)
+    dispatch = controller(tmp_path, clock, gateway)
+    await dispatch.submit(
+        "main",
+        DispatchCommand(DispatchMode.CHARGE_FROM_GRID, 80, 2000, clock.now() + timedelta(hours=1)),
+    )
+    assert await dispatch.restore_retry_info("main") == (0, None)
+    gateway.fail_restore = True
+    await dispatch.cancel("main")
+    attempts, next_at = await dispatch.restore_retry_info("main")
+    assert attempts == 1 and next_at == clock.now() + timedelta(seconds=1)
+
+
+def test_a_negative_stored_restore_attempts_counter_is_clamped() -> None:
+    record = DispatchRecord("main")
+    data = record.to_dict()
+    data["restore_attempts"] = -5
+    assert DispatchRecord.from_dict(data).restore_attempts == 0
+    del data["restore_attempts"]  # records written before the counter existed
+    assert DispatchRecord.from_dict(data).restore_attempts == 0
+
+
+async def test_recover_reports_an_unreadable_record_as_critical(tmp_path: Path, caplog) -> None:
+    clock = ManualClock()
+    gateway = FakeDispatchGateway(clock)
+    dispatch = controller(tmp_path, clock, gateway)
+    dispatch._store.put(DispatchRecord("ghost", state=DispatchState.PRECHECK))
+    with dispatch._store.connect() as db:
+        db.execute("UPDATE dispatch_operations SET encrypted=? WHERE device_id='ghost'", (b"garbage",))
+    with caplog.at_level("CRITICAL"):
+        await dispatch.recover()
+    assert dispatch.unreadable_devices == ("ghost",)
+    assert any(r.levelname == "CRITICAL" and "ghost" in r.getMessage() for r in caplog.records)

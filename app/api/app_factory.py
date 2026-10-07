@@ -350,13 +350,23 @@ def _with_energy_metric_names(periodic_names: list[str], catalog: RegistryCatalo
 
     The readings are cache-only and feed the dashboard flow graphic as well as the Energy Manager,
     so they are pinned regardless of write support: a narrowed METRICS_EXPOSED_NAMES would otherwise
-    let them expire. Bounded by MAX_PERIODIC_PER_DEVICE; extra names are skipped silently.
+    let them expire. The flow metrics are a guaranteed feature: when the selection already fills
+    MAX_PERIODIC_PER_DEVICE, non-flow names from its end are dropped to make room (and logged).
     """
     if not periodic_names:
         return periodic_names
     extra = [n for n in _ENERGY_METRIC_NAMES if catalog.exists(n) and n not in periodic_names]
-    room = MAX_PERIODIC_PER_DEVICE - len(periodic_names)
-    return periodic_names + extra[: max(room, 0)]
+    shortfall = len(periodic_names) + len(extra) - MAX_PERIODIC_PER_DEVICE
+    names = list(periodic_names)
+    if shortfall > 0:
+        flow = set(_ENERGY_METRIC_NAMES)
+        victims = [n for n in reversed(names) if n not in flow][:shortfall]
+        log.warning(
+            "Periodic selection is full (%d); dropping %d metric(s) to keep the energy-flow metrics: %s",
+            MAX_PERIODIC_PER_DEVICE, len(victims), ", ".join(victims),
+        )
+        names = [n for n in names if n not in set(victims)]
+    return names + extra
 
 
 def _periodic_names(settings: Settings, catalog: RegistryCatalog,
@@ -891,7 +901,11 @@ def create_app(settings: Settings, *, clock: Clock | None = None, connector: Con
             capabilities=dispatch_capabilities,
             soc_target_policies=soc_target_policies,
         )
-        coordinator.set_dispatch_restore(runtime.dispatch.shutdown_restore)
+        async def restore_for_shutdown() -> None:
+            gateway.begin_shutdown_restore()  # bounded readbacks: the restore runs against the work deadline
+            await runtime.dispatch.shutdown_restore()
+
+        coordinator.set_dispatch_restore(restore_for_shutdown)
     app = FastAPI(
         title="RCT Manager",
         version=__version__,

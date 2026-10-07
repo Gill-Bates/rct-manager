@@ -80,8 +80,13 @@ class _BoundedDeque:
     async def put(self, item: _Item) -> None:
         async with self._condition:
             if item.priority:
-                # Behind earlier priority items (their order matters), ahead of every ordinary one.
-                position = sum(1 for queued in self._items if queued.priority)
+                # Overtakes queued reads only: behind every queued write (caller writes included),
+                # so writes to a device keep their order and a restore is never overwritten by an
+                # older caller write that was queued first.
+                position = max(
+                    (i + 1 for i, queued in enumerate(self._items) if queued.priority or queued.request.kind == "write"),
+                    default=0,
+                )
                 self._items.insert(position, item)
             else:
                 if len(self._items) >= self._capacity:
@@ -193,6 +198,7 @@ class AccessSerializer:
 
     async def stop(self) -> int:
         """Cancel the worker (shutdown only); returns the number of aborted transactions."""
+        self._accepting = False  # a submit() racing the teardown must not queue behind a dead worker
         worker, self._worker = self._worker, None
         running = self._current  # the worker clears it while being cancelled
         if worker is not None:

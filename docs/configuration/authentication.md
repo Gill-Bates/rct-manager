@@ -25,10 +25,11 @@ issued automatically; PATs are created only by the admin in the GUI.
 A PAT has the form `pat_` followed by 40 base62 characters and a 6 character CRC32 checksum
 (base62), so a mistyped token is rejected without a lookup. The former `API_TOKENS`,
 `API_TOKENS_FILE` and the `tokens` CLI no longer exist. The administration API (`/admin/api/...`) accepts a session or a PAT;
-`read` tokens get 403 on the settings and token endpoints and on every change. Creating or
-deleting tokens, and changing `auth_required`, `trusted_proxies`, `bind_address`,
+`read` tokens get 403 on the settings and token endpoints and on every change. Listing, creating or
+deleting tokens needs a signed-in session. `GET /admin/api/settings` is readable with a `read/write` PAT, but omits the
+authentication and proxy-trust values listed next. Changing `auth_required`, `trusted_proxies`, `bind_address`,
 `behind_reverse_proxy`, `forwarded_header`, `metrics_require_token` or
-`metrics_trusted_sources`, need a signed-in session; a PAT gets 403 there.
+`metrics_trusted_sources` needs a signed-in session; a PAT gets 403 there.
 
 Create named PATs with a `read` or `read/write` role and an expiry of 30 days, 90 days (the
 preselected value), 1 year or never on the **API tokens** page. Copy the secret when it is shown: it cannot be retrieved

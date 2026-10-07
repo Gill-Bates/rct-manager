@@ -252,3 +252,16 @@ def dispatch_fixtures(directory: Path) -> dict[str, Path]:
     registry_path.write_text(json.dumps(registry), encoding="utf-8")
     allowlist_path.write_text(json.dumps({"version": 1, "entries": allowlist_entries}), encoding="utf-8")
     return {"object_registry_path": registry_path, "write_allowlist_path": allowlist_path}
+
+
+async def admin_session_headers(client, password: str) -> dict[str, str]:
+    """Log the client in with a cookie session; returns the CSRF header every later admin call needs.
+
+    Device, trust and token changes are session-only, so a PAT cannot drive them in tests.
+    """
+    csrf = (await client.get("/admin/api/session")).json()["csrf_token"]
+    login = await client.post(
+        "/admin/api/login", headers={"X-CSRF-Token": csrf}, json={"username": "admin", "password": password}
+    )
+    assert login.status_code == 200, login.text
+    return {"X-CSRF-Token": login.json()["csrf_token"]}

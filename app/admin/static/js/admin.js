@@ -418,13 +418,14 @@
   // buildBatteryStack() is ever asked to draw, independent of how many modules the server trusts.
   const BATTERY_TOWER_MAX_SEGMENTS = 5;
 
-  // Maps a trusted backend module count onto a drawn segment count. A count within the graphic's
-  // ceiling maps 1:1; a count above it is a real, trusted tower the graphic contract does not cover
-  // and is therefore not drawn as a fabricated maximum-size stand-in.
+  // Maps a trusted backend module count onto a drawn segment count: 1..5 modules map 1:1, the
+  // hardware maximum of 6 is drawn with the 5 segments of the graphic ceiling (the note keeps the
+  // true count); anything beyond the hardware maximum is not drawn.
   function renderableSegmentCount(moduleCount) {
     if (typeof moduleCount !== 'number' || moduleCount < 1) return null;
-    if (moduleCount > BATTERY_TOWER_MAX_SEGMENTS) return null;
-    return moduleCount;
+    if (moduleCount > BATTERY_MAX_MODULES_PER_TOWER) return null;
+    // 1..5 modules map 1:1; the documented 6th module shares the 5th segment (graphic ceiling).
+    return Math.min(moduleCount, BATTERY_TOWER_MAX_SEGMENTS);
   }
 
   // null -> nothing renderable (patchBatteryCard shows a neutral note instead of a tower). No
@@ -652,7 +653,17 @@
         card.note.hidden = false;
       } else {
         card.stack.replaceChildren(...buildBatteryStack(wanted));
-        card.note.hidden = true;
+      }
+    }
+    if (wanted !== null) {
+      // The graphic caps at BATTERY_TOWER_MAX_SEGMENTS; the true module count stays readable as text.
+      const capped = tower.moduleCount > wanted;
+      card.note.hidden = !capped;
+      if (capped) {
+        setText(card.note, `${tower.moduleCount} modules`);
+        const detail = `This tower has ${tower.moduleCount} modules; the graphic draws at most `
+          + `${BATTERY_TOWER_MAX_SEGMENTS} battery segments.`;
+        if (card.note.title !== detail) card.note.title = detail;
       }
     }
     if (wanted === null) {
@@ -1380,6 +1391,20 @@
       render();
     }
 
+    // 202 {status_available: false}: the action ran but the status projection failed, so the body
+    // carries no panel state. Poll the status instead of rendering it.
+    async function applyActionResult(result) {
+      if (result && result.status_available === false) {
+        try {
+          const list = await api('energy/devices');
+          const fresh = list.find((item) => item.device_id === id);
+          if (fresh) panel.update(fresh);
+        } catch (error) { /* the regular poll refreshes the panel */ }
+        return;
+      }
+      panel.update(result);
+    }
+
     async function send(payload) {
       setBusy(true);
       try {
@@ -1388,7 +1413,7 @@
         selected = null;
         touched.charge = false;
         touched.discharge = false;
-        panel.update(result);
+        await applyActionResult(result);
       } catch (error) { toast(messageFrom(error), 'danger'); }
       finally { setBusy(false); }
     }
@@ -1400,7 +1425,7 @@
         const result = await api(`${path}/armed`, { method: 'PUT', body: JSON.stringify({ armed: wanted }) });
         toast(wanted ? 'Manual control is enabled.' : 'Manual control is disabled; the inverter is back in automatic operation.');
         if (!wanted) selected = null;
-        panel.update(result);
+        await applyActionResult(result);
       } catch (error) { toast(messageFrom(error), 'danger'); }
       finally { setBusy(false); }
     });
@@ -1759,8 +1784,9 @@
     const limitExpertSlot = element('div');
     limitSection.append(limitExpertSlot);
     const limitForm = element('form', 'row g-2 align-items-end');
-    const maxCharge = numberInput(0.001, 100, 0.01);
-    const maxDischarge = numberInput(0.001, 100, 0.01);
+    // Step 0.001 from min 0.001, so whole-watt values like 3.00 kW validate (a 0.01 step rejected them).
+    const maxCharge = numberInput(0.001, 100, 0.001);
+    const maxDischarge = numberInput(0.001, 100, 0.001);
     const limitButton = element('button', 'btn btn-sm btn-primary', 'Save and continue');
     limitButton.type = 'submit';
     const limitButtonCol = element('div', 'col-auto');
@@ -1895,8 +1921,8 @@
         gridSign.value = isVerified('grid_power_sign_convention') ? String(caps.grid_power_sign_convention.grid_import_positive) : '';
       }
       if (!dirty.limits) {
-        maxCharge.value = device.limits ? (device.limits.max_charge_power_w / 1000).toFixed(2) : '';
-        maxDischarge.value = device.limits ? (device.limits.max_discharge_power_w / 1000).toFixed(2) : '';
+        maxCharge.value = device.limits ? (device.limits.max_charge_power_w / 1000).toFixed(device.limits.max_charge_power_w % 10 === 0 ? 2 : 3) : '';
+        maxDischarge.value = device.limits ? (device.limits.max_discharge_power_w / 1000).toFixed(device.limits.max_discharge_power_w % 10 === 0 ? 2 : 3) : '';
       }
       if (!dirty.engineering) engineering.input.checked = Boolean(device.limits && device.limits.engineering_mode);
       if (!dirty.policy) {

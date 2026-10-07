@@ -102,7 +102,7 @@ _SECRET_EDITABLE = frozenset({"influxdb_token", "questdb_password"})
 # switch authentication off or widen who is trusted, so they need the cookie session.
 _SESSION_ONLY_SETTINGS = frozenset({
     "auth_required", "trusted_proxies", "bind_address", "behind_reverse_proxy", "forwarded_header",
-    "metrics_require_token", "metrics_trusted_sources",
+    "metrics_require_token", "metrics_trusted_sources", "enable_write_support", "devices",
 })
 _SETTINGS_LOCK = threading.Lock()
 # Serializes live device reconfigurations without holding _SETTINGS_LOCK while they run.
@@ -324,6 +324,15 @@ def _settings_view(settings: Settings) -> dict[str, Any]:
     return result
 
 
+def _pat_safe_view(settings: Settings, session: dict | None) -> dict[str, Any]:
+    """Authentication and proxy-trust values are shown to a session only, never to a PAT."""
+    view = _settings_view(settings)
+    if session is None:
+        for key in _SESSION_ONLY_SETTINGS:
+            view.pop(key, None)
+    return view
+
+
 def _settings_persisted(settings: Settings) -> dict[str, Any]:
     result = {key: value for key, value in _settings_view(settings).items() if not key.endswith("_configured")}
     for key in _SECRET_EDITABLE:
@@ -374,9 +383,9 @@ def _repair_device_names(request: Request) -> None:
 
 @router.get("/settings")
 def get_settings(request: Request) -> dict:
-    require_admin(request, sensitive=True)
+    session = require_admin(request, sensitive=True)
     _repair_device_names(request)
-    return {"settings": _settings_view(request.app.state.admin_desired_settings),
+    return {"settings": _pat_safe_view(request.app.state.admin_desired_settings, session),
             "restart_required": _pending_restart(request), "live": sorted(_LIVE)}
 
 
@@ -525,18 +534,27 @@ def _restart_export(request: Request) -> None:
         log.exception("Restarting the metrics export after a settings change failed")
 
 
+def _changed_session_only(request: Request, body: dict[str, Any]) -> set[str]:
+    """Session-only keys whose requested value differs from the current one.
+
+    Re-sending an unchanged value (a client echoing the whole settings dict) is not a change.
+    """
+    current = _settings_view(request.app.state.admin_desired_settings)
+    return {key for key in body if key in _SESSION_ONLY_SETTINGS and current.get(key) != body[key]}
+
+
 @router.put("/settings")
 def put_settings(body: dict[str, Any], request: Request) -> dict:
     session = require_admin(request, mutation=True)
     if not body or set(body) - _EDITABLE:
         raise HTTPException(400, "Unknown or empty setting")
-    if session is None and set(body) & _SESSION_ONLY_SETTINGS:
-        raise HTTPException(403, "Administration session required")
     body = {k: v for k, v in body.items() if not (k in _SECRET_EDITABLE and v == "")}  # "" keeps the secret
     if not body:
         raise HTTPException(400, "Unknown or empty setting")
     if "devices" in body:
         body["devices"] = _normalize_devices(body["devices"])
+    if session is None and _changed_session_only(request, body):
+        raise HTTPException(403, "Administration session required")
     runtime = request.app.state.runtime
     with _SETTINGS_LOCK:  # keeps concurrent autosaves from publishing an older merge last
         previous = request.app.state.admin_desired_settings
@@ -569,7 +587,7 @@ def put_settings(body: dict[str, Any], request: Request) -> dict:
                 if exc.rollback:
                     _revert_devices(request, updated, previous)
                 raise
-    return {"settings": _settings_view(updated), "restart_required": _pending_restart(request),
+    return {"settings": _pat_safe_view(updated, session), "restart_required": _pending_restart(request),
             "live": sorted(_LIVE)}
 
 
@@ -1050,7 +1068,7 @@ def _dispatch_in_use(request: Request) -> bool:
 
 @router.put("/parameters")
 def put_parameters(body: ParameterSelection, request: Request) -> dict:
-    require_admin(request, mutation=True)
+    session = require_admin(request, mutation=True)
     runtime = request.app.state.runtime
     allowed = {entry.name for entry in runtime.catalog.entries() if is_numeric(entry.value_type)}
     write_allowed = set(request.app.state.default_write_entries)
@@ -1060,6 +1078,9 @@ def put_parameters(body: ParameterSelection, request: Request) -> dict:
         raise HTTPException(400, "Invalid writable metrics")
     store = _store(request)
     with _PARAMETERS_LOCK:  # the in-use check and the revoke must not be separated by another save
+        if session is None and set(body.write_names) - set(store.get("write_names") or []):
+            # Widening the write allowlist is a privilege change: cookie session only.
+            raise HTTPException(403, "Administration session required")
         revoked = set(RctDispatchGateway.REQUIRED_WRITES) & set(store.get("write_names") or []) - set(body.write_names)
         if revoked and _dispatch_in_use(request):
             # A restore writes these registers; revoking them now would leave it rejected forever.
@@ -1076,7 +1097,7 @@ def put_parameters(body: ParameterSelection, request: Request) -> dict:
 
 @router.get("/tokens")
 def get_tokens(request: Request) -> dict:
-    require_admin(request, sensitive=True)
+    require_admin(request, sensitive=True, session_only=True)
     return {"tokens": _store(request).list_tokens()}
 
 

@@ -33,12 +33,21 @@ from app.errors import ConfigError
 from app.export.endpoint import Endpoint, resolve_endpoint
 
 log = logging.getLogger(__name__)
+_WARNED: set[str] = set()
+
+
+def _warn_once(message: str, *args: object) -> None:
+    """Settings are re-validated on every admin save; a configuration warning belongs in the log once."""
+    if message not in _WARNED:
+        _WARNED.add(message)
+        log.warning(message, *args)
 
 MAX_DEVICES = 32
 MAX_PERIODIC_METRICS = 64
 # A restore is one stop write plus four framework writes, each followed by a bounded readback.
 DISPATCH_RESTORE_WRITES = 5
-SYSTEM_READBACK_TIMEOUT_SECONDS = 2.0
+SYSTEM_READBACK_TIMEOUT_SECONDS = 2.0  # readback bound while the shutdown restore runs
+DISPLAY_NAME_MAX = 64
 _DEVICE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
 _SECRET_FIELDS = frozenset({"influxdb_token", "questdb_password"})
 _MEASUREMENT = r"^[A-Za-z_][A-Za-z0-9_]{0,63}$"
@@ -97,14 +106,19 @@ class DeviceEntry(BaseModel):
     host: str
     port: int = Field(8899, ge=1, le=65535)
     network_id: int | None = Field(None, ge=0, le=2**32 - 1)  # set -> addressed via the plant network
-    display_name: str | None = Field(None, max_length=64)
+    display_name: str | None = None
 
     @field_validator("display_name")
     @classmethod
     def _check_display_name(cls, value: str | None) -> str | None:
-        if value is not None and any(not c.isprintable() for c in value):
-            raise ValueError("display name must not contain control characters")
-        return value
+        # Tolerant on purpose: a name saved by an older version must not stop the service from
+        # starting. The strict 400 for new input lives in the admin API.
+        if value is None:
+            return value
+        cleaned = "".join(c if c.isprintable() else " " for c in value)[:DISPLAY_NAME_MAX]
+        if cleaned != value:
+            log.warning("Device display name was shortened or cleaned of control characters: %r", cleaned)
+        return cleaned
 
     @field_validator("device_id")
     @classmethod
@@ -479,12 +493,17 @@ class Settings(BaseSettings):
                 f"SHUTDOWN_PERIODIC_RESERVE_SECONDS ({self.shutdown_periodic_reserve_seconds}) must be "
                 f"smaller than SHUTDOWN_GRACE_SECONDS ({self.shutdown_grace_seconds})"
             )
-        restore_writes = DISPATCH_RESTORE_WRITES * (self.write_response_timeout_ms / 1000 + SYSTEM_READBACK_TIMEOUT_SECONDS)
+        # Devices are restored one after the other, so the budget scales with their number.
+        restore_writes = (
+            max(1, len(self.devices))
+            * DISPATCH_RESTORE_WRITES
+            * (self.write_response_timeout_ms / 1000 + SYSTEM_READBACK_TIMEOUT_SECONDS)
+        )
         if restore_writes > self.shutdown_grace_seconds - self.shutdown_periodic_reserve_seconds:
             # A warning, not an error: it only matters while a dispatch is active at shutdown.
-            log.warning(
+            _warn_once(
                 "SHUTDOWN_GRACE_SECONDS minus SHUTDOWN_PERIODIC_RESERVE_SECONDS (%.1f s) is below the %.1f s "
-                "a battery restore of one device can need; a shutdown during dispatch may leave it unrestored",
+                "the battery restore of all devices can need; a shutdown during dispatch may leave one unrestored",
                 self.shutdown_grace_seconds - self.shutdown_periodic_reserve_seconds,
                 restore_writes,
             )
@@ -502,6 +521,12 @@ class Settings(BaseSettings):
             )
         if self.forwarded_header.strip().lower() == "forwarded":
             raise ValueError("FORWARDED_HEADER must name a single-address header such as X-Forwarded-For")
+        if self.behind_reverse_proxy and not self.trusted_proxies:
+            _warn_once(
+                "BEHIND_REVERSE_PROXY is set but TRUSTED_PROXIES is empty: X-Forwarded-Proto is ignored, so "
+                "behind a TLS-terminating proxy every administration login and change fails the same-origin "
+                "check with 403. List the proxy network in TRUSTED_PROXIES (environment, then restart)."
+            )
         if any(
             scrape.version == proxy.version and scrape.overlaps(proxy)
             for scrape in self.metrics_trusted_sources
@@ -509,7 +534,7 @@ class Settings(BaseSettings):
         ):
             # The scrape trust check uses the direct peer, so a proxy network listed here lets every
             # client behind that proxy scrape without a token.
-            log.warning("METRICS_TRUSTED_SOURCES overlaps TRUSTED_PROXIES: clients behind the proxy skip the scrape token")
+            _warn_once("METRICS_TRUSTED_SOURCES overlaps TRUSTED_PROXIES: clients behind the proxy skip the scrape token")
         if self.forwarded_header and not self.trusted_proxies:
             raise ValueError("FORWARDED_HEADER requires a non-empty TRUSTED_PROXIES")
         loopback = ip_address(str(self.bind_address)).is_loopback

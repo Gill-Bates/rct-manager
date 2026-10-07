@@ -16,8 +16,13 @@ import pytest
 from app.allowlist import Allowlist
 from app.cache import MemoryCache
 from app.catalog.registry import RegistryCatalog
-from app.config import DeviceEntry, DeviceKey, EndpointKey
-from app.errors import BudgetExhausted, QueueFullError, QueueTimeout
+from app.config import (
+    SYSTEM_READBACK_TIMEOUT_SECONDS,
+    DeviceEntry,
+    DeviceKey,
+    EndpointKey,
+)
+from app.errors import BudgetExhausted, DeviceApiError, QueueFullError, QueueTimeout
 from app.gateway.rct import DeviceBinding, RctGateway
 from app.protocol.frames import Frame
 from app.protocol.types import Command
@@ -189,6 +194,71 @@ def test_system_writes_jump_the_queue_and_survive_a_full_queue_and_stop_unblocks
         return order
 
     assert asyncio.run(scenario()) == ["write-waits-ahead", "drain-returns"]
+
+
+def test_priority_write_overtakes_reads_but_never_a_queued_caller_write() -> None:
+    """A restore must not be overwritten by an older caller write queued before it."""
+
+    async def scenario() -> list[tuple[str, str]]:
+        _budget, serializer, release = await _skipped_and_blocked(queue_max_length=8)
+        serializer._max_wait = 5.0
+        running = asyncio.create_task(serializer.submit(_request(serializer)))
+        async with asyncio.timeout(1):
+            while serializer._current is None:
+                await asyncio.sleep(0)
+
+        def request(origin: TransactionOrigin, kind: str) -> TransactionRequest:
+            return TransactionRequest(DeviceKey(KEY), Frame(Command.WRITE, 1), origin, kind)
+
+        tasks = [
+            asyncio.create_task(serializer.submit(request(origin, kind)))
+            for origin, kind in (
+                (TransactionOrigin.CALLER, "write"),
+                (TransactionOrigin.CALLER, "read"),
+                (TransactionOrigin.SYSTEM_WRITE, "write"),
+            )
+        ]
+        await asyncio.sleep(0.01)
+        order = [(item.request.origin.value, item.request.kind) for item in serializer._queue._items]
+        release.set()
+        await asyncio.gather(running, *tasks)
+        await serializer.stop()
+        return order
+
+    assert asyncio.run(scenario()) == [("caller", "write"), ("system_write", "write"), ("caller", "read")]
+
+
+def test_submit_after_stop_is_refused_instead_of_queued_behind_a_dead_worker() -> None:
+    async def scenario() -> str:
+        _budget, serializer, _release = await _skipped_and_blocked()
+        await serializer.stop()
+        with pytest.raises(DeviceApiError) as excinfo:
+            await serializer.submit(_request(serializer))
+        return str(excinfo.value.code)
+
+    assert asyncio.run(scenario()) == "not_ready"
+
+
+def test_readback_is_bounded_only_while_the_shutdown_restore_runs() -> None:
+    async def scenario() -> list[float | None]:
+        gateway, binding, _budget, _net, catalog = await _gateway(5)
+        entry = next(iter(catalog.entries()))
+        seen: list[float | None] = []
+        real_submit = binding.serializer.submit
+
+        async def spy(request):
+            if request.kind == "read":
+                seen.append(request.read_total_timeout_seconds)
+            return await real_submit(request)
+
+        binding.serializer.submit = spy
+        await gateway._write(binding, entry, ("inv1", entry.name), b"\x00\x00\x00\x01", system=True)
+        gateway.begin_shutdown_restore()
+        await gateway._write(binding, entry, ("inv1", entry.name), b"\x00\x00\x00\x01", system=True)
+        await binding.serializer.stop()
+        return seen
+
+    assert asyncio.run(scenario()) == [None, SYSTEM_READBACK_TIMEOUT_SECONDS]
 
 
 async def _gateway(limit: int, fail_connects: int = 0):

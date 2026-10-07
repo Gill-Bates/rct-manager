@@ -374,11 +374,8 @@ const towerGeometry = async () => {
   return (await readLayout()).towers;
 };
 // Graphic contract (owner-mandated): the drawn tower is 1 top cap + 1..BATTERY_TOWER_MAX_SEGMENTS
-// (5) battery segments + 1 bottom cap. 2..5 modules are within that ceiling and must still render
-// every module; 6 modules is real, trusted hardware (RCT_MAX_MODULES_PER_TOWER) the GRAPHIC does
-// not cover, so it renders no tower at all (see renderableSegmentCount/patchBatteryCard in
-// admin.js) rather than a fabricated maximum-size stand-in - this replaces the former "6-module
-// tower stays within the height cap" assertion, which assumed the graphic drew up to 6 segments.
+// (5) battery segments + 1 bottom cap. 2..5 modules render every module; the hardware maximum of
+// 6 modules (RCT_MAX_MODULES_PER_TOWER) is drawn with 5 segments and the note keeps the true count.
 for (const modules of [2, 3, 4, 5]) {
   await patchBatteries((batteries) => batteries.forEach((battery) => {
     battery.module_count = modules;
@@ -400,9 +397,11 @@ await patchBatteries((batteries) => batteries.forEach((battery) => {
 }));
 const sixModuleTowers = await towerGeometry();
 await page.unroute('**/admin/api/devices');
-check('a trusted 6-module tower (above the 5-segment graphic ceiling) renders no tower, not a fabricated one',
-  sixModuleTowers.length > 0 && sixModuleTowers.every((tower) => tower.slices === 0 && tower.noteHidden === false),
-  JSON.stringify(sixModuleTowers.map((tower) => ({ slices: tower.slices, noteHidden: tower.noteHidden }))));
+check('a trusted 6-module tower is drawn with 5 middle segments and still says "6 modules"',
+  sixModuleTowers.length > 0 && sixModuleTowers.every((tower) => tower.middles === 5 && tower.slices === 7
+    && tower.noteHidden === false && /\b6 modules\b/.test(tower.noteText || '')
+    && tower.stack.height <= TOWER_HEIGHT_CAP + 1),
+  JSON.stringify(sixModuleTowers.map((tower) => ({ middles: tower.middles, slices: tower.slices, noteText: tower.noteText, height: tower.stack.height }))));
 // Taller towers must get narrower rather than taller: that is what keeps the cap without dropping
 // modules from the drawing. Both widths are within the graphic's 5-segment ceiling.
 const widthAt = async (modules) => {
@@ -620,6 +619,24 @@ await context.setOffline(false);
 await page.waitForFunction(() => !document.querySelector('#reconnect-modal.show') && !document.body.classList.contains('is-reconnecting'), null, { timeout: 15000 });
 check('reconnect modal closes once the server answers again', true);
 scrub(/requestfailed:|ERR_INTERNET_DISCONNECTED|Failed to fetch|Failed to load resource/);
+
+// 2e-2. a probe that fails while the tab is hidden schedules no retry; returning to the foreground
+// must resume probing so the modal closes without any page-level polling.
+const setVisibility = (state) => page.evaluate((value) => {
+  Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => value });
+  document.dispatchEvent(new Event('visibilitychange'));
+}, state);
+await page.route('**/health', (route) => route.abort());
+await setVisibility('hidden');
+await page.evaluate(() => window.RCTReconnect.start());
+await page.waitForSelector('#reconnect-modal.show', { timeout: 8000 });
+await sleep(1500); // let the first (failing) probe end while hidden
+await page.unroute('**/health');
+await setVisibility('visible');
+await page.waitForFunction(() => !document.querySelector('#reconnect-modal.show') && !document.body.classList.contains('is-reconnecting'), null, { timeout: 15000 });
+check('reconnect modal closes after returning to the foreground once the server is back', true);
+await page.evaluate(() => { delete document.visibilityState; });
+scrub(/requestfailed:|ERR_FAILED|Failed to fetch|Failed to load resource/);
 
 // 3. layouts
 async function layouts(label, urls) {

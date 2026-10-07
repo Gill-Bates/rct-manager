@@ -367,7 +367,7 @@ class DispatchRecord:
             next_restore_at = _tz_aware_or_none(data.get("next_restore_at"), "next_restore_at")
             stop_reason = StopReason(data["stop_reason"]) if data.get("stop_reason") else None
             record_version = _strict_number(data.get("record_version", 0), "record_version", int)
-            restore_attempts = _strict_number(data.get("restore_attempts", 0), "restore_attempts", int)
+            restore_attempts = max(0, _strict_number(data.get("restore_attempts", 0), "restore_attempts", int))
         except (KeyError, TypeError, ValueError) as exc:
             raise DispatchRecordCorrupt(f"dispatch record is malformed: {exc}") from exc
         record = cls(

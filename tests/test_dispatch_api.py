@@ -21,6 +21,7 @@ from tests.api_helpers import (
     PORT,
     WRITE_TOKEN,
     _fixed_pat,
+    admin_session_headers,
     dispatch_capabilities,
     dispatch_fixtures,
     float_payload,
@@ -227,6 +228,7 @@ async def test_reconfiguration_is_rejected_when_an_affected_devices_restore_fail
     config = settings(tmp_path, devices=[DeviceEntry(device_id="main", host=HOST, port=PORT)])
     admin_write_token(config)
     async with running_app(config) as harness:
+        ADMIN_WRITER = await admin_session_headers(harness.client, "replacement-test-password")
         seed_payloads(harness)
         started = await harness.client.post(
             "/api/v1/devices/main/battery/dispatch",
@@ -273,6 +275,7 @@ async def test_reconfiguration_succeeds_and_rebuilds_limits_after_a_clean_restor
     config = settings(tmp_path, devices=[DeviceEntry(device_id="main", host=HOST, port=PORT)])
     admin_write_token(config)
     async with running_app(config) as harness:
+        ADMIN_WRITER = await admin_session_headers(harness.client, "replacement-test-password")
         seed_payloads(harness)
         started = await harness.client.post(
             "/api/v1/devices/main/battery/dispatch",
@@ -328,6 +331,8 @@ async def test_readdressing_clears_unverified_evidence_and_engineering_mode_too(
     token = admin_write_token(config)
     headers = {"Authorization": f"Bearer {token}"}
     async with running_app(config) as harness:
+        ADMIN_WRITER = await admin_session_headers(harness.client, "replacement-test-password")
+        headers = ADMIN_WRITER  # PAT calls would be refused once the cookie session exists
         # UNVERIFIED but carrying evidence a revoke would leave behind (strategy code, note).
         put_cap = await harness.client.put(
             "/admin/api/dispatch/devices/main/capabilities/write_path_convention",
@@ -376,6 +381,8 @@ async def test_failed_graph_build_leaves_identity_bound_state_untouched(tmp_path
     token = admin_write_token(config)
     headers = {"Authorization": f"Bearer {token}"}
     async with running_app(config) as harness:
+        ADMIN_WRITER = await admin_session_headers(harness.client, "replacement-test-password")
+        headers = ADMIN_WRITER  # PAT calls would be refused once the cookie session exists
         put_cap = await harness.client.put(
             "/admin/api/dispatch/devices/main/capabilities/write_path_convention",
             headers=headers,

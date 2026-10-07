@@ -171,6 +171,9 @@ class DispatchStore:
         return record
 
     def all(self) -> list[DispatchRecord]:
+        return self.all_with_skipped()[0]
+
+    def all_with_skipped(self) -> tuple[list[DispatchRecord], list[str]]:
         """Every readable row. A row that fails ``DispatchRecord.from_dict()`` is skipped, not
         raised: a single corrupt record must not block ``recover()``/``shutdown_restore()`` from
         reaching every other device's restore duty. The caller is responsible for surfacing the
@@ -179,15 +182,17 @@ class DispatchStore:
         with self.connect() as db:
             rows = db.execute("SELECT device_id,record_version,encrypted FROM dispatch_operations").fetchall()
         records = []
+        skipped = []
         for row in rows:
             try:
                 record = self._decode(row["device_id"], row["encrypted"])
             except ValueError:
                 log.error("Dispatch record for device %s is unreadable and was skipped", row["device_id"])
+                skipped.append(row["device_id"])
                 continue
             record.record_version = int(row["record_version"])
             records.append(record)
-        return records
+        return records, skipped
 
     def put(self, record: DispatchRecord) -> None:
         # The caller-supplied `record` must only be mutated after the write durably commits: a

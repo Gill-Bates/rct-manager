@@ -825,3 +825,19 @@ def test_the_manager_module_names_no_register_and_imports_no_gateway() -> None:
     source = (Path(__file__).resolve().parents[1] / "app" / "energy" / "manager.py").read_text()
     assert "app.gateway" not in source
     assert "power_mng" not in source
+
+
+async def test_a_failed_arming_commit_rolls_back_only_its_own_approvals() -> None:
+    """An approval another feature added while the commit was in flight must survive the rollback."""
+    spy = ApprovalSpy(EXISTING_WRITES)
+
+    class FailingStore:
+        def put_energy_state(self, record: ArmedRecord) -> None:
+            spy.names.append("approved_meanwhile")
+            raise OSError("disk full")
+
+    service = manager(SpyPort(), armed=False, approvals=spy, store=FailingStore())
+    with pytest.raises(OSError):
+        await service.set_armed("main", armed=True, actor="tester")
+    assert spy.names == [*EXISTING_WRITES, "approved_meanwhile"]
+    assert service.armed("main") is False

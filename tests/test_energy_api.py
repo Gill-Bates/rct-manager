@@ -522,6 +522,23 @@ def test_the_periodic_cap_prefers_flow_metrics_over_card_and_module_metrics(
     assert not any("module_sn" in n for n in names)
 
 
+def test_a_fully_used_periodic_budget_still_pins_the_flow_metrics(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = energy_settings(tmp_path, enable_write_support=False)
+    catalog = RegistryCatalog.from_file(settings.object_registry_path)
+    filler = [
+        e.name for e in catalog.entries()
+        if e.name not in _ENERGY_METRIC_NAMES and is_numeric(e.value_type)
+    ]
+    # The user selection alone fills the cap exactly, so no room is left for the flow metrics.
+    monkeypatch.setattr("app.api.app_factory.MAX_PERIODIC_PER_DEVICE", len(filler))
+    names = _effective_periodic_names(settings, catalog, filler)
+    assert len(names) == len(filler)
+    assert set(_ENERGY_METRIC_NAMES) <= set(names)
+    assert names[: len(filler) - len(_ENERGY_METRIC_NAMES)] == filler[: len(filler) - len(_ENERGY_METRIC_NAMES)]
+
+
 async def test_with_periodic_reads_disabled_the_list_is_empty(tmp_path: Path) -> None:
     settings = energy_settings(tmp_path, enable_periodic_reads=False)
     async with running_app(settings) as harness:
@@ -873,3 +890,20 @@ def test_no_new_code_marks_a_capability_as_verified() -> None:
         if _VERIFIED.search(path.read_text(encoding="utf-8"))
     }
     assert named <= _VERIFIED_FIXTURES, f"new file marks a capability verified: {named - _VERIFIED_FIXTURES}"
+
+
+async def test_a_failing_status_projection_after_an_executed_action_still_reports_success(
+    tmp_path: Path,
+) -> None:
+    from unittest.mock import patch
+
+    async with running_app(energy_settings(tmp_path)) as harness:
+        seed_payloads(harness)
+        await arm(harness)
+        headers = await admin_session(harness)
+        with patch("app.admin.energy_api._admin_status", side_effect=RuntimeError("projection broke")):
+            response = await harness.client.post(
+                "/admin/api/energy/devices/main/command", headers=headers, json={"action": "auto"}
+            )
+        assert response.status_code == 202, response.text
+        assert response.json() == {"executed": True, "status_available": False, "device_id": "main"}

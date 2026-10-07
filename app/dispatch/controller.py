@@ -11,7 +11,7 @@ import logging
 import math
 import uuid
 from collections.abc import Iterable
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 from app.clock import Clock
 from app.dispatch.base import BatteryDispatchGateway
@@ -46,7 +46,7 @@ log = logging.getLogger(__name__)
 
 # Automatic restore retries back off exponentially so a persistently failing device is not hammered.
 _RESTORE_BACKOFF_BASE_SECONDS = 1.0
-_RESTORE_BACKOFF_MAX_SECONDS = 300.0
+_RESTORE_BACKOFF_MAX_SECONDS = 30.0  # the battery stays externally controlled meanwhile
 
 # The state a successfully applied command leaves the device in. A table rather than a conditional
 # so a new mode without a state cannot silently inherit another mode's.
@@ -120,6 +120,7 @@ class DispatchController:
         # controller writes, so an operator change takes effect on the next apply without a restart.
         self._soc_target_policies = soc_target_policies
         self._locks: dict[str, asyncio.Lock] = {}
+        self.unreadable_devices: tuple[str, ...] = ()
 
     def _lock(self, device_id: str) -> asyncio.Lock:
         return self._locks.setdefault(device_id, asyncio.Lock())
@@ -632,11 +633,28 @@ class DispatchController:
             if record.state is not DispatchState.IDLE:
                 raise ReconfigurationRejected(device_id, record.fault_code)
 
+    async def _read_candidates(self) -> list[DispatchRecord]:
+        records, skipped = await asyncio.to_thread(self._store.all_with_skipped)
+        self.unreadable_devices = tuple(skipped)
+        for device_id in skipped:
+            # No restore is possible for a record that cannot be read; an operator has to look.
+            log.critical(
+                "Dispatch record of device %s is unreadable: its battery settings are NOT restored "
+                "automatically and the device stays blocked for dispatch",
+                device_id,
+            )
+        return records
+
+    async def restore_retry_info(self, device_id: str) -> tuple[int, datetime | None]:
+        """Failed restore attempts and the next automatic retry time (admin/energy status only)."""
+        record = await self._get(device_id)
+        return record.restore_attempts, record.next_restore_at
+
     async def recover(self) -> None:
         # DispatchStore.all() skips and logs an individually unreadable row. Records read here are
         # only candidates: each one is re-read under its device lock, because a tick may have
         # advanced it since, and a stale object would fail the store's CAS check.
-        candidates = await asyncio.to_thread(self._store.all)
+        candidates = await self._read_candidates()
         for candidate in candidates:
             if candidate.state is DispatchState.IDLE and not candidate.restore_required:
                 continue
@@ -665,7 +683,7 @@ class DispatchController:
 
     async def shutdown_restore(self) -> None:
         """Best-effort restore while serializers still accept device work."""
-        candidates = await asyncio.to_thread(self._store.all)
+        candidates = await self._read_candidates()
         for candidate in candidates:
             if candidate.intent is None and not candidate.restore_required:
                 continue

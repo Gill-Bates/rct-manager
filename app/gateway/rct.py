@@ -147,6 +147,7 @@ class RctGateway:
         self._slave_max = slave_max_reads
         self._slave_cache: dict[str, tuple[float, SlaveDiscovery]] = {}
         self._slave_locks: dict[str, asyncio.Lock] = {}
+        self._shutdown_restore = False
         self._write_locks: dict[tuple[str, int], asyncio.Lock] = {}  # one write+readback per object id
         self._devices: dict[str, DeviceBinding] = {}
         self._by_address: dict[tuple[EndpointKey, int | None], str] = {}
@@ -226,6 +227,10 @@ class RctGateway:
     def add_device(self, binding: DeviceBinding) -> None:
         self._devices[binding.entry.device_id] = binding
         self._by_address[(binding.entry.key.endpoint, binding.entry.network_id)] = binding.entry.device_id
+
+    def begin_shutdown_restore(self) -> None:
+        """From now on system-write readbacks use the short shutdown bound."""
+        self._shutdown_restore = True
 
     def device_bindings(self) -> list[DeviceBinding]:
         return list(self._devices.values())
@@ -588,9 +593,9 @@ class RctGateway:
                 self._cache.invalidate(key)  # also when the outcome is unclear (Requirement 9.12)
             if not result.ok and not result.committed:
                 raise result.error or DeviceApiError()  # nothing left the send path: final and safe
-            # A system write's readback is bounded tightly: restore runs against the shutdown
-            # work deadline and a slow readback must not eat the budget of the remaining steps.
-            readback_timeout = SYSTEM_READBACK_TIMEOUT_SECONDS if system else None
+            # Only during the shutdown restore is the readback bounded tightly: it runs against the
+            # work deadline. In normal operation a lost frame must not fail a dispatch step.
+            readback_timeout = SYSTEM_READBACK_TIMEOUT_SECONDS if system and self._shutdown_restore else None
             return result, await self._read_into_cache(
                 binding, entry, key, origin, charge, total_timeout_seconds=readback_timeout
             )

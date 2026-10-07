@@ -158,6 +158,8 @@ class AdminEnergyDeviceStatus(EnergyStatusResponse):
     approved_write_names: list[str]  # the live write allowlist, state-independent (Setup checklist)
     armed_at: datetime | None
     armed_by: str | None
+    restore_attempts: int = 0  # failed automatic restore attempts since the last clean restore
+    next_restore_at: datetime | None = None
 
 
 async def _admin_status(request: Request, device_id: str) -> AdminEnergyDeviceStatus:
@@ -167,6 +169,7 @@ async def _admin_status(request: Request, device_id: str) -> AdminEnergyDeviceSt
     record = energy.armed_record(device_id)
     runtime = request.app.state.runtime
     limits = dispatch.device_limits(device_id)
+    restore_attempts, next_restore_at = await dispatch.restore_retry_info(device_id)
     device = runtime.devices[device_id]
     state = runtime.gateway.device_status(device_id).state
     return AdminEnergyDeviceStatus(
@@ -214,6 +217,8 @@ async def _admin_status(request: Request, device_id: str) -> AdminEnergyDeviceSt
         approved_write_names=list(energy.approved_write_names()),
         armed_at=record.armed_at,
         armed_by=record.armed_by,
+        restore_attempts=restore_attempts,
+        next_restore_at=next_restore_at,
     )
 
 

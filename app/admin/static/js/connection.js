@@ -240,7 +240,15 @@
 
   function onVisibilityChange() {
     pageHidden = document.visibilityState === 'hidden';
-    if (reconnectState.active) return;
+    if (reconnectState.active) {
+      // A probe that ended while hidden schedules no retry; resume it on return (an in-flight probe
+      // reschedules itself, and probeReconnect() ignores a second concurrent call).
+      if (!pageHidden) {
+        clearReconnectTimer();
+        void probeReconnect();
+      }
+      return;
+    }
     if (document.visibilityState === 'visible') scheduleHeartbeat(1000);
     else clearHeartbeatTimer();
   }
