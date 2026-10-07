@@ -113,12 +113,9 @@ curl -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/jso
 
 ## Energy Manager
 
-The Energy Manager is the business-level surface in front of battery dispatch: one action
-(`charge`, `discharge`, `hold`, `auto`) plus the stop goal `target_soc_percent` for the two that
-need one, instead of a mode, a power budget and a `valid_until`. The power limit defaults to the
-limit configured for the inverter, the command TTL is one hour and is not renewed automatically, and
-the target SoC is the business goal, not a device register value. Details, including the per-device
-armed switch and the two unverified hypotheses, are in [Energy Manager](../energy-manager.md).
+Business-level control in front of battery dispatch: one action (`charge`, `discharge`, `hold`,
+`auto`) plus `target_soc_percent` where needed. Actions, errors and readings are described in
+[Energy Manager](../energy-manager.md).
 
 ```sh
 curl -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
@@ -126,10 +123,5 @@ curl -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/jso
   http://127.0.0.1:8000/api/v1/devices/main/energy/command
 ```
 
-- `409 energy_manager_disarmed` — the Energy Manager is off for this inverter; an operator has to switch it on
-  in the admin GUI first (arming is not part of the public API).
-- `409 energy_write_support_required` — write access must be enabled (and the four dispatch
-  registers must be offered by the configured write allowlist) before the Energy Manager can be
-  switched on.
-- `409 energy_action_unavailable` — the action is not available for this inverter right now, for
-  example because its register approvals were revoked on the **Inverters** page.
+- `409 energy_manager_disarmed` - switched off; an operator enables it in the admin GUI (the public API cannot).
+- `409 energy_action_unavailable` - the action is not available right now, for example after its register approvals were revoked.

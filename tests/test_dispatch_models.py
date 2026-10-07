@@ -4,9 +4,7 @@
 # Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
 #
 
-"""Model-layer safety invariants (list C): fail-closed persistence, finite values, and the
-state/intent/snapshot/restore_required consistency rule.
-"""
+"""Model-layer safety invariants (fail-closed persistence, finite values, state consistency) and RCT sign conventions."""
 
 from datetime import UTC, datetime
 
@@ -26,6 +24,7 @@ from app.dispatch.models import (
     PowerSetpoint,
     phase_for,
 )
+from app.gateway.conventions import RctBatteryPowerConvention, RctGridPowerConvention
 
 AWARE_NOW = datetime(2026, 10, 6, 12, 0, tzinfo=UTC)
 
@@ -57,9 +56,6 @@ def _intent_dict(**overrides) -> dict:
     return data
 
 
-# --- C1: fail-closed from_dict() ---------------------------------------------------------------
-
-
 def test_from_dict_on_a_bare_device_id_raises_instead_of_returning_a_clean_idle_record() -> None:
     """The exact review example: {"device_id": "battery-1"} must not silently become IDLE."""
     with pytest.raises(DispatchRecordCorrupt):
@@ -77,9 +73,6 @@ def test_from_dict_on_a_complete_idle_record_still_succeeds() -> None:
     record = DispatchRecord.from_dict({"device_id": "main", "state": "idle", "restore_required": False})
     assert record.state is DispatchState.IDLE
     assert record.intent is None
-
-
-# --- C2: NaN/inf rejected -----------------------------------------------------------------------
 
 
 def test_power_setpoint_rejects_nan_and_inf() -> None:
@@ -132,9 +125,6 @@ def test_from_dict_rejects_a_non_finite_persisted_power_setpoint() -> None:
         )
 
 
-# --- naive datetimes rejected --------------------------------------------------------------------
-
-
 def test_from_dict_rejects_a_naive_last_write_at() -> None:
     with pytest.raises(DispatchRecordCorrupt):
         DispatchRecord.from_dict(
@@ -159,9 +149,6 @@ def test_from_dict_rejects_a_naive_intent_valid_until() -> None:
         )
 
 
-# --- D5: all_fresh defaults to False on a missing key -------------------------------------------
-
-
 def test_snapshot_all_fresh_defaults_to_false_when_absent_from_the_persisted_dict() -> None:
     data = _snapshot_dict()
     assert "all_fresh" not in data
@@ -176,9 +163,6 @@ def test_snapshot_all_fresh_defaults_to_false_when_absent_from_the_persisted_dic
     )
     assert record.snapshot is not None
     assert record.snapshot.all_fresh is False
-
-
-# --- C5: invalid state/intent/snapshot/restore_required combinations rejected -------------------
 
 
 def test_from_dict_rejects_idle_with_a_present_intent() -> None:
@@ -217,9 +201,6 @@ def test_precheck_with_no_intent_is_a_valid_crash_window_not_corruption() -> Non
     assert record.intent is None
 
 
-# --- DeviceLimits / DispatchConfig domain validation ---------------------------------------------
-
-
 def test_device_limits_rejects_non_positive_power() -> None:
     with pytest.raises(ValueError):
         DeviceLimits(-100, 500)
@@ -237,9 +218,6 @@ def test_dispatch_config_rejects_engineering_ttl_above_the_normal_cap() -> None:
         DispatchConfig(max_operation_duration_seconds=1000, max_operation_duration_engineering_seconds=2000)
 
 
-# --- strict bool/number coercion in from_dict() --------------------------------------------------
-
-
 def test_from_dict_rejects_a_truthy_string_instead_of_a_real_bool() -> None:
     with pytest.raises(DispatchRecordCorrupt):
         DispatchRecord.from_dict({"device_id": "x", "state": "idle", "restore_required": "yes"})
@@ -248,9 +226,6 @@ def test_from_dict_rejects_a_truthy_string_instead_of_a_real_bool() -> None:
 def test_device_control_snapshot_rejects_non_finite_soc_target_ratio() -> None:
     with pytest.raises(ValueError):
         DeviceControlSnapshot(PowerSetpoint(), float("nan"), 1, False, AWARE_NOW)
-
-
-# --- HOLD: a controlling state with no SoC goal ---------------------------------------------------
 
 
 def test_a_holding_record_round_trips_and_reports_the_controlling_phase() -> None:
@@ -293,3 +268,17 @@ def test_a_non_numeric_target_soc_percent_is_still_corruption_not_none() -> None
                 "intent": _intent_dict(target_soc_percent="80"),
             }
         )
+
+
+def test_default_battery_convention() -> None:
+    convention = RctBatteryPowerConvention()
+    assert convention.target(PowerSetpoint(PowerDirection.CHARGE, 3000)) == -3000
+    assert convention.target(PowerSetpoint(PowerDirection.DISCHARGE, 3000)) == 3000
+    assert convention.setpoint(-3000) == PowerSetpoint(PowerDirection.CHARGE, 3000)
+
+
+def test_sign_conventions_can_be_inverted_after_hardware_verification() -> None:
+    battery = RctBatteryPowerConvention(discharge_positive=False)
+    grid = RctGridPowerConvention(import_positive=False)
+    assert battery.target(PowerSetpoint(PowerDirection.DISCHARGE, 500)) == -500
+    assert grid.import_watts(-700) == 700

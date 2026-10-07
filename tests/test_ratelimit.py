@@ -1,16 +1,20 @@
 #!/usr/bin/env python3
 #
-# tests/test_ratelimit_threads.py
+# tests/test_ratelimit.py
 # Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
 #
 
-"""The limiter is shared by the event loop and threadpool handlers, so it must be thread-safe."""
+"""Rate limiter: thread safety and fail-closed auth-failure overflow."""
 
 import threading
 import time
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 
-from app.security.ratelimit import AuthFailureTracker, SlidingWindow
+import pytest
+
+from app.security.ratelimit import MAX_KEYS, AuthFailureTracker, SlidingWindow
+from tests.conftest import ManualClock
 
 
 class _YieldingClock:
@@ -62,3 +66,17 @@ def test_auth_tracker_blocks_after_concurrent_failures() -> None:
     with ThreadPoolExecutor(max_workers=32) as pool:
         list(pool.map(worker, range(failures)))
     assert tracker.blocked_for("192.0.2.1") > 0
+
+
+def test_overflow_address_is_rejected_instead_of_silently_merged(clock: ManualClock) -> None:
+    tracker = AuthFailureTracker(limit=3, window_seconds=60.0, block_seconds=900.0, clock=clock)
+    # Fill the table with MAX_KEYS distinct, non-expired addresses so no eviction can free room.
+    for i in range(MAX_KEYS):
+        tracker._failures[f"10.0.{i // 256}.{i % 256}"] = deque([clock.monotonic()])
+
+    with pytest.raises(RuntimeError):
+        tracker.record_failure("203.0.113.1")
+
+    # The capacity-exhausted address was never recorded, so it is never found blocked either.
+    assert "__overflow__" not in tracker._blocked_until
+    assert tracker.blocked_for("203.0.113.1") == 0.0

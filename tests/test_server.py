@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
 #
-# tests/test_serve_smoke.py
+# tests/test_server.py
 # Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
 #
 
-"""Process smoke test: SIGTERM drains in-flight work, answers 503 meanwhile and exits with 0 (task 10.4)."""
+"""Server startup and shutdown: process smoke test, signal handling, bind warning, access-log level, docs log line, startup gate and first-start password handover."""
 
 import asyncio
 import contextlib
 import json
+import logging
 import os
 import signal
 import socket
+import stat
 import struct
 import subprocess
 import sys
@@ -20,16 +22,36 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+import uvicorn
 
 from app.admin.store import AdminStore
+from app.api import server
+from app.api.app_factory import create_app
+from app.api.middleware import access_log_level
+from app.api.server import (
+    FIRST_START_PASSWORD_FILE,
+    GracefulServer,
+    write_first_start_password,
+)
 from app.catalog.registry import RegistryCatalog
+from app.gateway.base import DeviceState
 from app.protocol.frames import encode_frame
 from app.protocol.stream import StreamParser
 from app.protocol.types import Command
-from tests.api_helpers import REGISTRY_FIXTURE, make_settings
+from tests.api_helpers import (
+    REGISTRY_FIXTURE,
+    make_settings,
+    running_app,
+    wait_settled,
+)
 from tests.conftest import settings_env_names
 
 ROOT = Path(__file__).resolve().parent.parent
+
+
 SLOW_DELAY = 1.5
 
 
@@ -195,3 +217,180 @@ def test_sigterm_drains_answers_503_and_exits_cleanly(tmp_path) -> None:
         if server is not None and loop is not None:
             loop.call_soon_threadsafe(server.close)
         device_thread.join(5)
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "status", "level"),
+    [
+        ("GET", "/admin/static/css/admin.css", 200, logging.DEBUG),
+        ("GET", "/login", 200, logging.DEBUG),
+        ("GET", "/", 303, logging.DEBUG),
+        ("GET", "/ui/dashboard", 200, logging.DEBUG),
+        ("GET", "/admin/api/session", 200, logging.DEBUG),
+        ("GET", "/admin/api/devices", 200, logging.DEBUG),
+        ("POST", "/admin/api/login", 200, logging.INFO),
+        ("POST", "/admin/api/logout", 200, logging.INFO),
+        ("POST", "/admin/api/change-password", 200, logging.INFO),
+        ("PUT", "/admin/api/settings", 200, logging.INFO),
+        ("DELETE", "/admin/api/tokens/abc", 200, logging.INFO),
+        ("GET", "/api/v1/devices", 200, logging.INFO),
+        ("GET", "/metrics", 200, logging.DEBUG),
+        ("GET", "/metrics", 401, logging.WARNING),
+        ("GET", "/health", 200, logging.INFO),
+        ("POST", "/admin/api/login", 401, logging.WARNING),
+        ("GET", "/admin/static/missing.js", 404, logging.WARNING),
+        ("GET", "/api/v1/devices", 500, logging.ERROR),
+    ],
+)
+def test_access_log_level(method, path, status, level):
+    assert access_log_level(method, path, status) == level
+
+
+def _settings(address: str) -> SimpleNamespace:
+    return SimpleNamespace(bind_address=address, bind_port=8000)
+
+
+def test_warns_on_loopback_in_container(monkeypatch, caplog) -> None:
+    # IPv4 and IPv6 loopback hit the same is_loopback branch; one address covers it.
+    monkeypatch.setattr(server, "_in_container", lambda: True)
+    with caplog.at_level(logging.WARNING, logger=server.log.name):
+        server.warn_if_loopback_in_container(_settings("127.0.0.1"))
+    assert any("loopback" in r.getMessage() and "0.0.0.0" in r.getMessage() for r in caplog.records)
+    assert any("behind reverse proxy" in r.getMessage() for r in caplog.records)
+
+
+def test_silent_for_wildcard_bind_in_container(monkeypatch, caplog) -> None:
+    monkeypatch.setattr(server, "_in_container", lambda: True)
+    with caplog.at_level(logging.WARNING, logger=server.log.name):
+        server.warn_if_loopback_in_container(_settings("0.0.0.0"))
+    assert not caplog.records
+
+
+def test_silent_for_loopback_outside_container(monkeypatch, caplog) -> None:
+    monkeypatch.setattr(server, "_in_container", lambda: False)
+    with caplog.at_level(logging.WARNING, logger=server.log.name):
+        server.warn_if_loopback_in_container(_settings("127.0.0.1"))
+    assert not caplog.records
+
+
+def test_marker_variable_marks_container(monkeypatch) -> None:
+    monkeypatch.setenv("RCT_API_CONTAINER", "1")
+    assert server._in_container()
+
+
+def _docs_lines(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [r.getMessage() for r in caplog.records if r.getMessage().startswith("API documentation")]
+
+
+@pytest.mark.parametrize(
+    ("address", "url"),
+    [("127.0.0.1", "http://127.0.0.1:8123/docs"), ("::1", "http://[::1]:8123/docs")],
+)
+def test_enabled_docs_log_their_url(caplog: pytest.LogCaptureFixture, address: str, url: str) -> None:
+    with caplog.at_level(logging.INFO, logger="app.api.app_factory"):
+        create_app(make_settings(docs_public=True, bind_address=address, bind_port=8123))
+    assert _docs_lines(caplog) == [f"API documentation: {url} (OpenAPI: /openapi.json)"]
+
+
+def test_disabled_docs_say_so(caplog: pytest.LogCaptureFixture) -> None:
+    with caplog.at_level(logging.INFO, logger="app.api.app_factory"):
+        create_app(make_settings(docs_public=False))
+    assert _docs_lines(caplog) == ["API documentation disabled (DOCS_PUBLIC=false)"]
+
+
+def test_early_signal_is_remembered_and_starts_drain_in_serve(monkeypatch) -> None:
+    server = GracefulServer(uvicorn.Config(lambda *a: None), SimpleNamespace(shutdown=None))
+    server.handle_exit(signal.SIGTERM, None)
+    assert server._early_signal and not server._drain_requested
+
+    started: list[bool] = []
+    monkeypatch.setattr(server, "_start_drain", lambda: started.append(True))
+
+    async def fake_serve(self, sockets=None) -> None:
+        return None
+
+    monkeypatch.setattr(uvicorn.Server, "serve", fake_serve)
+    import asyncio
+
+    asyncio.run(server.serve())
+    assert started == [True] and server._drain_requested
+
+
+NEW_PASSWORD = "a much stronger password"
+
+
+def _gate_settings(tmp_path):
+    return make_settings(hmac_secret="s" * 48, admin_db_path=tmp_path / "rct.db")
+
+
+def _states(app):
+    runtime = app.state.runtime
+    return {runtime.gateway.device_status(d).state for d in runtime.devices}
+
+
+@pytest.mark.asyncio
+async def test_jobs_wait_for_password_change_then_start(tmp_path, caplog):
+    settings = _gate_settings(tmp_path)
+    caplog.set_level(logging.WARNING)
+    async with running_app(settings, settle=False, authorize=False) as harness:
+        password = harness.app.state.first_start_password
+        # The lifespan gate (app_factory._await_password_change) decides whether to start the
+        # heartbeat/periodic/refresh tasks synchronously, before the context manager above ever
+        # yields: the warning log line and the STARTING state are both already settled by this
+        # point, not something a fixed sleep could prove any more reliably (minor note).
+        assert _states(harness.app) == {DeviceState.STARTING}  # no heartbeat while the bootstrap password stands
+        assert "Initial admin password not changed yet" in caplog.text
+        assert (await harness.client.get("/login")).status_code == 200  # the admin UI stays reachable
+        assert harness.app.state.admin_store.change_password(password, NEW_PASSWORD)
+        await wait_settled(harness.app, timeout=8)
+        assert DeviceState.STARTING not in _states(harness.app)
+
+
+@pytest.mark.asyncio
+async def test_later_start_with_changed_password_runs_jobs_immediately(tmp_path, caplog):
+    settings = _gate_settings(tmp_path)
+    async with running_app(settings, settle=False, authorize=False) as first:
+        password = first.app.state.first_start_password
+        assert first.app.state.admin_store.change_password(password, NEW_PASSWORD)
+    caplog.set_level(logging.WARNING)
+    caplog.clear()
+    async with running_app(settings, authorize=False) as second:  # settle=True: heartbeat ran at once
+        assert DeviceState.STARTING not in _states(second.app)
+    assert "Initial admin password not changed yet" not in caplog.text
+
+
+BOOTSTRAP_PASSWORD = "Xk7-pw29"
+
+
+async def test_first_start_password_goes_to_stdout_and_is_also_saved_to_a_0600_file(
+    tmp_path, capsys, monkeypatch
+) -> None:
+    """Deliberate product choice (reverses the former P2-3 restriction): the console banner must
+    carry the password in clear text so it can be copy-pasted directly; the 0600 file remains as a
+    fallback for runs without a visible console."""
+    settings = make_settings(admin_db_path=tmp_path / "data" / "rct.db")
+    app = SimpleNamespace(
+        state=SimpleNamespace(first_start_password=BOOTSTRAP_PASSWORD, runtime=SimpleNamespace(settings=settings))
+    )
+
+    async def no_listener(self, sockets=None) -> None:
+        return None
+
+    monkeypatch.setattr(uvicorn.Server, "startup", no_listener)
+    server = GracefulServer(uvicorn.Config(app), None)
+    server.started = True
+    await server.startup()
+
+    path = settings.admin_db_path.parent / FIRST_START_PASSWORD_FILE
+    printed = capsys.readouterr().out
+    assert BOOTSTRAP_PASSWORD in printed and str(path.resolve()) in printed
+    assert path.read_text(encoding="utf-8").strip() == BOOTSTRAP_PASSWORD
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+def test_rewriting_the_password_file_cannot_leave_a_readable_mode(tmp_path) -> None:
+    settings = make_settings(admin_db_path=tmp_path / "data" / "rct.db")
+    first = write_first_start_password(settings, BOOTSTRAP_PASSWORD)
+    first.chmod(0o644)  # a previous run or an operator widened it
+    again = write_first_start_password(settings, BOOTSTRAP_PASSWORD)
+    assert again == first and stat.S_IMODE(again.stat().st_mode) == 0o600

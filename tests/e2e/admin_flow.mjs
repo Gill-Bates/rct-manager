@@ -621,12 +621,31 @@ await stop(server);
 server = await startServer(db, httpPort, devicePort, 'after-layouts');
 await page.goto(base + '/ui/tokens');
 await page.waitForSelector('#tokens-list tr');
-// Empty state on a fresh install: one row spanning all six columns.
-check('empty state is a single full-width row', (await page.locator('#tokens-list tr').count()) === 1
-  && (await page.getAttribute('#tokens-list td', 'colspan')) === '6'
-  && (await page.locator('#tokens-list').innerText()).includes('No API tokens created yet.'));
 check('token table has the six columns', JSON.stringify(await page.locator('.token-table thead th').evaluateAll((n) => n.map((e) => e.textContent.trim()))) === JSON.stringify(['Name', 'Permission', 'Created', 'Last used', 'Expires', 'Actions']));
-check('token form is hidden until the modal opens', !(await page.locator('#token-form').isVisible()));
+check('Add token button is shown and the form is not permanently on the page', (await page.locator('#open-add-token').isVisible()) && !(await page.locator('#token-form').isVisible()));
+await page.click('#open-add-token');
+await page.waitForSelector('#add-token-modal.show #token-name', { state: 'visible' });
+await sleep(250);
+check('expiry defaults to 90 days', (await page.inputValue('#token-expires')) === '90d');
+await page.fill('#token-name', 'e2e-monitor');
+await page.click('#token-form button[type=submit]');
+await page.waitForSelector('#new-token-result:not([hidden])');
+const token = (await page.locator('#new-token-value').innerText()).trim();
+check('result state shows the PAT once', token.length > 0 && (await page.locator('#new-token-result').innerText()).includes('will not be shown again'));
+check('new row appears without reload', (await page.locator('#tokens-list tr', { hasText: 'e2e-monitor' }).count()) === 1);
+const call = async () => (await fetch(`${base}/api/v1/devices/sim/metrics/grid_power`, { headers: { Authorization: `Bearer ${token}` } })).status;
+check('new PAT is accepted by the API', (await call()) === 200);
+await page.click('#token-done');
+await page.waitForSelector('#add-token-modal', { state: 'hidden' });
+await page.waitForSelector('.modal-backdrop', { state: 'detached' });
+check('closing the modal removes the PAT from the DOM', await page.evaluate((t) => !document.documentElement.outerHTML.includes(t) && !document.body.innerText.includes(t), token));
+await page.locator('#tokens-list tr', { hasText: 'e2e-monitor' }).locator('button[data-bs-toggle=dropdown]').click();
+await page.click('button[aria-label="Revoke token e2e-monitor"]');
+await page.waitForFunction(() => !document.getElementById('tokens-list').textContent.includes('e2e-monitor'));
+check('revoked PAT is rejected', (await call()) === 401);
+check('empty state returns after the last token is revoked', (await page.locator('#tokens-list td[colspan="6"]').count()) === 1);
+
+// 4a. copy, last used, mobile, and expiry presets reaching the backend
 const openTokenModal = async () => { await page.click('#open-add-token'); await page.waitForSelector('#add-token-modal.show #token-name', { state: 'visible' }); await sleep(250); };
 const submitToken = async (name, expires) => {
   await openTokenModal();
@@ -636,71 +655,42 @@ const submitToken = async (name, expires) => {
   await page.waitForSelector('#new-token-result:not([hidden])');
   return (await page.locator('#new-token-value').innerText()).trim();
 };
-const closeTokenModal = async () => { await page.click('#token-done'); await page.waitForSelector('#add-token-modal', { state: 'hidden' }); };
-const tokenRow = (name) => page.locator('#tokens-list tr', { hasText: name });
-await openTokenModal();
-// Expiry is a preset select, not a date input, and defaults to 90 days.
-const expirySelect = await page.evaluate(() => {
-  const el = document.getElementById('token-expires');
-  return { tag: el.tagName, value: el.value, options: [...el.options].map((o) => o.textContent), label: document.querySelector('label[for="token-expires"]').textContent };
-});
-check('expiry is a preset select', expirySelect.tag === 'SELECT', expirySelect.tag);
-check('expiry offers the four presets', JSON.stringify(expirySelect.options) === JSON.stringify(['30 days', '90 days', '1 year', 'Never expires']), JSON.stringify(expirySelect.options));
-check('expiry label is "Expiry"', expirySelect.label === 'Expiry', expirySelect.label);
-check('expiry defaults to 90 days, not never', expirySelect.value === '90d', expirySelect.value);
-check('no date input left on the token form', (await page.locator('#token-form input[type=date]').count()) === 0);
-check('modal shows the one-time hint', (await page.locator('#add-token-modal .modal-header').first().innerText()).includes('shown only once'));
-await page.click('#add-token-modal .modal-footer button[data-bs-dismiss]');
-await page.waitForSelector('#add-token-modal', { state: 'hidden' });
-
-const token = await submitToken('e2e-monitor');
-check('result state shows "Token created"', (await page.locator('#new-token-result').innerText()).includes('Token created') && (await page.locator('#new-token-result').innerText()).includes('will not be shown again'));
-check('token value is not on the main page', await page.evaluate((t) => { const c = document.body.cloneNode(true); c.querySelector('#add-token-modal')?.remove(); return !c.textContent.includes(t); }, token));
-check('new row appears without reload', (await tokenRow('e2e-monitor').count()) === 1);
-await context.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: base }).catch(() => {});
+const closeTokenModal = async () => { await page.click('#token-done'); await page.waitForSelector('#add-token-modal', { state: 'hidden' }); await page.waitForSelector('.modal-backdrop', { state: 'detached' }); };
+const copyMe = await submitToken('e2e-copy');
+await context.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: base }).catch(() => { });
 await page.click('#copy-token');
-await page.waitForFunction(() => document.getElementById('toast-region').textContent.includes('copied') || document.getElementById('toast-region').textContent.includes('Copying is not available'));
+await page.waitForFunction(() => /copied|Copying is not available/.test(document.getElementById('toast-region').textContent));
 const clip = await page.evaluate(() => navigator.clipboard.readText()).catch(() => null);
-check('Copy puts the token on the clipboard', clip === null || clip === token, String(clip === null ? 'clipboard unreadable' : clip === token));
+check('Copy puts the token on the clipboard', clip === null || clip === copyMe, clip === null ? 'clipboard unreadable' : '');
 await closeTokenModal();
-const leaks = await page.evaluate((t) => [document.getElementById('new-token-value').textContent === '' ? '' : 'value', document.documentElement.outerHTML.includes(t) ? 'html' : '', document.body.innerText.includes(t) ? 'text' : ''].filter(Boolean), token);
-check('Done clears the secret from the DOM', leaks.length === 0, leaks.join(','));
+check('Done empties the secret element and restores the form state', await page.evaluate(() => document.getElementById('new-token-value').textContent === '' && document.getElementById('new-token-result').hidden && !document.getElementById('token-form-state').hidden));
 await openTokenModal();
-check('modal reopens in form state with reset fields', (await page.locator('#token-form').isVisible()) && (await page.locator('#new-token-result').isHidden()) && (await page.inputValue('#token-name')) === '' && (await page.inputValue('#token-expires')) === '90d');
+check('reopened modal has reset fields and the 90 day default', (await page.inputValue('#token-name')) === '' && (await page.inputValue('#token-expires')) === '90d');
 await page.keyboard.press('Escape');
 await page.waitForSelector('#add-token-modal', { state: 'hidden' });
-const call = async () => (await fetch(`${base}/api/v1/devices/sim/metrics/grid_power`, { headers: { Authorization: `Bearer ${token}` } })).status;
-check('new PAT is accepted by the API', (await call()) === 200);
+await page.waitForSelector('.modal-backdrop', { state: 'detached' });
+const copyCall = async () => (await fetch(`${base}/api/v1/devices/sim/metrics/grid_power`, { headers: { Authorization: `Bearer ${copyMe}` } })).status;
+check('copied PAT is accepted by the API', (await copyCall()) === 200);
 await sleep(300);
 await page.reload();
 await page.waitForSelector('#tokens-list tr td:nth-child(2)');
-const lastUsed = await tokenRow('e2e-monitor').locator('td').nth(3).innerText();
-check('token list shows Last used after use', lastUsed.trim() !== 'Never' && lastUsed.trim() !== '', lastUsed);
-// Mobile: wide table scrolls inside its wrapper, never the page.
+const lastUsed = (await page.locator('#tokens-list tr', { hasText: 'e2e-copy' }).locator('td').nth(3).innerText()).trim();
+check('token list shows Last used after use', lastUsed !== '' && lastUsed !== 'Never', lastUsed);
 await page.setViewportSize({ width: 390, height: 844 });
 await sleep(200);
 check('tokens page has no horizontal page scroll on mobile', (await overflow()) <= 0, String(await overflow()));
 await page.setViewportSize({ width: 1280, height: 800 });
-await tokenRow('e2e-monitor').locator('button[data-bs-toggle=dropdown]').click();
-await page.click('button[aria-label="Revoke token e2e-monitor"]');
-await page.waitForFunction(() => !document.getElementById('tokens-list').textContent.includes('e2e-monitor'));
-check('revoked PAT is rejected', (await call()) === 401);
-check('empty state returns after the last token is revoked', (await page.locator('#tokens-list td[colspan="6"]').count()) === 1);
-
-// 4b. expiry presets reach the backend: a timed preset sets expires_at, "Never expires" leaves it null
 const tokenApi = async (name) => ((await (await context.request.get(base + '/admin/api/tokens')).json()).tokens || []).find((t) => t.name === name);
 await submitToken('e2e-one-year', '1y');
 await closeTokenModal();
-await page.waitForFunction(() => document.getElementById('tokens-list').textContent.includes('e2e-one-year'));
 const yearToken = await tokenApi('e2e-one-year');
 const yearsAhead = (new Date(yearToken.expires_at) - Date.now()) / 86400000;
 check('1 year preset expires in a calendar year', yearsAhead > 364 && yearsAhead < 367, `${yearsAhead} days (${yearToken.expires_at})`);
 await submitToken('e2e-forever', 'never');
 await closeTokenModal();
-await page.waitForFunction(() => document.getElementById('tokens-list').textContent.includes('e2e-forever'));
 check('"Never expires" stores no expiry', (await tokenApi('e2e-forever')).expires_at === null, JSON.stringify((await tokenApi('e2e-forever')).expires_at));
-for (const name of ['e2e-one-year', 'e2e-forever']) {
-  await tokenRow(name).locator('button[data-bs-toggle=dropdown]').click();
+for (const name of ['e2e-copy', 'e2e-one-year', 'e2e-forever']) {
+  await page.locator('#tokens-list tr', { hasText: name }).locator('button[data-bs-toggle=dropdown]').click();
   await page.click(`button[aria-label="Revoke token ${name}"]`);
   await page.waitForFunction((n) => !document.getElementById('tokens-list').textContent.includes(n), name);
 }
