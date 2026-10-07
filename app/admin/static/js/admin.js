@@ -87,6 +87,11 @@
         location.assign('/login');
       }
       const detail = data.detail;
+      // dispatch_capability_conflict (409) carries a structured detail {detail, operation_id, mode}
+      // instead of a plain string; naming the blocking operation is what makes the refusal useful.
+      if (detail && typeof detail === 'object') {
+        throw new Error(`${detail.detail || 'Conflict.'} (operation ${detail.operation_id}, mode ${detail.mode})`);
+      }
       throw new Error(typeof detail === 'string' ? detail : `Request failed (${response.status}).`);
     }
     return data;
@@ -902,6 +907,228 @@
       if (await copyToClipboard($('new-token-value').textContent)) toast('Token copied.');
       else toast('Copying is not available here. Please select and copy the token.', 'warning');
     });
+  }
+
+  // Business labels for the Energy Manager's own enums (app/energy/models.py); the admin API never
+  // sends a register name or a raw dispatch mode, so no further decoding happens here.
+  const ENERGY_ACTION_LABELS = { charge: 'Charge', discharge: 'Discharge', hold: 'Hold', auto: 'Automatic' };
+  const ENERGY_STATE_LABELS = {
+    automatic: 'Automatic', starting: 'Starting', charging: 'Charging', discharging: 'Discharging',
+    holding: 'Holding', stopping: 'Stopping', fault: 'Fault',
+  };
+  const ENERGY_REASON_LABELS = {
+    not_armed: 'Not armed', write_not_permitted: 'Write not permitted', limits_missing: 'Limits missing',
+    hardware_not_verified: 'Hardware not verified', restore_required: 'Restore required',
+  };
+  const ENERGY_POLICY_MODES = [['business_target', 'Business target'], ['below_current_soc', 'Below current SoC']];
+  const ENERGY_TARGET_ACTIONS = ['charge', 'discharge'];
+
+  function energyReadingCell(label, reading, unit) {
+    const node = element('div', 'device-metric-card');
+    const hasValue = reading && reading.value !== null && reading.value !== undefined;
+    const dd = element('dd', 'mb-0', hasValue ? formatMetric(Number(reading.value), unit) : 'n/a');
+    if (hasValue && reading.stale) setClass(dd, 'text-secondary', true);
+    node.append(element('dt', 'fw-normal', label), dd);
+    return node;
+  }
+
+  function energyCommandForm(device) {
+    const form = element('form', 'row g-2 align-items-end mb-3');
+    const actionId = `energy-action-${device.device_id}`;
+    const actionCol = element('div', 'col-auto');
+    const actionLabel = element('label', 'form-label', 'Action');
+    actionLabel.htmlFor = actionId;
+    const actionSelect = element('select', 'form-select');
+    actionSelect.id = actionId;
+    for (const item of device.actions) {
+      const option = element('option', null, ENERGY_ACTION_LABELS[item.action] || item.action);
+      option.value = item.action;
+      option.disabled = !item.available;
+      if (!item.available && item.reason) option.textContent += ` (${ENERGY_REASON_LABELS[item.reason] || item.reason})`;
+      actionSelect.append(option);
+    }
+    actionSelect.value = device.action || 'auto';
+    actionCol.append(actionLabel, actionSelect);
+
+    const targetId = `energy-target-${device.device_id}`;
+    const targetCol = element('div', 'col-auto');
+    const targetLabel = element('label', 'form-label', 'Target SoC %');
+    targetLabel.htmlFor = targetId;
+    const targetInput = element('input', 'form-control');
+    targetInput.type = 'number';
+    targetInput.id = targetId;
+    targetInput.min = String(device.target_soc_window.min);
+    targetInput.max = String(device.target_soc_window.max);
+    targetInput.step = '1';
+    if (device.target_soc_percent !== null && device.target_soc_percent !== undefined) targetInput.value = String(device.target_soc_percent);
+    targetCol.append(targetLabel, targetInput);
+
+    const toggleTarget = () => { targetCol.hidden = !ENERGY_TARGET_ACTIONS.includes(actionSelect.value); };
+    actionSelect.addEventListener('change', toggleTarget);
+    toggleTarget();
+
+    const submitCol = element('div', 'col-auto');
+    const submitButton = element('button', 'btn btn-primary', 'Send command');
+    submitButton.type = 'submit';
+    submitCol.append(submitButton);
+    form.append(actionCol, targetCol, submitCol);
+
+    form.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const body = { action: actionSelect.value };
+      if (ENERGY_TARGET_ACTIONS.includes(actionSelect.value)) {
+        if (targetInput.value === '') { toast('Target SoC is required for charge and discharge.', 'danger'); return; }
+        body.target_soc_percent = Number(targetInput.value);
+      }
+      submitButton.disabled = true;
+      try {
+        await api(`energy/devices/${encodeURIComponent(device.device_id)}/command`, { method: 'POST', body: JSON.stringify(body) });
+        toast('Command sent.');
+        await loadEnergyDevices();
+      } catch (error) { toast(messageFrom(error), 'danger'); submitButton.disabled = false; }
+    });
+    return form;
+  }
+
+  function energyPolicyForm(device) {
+    const policy = device.soc_target_policy;
+    const form = element('form', 'row g-2 align-items-end');
+    const modeId = `energy-policy-mode-${device.device_id}`;
+    const modeCol = element('div', 'col-auto');
+    const modeLabel = element('label', 'form-label', 'SoC target policy');
+    modeLabel.htmlFor = modeId;
+    const modeSelect = element('select', 'form-select');
+    modeSelect.id = modeId;
+    for (const [value, text] of ENERGY_POLICY_MODES) {
+      const option = element('option', null, text);
+      option.value = value;
+      modeSelect.append(option);
+    }
+    modeSelect.value = policy.mode;
+    modeCol.append(modeLabel, modeSelect);
+
+    const marginId = `energy-policy-margin-${device.device_id}`;
+    const marginCol = element('div', 'col-auto');
+    const marginLabel = element('label', 'form-label', 'Margin %');
+    marginLabel.htmlFor = marginId;
+    const marginInput = element('input', 'form-control');
+    marginInput.type = 'number';
+    marginInput.id = marginId;
+    marginInput.min = '0';
+    marginInput.max = '50';
+    marginInput.step = '0.1';
+    marginInput.value = String(policy.below_margin_percent);
+    marginCol.append(marginLabel, marginInput);
+
+    const submitCol = element('div', 'col-auto');
+    const submitButton = element('button', 'btn btn-outline-primary', 'Save policy');
+    submitButton.type = 'submit';
+    submitCol.append(submitButton);
+    form.append(modeCol, marginCol, submitCol);
+
+    form.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      submitButton.disabled = true;
+      try {
+        await api(`energy/devices/${encodeURIComponent(device.device_id)}/soc-target-policy`, {
+          method: 'PUT',
+          body: JSON.stringify({ mode: modeSelect.value, below_margin_percent: Number(marginInput.value), note: policy.note || null }),
+        });
+        toast('SoC target policy saved.');
+        await loadEnergyDevices();
+      } catch (error) { toast(messageFrom(error), 'danger'); submitButton.disabled = false; }
+    });
+    return form;
+  }
+
+  // Admin-only diagnostic (energy.html's own subtitle: "shows the raw gate detail behind each
+  // action"), so a refusal's capability names and reject_detail are shown raw, never softened.
+  function energyGatesBlock(device) {
+    const details = element('details', 'mt-2');
+    details.append(element('summary', 'text-secondary small', 'Gate detail (admin diagnostic)'));
+    const table = element('table', 'table table-sm table-borderless mb-0');
+    const head = element('thead');
+    const headRow = element('tr');
+    for (const label of ['Action', 'Allowed', 'Engineering mode', 'Unverified', 'Reject detail']) {
+      headRow.append(element('th', 'text-secondary small fw-normal', label));
+    }
+    head.append(headRow);
+    const bodyEl = element('tbody');
+    for (const gate of device.gates) {
+      const row = element('tr');
+      row.append(element('td', 'small', ENERGY_ACTION_LABELS[gate.action] || gate.action));
+      const allowedCell = element('td', `small ${gate.allowed ? 'text-success' : 'text-danger'}`, gate.allowed ? 'Yes' : 'No');
+      row.append(allowedCell);
+      row.append(element('td', 'small', gate.engineering_mode ? 'Yes' : 'No'));
+      row.append(element('td', 'small', gate.unverified.join(', ') || '–'));
+      row.append(element('td', 'small', gate.reject_detail || '–'));
+      bodyEl.append(row);
+    }
+    table.append(head, bodyEl);
+    details.append(table);
+    return details;
+  }
+
+  function createEnergyCard(device) {
+    const card = element('section', 'card');
+    const body = element('div', 'card-body');
+
+    const head = element('div', 'd-flex align-items-center justify-content-between flex-wrap gap-2 mb-3');
+    head.append(element('h2', 'h5 mb-0', device.device_id));
+    const armedId = `energy-armed-${device.device_id}`;
+    const armedInput = element('input', 'form-check-input');
+    armedInput.type = 'checkbox';
+    armedInput.id = armedId;
+    armedInput.checked = device.armed;
+    const armedLabel = element('label', 'form-check-label', device.armed ? 'Armed' : 'Disarmed');
+    armedLabel.htmlFor = armedId;
+    armedInput.addEventListener('change', async () => {
+      const wanted = armedInput.checked;
+      armedInput.disabled = true;
+      try {
+        await api(`energy/devices/${encodeURIComponent(device.device_id)}/armed`, { method: 'PUT', body: JSON.stringify({ armed: wanted }) });
+        toast(wanted ? 'Energy Manager armed.' : 'Energy Manager disarmed.');
+        await loadEnergyDevices();
+      } catch (error) { armedInput.checked = !wanted; armedInput.disabled = false; toast(messageFrom(error), 'danger'); }
+    });
+    const armedSwitch = element('div', 'form-check form-switch d-flex align-items-center gap-2');
+    armedSwitch.append(armedInput, armedLabel);
+    head.append(armedSwitch);
+    body.append(head);
+
+    const stateParts = [`State: ${ENERGY_STATE_LABELS[device.state] || device.state}`];
+    if (device.action) stateParts.push(`Action: ${ENERGY_ACTION_LABELS[device.action] || device.action}`);
+    if (device.stop_reason) stateParts.push(`Stopped: ${device.stop_reason}`);
+    body.append(element('p', 'text-secondary small mb-3', stateParts.join(' · ')));
+
+    const grid = element('dl', 'device-metric-grid mb-3');
+    grid.append(
+      energyReadingCell('Battery SoC', device.readings.battery_soc_percent, '%'),
+      energyReadingCell('Grid power', device.readings.grid_power_w, 'W'),
+      energyReadingCell('PV power', device.readings.pv_power_w, 'W'),
+      energyReadingCell('House load', device.readings.house_load_w, 'W'),
+    );
+    body.append(grid);
+
+    body.append(energyCommandForm(device));
+    body.append(energyPolicyForm(device));
+    body.append(energyGatesBlock(device));
+    card.append(body);
+    return card;
+  }
+
+  async function loadEnergyDevices() {
+    const host = $('energy-list');
+    let devices;
+    try { devices = await api('energy/devices'); }
+    catch (error) { host.replaceChildren(element('p', 'text-danger mb-0', messageFrom(error))); return; }
+    host.replaceChildren();
+    if (!devices.length) { host.append(element('p', 'text-secondary mb-0', 'No inverters configured yet.')); return; }
+    for (const device of devices) host.append(createEnergyCard(device));
+  }
+
+  function initEnergy() {
+    loadEnergyDevices().catch((error) => toast(messageFrom(error), 'danger'));
   }
 
   const settingFields = [
@@ -2132,6 +2359,7 @@
       await session();
       if (page === 'dashboard') { initDashboardPolling(); await Promise.all([loadDashboard(), loadMetricCount(), initSettings()]); }
       else if (page === 'tokens') initTokens();
+      else if (page === 'energy') initEnergy();
       else if (['settings', 'inverters', 'prometheus', 'tsdb'].includes(page)) {
         await initSettings();
         if (page === 'inverters' || page === 'prometheus') await initParameters();

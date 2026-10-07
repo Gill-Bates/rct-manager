@@ -15,6 +15,9 @@
 | POST | `/api/v1/devices/{device_id}/battery/dispatch` | read/write | Start or atomically replace grid charging or load-following discharge |
 | GET | `/api/v1/devices/{device_id}/battery/dispatch` | read/write | Read the current dispatch and restore state |
 | DELETE | `/api/v1/devices/{device_id}/battery/dispatch` | read/write | Stop dispatch and restore the previous inverter settings |
+| GET | `/api/v1/devices/{device_id}/energy` | read/write | Energy Manager state, readings, target window and action availability |
+| POST | `/api/v1/devices/{device_id}/energy/command` | read/write | One business action: charge, discharge, hold, auto |
+| PUT | `/api/v1/devices/{device_id}/energy/armed` | read/write | Switch the Energy Manager on or off for one inverter |
 | GET | `/api/v1/vendor/rct/objects`, `/transports`, `/devices/{device_id}/slaves` | read/write | RCT diagnostics |
 
 `/metrics` (Prometheus) and `/api/v1/metrics` (metric list) are different on
@@ -105,3 +108,29 @@ curl -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/jso
 - `DELETE` first requests 0 W and then restores the captured pre-dispatch register values.
 - `FAULT_RESTORE_PENDING` means restoration could not be confirmed. New dispatches remain blocked until restore succeeds.
 - `export_to_grid` is reserved but currently returns `409 dispatch_mode_unavailable`.
+- `hold` is a valid `mode` as well: it pins the battery at 0 W under our control, takes no
+  `target_soc_percent` and no power budget, and is gated per device like every other mode. It is
+  **not verified on hardware** — see [Energy Manager](../energy-manager.md#hold-is-unverified).
+
+## Energy Manager
+
+The Energy Manager is the business-level surface in front of battery dispatch: one action
+(`charge`, `discharge`, `hold`, `auto`) plus the stop goal `target_soc_percent` for the two that
+need one, instead of a mode, a power budget and a `valid_until`. The power limit defaults to the
+limit configured for the inverter, the command TTL is one hour and is not renewed automatically, and
+the target SoC is the business goal, not a device register value. Details, including the per-device
+armed switch and the two unverified hypotheses, are in [Energy Manager](../energy-manager.md).
+
+```sh
+curl -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"action":"charge","target_soc_percent":80}' \
+  http://127.0.0.1:8000/api/v1/devices/main/energy/command
+```
+
+- `409 energy_manager_disarmed` — the Energy Manager is off for this inverter; switch it on with
+  `PUT .../energy/armed` first.
+- `409 energy_write_support_required` — write access must be enabled (and the four dispatch
+  registers must be offered by the configured write allowlist) before the Energy Manager can be
+  switched on.
+- `409 energy_action_unavailable` — the action is not available for this inverter right now, for
+  example because its register approvals were revoked on the **Inverters** page.

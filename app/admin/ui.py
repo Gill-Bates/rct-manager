@@ -21,7 +21,7 @@ from app.admin.api import admin_session
 
 _ROOT = Path(__file__).resolve().parent
 _TEMPLATES = Jinja2Templates(directory=str(_ROOT / "templates"))
-_PAGES = {"dashboard", "inverters", "tsdb", "prometheus", "tokens", "settings", "about"}
+_PAGES = {"dashboard", "inverters", "tsdb", "prometheus", "tokens", "settings", "energy", "about"}
 _CHANGELOG = _ROOT.parent.parent / "CHANGELOG.md"
 _DEPENDENCIES = ("argon2-cffi", "cryptography", "fastapi", "jinja2", "pydantic", "pydantic-settings", "starlette", "uvicorn")
 _HEADERS = {

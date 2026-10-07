@@ -1,30 +1,135 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
 <!--
   battery_bottom.svg - base slice with the two feet, drawn from its top edge (y=0) downwards so the
   module above butts directly against it. The viewBox ends at 132, just past the feet (ink ends at
   131.4 including the 0.8 stroke), so there is no transparent margin below the tower either.
   No drop shadow here - the assembled tower gets a single one in admin.css.
 -->
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 220 132" width="220" height="132">
-<defs>
-  <linearGradient id="edgeL" x1="0" y1="0" x2="1" y2="0">
-    <stop offset="0%" stop-color="#cfd6db"/>
-    <stop offset="100%" stop-color="#f5f7f8"/>
-  </linearGradient>
-  <linearGradient id="base" x1="0" y1="0" x2="0" y2="1">
-    <stop offset="0%" stop-color="#ffffff"/>
-    <stop offset="75%" stop-color="#f2f4f5"/>
-    <stop offset="100%" stop-color="#dfe4e7"/>
-  </linearGradient>
-</defs>
-<g>
-  <path d="M18 0 H202 V100 Q202 112 194 118 H26 Q18 112 18 100 Z" fill="url(#base)" stroke="#d8dde1" stroke-width="1"/>
-  <path d="M18 0 H31 V104 Q31 112 36 118 H26 Q18 112 18 100 Z" fill="url(#edgeL)" opacity=".9"/>
-  <line x1="18" y1="1.5" x2="202" y2="1.5" stroke="#34383b" stroke-width="3"/>
-  <g fill="#25282a" stroke="#111" stroke-width=".8">
-    <rect x="30" y="116" width="8" height="12" rx="1"/>
-    <rect x="182" y="116" width="8" height="12" rx="1"/>
-    <rect x="24" y="126" width="20" height="5" rx="1.5"/>
-    <rect x="176" y="126" width="20" height="5" rx="1.5"/>
+
+<svg
+   viewBox="0 0 220 132"
+   width="220"
+   height="132"
+   version="1.1"
+   id="svg10"
+   sodipodi:docname="battery_bottom.svg"
+   inkscape:version="1.4.2 (f4327f4, 2025-05-13)"
+   xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
+   xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
+   xmlns="http://www.w3.org/2000/svg"
+   xmlns:svg="http://www.w3.org/2000/svg">
+  <sodipodi:namedview
+     id="namedview10"
+     pagecolor="#ffffff"
+     bordercolor="#000000"
+     borderopacity="0.25"
+     inkscape:showpageshadow="2"
+     inkscape:pageopacity="0.0"
+     inkscape:pagecheckerboard="0"
+     inkscape:deskcolor="#d1d1d1"
+     showgrid="false"
+     showguides="true"
+     inkscape:zoom="6.8181818"
+     inkscape:cx="92.546667"
+     inkscape:cy="78.1"
+     inkscape:window-width="2560"
+     inkscape:window-height="1369"
+     inkscape:window-x="1912"
+     inkscape:window-y="70"
+     inkscape:window-maximized="1"
+     inkscape:current-layer="svg10">
+    <sodipodi:guide
+       position="63.8,152.82667"
+       orientation="0,-1"
+       id="guide10"
+       inkscape:locked="false" />
+  </sodipodi:namedview>
+  <defs
+     id="defs5">
+    <linearGradient
+       id="edgeL"
+       x1="46.086874"
+       y1="0"
+       x2="92.173749"
+       y2="0"
+       gradientTransform="scale(0.39056673,2.5603819)"
+       gradientUnits="userSpaceOnUse">
+      <stop
+         offset="0%"
+         stop-color="#cfd6db"
+         id="stop1" />
+      <stop
+         offset="100%"
+         stop-color="#f5f7f8"
+         id="stop2" />
+    </linearGradient>
+    <linearGradient
+       id="base"
+       x1="14.035428"
+       y1="-0.62342238"
+       x2="14.035428"
+       y2="147.7511"
+       gradientTransform="scale(1.2468448,0.80202447)"
+       gradientUnits="userSpaceOnUse">
+      <stop
+         offset="0%"
+         stop-color="#ffffff"
+         id="stop3" />
+      <stop
+         offset="75%"
+         stop-color="#f2f4f5"
+         id="stop4" />
+      <stop
+         offset="100%"
+         stop-color="#dfe4e7"
+         id="stop5" />
+    </linearGradient>
+  </defs>
+  <path
+     d="m 18,0 h 184 v 100 q 0,12 -8,18 H 26 q -8,-6 -8,-18 z"
+     fill="url(#base)"
+     stroke="#d8dde1"
+     stroke-width="1"
+     id="path5"
+     style="fill:url(#base)" />
+  <path
+     d="m 18,0 h 13 v 104 q 0,8 5,14 H 26 q -8,-6 -8,-18 z"
+     fill="url(#edgeL)"
+     opacity="0.9"
+     id="path6"
+     style="fill:url(#edgeL)" />
+  <g
+     fill="#25282a"
+     stroke="#111111"
+     stroke-width="0.8"
+     id="g9">
+    <rect
+       x="30"
+       y="116"
+       width="8"
+       height="12"
+       rx="1"
+       id="rect6" />
+    <rect
+       x="182"
+       y="116"
+       width="8"
+       height="12"
+       rx="1"
+       id="rect7" />
+    <rect
+       x="24"
+       y="126"
+       width="20"
+       height="5"
+       rx="1.5"
+       id="rect8" />
+    <rect
+       x="176"
+       y="126"
+       width="20"
+       height="5"
+       rx="1.5"
+       id="rect9" />
   </g>
-</g>
 </svg>

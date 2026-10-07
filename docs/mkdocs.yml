@@ -129,6 +129,7 @@ nav:
     - Errors: api/errors.md
     - Prometheus Metrics: api/prometheus.md
   - Operation: operation.md
+  - Energy Manager: energy-manager.md
   - Development:
     - Setup: development/setup.md
     - Architecture: development/architecture.md

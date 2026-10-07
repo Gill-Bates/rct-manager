@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block title %}Energy Manager – RCT Administration{% endblock %}
+{% block content %}
+<div class="page-heading">
+    <div>
+        <h1>Energy Manager</h1>
+        <p class="text-secondary mb-0">Arm devices, issue hold/charge/discharge commands and set the SoC target
+            policy. Admin-only: shows the raw gate detail behind each action.</p>
+    </div>
+</div>
+<div id="energy-list" class="settings-grid mt-4" aria-live="polite">
+    <p class="text-secondary">Loading Energy Manager status …</p>
+</div>
+{% endblock %}
