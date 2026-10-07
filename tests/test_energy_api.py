@@ -678,9 +678,7 @@ async def test_hardware_verification_keeps_a_note_already_stored_on_a_sign_recor
             "/admin/api/dispatch/devices/main/capabilities/battery_power_sign_convention",
             headers=headers,
             json={
-                "status": "verified",
-                "verified_device_model": "RCT-Power-Storage-DC",
-                "verified_firmware": "1.0.0",
+                "status": "unverified",
                 "battery_discharge_positive": True,
                 "note": "clamp meter on PV string, 2026-01-04",
             },

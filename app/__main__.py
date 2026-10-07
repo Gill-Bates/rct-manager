@@ -117,7 +117,7 @@ def _serve(env_file: Path | None) -> int:
     settings = _load(env_file)
     if settings is None:
         return 1
-    log.info("rct-api %s starting (%s)", resolve_version(), environment())
+    log.info("rct-api %s starting (%s), pid=%d", resolve_version(), environment(), os.getpid())
     from app.api.app_factory import create_app
     from app.api.server import run_server
 

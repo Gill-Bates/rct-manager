@@ -91,6 +91,9 @@ The `PUT` body needs `verified_device_model`, `verified_firmware`, a non-empty `
 running operation of the device answers `409 dispatch_capability_conflict`. Both calls return the
 admin device status, whose capability rows now also carry the two verification flags.
 
+The `note` documents the write path only. A note already stored on one of the two sign records is
+carried over unchanged, because this form has no input field for it.
+
 The hardware verification form covers the write path and both sign conventions only. `export_limit_convention` cannot be set there; it matters only with `limit_export_during_discharge`, which is off by default.
 
 ## Hold is unverified

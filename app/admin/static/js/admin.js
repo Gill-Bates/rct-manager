@@ -1037,7 +1037,7 @@
       const reverse = watts < 0;
       setClass(line.group, 'is-reverse', reverse);
       for (const kind of new Set([positiveKind, negativeKind])) setClass(line.group, kind, kind === (reverse ? negativeKind : positiveKind));
-      const speed = Math.min(Math.max(Math.abs(watts) / 1000 * 30, 8), 160);
+      const speed = Math.min(Math.max(Math.abs(watts) / 1000 * 15, 4), 80);
       const duration = (ENERGY_DASH_PERIOD / speed).toFixed(2);
       if (line.duration !== duration) {
         line.dots.style.setProperty('--flow-dur', `${duration}s`);
