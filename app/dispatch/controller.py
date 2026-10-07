@@ -36,11 +36,20 @@ from app.dispatch.models import (
     StopReason,
     phase_for,
 )
+from app.dispatch.soc_policy import SocTargetPolicy, SocTargetPolicyRegistry
 from app.dispatch.store import DispatchStore
 from app.dispatch.strategy import calculate_setpoint, target_reached
 from app.errors import DeviceApiError
 
 log = logging.getLogger(__name__)
+
+# The state a successfully applied command leaves the device in. A table rather than a conditional
+# so a new mode without a state cannot silently inherit another mode's.
+_STATE_FOR_MODE = {
+    DispatchMode.CHARGE_FROM_GRID: DispatchState.CHARGING,
+    DispatchMode.DISCHARGE_TO_LOAD: DispatchState.DISCHARGING,
+    DispatchMode.HOLD: DispatchState.HOLDING,
+}
 
 
 class DispatchRejected(DeviceApiError):
@@ -87,6 +96,7 @@ class DispatchController:
         limits: dict[str, DeviceLimits],
         *,
         capabilities: CapabilityRegistry,
+        soc_target_policies: SocTargetPolicyRegistry,
     ) -> None:
         self._gateway = gateway
         self._store = store
@@ -96,6 +106,9 @@ class DispatchController:
         # The very same registry instance the adapter reads from: a second instance would be a
         # second truth, and a capability update has to take effect live, without a restart.
         self._capabilities = capabilities
+        # Same single-instance rule as the capabilities: the adapter reads the policy this
+        # controller writes, so an operator change takes effect on the next apply without a restart.
+        self._soc_target_policies = soc_target_policies
         self._locks: dict[str, asyncio.Lock] = {}
 
     def _lock(self, device_id: str) -> asyncio.Lock:
@@ -150,12 +163,20 @@ class DispatchController:
             now = self._clock.now()
             if command.valid_until.tzinfo is None or command.valid_until <= now:
                 raise DispatchRejected("value_out_of_range")
-            if not math.isfinite(command.target_soc_percent) or not math.isfinite(command.max_power_w):
-                raise DispatchRejected("value_not_finite")
-            if not self._config.min_soc <= command.target_soc_percent <= self._config.max_soc:
-                raise DispatchRejected("value_out_of_range")
-            if command.max_power_w <= 0:
-                raise DispatchRejected("value_out_of_range")
+            if command.mode is DispatchMode.HOLD:
+                # A hold has no SoC goal and no power budget; anything else is a programming error
+                # upstream, not an operator value out of range.
+                if command.target_soc_percent is not None or command.max_power_w != 0.0:
+                    raise DispatchRejected("invalid_request")
+            else:
+                if command.target_soc_percent is None:
+                    raise DispatchRejected("invalid_request")
+                if not math.isfinite(command.target_soc_percent) or not math.isfinite(command.max_power_w):
+                    raise DispatchRejected("value_not_finite")
+                if not self._config.min_soc <= command.target_soc_percent <= self._config.max_soc:
+                    raise DispatchRejected("value_out_of_range")
+                if command.max_power_w <= 0:
+                    raise DispatchRejected("value_out_of_range")
             limits = self._limits.get(device_id)
             if limits is None:
                 raise DispatchRejected("dispatch_limits_missing")
@@ -202,12 +223,17 @@ class DispatchController:
                 current.stop_reason = StopReason.TARGET_REACHED
                 await self._put(current)
                 return self._status(current)
-            maximum = (
-                limits.max_charge_power_w
-                if command.mode is DispatchMode.CHARGE_FROM_GRID
-                else limits.max_discharge_power_w
-            )
-            effective_power = min(command.max_power_w, maximum)
+            if command.mode is DispatchMode.HOLD:
+                # DeviceLimits is still required above (the gate and the TTL cap need it); only the
+                # power lookup is skipped, because a hold commands no power at all.
+                effective_power = 0.0
+            else:
+                maximum = (
+                    limits.max_charge_power_w
+                    if command.mode is DispatchMode.CHARGE_FROM_GRID
+                    else limits.max_discharge_power_w
+                )
+                effective_power = min(command.max_power_w, maximum)
             # Engineering mode drives unverified hardware, so an unattended setpoint must expire
             # sooner than in normal operation.
             ttl_cap = (
@@ -245,20 +271,22 @@ class DispatchController:
                     raise DispatchRejected("dispatch_snapshot_stale")
             record.state = DispatchState.REPLACING if replacing else DispatchState.APPLYING
             record.restore_required = True
-            steps = ["control_mode", "soc_target", "grid_charge"]
-            steps.append("setpoint")
+            steps = ["control_mode"]
+            if command.mode is not DispatchMode.HOLD:
+                # A hold has no SoC goal, so there is no SoC target to write. _apply() executes
+                # exactly this durable plan by step name, so plan and execution cannot drift.
+                steps.append("soc_target")
+            steps += ["grid_charge", "setpoint"]
             record.plan = [{"name": name, "status": "planned"} for name in steps]
             await self._put(record)  # snapshot and complete plan before writes
             try:
-                await self._apply(record)
+                # The SoC submit() already read is handed down: _apply() adds no device read, and
+                # the derivation of the device-level SoC target needs the measured value.
+                await self._apply(record, soc_percent=soc)
             except DeviceApiError as exc:
                 await self._restore(record, StopReason.DEVICE_ERROR, getattr(exc, "code", "internal_error"))
                 raise
-            record.state = (
-                DispatchState.CHARGING
-                if command.mode is DispatchMode.CHARGE_FROM_GRID
-                else DispatchState.DISCHARGING
-            )
+            record.state = _STATE_FOR_MODE[command.mode]
             record.restore_required = False
             await self._put(record)
             return self._status(record, replaced=replacing)
@@ -285,39 +313,71 @@ class DispatchController:
         record.plan[index]["status"] = "confirmed"
         await self._put(record)
 
-    async def _apply(self, record: DispatchRecord) -> None:
-        assert record.intent is not None
-        index = 0
-        await self._step(record, index, lambda: self._gateway.apply_control_mode(record.device_id, external=True))
-        index += 1
-        await self._step(
-            record,
-            index,
-            lambda: self._gateway.apply_soc_target(record.device_id, record.intent.target_soc_percent),
-        )
-        index += 1
-        assert record.snapshot is not None
-        grid_charge_enabled = (
-            True
-            if record.intent.mode is DispatchMode.CHARGE_FROM_GRID
-            else record.snapshot.grid_charge_enabled
-        )
-        await self._step(
-            record,
-            index,
-            lambda: self._gateway.apply_grid_charge(record.device_id, enabled=grid_charge_enabled),
-        )
-        index += 1
-        telemetry = await self._gateway.read_control_telemetry(record.device_id)
-        desired = calculate_setpoint(
-            record.intent.mode,
-            telemetry,
-            target_soc_percent=record.intent.target_soc_percent,
-            max_power_w=record.intent.max_power_w,
-            config=self._config,
-            last=PowerSetpoint(),
-        )
-        await self._step(record, index, lambda: self._gateway.apply_setpoint(record.device_id, desired))
+    def _writer(
+        self,
+        record: DispatchRecord,
+        name: str,
+        *,
+        desired: PowerSetpoint,
+        grid_charge_enabled: bool,
+        soc_percent: float,
+    ):
+        """The write one named plan step performs. An unknown name is a ``KeyError``: that is a
+        programming error, not operator input, and loud is correct.
+        """
+        intent = record.intent
+        assert intent is not None
+        if name == "control_mode":
+            return lambda: self._gateway.apply_control_mode(record.device_id, external=True)
+        if name == "soc_target":
+            # The business stop goal, the mode and the measured SoC go to the adapter; which raw
+            # value the device's SoC-target register wants is the adapter's decision alone.
+            return lambda: self._gateway.apply_soc_target(
+                record.device_id,
+                dispatch_mode=intent.mode,
+                stop_target_percent=intent.target_soc_percent,
+                soc_percent=soc_percent,
+            )
+        if name == "grid_charge":
+            return lambda: self._gateway.apply_grid_charge(record.device_id, enabled=grid_charge_enabled)
+        if name == "setpoint":
+            return lambda: self._gateway.apply_setpoint(record.device_id, desired)
+        raise KeyError(name)
+
+    async def _apply(self, record: DispatchRecord, *, soc_percent: float) -> None:
+        assert record.intent is not None and record.snapshot is not None
+        if record.intent.mode is DispatchMode.CHARGE_FROM_GRID:
+            grid_charge_enabled = True
+        elif record.intent.mode is DispatchMode.HOLD:
+            grid_charge_enabled = False  # holding must not let the grid charge the battery
+        else:
+            grid_charge_enabled = record.snapshot.grid_charge_enabled
+        desired = PowerSetpoint()
+        # Dispatch by step name over the durable plan: an omitted step must not shift the index of
+        # every later step against record.plan's own bookkeeping.
+        for index, step in enumerate(record.plan):
+            if step["name"] == "setpoint":
+                # The telemetry read stays immediately before the setpoint write.
+                telemetry = await self._gateway.read_control_telemetry(record.device_id)
+                desired = calculate_setpoint(
+                    record.intent.mode,
+                    telemetry,
+                    target_soc_percent=record.intent.target_soc_percent,
+                    max_power_w=record.intent.max_power_w,
+                    config=self._config,
+                    last=PowerSetpoint(),
+                )
+            await self._step(
+                record,
+                index,
+                self._writer(
+                    record,
+                    step["name"],
+                    desired=desired,
+                    grid_charge_enabled=grid_charge_enabled,
+                    soc_percent=soc_percent,
+                ),
+            )
         record.last_commanded = desired
         record.last_write_at = self._clock.now()
 
@@ -332,7 +392,11 @@ class DispatchController:
                 if record.next_restore_at is not None and self._clock.now() >= record.next_restore_at:
                     await self._restore(record, record.stop_reason or StopReason.DEVICE_ERROR, record.fault_code)
                 return self._status(record)
-            if record.state not in (DispatchState.CHARGING, DispatchState.DISCHARGING):
+            if record.state not in (
+                DispatchState.CHARGING,
+                DispatchState.DISCHARGING,
+                DispatchState.HOLDING,
+            ):
                 return self._status(record)
             assert record.intent is not None
             if self._clock.now() >= record.intent.valid_until:
@@ -480,11 +544,33 @@ class DispatchController:
             await asyncio.to_thread(self._store.put_device_config, device_id, limits)
             self._limits[device_id] = limits
 
+    async def set_soc_target_policy(self, device_id: str, policy: SocTargetPolicy) -> None:
+        """Persist how one device derives its device-level SoC target, then take it over.
+
+        The single writer of the policy table, for the same reasons ``set_capability`` is the single
+        writer of the capability table: the write runs off the event loop under the per-device lock,
+        it is refused while an operation of that device is active (the derivation would change under
+        an applied setpoint), and the registry the adapter reads is updated only after the commit.
+        """
+        if policy.device_id != device_id:
+            raise ValueError("soc target policy belongs to another device")
+        async with self._lock(device_id):
+            current = await self._get(device_id)
+            blocking_mode = self._active_mode_blocking(current)
+            if blocking_mode is not None:
+                assert current.intent is not None
+                raise CapabilityConflict(device_id, current.intent.operation_id, blocking_mode)
+            await asyncio.to_thread(self._store.put_soc_target_policy, policy)
+            self._soc_target_policies.replace(policy)
+
     def capabilities(self, device_id: str) -> tuple[CapabilityRecord, ...]:
         return self._capabilities.all(device_id)
 
     def device_limits(self, device_id: str) -> DeviceLimits | None:
         return self._limits.get(device_id)
+
+    def soc_target_policy(self, device_id: str) -> SocTargetPolicy:
+        return self._soc_target_policies.policy(device_id)
 
     async def force_restore_or_raise(self, device_id: str) -> None:
         """Synchronously drive ``device_id`` to a clean, restored state before its transport is

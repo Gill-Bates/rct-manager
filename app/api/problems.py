@@ -72,6 +72,9 @@ class ErrorCode(StrEnum):
     DISPATCH_CAPABILITY_CONFLICT = "dispatch_capability_conflict"
     DISPATCH_RECORD_CORRUPT = "dispatch_record_corrupt"
     DISPATCH_SNAPSHOT_STALE = "dispatch_snapshot_stale"
+    ENERGY_MANAGER_DISARMED = "energy_manager_disarmed"
+    ENERGY_WRITE_SUPPORT_REQUIRED = "energy_write_support_required"
+    ENERGY_ACTION_UNAVAILABLE = "energy_action_unavailable"
     # Field-level keys: they appear only inside ``errors``, never as a top-level code.
     INVALID_FLOAT = "invalid_float"
     DECODE_LENGTH_MISMATCH = "decode_length_mismatch"
@@ -122,6 +125,9 @@ STATUS: dict[ErrorCode, int] = {
     E.DISPATCH_CAPABILITY_CONFLICT: 409,
     E.DISPATCH_RECORD_CORRUPT: 503,
     E.DISPATCH_SNAPSHOT_STALE: 503,
+    E.ENERGY_MANAGER_DISARMED: 409,
+    E.ENERGY_WRITE_SUPPORT_REQUIRED: 409,
+    E.ENERGY_ACTION_UNAVAILABLE: 409,
 }
 
 _TEXT: dict[ErrorCode, tuple[str, str]] = {
@@ -176,6 +182,18 @@ _TEXT: dict[ErrorCode, tuple[str, str]] = {
     E.DISPATCH_SNAPSHOT_STALE: (
         "Dispatch snapshot stale",
         "The device state could not be read freshly enough to start a new dispatch; retry.",
+    ),
+    E.ENERGY_MANAGER_DISARMED: (
+        "Energy Manager is off",
+        "Energy Manager is off - switch it on for this inverter first.",
+    ),
+    E.ENERGY_WRITE_SUPPORT_REQUIRED: (
+        "Write access required",
+        "Write access must be enabled before the Energy Manager can be switched on.",
+    ),
+    E.ENERGY_ACTION_UNAVAILABLE: (
+        "Action unavailable",
+        "This action is not available for this inverter right now.",
     ),
 }
 
@@ -336,12 +354,22 @@ def _is_write_path(request: Request) -> bool:
     path = request.url.path.rstrip("/").split("/")
     if path[:4] != ["", "api", "v1", "devices"]:
         return False
-    if len(path) != 7:
+    # Bounded, never dropped: the energy status sits at depth 6, every other pattern at depth 7.
+    # This runs inside the global HTTP exception handler, where an IndexError on /api/v1/devices or
+    # /api/v1/devices/main would turn a plain 404 into an unhandled 500, so each clause below
+    # checks its own length too.
+    if not 6 <= len(path) <= 7:
         return False
     return (
-        (request.method == "PUT" and path[5] == "metrics")
-        or (request.method == "POST" and path[5] == "actions")
-        or (path[5:7] == ["battery", "dispatch"] and request.method in {"POST", "GET", "DELETE"})
+        (len(path) == 7 and request.method == "PUT" and path[5] == "metrics")
+        or (len(path) == 7 and request.method == "POST" and path[5] == "actions")
+        or (
+            len(path) == 7
+            and path[5:7] == ["battery", "dispatch"]
+            and request.method in {"POST", "GET", "DELETE"}
+        )
+        or (len(path) == 6 and path[5] == "energy" and request.method == "GET")
+        or (len(path) == 7 and path[5] == "energy" and path[6] in ("command", "armed"))
     )
 
 

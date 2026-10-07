@@ -7,9 +7,19 @@
 """RCT adapter for the vendor-neutral battery dispatch port (REQ-054/055)."""
 
 from app.dispatch.capabilities import CapabilityName, CapabilityRegistry
-from app.dispatch.models import ControlTelemetry, DeviceControlSnapshot, PowerSetpoint
+from app.dispatch.models import (
+    ControlTelemetry,
+    DeviceControlSnapshot,
+    DispatchMode,
+    PowerSetpoint,
+)
+from app.dispatch.soc_policy import SocTargetPolicyRegistry
 from app.errors import DeviceApiError
-from app.gateway.conventions import RctBatteryPowerConvention, RctGridPowerConvention
+from app.gateway.conventions import (
+    RctBatteryPowerConvention,
+    RctGridPowerConvention,
+    RctSocTargetConvention,
+)
 from app.gateway.rct import RctGateway
 
 
@@ -26,6 +36,7 @@ class RctDispatchGateway:
         gateway: RctGateway,
         *,
         capabilities: CapabilityRegistry,
+        soc_target_policies: SocTargetPolicyRegistry,
         write_soc_target: bool = False,
         limit_export_during_discharge: bool = False,
     ) -> None:
@@ -37,6 +48,9 @@ class RctDispatchGateway:
         # The capability values are read per call and per device instead: they differ between the
         # devices of one process, and a verification has to take effect live, without a restart.
         self._capabilities = capabilities
+        # Same reasoning for the SoC-target derivation policy, and the same single instance the
+        # controller writes to: an operator change must reach the adapter that writes the register.
+        self._soc_target_policies = soc_target_policies
 
     def _battery_convention(self, device_id: str) -> RctBatteryPowerConvention:
         record = self._capabilities.record(device_id, CapabilityName.BATTERY_POWER_SIGN)
@@ -112,8 +126,22 @@ class RctDispatchGateway:
             self._battery_convention(device_id).target(setpoint),
         )
 
-    async def apply_soc_target(self, device_id: str, percent: float):
-        return await self._rct.write_metric(device_id, "power_mng_soc_target_set", float(percent) / 100.0)
+    async def apply_soc_target(
+        self,
+        device_id: str,
+        *,
+        dispatch_mode: DispatchMode,
+        stop_target_percent: float,
+        soc_percent: float,
+    ):
+        policy = self._soc_target_policies.policy(device_id)
+        try:
+            ratio = RctSocTargetConvention(policy.mode, policy.below_margin_percent).register_ratio(
+                dispatch_mode, stop_target_percent=stop_target_percent, soc_percent=soc_percent
+            )
+        except ValueError as exc:
+            raise DeviceApiError("protocol_error", name="power_mng_soc_target_set") from exc
+        return await self._rct.write_metric(device_id, "power_mng_soc_target_set", ratio)
 
     async def apply_control_mode(self, device_id: str, *, external: bool):
         # Second, independent lock next to the controller's capability gate (defense in depth): a

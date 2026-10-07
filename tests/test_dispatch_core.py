@@ -36,10 +36,12 @@ from app.dispatch.models import (
     PowerSetpoint,
     StopReason,
 )
+from app.dispatch.soc_policy import SocTargetPolicyRegistry
 from app.dispatch.store import DispatchStore
 from app.dispatch.strategy import calculate_setpoint
 from app.errors import DeviceApiError
 from app.gateway.base import WriteOutcome
+from app.gateway.conventions import RctSocTargetConvention
 from tests.conftest import ManualClock
 
 
@@ -218,7 +220,9 @@ def test_dispatch_store_upgrade_adds_only_the_new_tables_and_keeps_the_old_row(t
     store = version_1_database(tmp_path / "dispatch.db", "s" * 48, _V1_ROW)
     store.initialize()
     with store.connect() as db:
-        assert int(db.execute("PRAGMA user_version").fetchone()[0]) == 2
+        # A version 1 file now lands on the current schema version in one go (see
+        # tests/test_energy_store.py for the 2 -> 3 step on its own).
+        assert int(db.execute("PRAGMA user_version").fetchone()[0]) == 3
         tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         assert {"dispatch_operations", "dispatch_capabilities", "dispatch_device_config"} <= tables
         assert db.execute("PRAGMA synchronous").fetchone()[0] == 2
@@ -295,10 +299,12 @@ def test_dispatch_store_detects_a_capability_blob_moved_to_another_row(tmp_path:
 
 
 class FakeDispatchGateway:
-    def __init__(self, clock: ManualClock) -> None:
+    def __init__(self, clock: ManualClock, *, soc_target_policies: SocTargetPolicyRegistry | None = None) -> None:
         self.clock = clock
         self.calls: list[tuple] = []
         self.fail_restore = False
+        # The same registry instance the controller writes to, exactly as in production.
+        self.soc_target_policies = soc_target_policies or SocTargetPolicyRegistry()
 
     def outcome(self, name: str, value=0) -> WriteOutcome:
         return WriteOutcome(name, value, value, True, False, self.clock.now())
@@ -319,9 +325,22 @@ class FakeDispatchGateway:
         self.calls.append(("setpoint", setpoint.direction, setpoint.watts))
         return self.outcome("power", setpoint.watts)
 
-    async def apply_soc_target(self, device_id: str, percent: float) -> WriteOutcome:
-        self.calls.append(("soc_target", percent))
-        return self.outcome("soc", percent)
+    async def apply_soc_target(
+        self,
+        device_id: str,
+        *,
+        dispatch_mode: DispatchMode,
+        stop_target_percent: float,
+        soc_percent: float,
+    ) -> WriteOutcome:
+        # The fake stands in for the RCT adapter, so it records what the adapter would write: the
+        # derived register ratio, never the business stop goal it was handed.
+        policy = self.soc_target_policies.policy(device_id)
+        ratio = RctSocTargetConvention(policy.mode, policy.below_margin_percent).register_ratio(
+            dispatch_mode, stop_target_percent=stop_target_percent, soc_percent=soc_percent
+        )
+        self.calls.append(("soc_target", ratio))
+        return self.outcome("soc", ratio)
 
     async def apply_control_mode(self, device_id: str, *, external: bool) -> WriteOutcome:
         self.calls.append(("control", external))
@@ -384,6 +403,7 @@ def controller_with_store(
         config or DispatchConfig(),
         limits if limits is not None else {"main": DeviceLimits(3000, 5000)},
         capabilities=capabilities if capabilities is not None else verified_registry("main"),
+        soc_target_policies=gateway.soc_target_policies,
     )
 
 
@@ -431,7 +451,7 @@ async def test_charge_apply_and_cancel_restores_snapshot(tmp_path: Path) -> None
         ("read_soc", "main"),
         ("snapshot", "main"),
         ("control", True),
-        ("soc_target", 80),
+        ("soc_target", 0.8),
         ("grid_charge", True),
         ("telemetry", "main"),
     ]

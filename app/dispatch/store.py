@@ -22,6 +22,8 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 from app.dispatch.capabilities import CapabilityRecord
 from app.dispatch.models import DeviceLimits, DispatchRecord, DispatchRecordCorrupt
+from app.dispatch.soc_policy import SocTargetMode, SocTargetPolicy
+from app.energy.models import ArmedRecord
 
 log = logging.getLogger(__name__)
 
@@ -45,6 +47,26 @@ _SCHEMA_V2 = """
         encrypted        BLOB NOT NULL
     ) STRICT;
     PRAGMA user_version = 2;
+"""
+
+# user_version 3 is strictly additive as well: it adds the Energy Manager's armed state and the
+# per-device SoC-target derivation policy. `armed` and `mode` stay in cleartext for the same
+# documented reason `state`, `status` and `engineering_mode` do — an operator must be able to see
+# whether a device is armed, and how its target is derived, while the service is down or after an
+# HMAC_SECRET rotation. They are state names, not secrets.
+_SCHEMA_V3 = """
+    CREATE TABLE energy_manager_state (
+        device_id TEXT PRIMARY KEY,
+        armed     INTEGER NOT NULL CHECK(armed IN (0,1)),
+        encrypted BLOB NOT NULL
+    ) STRICT;
+
+    CREATE TABLE dispatch_soc_target_policy (
+        device_id TEXT PRIMARY KEY,
+        mode      TEXT NOT NULL,
+        encrypted BLOB NOT NULL
+    ) STRICT;
+    PRAGMA user_version = 3;
 """
 
 
@@ -85,7 +107,7 @@ class DispatchStore:
         with self.connect() as db:
             db.execute("PRAGMA journal_mode = WAL")
             version = int(db.execute("PRAGMA user_version").fetchone()[0])
-            if version not in (0, 1, 2):
+            if version not in (0, 1, 2, 3):
                 raise ValueError("unsupported dispatch database version")
             if version == 0:
                 db.executescript("""
@@ -103,6 +125,11 @@ class DispatchStore:
                 # dispatch_operations and every row in it stay exactly as they are, so an update
                 # cannot lose the restore duty a persisted operation carries.
                 db.executescript(_SCHEMA_V2)
+            if version in (0, 1, 2):
+                # Upgrade 2 -> 3: two new tables and the version bump, nothing else. A code
+                # downgrade afterwards is not supported — the older initialize() rejects version 3,
+                # so a rollback means restoring the dispatch database from a backup.
+                db.executescript(_SCHEMA_V3)
 
     def _encode(self, device_id: str, record: DispatchRecord, *, version: int | None = None) -> bytes:
         # `version` lets `put()` encode the pending next version without first writing it onto the
@@ -247,6 +274,92 @@ class DispatchStore:
                    ON CONFLICT(device_id) DO UPDATE SET engineering_mode=excluded.engineering_mode,
                        encrypted=excluded.encrypted""",
                 (device_id, int(limits.engineering_mode), encrypted),
+            )
+
+    def get_energy_states(self) -> dict[str, ArmedRecord]:
+        """Every readable armed record. A row that cannot be decrypted is skipped and reported, so
+        the device reads as *not armed* — fail closed, never silently defaulted to armed.
+        """
+        with self.connect() as db:
+            rows = db.execute("SELECT device_id,armed,encrypted FROM energy_manager_state").fetchall()
+        states: dict[str, ArmedRecord] = {}
+        for row in rows:
+            device_id = row["device_id"]
+            try:
+                data = self._decrypt(device_id, row["encrypted"])
+                armed_at = data.get("armed_at")
+                states[device_id] = ArmedRecord(
+                    device_id=device_id,
+                    armed=bool(row["armed"]),
+                    added_write_names=tuple(data.get("added_write_names") or ()),
+                    armed_at=datetime.fromisoformat(armed_at) if armed_at else None,
+                    armed_by=data.get("armed_by"),
+                )
+            except (ValueError, TypeError):
+                log.error(
+                    "Energy manager state for device %s is unreadable and was skipped; the device "
+                    "reads as not armed",
+                    device_id,
+                )
+        return states
+
+    def put_energy_state(self, record: ArmedRecord) -> None:
+        encrypted = self._encrypt(
+            record.device_id,
+            {
+                "added_write_names": list(record.added_write_names),
+                "armed_at": record.armed_at.isoformat() if record.armed_at is not None else None,
+                "armed_by": record.armed_by,
+            },
+        )
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            db.execute(
+                """INSERT INTO energy_manager_state(device_id,armed,encrypted)
+                   VALUES(?,?,?)
+                   ON CONFLICT(device_id) DO UPDATE SET armed=excluded.armed,
+                       encrypted=excluded.encrypted""",
+                (record.device_id, int(record.armed), encrypted),
+            )
+
+    def get_soc_target_policies(self) -> dict[str, SocTargetPolicy]:
+        """Every readable derivation policy. An unreadable row is skipped and reported, so the
+        device falls back to the shipped ``BUSINESS_TARGET`` default (today's behaviour).
+        """
+        with self.connect() as db:
+            rows = db.execute("SELECT device_id,mode,encrypted FROM dispatch_soc_target_policy").fetchall()
+        policies: dict[str, SocTargetPolicy] = {}
+        for row in rows:
+            device_id = row["device_id"]
+            try:
+                data = self._decrypt(device_id, row["encrypted"])
+                policies[device_id] = SocTargetPolicy(
+                    device_id=device_id,
+                    mode=SocTargetMode(row["mode"]),
+                    below_margin_percent=float(data["below_margin_percent"]),
+                    note=data.get("note"),
+                )
+            except (ValueError, TypeError, KeyError):
+                log.error(
+                    "SoC target policy for device %s is unreadable and was skipped; the device "
+                    "falls back to the business target default",
+                    device_id,
+                )
+        return policies
+
+    def put_soc_target_policy(self, policy: SocTargetPolicy) -> None:
+        encrypted = self._encrypt(
+            policy.device_id,
+            {"below_margin_percent": policy.below_margin_percent, "note": policy.note},
+        )
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            db.execute(
+                """INSERT INTO dispatch_soc_target_policy(device_id,mode,encrypted)
+                   VALUES(?,?,?)
+                   ON CONFLICT(device_id) DO UPDATE SET mode=excluded.mode,
+                       encrypted=excluded.encrypted""",
+                (policy.device_id, policy.mode.value, encrypted),
             )
 
     def delete(self, device_id: str) -> None:

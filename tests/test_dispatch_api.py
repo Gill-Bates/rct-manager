@@ -112,6 +112,93 @@ async def test_grid_charge_then_delete_restores_device(tmp_path: Path) -> None:
         assert stopped.json()["restore_required"] is False
 
 
+async def test_an_existing_request_body_produces_the_recorded_response(tmp_path: Path) -> None:
+    """AC-16: the body an existing client sends today must still produce the same response, field
+    for field. Recorded here so a regression shows up as a diff instead of as a silent change.
+    """
+    async with running_app(settings(tmp_path)) as harness:
+        seed_payloads(harness)
+        response = await harness.client.post(
+            "/api/v1/devices/main/battery/dispatch",
+            headers=WRITER,
+            json={
+                "mode": "charge_from_grid",
+                "target_soc_percent": 80,
+                "max_power_w": 4000,
+                "valid_until": (datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+            },
+        )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    # Generated per operation, so they are asserted for shape rather than value.
+    assert isinstance(body.pop("operation_id"), str)
+    assert isinstance(body.pop("valid_until"), str)
+    assert body == {
+        "device_id": "main",
+        "mode": "charge_from_grid",
+        "state": "charging",
+        "phase": "controlling",
+        "control_state": "controlled",
+        "restore_required": False,
+        "target_soc_percent": 80.0,
+        "max_power_w": 3000.0,
+        "max_power_w_requested": 4000.0,
+        "max_power_w_clamped": True,
+        "commanded_direction": "charge",
+        "commanded_power_w": 3000.0,
+        "stop_reason": None,
+        "fault_code": None,
+        "replaced": False,
+    }
+
+
+async def test_a_hold_body_is_accepted_and_reports_a_held_battery(tmp_path: Path) -> None:
+    """`hold` carries no SoC goal and no power budget; the commanded figures carry the zero."""
+    async with running_app(settings(tmp_path)) as harness:
+        seed_payloads(harness)
+        response = await harness.client.post(
+            "/api/v1/devices/main/battery/dispatch",
+            headers=WRITER,
+            json={
+                "mode": "hold",
+                "max_power_w": 0,
+                "valid_until": (datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+            },
+        )
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["state"] == "holding"
+        assert body["phase"] == "controlling"
+        assert body["control_state"] == "controlled"
+        assert body["target_soc_percent"] is None
+        assert body["max_power_w"] == 0.0
+        assert body["commanded_direction"] == "none"
+        assert body["commanded_power_w"] == 0.0
+        stopped = await harness.client.delete("/api/v1/devices/main/battery/dispatch", headers=WRITER)
+        assert stopped.status_code == 200, stopped.text
+        assert stopped.json()["state"] == "idle"
+
+
+async def test_mode_dependent_bodies_are_rejected_before_the_device_is_touched(tmp_path: Path) -> None:
+    valid_until = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+    bad_bodies = [
+        {"mode": "hold", "target_soc_percent": 80, "max_power_w": 0, "valid_until": valid_until},
+        {"mode": "hold", "max_power_w": 500, "valid_until": valid_until},
+        {"mode": "charge_from_grid", "max_power_w": 2000, "valid_until": valid_until},
+        {"mode": "charge_from_grid", "target_soc_percent": 80, "max_power_w": 0, "valid_until": valid_until},
+    ]
+    async with running_app(settings(tmp_path)) as harness:
+        seed_payloads(harness)
+        for body in bad_bodies:
+            response = await harness.client.post(
+                "/api/v1/devices/main/battery/dispatch", headers=WRITER, json=body
+            )
+            assert response.status_code == 422, (body, response.text)
+            assert response.json()["code"] == "invalid_request"
+        status = await harness.client.get("/api/v1/devices/main/battery/dispatch", headers=WRITER)
+        assert status.json()["state"] == "idle"
+
+
 async def test_dispatch_requires_write_role(tmp_path: Path) -> None:
     async with running_app(settings(tmp_path)) as harness:
         response = await harness.client.get("/api/v1/devices/main/battery/dispatch")

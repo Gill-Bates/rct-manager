@@ -1,0 +1,655 @@
+#!/usr/bin/env python3
+#
+# tests/test_energy_api.py
+# Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
+#
+
+"""The Energy Manager HTTP surfaces, end to end against the fake inverter network.
+
+Two properties are pinned here that no unit test can prove: the public ``/api/v1`` contract carries
+business semantics only — no register name, no raw strategy code, no byte width, no sign flag — and
+the one GET serves the whole card, readings included, without costing a device transaction per poll.
+"""
+
+import json
+import re
+from pathlib import Path
+
+import pytest
+from starlette.requests import Request
+
+from app.admin.store import AdminStore
+from app.api.app_factory import _ENERGY_METRIC_NAMES, create_app
+from app.api.problems import _is_write_path
+from app.catalog.registry import RegistryCatalog
+from app.scheduling.shutdown import ShutdownPlan
+from tests.api_helpers import (
+    DISPATCH_WRITE_NAMES,
+    HOST,
+    PORT,
+    READ_TOKEN,
+    WRITE_TOKEN,
+    dispatch_capabilities,
+    dispatch_fixtures,
+    float_payload,
+    make_settings,
+    running_app,
+)
+
+WRITER = {"Authorization": f"Bearer {WRITE_TOKEN}"}
+READER = {"Authorization": f"Bearer {READ_TOKEN}"}
+SECRET = "d" * 48
+PASSWORD = "replacement-test-password"
+ROOT = Path(__file__).resolve().parents[1]
+
+# Seeded as the operator's existing selection: one of the four, deliberately not the first required
+# name, so the add-only union's order is observable in the admin store afterwards.
+PRE_APPROVED = ("power_mng_use_grid_power_enable",)
+# A narrowed Prometheus selection: without the Energy Manager pinning its own metric names the
+# readings would go dark here.
+EXPOSED = ["battery_power"]
+
+
+def energy_settings(tmp_path: Path, *, unpinned: bool = True, **overrides):
+    """A dispatch-capable app whose admin store already holds an operator selection.
+
+    ``unpinned`` removes the ``preselected`` flag from the Energy Manager's own metrics in the
+    registry fixture, so the periodic list contains them only if ``_with_energy_metric_names()``
+    actually pinned them.
+    """
+    paths = dispatch_fixtures(tmp_path)
+    if unpinned:
+        registry = json.loads(Path(paths["object_registry_path"]).read_text(encoding="utf-8"))
+        for entry in registry["entries"]:
+            if entry["name"] in _ENERGY_METRIC_NAMES:
+                entry["preselected"] = False
+        Path(paths["object_registry_path"]).write_text(json.dumps(registry), encoding="utf-8")
+    admin_path = tmp_path / "admin.db"
+    store = AdminStore(admin_path, SECRET)
+    password = store.initialize()
+    assert password is not None
+    assert store.change_password(password, PASSWORD)
+    store.put_many({"write_names": list(PRE_APPROVED), "exposed_names": EXPOSED})
+    store.close()
+    base = {
+        "enable_write_support": True,
+        "hmac_secret": SECRET,
+        "admin_db_path": admin_path,
+        # The dispatch gate blocks unverified hardware, so an integration test that drives a device
+        # has to seed the verification of exactly that device explicitly.
+        "dispatch_db_path": dispatch_capabilities(tmp_path, ("main", "slave1"), secret=SECRET),
+        "dispatch_max_charge_power_w": 3000,
+        "dispatch_max_discharge_power_w": 5000,
+        "write_response_timeout_ms": 50,
+    }
+    return make_settings(**{**base, **paths, **overrides})
+
+
+def seed_payloads(harness) -> None:
+    catalog = RegistryCatalog.from_file(harness.runtime.settings.object_registry_path)
+    values = {
+        "battery_soc": float_payload(0.5),
+        "grid_power": float_payload(1200),
+        "battery_power": float_payload(0),
+        "household_load_power": float_payload(800),
+        "solar_a_power": float_payload(1500),
+        "solar_b_power": float_payload(900),
+        "power_mng_soc_strategy": b"\x00",
+        "power_mng_soc_target_set": float_payload(0.5),
+        "power_mng_battery_power_extern": float_payload(0),
+        "power_mng_use_grid_power_enable": b"\x00",
+    }
+    for name, payload in values.items():
+        harness.net.payloads[catalog.object_entry(name).object_id] = payload
+
+
+async def arm(harness, device_id: str = "main") -> dict:
+    response = await harness.client.put(
+        f"/api/v1/devices/{device_id}/energy/armed", headers=WRITER, json={"armed": True}
+    )
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+async def command(harness, body: dict, device_id: str = "main"):
+    return await harness.client.post(
+        f"/api/v1/devices/{device_id}/energy/command", headers=WRITER, json=body
+    )
+
+
+async def admin_session(harness) -> dict[str, str]:
+    """Log in and change nothing: the admin endpoints need a session cookie plus the CSRF header."""
+    csrf = (await harness.client.get("/admin/api/session")).json()["csrf_token"]
+    login = await harness.client.post(
+        "/admin/api/login",
+        headers={"X-CSRF-Token": csrf},
+        json={"username": "admin", "password": PASSWORD},
+    )
+    assert login.status_code == 200, login.text
+    return {"X-CSRF-Token": login.json()["csrf_token"]}
+
+
+def periodic_object_ids(harness, device_id: str = "main") -> tuple[int, ...]:
+    periodic = harness.runtime.gateway._device(device_id).periodic
+    return () if periodic is None else periodic.object_ids
+
+
+def energy_object_ids(harness) -> set[int]:
+    catalog = RegistryCatalog.from_file(harness.runtime.settings.object_registry_path)
+    return {catalog.object_entry(name).object_id for name in _ENERGY_METRIC_NAMES}
+
+
+# --- item 19: the happy path per action -----------------------------------------------------------
+
+
+async def test_the_task_body_charges_the_battery_to_the_target(tmp_path: Path) -> None:
+    """The literal body from the task: an action and a business target SoC, nothing else."""
+    async with running_app(energy_settings(tmp_path)) as harness:
+        seed_payloads(harness)
+        await arm(harness)
+        response = await command(harness, {"action": "charge", "target_soc_percent": 80})
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["state"] == "charging"
+        assert body["action"] == "charge"
+        assert body["target_soc_percent"] == 80
+        assert body["power_limit_w"] == 3000  # the configured device limit, chosen server-side
+        assert body["power_limit_clamped"] is False
+        assert body["commanded_direction"] == "charge"
+        assert body["until"] is not None
+        assert body["armed"] is True
+
+
+async def test_an_explicit_power_above_the_device_limit_is_clamped(tmp_path: Path) -> None:
+    async with running_app(energy_settings(tmp_path)) as harness:
+        seed_payloads(harness)
+        await arm(harness)
+        response = await command(
+            harness, {"action": "charge", "target_soc_percent": 80, "max_power_w": 4500}
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["power_limit_w"] == 3000
+        assert response.json()["power_limit_clamped"] is True
+
+
+async def test_discharge_hold_and_auto_each_reach_their_business_state(tmp_path: Path) -> None:
+    async with running_app(energy_settings(tmp_path)) as harness:
+        seed_payloads(harness)
+        await arm(harness)
+
+        discharging = await command(harness, {"action": "discharge", "target_soc_percent": 30})
+        assert discharging.status_code == 200, discharging.text
+        assert discharging.json()["state"] == "discharging"
+        assert discharging.json()["power_limit_w"] == 5000
+
+        holding = await command(harness, {"action": "hold"})
+        assert holding.status_code == 200, holding.text
+        assert holding.json()["state"] == "holding"
+        assert holding.json()["action"] == "hold"
+        # A hold has no power budget; the commanded pair carries the zero instead.
+        assert holding.json()["power_limit_w"] is None
+        assert holding.json()["commanded_power_w"] == 0.0
+        assert holding.json()["commanded_direction"] == "none"
+
+        automatic = await command(harness, {"action": "auto"})
+        assert automatic.status_code == 200, automatic.text
+        assert automatic.json()["state"] == "automatic"
+        assert automatic.json()["action"] is None
+        assert automatic.json()["stop_reason"] == "stopped_by_operator"
+
+
+async def test_auto_on_an_untouched_device_is_not_an_error(tmp_path: Path) -> None:
+    async with running_app(energy_settings(tmp_path)) as harness:
+        seed_payloads(harness)
+        await arm(harness)
+        response = await command(harness, {"action": "auto"})
+        assert response.status_code == 200, response.text
+        assert response.json()["state"] == "automatic"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"action": "charge"},  # target required
+        {"action": "hold", "target_soc_percent": 80},  # target forbidden
+        {"action": "auto", "max_power_w": 1000},  # power forbidden
+        {"action": "charge", "target_soc_percent": 3},  # below the hard bound
+        {"action": "charge", "target_soc_percent": 99},  # above the hard bound
+        {"action": "charge", "target_soc_percent": 80, "max_power_w": 0},
+        {"action": "charge", "target_soc_percent": 80, "max_power_w": 50_001},
+        {"action": "charge", "target_soc_percent": 80, "unexpected": 1},  # extra="forbid"
+        {"action": "shutdown_everything", "target_soc_percent": 80},
+    ],
+)
+async def test_an_invalid_command_body_is_rejected_by_the_request_model(
+    tmp_path: Path, body: dict
+) -> None:
+    async with running_app(energy_settings(tmp_path)) as harness:
+        seed_payloads(harness)
+        await arm(harness)
+        response = await command(harness, body)
+        assert response.status_code == 422, response.text
+        assert response.json()["code"] == "invalid_request"
+
+
+async def test_the_armed_flag_is_not_coerced_from_a_string(tmp_path: Path) -> None:
+    async with running_app(energy_settings(tmp_path)) as harness:
+        response = await harness.client.put(
+            "/api/v1/devices/main/energy/armed", headers=WRITER, json={"armed": "true"}
+        )
+        assert response.status_code == 422, response.text
+
+
+# --- item 20: refusals ----------------------------------------------------------------------------
+
+
+async def test_a_disarmed_device_refuses_a_command(tmp_path: Path) -> None:
+    async with running_app(energy_settings(tmp_path)) as harness:
+        seed_payloads(harness)
+        response = await command(harness, {"action": "charge", "target_soc_percent": 80})
+        assert response.status_code == 409, response.text
+        assert response.json()["code"] == "energy_manager_disarmed"
+
+
+async def test_an_unknown_device_is_a_404(tmp_path: Path) -> None:
+    async with running_app(energy_settings(tmp_path)) as harness:
+        for response in (
+            await harness.client.get("/api/v1/devices/nope/energy", headers=WRITER),
+            await command(harness, {"action": "auto"}, device_id="nope"),
+        ):
+            assert response.status_code == 404, response.text
+            assert response.json()["code"] == "unknown_device"
+
+
+async def test_a_read_only_token_cannot_reach_the_energy_manager(tmp_path: Path) -> None:
+    async with running_app(energy_settings(tmp_path)) as harness:
+        for response in (
+            await harness.client.get("/api/v1/devices/main/energy", headers=READER),
+            await harness.client.post(
+                "/api/v1/devices/main/energy/command", headers=READER, json={"action": "auto"}
+            ),
+            await harness.client.put(
+                "/api/v1/devices/main/energy/armed", headers=READER, json={"armed": True}
+            ),
+        ):
+            assert response.status_code == 403, response.text
+            assert response.json()["code"] == "insufficient_scope"
+
+
+async def test_without_write_support_the_public_router_is_absent_and_the_admin_surface_refuses(
+    tmp_path: Path,
+) -> None:
+    """AC-10: the public endpoints do not exist at all, while the admin surface explains why."""
+    settings = energy_settings(tmp_path, enable_write_support=False)
+    async with running_app(settings) as harness:
+        for response in (
+            await harness.client.get("/api/v1/devices/main/energy", headers=WRITER),
+            await command(harness, {"action": "auto"}),
+            await harness.client.put(
+                "/api/v1/devices/main/energy/armed", headers=WRITER, json={"armed": True}
+            ),
+        ):
+            assert response.status_code == 404, response.text
+            assert response.json()["code"] == "write_disabled"
+
+        headers = await admin_session(harness)
+        arming = await harness.client.put(
+            "/admin/api/energy/devices/main/armed", headers=headers, json={"armed": True}
+        )
+        assert arming.status_code == 409, arming.text
+        assert arming.json()["code"] == "energy_write_support_required"
+        commanding = await harness.client.post(
+            "/admin/api/energy/devices/main/command",
+            headers=headers,
+            json={"action": "charge", "target_soc_percent": 80},
+        )
+        assert commanding.status_code == 503, commanding.text
+        assert commanding.json()["code"] == "dispatch_store_unavailable"
+
+
+async def test_revoking_the_register_approvals_disables_the_actions(tmp_path: Path) -> None:
+    async with running_app(energy_settings(tmp_path)) as harness:
+        seed_payloads(harness)
+        await arm(harness)
+        # What the Inverters page does when an operator clears the selection.
+        harness.app.state.admin_store.put("write_names", [])
+        status = await harness.client.get("/api/v1/devices/main/energy", headers=WRITER)
+        assert status.status_code == 200, status.text
+        assert {item["reason"] for item in status.json()["actions"]} == {"write_not_permitted"}
+        refused = await command(harness, {"action": "charge", "target_soc_percent": 80})
+        assert refused.status_code == 409, refused.text
+        assert refused.json()["code"] == "energy_action_unavailable"
+
+
+# --- item 21: one GET serves the whole card -------------------------------------------------------
+
+
+async def test_the_status_get_serves_the_whole_card_in_one_call(tmp_path: Path) -> None:
+    async with running_app(energy_settings(tmp_path)) as harness:
+        seed_payloads(harness)
+        # One ordinary read per figure fills the cache the readings are served from.
+        names = ",".join(_ENERGY_METRIC_NAMES)
+        filled = await harness.client.get(
+            f"/api/v1/devices/main/metrics?names={names}", headers=WRITER
+        )
+        assert filled.status_code == 200, filled.text
+
+        response = await harness.client.get("/api/v1/devices/main/energy", headers=WRITER)
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["state"] == "automatic" and body["action"] is None
+        assert body["power_limit_w"] is None and body["commanded_power_w"] == 0.0
+        assert body["target_soc_window"] == {"min": 7.0, "max": 95.0}
+        readings = body["readings"]
+        assert readings["battery_soc_percent"]["value"] == pytest.approx(50.0)
+        assert readings["grid_power_w"]["value"] == pytest.approx(1200.0)
+        assert readings["pv_power_w"]["value"] == pytest.approx(2400.0)
+        assert readings["house_load_w"]["value"] == pytest.approx(800.0)
+        assert all(not readings[name]["stale"] for name in readings)
+        assert [item["action"] for item in body["actions"]] == ["charge", "discharge", "hold", "auto"]
+
+
+async def test_a_device_without_any_cached_reading_answers_with_four_absent_figures(
+    tmp_path: Path,
+) -> None:
+    """AC-21/AC-24: absent is a published state, not an error — and never a device read."""
+    async with running_app(energy_settings(tmp_path, enable_periodic_reads=False)) as harness:
+        response = await harness.client.get("/api/v1/devices/slave1/energy", headers=WRITER)
+        assert response.status_code == 200, response.text
+        readings = response.json()["readings"]
+        assert len(readings) == 4
+        for reading in readings.values():
+            assert reading == {"value": None, "age_seconds": None, "stale": True}
+
+
+# --- item 22: _is_write_path ----------------------------------------------------------------------
+
+
+def fake_request(method: str, path: str) -> Request:
+    return Request(
+        {
+            "type": "http",
+            "method": method,
+            "path": path,
+            "raw_path": path.encode(),
+            "query_string": b"",
+            "headers": [],
+            "scheme": "http",
+            "server": ("testserver", 80),
+            "root_path": "",
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "expected"),
+    [
+        ("PUT", "/api/v1/devices/main/metrics/battery_target", True),
+        ("POST", "/api/v1/devices/main/actions/com_service", True),
+        ("POST", "/api/v1/devices/main/battery/dispatch", True),
+        ("GET", "/api/v1/devices/main/battery/dispatch", True),
+        ("DELETE", "/api/v1/devices/main/battery/dispatch", True),
+        ("GET", "/api/v1/devices/main/energy", True),
+        ("POST", "/api/v1/devices/main/energy/command", True),
+        ("PUT", "/api/v1/devices/main/energy/armed", True),
+        # Short paths must return False, not raise: this runs inside the global exception handler,
+        # where an IndexError would turn a plain 404 into an unhandled 500.
+        ("GET", "/api/v1/devices", False),
+        ("GET", "/api/v1/devices/main", False),
+        ("GET", "/api/v1", False),
+        ("GET", "/", False),
+        ("GET", "/api/v1/devices/main/energy/unknown", False),
+        ("GET", "/api/v1/devices/main/metrics/battery_target", False),  # wrong method
+        ("GET", "/api/v1/devices/main/nothing", False),
+    ],
+)
+def test_is_write_path_matches_method_and_path_exactly(
+    method: str, path: str, expected: bool
+) -> None:
+    assert _is_write_path(fake_request(method, path)) is expected
+
+
+async def test_a_404_on_a_short_path_stays_a_plain_404_without_write_support() -> None:
+    async with running_app(make_settings(enable_write_support=False)) as harness:
+        for path in ("/api/v1/devices/main", "/api/v1/devices/main/nothing"):
+            response = await harness.client.get(path, headers=WRITER)
+            assert response.status_code == 404, response.text
+            assert response.json()["code"] == "not_found"
+
+
+# --- item 22b: the shutdown drain -----------------------------------------------------------------
+
+
+async def test_the_shutdown_drain_refuses_commands_on_both_surfaces_but_still_reports(
+    tmp_path: Path,
+) -> None:
+    async with running_app(energy_settings(tmp_path)) as harness:
+        seed_payloads(harness)
+        headers = await admin_session(harness)
+        harness.runtime.shutdown.plan = ShutdownPlan(harness.runtime.clock.now(), 0.0, 0.0)
+        try:
+            refused = [
+                await command(harness, {"action": "charge", "target_soc_percent": 80}),
+                await harness.client.put(
+                    "/api/v1/devices/main/energy/armed", headers=WRITER, json={"armed": True}
+                ),
+                await harness.client.post(
+                    "/admin/api/energy/devices/main/command",
+                    headers=headers,
+                    json={"action": "charge", "target_soc_percent": 80},
+                ),
+                await harness.client.put(
+                    "/admin/api/energy/devices/main/armed", headers=headers, json={"armed": True}
+                ),
+            ]
+            for response in refused:
+                assert response.status_code == 503, response.text
+                assert response.json()["code"] == "not_ready"
+            status = await harness.client.get("/api/v1/devices/main/energy", headers=WRITER)
+            assert status.status_code == 200, status.text
+        finally:
+            harness.runtime.shutdown.plan = None
+
+
+# --- item 22c: the periodic wiring ----------------------------------------------------------------
+
+
+async def test_the_energy_metrics_are_pinned_at_startup_and_after_a_device_list_change(
+    tmp_path: Path,
+) -> None:
+    """The reconfiguration path runs on every Inverters-page save; extending only create_app() would
+    make the card go dark on the next settings change."""
+    settings = energy_settings(tmp_path)
+    async with running_app(settings) as harness:
+        wanted = energy_object_ids(harness)
+        assert wanted <= set(periodic_object_ids(harness))
+
+        headers = await admin_session(harness)
+        current = (await harness.client.get("/admin/api/settings", headers=headers)).json()
+        devices = current["settings"]["devices"]
+        saved = await harness.client.put(
+            "/admin/api/settings",
+            headers=headers,
+            json={"devices": [*devices, {"host": HOST, "port": PORT, "network_id": 1234567}]},
+        )
+        assert saved.status_code == 200, saved.text
+        assert wanted <= set(periodic_object_ids(harness))
+
+
+async def test_without_dispatch_the_energy_metrics_are_not_added(tmp_path: Path) -> None:
+    settings = energy_settings(tmp_path, enable_write_support=False)
+    async with running_app(settings) as harness:
+        assert not energy_object_ids(harness) & set(periodic_object_ids(harness))
+
+
+async def test_with_periodic_reads_disabled_the_list_is_empty(tmp_path: Path) -> None:
+    settings = energy_settings(tmp_path, enable_periodic_reads=False)
+    async with running_app(settings) as harness:
+        assert periodic_object_ids(harness) == ()
+        status = await harness.client.get("/api/v1/devices/main/energy", headers=WRITER)
+        assert status.status_code == 200, status.text
+        assert all(item["stale"] for item in status.json()["readings"].values())
+
+
+# --- item 23: the admin surface -------------------------------------------------------------------
+
+
+async def test_the_admin_surface_requires_a_session_and_the_csrf_header(tmp_path: Path) -> None:
+    async with running_app(energy_settings(tmp_path)) as harness:
+        assert (await harness.client.get("/admin/api/energy/devices")).status_code == 401
+        headers = await admin_session(harness)
+        assert (await harness.client.get("/admin/api/energy/devices")).status_code == 200
+        # A mutation without the CSRF header is refused even with a valid session.
+        without_csrf = await harness.client.put(
+            "/admin/api/energy/devices/main/armed", json={"armed": True}
+        )
+        assert without_csrf.status_code == 403, without_csrf.text
+        with_csrf = await harness.client.put(
+            "/admin/api/energy/devices/main/armed", headers=headers, json={"armed": True}
+        )
+        assert with_csrf.status_code == 200, with_csrf.text
+
+
+async def test_admin_arming_adds_the_register_approvals_add_only(tmp_path: Path) -> None:
+    async with running_app(energy_settings(tmp_path)) as harness:
+        headers = await admin_session(harness)
+        assert harness.app.state.admin_store.get("write_names") == list(PRE_APPROVED)
+        armed = await harness.client.put(
+            "/admin/api/energy/devices/main/armed", headers=headers, json={"armed": True}
+        )
+        assert armed.status_code == 200, armed.text
+        names = harness.app.state.admin_store.get("write_names")
+        # Add-only and order-preserving: the operator's own entry stays first.
+        assert names[: len(PRE_APPROVED)] == list(PRE_APPROVED)
+        assert set(names) == set(DISPATCH_WRITE_NAMES)
+        assert armed.json()["armed_by"] == "admin"
+        assert armed.json()["armed_at"] is not None
+        assert set(armed.json()["added_write_names"]) == set(DISPATCH_WRITE_NAMES) - set(PRE_APPROVED)
+
+        disarmed = await harness.client.put(
+            "/admin/api/energy/devices/main/armed", headers=headers, json={"armed": False}
+        )
+        assert disarmed.status_code == 200, disarmed.text
+        assert disarmed.json()["armed"] is False
+        # Non-destructive: disarming revokes no approval.
+        assert harness.app.state.admin_store.get("write_names") == names
+
+
+async def test_the_admin_status_carries_the_raw_gate_detail_and_the_policy(tmp_path: Path) -> None:
+    async with running_app(energy_settings(tmp_path)) as harness:
+        headers = await admin_session(harness)
+        del headers
+        devices = await harness.client.get("/admin/api/energy/devices")
+        assert devices.status_code == 200, devices.text
+        entry = next(item for item in devices.json() if item["device_id"] == "main")
+        assert [gate["action"] for gate in entry["gates"]] == ["charge", "discharge", "hold", "auto"]
+        auto = next(gate for gate in entry["gates"] if gate["action"] == "auto")
+        assert auto == {
+            "action": "auto",
+            "allowed": True,
+            "engineering_mode": False,
+            "unverified": [],
+            "reject_detail": None,
+        }
+        assert entry["soc_target_policy"]["mode"] == "business_target"
+        assert "readings" in entry  # the GUI needs exactly one poll per cycle
+
+        public = await harness.client.get("/api/v1/devices/main/energy", headers=WRITER)
+        assert public.status_code == 200, public.text
+        for admin_only in ("gates", "soc_target_policy", "added_write_names", "armed_by"):
+            assert admin_only not in public.json()
+
+
+async def test_the_soc_target_policy_round_trips_through_the_admin_surface(tmp_path: Path) -> None:
+    async with running_app(energy_settings(tmp_path)) as harness:
+        headers = await admin_session(harness)
+        saved = await harness.client.put(
+            "/admin/api/energy/devices/main/soc-target-policy",
+            headers=headers,
+            json={"mode": "below_current_soc", "below_margin_percent": 7.5, "note": "H-1 probe"},
+        )
+        assert saved.status_code == 200, saved.text
+        read_back = await harness.client.get("/admin/api/energy/devices/main/soc-target-policy")
+        assert read_back.json() == {
+            "mode": "below_current_soc",
+            "below_margin_percent": 7.5,
+            "note": "H-1 probe",
+        }
+        refused = await harness.client.put(
+            "/admin/api/energy/devices/main/soc-target-policy",
+            headers=headers,
+            json={"mode": "below_current_soc", "below_margin_percent": 80},
+        )
+        assert refused.status_code == 422, refused.text
+
+
+# --- item 24: OpenAPI purity ----------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("vendor", [True, False])
+def test_the_public_document_names_no_vendor_internal(tmp_path: Path, vendor: bool) -> None:
+    """AC-19. ``byte_width`` is asserted within the energy and dispatch schemas only: the vendor
+    diagnostics router legitimately publishes ``effective_byte_width``, so a document-wide scan
+    would pass only by virtue of that flag's default and fail falsely once a harness turns it on.
+    """
+    settings = energy_settings(tmp_path, enable_vendor_diagnostics=vendor, docs_public=True)
+    document = create_app(settings).openapi()
+    whole = json.dumps(document)
+    for forbidden in ("power_mng", "soc_strategy", "discharge_positive"):
+        assert forbidden not in whole
+
+    schemas = document["components"]["schemas"]
+    scoped = {
+        name: schema
+        for name, schema in schemas.items()
+        if name.startswith(("Energy", "Dispatch"))
+    }
+    assert scoped, "the energy and dispatch schemas must be part of the public document"
+    assert "byte_width" not in json.dumps(scoped)
+    energy_paths = {
+        path: item for path, item in document["paths"].items() if path.endswith(("/energy", "/energy/command", "/energy/armed"))
+    }
+    assert len(energy_paths) == 3
+    assert "byte_width" not in json.dumps(energy_paths)
+    assert "grid_import_positive" not in json.dumps(energy_paths)
+
+
+# --- item 25: source purity -----------------------------------------------------------------------
+
+
+def test_only_the_rct_adapter_layer_names_the_soc_target_register() -> None:
+    """AC-13: the register name is a vendor detail. The scan excludes app/catalog/*.json (data) and
+    tests/ (fixture code), both of which legitimately name it today."""
+    offenders = [
+        path.relative_to(ROOT).as_posix()
+        for path in (ROOT / "app").rglob("*.py")
+        if "power_mng_soc_target_set" in path.read_text(encoding="utf-8")
+        and not path.as_posix().startswith((ROOT / "app" / "gateway").as_posix())
+    ]
+    assert offenders == []
+
+
+# Files that already stated a capability verification before this feature existed; they are the only
+# place a released record may come from, and the list must not grow (AC-20).
+_VERIFIED_FIXTURES = {
+    "tests/api_helpers.py",
+    "tests/test_dispatch_api.py",
+    "tests/test_dispatch_capabilities.py",
+    "tests/test_dispatch_core.py",
+    "tests/test_dispatch_models.py",
+    "tests/test_energy_store.py",
+    "app/dispatch/capabilities.py",  # the enum member itself
+    "app/admin/dispatch_api.py",  # the admin PUT that an operator uses to enter one
+}
+_VERIFIED = re.compile(r"CapabilityStatus\.VERIFIED|\"status\"\s*:\s*\"verified\"|status=\"verified\"")
+
+
+def test_no_new_code_marks_a_capability_as_verified() -> None:
+    """AC-20: a verification is a hardware fact an operator enters, never something code asserts."""
+    named = {
+        path.relative_to(ROOT).as_posix()
+        for base in ("app", "tests")
+        for path in (ROOT / base).rglob("*.py")
+        if _VERIFIED.search(path.read_text(encoding="utf-8"))
+    }
+    assert named <= _VERIFIED_FIXTURES, f"new file marks a capability verified: {named - _VERIFIED_FIXTURES}"

@@ -213,7 +213,16 @@ DISPATCH_WRITE_NAMES = (
     "power_mng_battery_power_extern",
     "power_mng_use_grid_power_enable",
 )
-DISPATCH_READ_NAMES = ("battery_soc", "grid_power", "battery_power", "household_load_power")
+DISPATCH_READ_NAMES = (
+    "battery_soc",
+    "grid_power",
+    "battery_power",
+    "household_load_power",
+    # The two PV strings the Energy Manager's readings sum. Additive: the dispatch control loop does
+    # not read them, so no existing expectation changes.
+    "solar_a_power",
+    "solar_b_power",
+)
 
 
 def dispatch_fixtures(directory: Path) -> dict[str, Path]:

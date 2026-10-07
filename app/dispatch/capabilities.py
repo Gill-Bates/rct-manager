@@ -156,6 +156,13 @@ def required_for(mode: DispatchMode, *, limit_export: bool) -> frozenset[Capabil
         if limit_export:
             base.add(CapabilityName.EXPORT_LIMIT)
         return frozenset(base)
+    if mode is DispatchMode.HOLD:
+        # WRITE_PATH because a hold activates external control and therefore needs the external
+        # strategy code. BATTERY_POWER_SIGN because the *restore* path writes the captured,
+        # possibly non-zero snapshot.battery_setpoint back through the battery convention — a wrong
+        # sign there would turn a handback into a charge or discharge. The 0 W hold write itself is
+        # sign-free. No new CapabilityName is introduced for HOLD.
+        return frozenset({CapabilityName.WRITE_PATH, CapabilityName.BATTERY_POWER_SIGN})
     return frozenset()  # EXPORT_TO_GRID is refused before the gate (409 dispatch_mode_unavailable)
 
 

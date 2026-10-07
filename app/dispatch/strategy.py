@@ -15,21 +15,34 @@ from app.dispatch.models import (
 )
 
 
-def target_reached(mode: DispatchMode, soc_percent: float, target_soc_percent: float) -> bool:
+def target_reached(mode: DispatchMode, soc_percent: float, target_soc_percent: float | None) -> bool:
+    """Whether the business stop goal is met — a stop threshold and nothing else.
+
+    No register value is derived from this number: what a device's SoC-target register wants is the
+    adapter's business (``RctSocTargetConvention`` in ``app.gateway.conventions``). Each mode is
+    decided explicitly, so a future mode cannot silently inherit discharge semantics.
+    """
+    if target_soc_percent is None:  # HOLD, and any future mode without a SoC goal
+        return False
     if mode is DispatchMode.CHARGE_FROM_GRID:
         return soc_percent >= target_soc_percent
-    return soc_percent <= target_soc_percent
+    if mode is DispatchMode.DISCHARGE_TO_LOAD:
+        return soc_percent <= target_soc_percent
+    return False
 
 
 def calculate_setpoint(
     mode: DispatchMode,
     telemetry: ControlTelemetry,
     *,
-    target_soc_percent: float,
+    target_soc_percent: float | None,
     max_power_w: float,
     config: DispatchConfig,
     last: PowerSetpoint,
 ) -> PowerSetpoint:
+    # A hold is 0 W by definition, before any SoC or telemetry consideration.
+    if mode is DispatchMode.HOLD:
+        return PowerSetpoint()
     if target_reached(mode, telemetry.soc_percent, target_soc_percent):
         return PowerSetpoint()
     if mode is DispatchMode.CHARGE_FROM_GRID:

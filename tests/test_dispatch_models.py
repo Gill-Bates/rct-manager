@@ -17,11 +17,14 @@ from app.dispatch.models import (
     DeviceControlSnapshot,
     DeviceLimits,
     DispatchConfig,
+    DispatchMode,
+    DispatchPhase,
     DispatchRecord,
     DispatchRecordCorrupt,
     DispatchState,
     PowerDirection,
     PowerSetpoint,
+    phase_for,
 )
 
 AWARE_NOW = datetime(2026, 10, 6, 12, 0, tzinfo=UTC)
@@ -245,3 +248,48 @@ def test_from_dict_rejects_a_truthy_string_instead_of_a_real_bool() -> None:
 def test_device_control_snapshot_rejects_non_finite_soc_target_ratio() -> None:
     with pytest.raises(ValueError):
         DeviceControlSnapshot(PowerSetpoint(), float("nan"), 1, False, AWARE_NOW)
+
+
+# --- HOLD: a controlling state with no SoC goal ---------------------------------------------------
+
+
+def test_a_holding_record_round_trips_and_reports_the_controlling_phase() -> None:
+    """HOLDING must reach DispatchPhase.CONTROLLING: without the mapping phase_for() would raise,
+    and control_state must say `controlled` — the battery is held under external control.
+    """
+    data = {
+        "device_id": "main",
+        "state": "holding",
+        "restore_required": False,
+        "intent": _intent_dict(mode="hold", target_soc_percent=None, max_power_w=0.0),
+    }
+    record = DispatchRecord.from_dict(data)
+    assert record.state is DispatchState.HOLDING
+    assert record.intent is not None
+    assert record.intent.mode is DispatchMode.HOLD
+    assert record.intent.target_soc_percent is None
+    assert phase_for(record.state) is DispatchPhase.CONTROLLING
+    assert DispatchRecord.from_dict(record.to_dict()).to_dict() == record.to_dict()
+
+
+def test_a_persisted_intent_without_a_target_soc_percent_key_loads_as_none() -> None:
+    """A mode without a SoC goal carries no target; the key may also be absent entirely."""
+    data = _intent_dict()
+    del data["target_soc_percent"]
+    record = DispatchRecord.from_dict(
+        {"device_id": "main", "state": "holding", "restore_required": False, "intent": data}
+    )
+    assert record.intent is not None and record.intent.target_soc_percent is None
+
+
+def test_a_non_numeric_target_soc_percent_is_still_corruption_not_none() -> None:
+    """Optional must not mean lenient: a string target is a malformed record, never a silent None."""
+    with pytest.raises(DispatchRecordCorrupt):
+        DispatchRecord.from_dict(
+            {
+                "device_id": "main",
+                "state": "charging",
+                "restore_required": False,
+                "intent": _intent_dict(target_soc_percent="80"),
+            }
+        )

@@ -10,7 +10,7 @@ from datetime import datetime
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.api.problems import ErrorCode, ProblemError, problem_responses
 from app.api.runtime import RuntimeDep
@@ -54,10 +54,26 @@ class DispatchBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     mode: DispatchMode
-    target_soc_percent: float = Field(ge=0, le=100)
-    max_power_w: float = Field(gt=0)
+    # Both fields depend on the mode: a hold has no SoC goal and no power budget, every other mode
+    # has both. The bounds that do not depend on the mode stay on the fields.
+    target_soc_percent: float | None = Field(None, ge=0, le=100)
+    max_power_w: float = Field(ge=0)
     valid_until: datetime
     expected_operation_id: str | None = Field(None, min_length=1, max_length=64)
+
+    @model_validator(mode="after")
+    def _mode_consistency(self) -> "DispatchBody":
+        if self.mode is DispatchMode.HOLD:
+            if self.target_soc_percent is not None:
+                raise ValueError("target_soc_percent must be omitted for mode hold")
+            if self.max_power_w != 0:
+                raise ValueError("max_power_w must be 0 for mode hold")
+        else:
+            if self.target_soc_percent is None:
+                raise ValueError("target_soc_percent is required unless mode is hold")
+            if self.max_power_w <= 0:
+                raise ValueError("max_power_w must be greater than 0")
+        return self
 
     @field_validator("valid_until")
     @classmethod

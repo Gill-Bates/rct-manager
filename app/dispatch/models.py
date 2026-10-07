@@ -26,6 +26,8 @@ class DispatchMode(StrEnum):
     CHARGE_FROM_GRID = "charge_from_grid"
     DISCHARGE_TO_LOAD = "discharge_to_load"
     EXPORT_TO_GRID = "export_to_grid"
+    # Pin the battery at 0 W under external control: no SoC goal, no power budget.
+    HOLD = "hold"
 
 
 class DispatchState(StrEnum):
@@ -39,6 +41,7 @@ class DispatchState(StrEnum):
     RESTORING = "restoring"
     FAULT = "fault"
     FAULT_RESTORE_PENDING = "fault_restore_pending"
+    HOLDING = "holding"
 
 
 class DispatchPhase(StrEnum):
@@ -87,7 +90,9 @@ class PowerSetpoint:
 @dataclass(frozen=True, slots=True)
 class DispatchCommand:
     mode: DispatchMode
-    target_soc_percent: float
+    # The business stop goal, not a register value: None for a mode without one (HOLD). The field
+    # keeps its position and gets no default, so the positional call sites stay valid.
+    target_soc_percent: float | None
     max_power_w: float
     valid_until: datetime
     expected_operation_id: str | None = None
@@ -97,7 +102,7 @@ class DispatchCommand:
 class DispatchIntent:
     operation_id: str
     mode: DispatchMode
-    target_soc_percent: float
+    target_soc_percent: float | None
     max_power_w: float
     max_power_w_requested: float
     valid_until: datetime
@@ -231,11 +236,20 @@ def _tz_aware_or_none(value: object, field_name: str) -> datetime | None:
     return _tz_aware(datetime.fromisoformat(value), field_name)
 
 
+def _optional_number(value: object, field_name: str) -> float | None:
+    """A persisted ``float | None`` field: absent/null is a real value, a non-number is corruption."""
+    if value is None:
+        return None
+    return float(_strict_number(value, field_name, float))
+
+
 def _intent_from_dict(intent_data: dict) -> DispatchIntent:
     return DispatchIntent(
         operation_id=intent_data["operation_id"],
         mode=DispatchMode(intent_data["mode"]),
-        target_soc_percent=_strict_number(intent_data["target_soc_percent"], "target_soc_percent", float),
+        # A mode without a SoC goal (HOLD) persists target_soc_percent as null, and a record
+        # written before the field could be null carries a number — both load; a string does not.
+        target_soc_percent=_optional_number(intent_data.get("target_soc_percent"), "target_soc_percent"),
         max_power_w=_strict_number(intent_data["max_power_w"], "max_power_w", float),
         max_power_w_requested=_strict_number(
             intent_data["max_power_w_requested"], "max_power_w_requested", float
@@ -365,7 +379,12 @@ class DispatchRecord:
 
 
 def phase_for(state: DispatchState) -> DispatchPhase:
-    if state in (DispatchState.CHARGING, DispatchState.DISCHARGING, DispatchState.TARGET_REACHED):
+    if state in (
+        DispatchState.CHARGING,
+        DispatchState.DISCHARGING,
+        DispatchState.HOLDING,
+        DispatchState.TARGET_REACHED,
+    ):
         return DispatchPhase.CONTROLLING
     if state in (DispatchState.FAULT, DispatchState.FAULT_RESTORE_PENDING):
         return DispatchPhase.FAULT

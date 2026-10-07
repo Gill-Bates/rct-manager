@@ -9,7 +9,7 @@
 import asyncio
 import contextlib
 import logging
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import timedelta
 from pathlib import Path
@@ -23,6 +23,7 @@ from app import __version__
 from app.admin.api import RCT_MODULE_SN_SLOTS, _settings_persisted
 from app.admin.api import router as admin_router
 from app.admin.dispatch_api import router as admin_dispatch_router
+from app.admin.energy_api import router as admin_energy_router
 from app.admin.store import AdminStore
 from app.admin.ui import install_ui
 from app.allowlist import Allowlist
@@ -31,7 +32,7 @@ from app.api.docs_nav import SIDEBAR_HTML
 from app.api.middleware import RequestContextMiddleware
 from app.api.problems import ErrorCode, ProblemError, register_handlers
 from app.api.routers import catalog as catalog_router
-from app.api.routers import dispatch, health, metrics, values, vendor, writes
+from app.api.routers import dispatch, energy, health, metrics, values, vendor, writes
 from app.api.runtime import Runtime
 from app.cache import MemoryCache
 from app.catalog.base import is_numeric
@@ -41,8 +42,12 @@ from app.config import DeviceEntry, Settings, url_host
 from app.dispatch.capabilities import CapabilityRegistry
 from app.dispatch.controller import DispatchController
 from app.dispatch.models import DeviceLimits, DispatchConfig
+from app.dispatch.soc_policy import SocTargetPolicyRegistry
 from app.dispatch.store import DispatchStore
+from app.energy.manager import EnergyManager
+from app.energy.models import ArmedRecord
 from app.errors import ConfigError, DeviceApiError
+from app.gateway.energy_readings import RctEnergyReadings
 from app.gateway.rct import DeviceBinding, RctGateway
 from app.gateway.rct_dispatch import RctDispatchGateway
 from app.observability.exporter import DeviceView, EndpointView, MetricsExporter
@@ -268,6 +273,10 @@ def _build(
     periodic_names = _periodic_names(settings, catalog, selected_exposed)
     if not settings.periodic_metrics:  # a programmatic periodic_metrics list (not env-settable) is kept as given
         periodic_names = _with_dashboard_metric_names(periodic_names, catalog)
+        periodic_names = _with_energy_metric_names(
+            periodic_names, catalog,
+            dispatch=settings.enable_write_support and settings.hmac_secret is not None,
+        )  # fmt: skip
     graph = _build_device_graph(settings, clock, connector, catalog, gateway, periodic_names)
     parts.endpoints = graph.endpoints
     parts.serializers = graph.serializers
@@ -327,6 +336,29 @@ def _with_dashboard_metric_names(periodic_names: list[str], catalog: RegistryCat
     if not periodic_names:
         return periodic_names  # periodic reads disabled or no preselected metrics: leave it off
     extra = [n for n in _DASHBOARD_METRIC_NAMES if catalog.exists(n) and n not in periodic_names]
+    room = MAX_PERIODIC_PER_DEVICE - len(periodic_names)
+    return periodic_names + extra[: max(room, 0)]
+
+
+_ENERGY_METRIC_NAMES = (
+    "battery_soc", "grid_power", "solar_a_power", "solar_b_power", "household_load_power",
+)  # fmt: skip
+
+
+def _with_energy_metric_names(
+    periodic_names: list[str], catalog: RegistryCatalog, *, dispatch: bool
+) -> list[str]:
+    """Pin the Energy Manager's four published figures, the way the dashboard pins its own values.
+
+    A separate tuple and a separate function on purpose: the readings are cache-only, so a narrowed
+    METRICS_EXPOSED_NAMES would otherwise leave the Energy Manager card dark with no diagnosis path.
+    No-op without dispatch — a read-only deployment gains no periodic reads it did not ask for — and
+    bounded by MAX_PERIODIC_PER_DEVICE, where extra names are skipped silently rather than turning a
+    display nicety into a startup failure.
+    """
+    if not periodic_names or not dispatch:
+        return periodic_names
+    extra = [n for n in _ENERGY_METRIC_NAMES if catalog.exists(n) and n not in periodic_names]
     room = MAX_PERIODIC_PER_DEVICE - len(periodic_names)
     return periodic_names + extra[: max(room, 0)]
 
@@ -590,6 +622,13 @@ def _lifespan(
             periodic_names = _periodic_names(runtime.settings, runtime.catalog)
             if not runtime.settings.periodic_metrics:
                 periodic_names = _with_dashboard_metric_names(periodic_names, runtime.catalog)
+                # Also here, not only at startup: this path runs on every Inverters-page save, and
+                # extending only create_app() would make the Energy Manager card go dark on the
+                # next settings change.
+                periodic_names = _with_energy_metric_names(
+                    periodic_names, runtime.catalog,
+                    dispatch=runtime.settings.enable_write_support and runtime.settings.hmac_secret is not None,
+                )  # fmt: skip
             graph = _build_device_graph(
                 runtime.settings, runtime.clock, connector, runtime.catalog, gateway, periodic_names
             )
@@ -772,14 +811,44 @@ def create_app(settings: Settings, *, clock: Clock | None = None, connector: Con
         parts.service,
         gateway,
     )
+    # Built unconditionally and shared with the Energy Manager: it publishes the effective target
+    # window from the same bounds the controller validates against, with or without dispatch.
+    dispatch_config = DispatchConfig(
+        min_soc=settings.dispatch_min_soc,
+        max_soc=settings.dispatch_max_soc,
+        grid_import_reserve_w=settings.dispatch_grid_import_reserve_w,
+        grid_control_deadband_w=settings.dispatch_grid_control_deadband_w,
+        power_write_deadband_w=settings.dispatch_power_write_deadband_w,
+        min_write_interval_seconds=settings.dispatch_min_write_interval_seconds,
+        cycle_interval_seconds=settings.dispatch_cycle_interval_seconds,
+        telemetry_timeout_seconds=settings.dispatch_telemetry_timeout_seconds,
+        control_telemetry_max_age_seconds=settings.dispatch_control_telemetry_max_age_seconds,
+        soc_telemetry_max_age_seconds=settings.dispatch_soc_telemetry_max_age_seconds,
+        max_operation_duration_seconds=settings.dispatch_max_operation_duration_seconds,
+        max_operation_duration_engineering_seconds=(
+            settings.dispatch_max_operation_duration_engineering_seconds
+        ),
+    )
     dispatch_store = None
+    energy_readings = None
+    energy_armed: dict[str, ArmedRecord] = {}
     if settings.enable_write_support and settings.hmac_secret is not None:
         dispatch_store = DispatchStore(settings.dispatch_db_path, settings.hmac_secret.get_secret_value())
         dispatch_store.initialize()
         # One registry instance for the adapter and the controller: a second one would be a second
         # truth about which hardware is verified.
         dispatch_capabilities = CapabilityRegistry(dispatch_store.get_capabilities())
-        dispatch_gateway = RctDispatchGateway(gateway, capabilities=dispatch_capabilities)
+        # Same rule for the per-device SoC-target derivation policy: one instance, so an operator's
+        # policy change reaches the adapter that actually writes the register, not just the
+        # controller.
+        soc_target_policies = SocTargetPolicyRegistry(dispatch_store.get_soc_target_policies())
+        dispatch_gateway = RctDispatchGateway(
+            gateway, capabilities=dispatch_capabilities, soc_target_policies=soc_target_policies
+        )
+        # The live capability registry, so a verification reaches the published grid sign without a
+        # restart. The readings are cache-only and never queue a device transaction.
+        energy_readings = RctEnergyReadings(gateway, capabilities=dispatch_capabilities)
+        energy_armed = dispatch_store.get_energy_states()
         # The store is the truth for the per-device limits and the engineering switch: they are an
         # operator setting, made through the admin dispatch API, and must survive a restart. The
         # environment values are only a bootstrap seed for a device that has no record yet.
@@ -797,24 +866,10 @@ def create_app(settings: Settings, *, clock: Clock | None = None, connector: Con
             dispatch_gateway,
             dispatch_store,
             clock,
-            DispatchConfig(
-                min_soc=settings.dispatch_min_soc,
-                max_soc=settings.dispatch_max_soc,
-                grid_import_reserve_w=settings.dispatch_grid_import_reserve_w,
-                grid_control_deadband_w=settings.dispatch_grid_control_deadband_w,
-                power_write_deadband_w=settings.dispatch_power_write_deadband_w,
-                min_write_interval_seconds=settings.dispatch_min_write_interval_seconds,
-                cycle_interval_seconds=settings.dispatch_cycle_interval_seconds,
-                telemetry_timeout_seconds=settings.dispatch_telemetry_timeout_seconds,
-                control_telemetry_max_age_seconds=settings.dispatch_control_telemetry_max_age_seconds,
-                soc_telemetry_max_age_seconds=settings.dispatch_soc_telemetry_max_age_seconds,
-                max_operation_duration_seconds=settings.dispatch_max_operation_duration_seconds,
-                max_operation_duration_engineering_seconds=(
-                    settings.dispatch_max_operation_duration_engineering_seconds
-                ),
-            ),
+            dispatch_config,
             limits,
             capabilities=dispatch_capabilities,
+            soc_target_policies=soc_target_policies,
         )
         coordinator.set_dispatch_restore(runtime.dispatch.shutdown_restore)
     app = FastAPI(
@@ -836,6 +891,37 @@ def create_app(settings: Settings, *, clock: Clock | None = None, connector: Con
         app.state.default_write_entries = {name: initial_allowlist.entry(name) for name in catalog.names() if initial_allowlist.entry(name)}
         app.state.build_write_allowlist = lambda names: Allowlist(
             {name: app.state.default_write_entries[name] for name in names}, catalog
+        )
+    if admin_store is not None:
+        # Constructed after app.state.default_write_entries / build_write_allowlist exist, with
+        # late-bound closures over them: an operator can change the approved register names on the
+        # Inverters page at any time, so a snapshot taken here would go stale. The manager is built
+        # whenever an admin store exists, so the admin surface always has an object that can answer
+        # with a proper refusal instead of a missing attribute.
+        def _approve_writes(names: Iterable[str]) -> list[str]:
+            """Exactly what the Inverters page does, add-only: persist, then widen the allowlist."""
+            selected = list(names)
+            admin_store.put_many({"write_names": selected})
+            runtime.gateway.set_allowlist(app.state.build_write_allowlist(selected))
+            return selected
+
+        runtime.energy = EnergyManager(
+            port=runtime.dispatch,
+            store=dispatch_store,
+            readings=energy_readings or RctEnergyReadings(gateway, capabilities=CapabilityRegistry()),
+            clock=clock,
+            config=dispatch_config,
+            devices=runtime.devices,
+            write_support_enabled=settings.enable_write_support,
+            approve_writes=_approve_writes if initial_allowlist is not None else None,
+            approved_writes=lambda: tuple(admin_store.get("write_names") or ()),
+            allowlist_candidates=(
+                (lambda: frozenset(app.state.default_write_entries))
+                if initial_allowlist is not None
+                else None
+            ),
+            required_writes=RctDispatchGateway.REQUIRED_WRITES,
+            armed=energy_armed,
         )
     app.state.security = SecurityContext(
         TokenStore(auth_required=settings.auth_required, admin_store=admin_store),
@@ -865,6 +951,7 @@ def create_app(settings: Settings, *, clock: Clock | None = None, connector: Con
     if admin_store is not None:
         app.include_router(admin_router)
         app.include_router(admin_dispatch_router)
+        app.include_router(admin_energy_router)
         install_ui(app)
     read_auth = [Depends(_bearer)]
     for router in (health.business, catalog_router.router, values.router):
@@ -876,6 +963,7 @@ def create_app(settings: Settings, *, clock: Clock | None = None, connector: Con
     if settings.enable_write_support:
         app.include_router(writes.router, dependencies=[Depends(_bearer)])
         app.include_router(dispatch.router, dependencies=[Depends(_bearer)])
+        app.include_router(energy.router, dependencies=[Depends(_bearer)])
     _add_docs(app, settings)
     return app
 

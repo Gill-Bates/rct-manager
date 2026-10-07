@@ -663,6 +663,22 @@ class RctGateway:
         freshness = self._classify(key, cached)
         return None if freshness is CacheFreshness.EXPIRED else (cached.value, freshness)
 
+    def cached_sample(self, device_id: str, name: str) -> tuple[ScalarValue, float, CacheFreshness] | None:
+        """Cached value, its age and its freshness; None when the entry is absent or expired.
+
+        ``cached_reading()`` answers the same question without the age; this variant exists for the
+        Energy Manager's readings, which publish how old a value is. It reads the cache only and
+        never queues a device transaction.
+        """
+        key = (device_id, name)
+        cached = self._cache.get(key)
+        if cached is None:
+            return None
+        freshness = self._classify(key, cached)
+        if freshness is CacheFreshness.EXPIRED:
+            return None
+        return cached.value, age_seconds(cached, self._clock.monotonic()), freshness
+
     def device_status(self, device_id: str) -> DeviceStatus:
         binding = self._device(device_id)
         counters = binding.endpoint.counters_for(binding.entry.key)
