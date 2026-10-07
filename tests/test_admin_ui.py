@@ -150,7 +150,7 @@ def test_header_is_sticky_above_content_and_toasts_stay_on_top():
 def test_device_editor_has_host_port_and_network_id_fields():
     js = (ADMIN_DIR / "static/js/admin.js").read_text(encoding="utf-8")
     assert "Device ID" not in js and "Display name" not in js
-    assert ("data-field" in js or "dataset.field" in js) and "Add inverter" in js
+    assert ("data-field" in js or "dataset.field" in js) and "Add another inverter" in js
     # The network id is part of the backend uniqueness key, so master/slave setups need the field.
     assert "'network_id'" in js and "Network ID" in js
     assert "networkLabel.htmlFor" in js and "networkInput.inputMode = 'numeric'" in js
@@ -158,11 +158,13 @@ def test_device_editor_has_host_port_and_network_id_fields():
     assert "devices.push(withUid({ host: '', port: 8899, network_id: null }))" in js
 
 
-def test_device_duplicate_rule_matches_the_backend_key_and_autosave_keeps_local_edits():
+def test_device_duplicate_rule_matches_the_backend_key_and_apply_adopts_the_server_list():
     js = (ADMIN_DIR / "static/js/admin.js").read_text(encoding="utf-8")
     assert "networkId(other.network_id) === network" in js  # host, port and network id together
-    assert "Object.assign(device, (result.settings" not in js  # no clobbering of newer local input
-    assert "if (assigned && !device.device_id && assigned.device_id) device.device_id = assigned.device_id;" in js
+    assert "Object.assign(device, (result.settings" not in js
+    # After a successful apply the draft is the server state, including newly assigned ids.
+    apply_block = js[js.index("async function applyDevices(card)"):js.index("function buildGroupBody(")]
+    assert "adoptDevices(structuredClone(settingsCommitted.devices || payload.devices));" in apply_block
 
 
 def test_numeric_settings_carry_their_own_bounds():
@@ -309,7 +311,7 @@ def test_export_group_is_withheld_as_a_group_and_revalidated_at_send_time():
     # The send-time re-check sits in the synchronous wrapper, before any key is computed.
     send = js[js.index("function sendSettings(sections = null)"):js.index("function secretKeysIn(")]
     assert "if (pendingExportGroup && !exportReady(type)) {" in send
-    assert "if (pendingKeys.has('devices') && !devicesValid()) {" in send
+    assert "devices" not in send  # the device list never goes through the autosave queue
     assert send.index("if (pendingExportGroup && !exportReady(type)) {") < send.index("const keys = keysFor(sections);")
 
 
@@ -335,20 +337,43 @@ def test_failed_settings_save_does_not_re_render_the_whole_page():
     assert "renderSettings();" not in catch_block
     # Re-queued during the request, device rows and secrets are all skipped by the rollback.
     assert "if (pendingKeys.has(key)) continue;" in catch_block
-    assert "if (key === 'devices') continue;" in catch_block
+    assert "devices" not in catch_block
     assert "if (isSecretKey(key)) continue;" in catch_block
-    assert "structuredClone(settingsCommitted.devices" not in catch_block
     assert "for (const id of sentSections) reportSaveFailure(id, failureMessage(id, reason));" in catch_block
 
 
-def test_device_id_is_matched_back_by_host_port_and_network_id_not_array_index():
-    """Review item 10 (LOW): the server is not guaranteed to echo devices back in the exact order
-    they were sent, so matching by array index can assign the wrong id to the wrong row."""
+def test_device_list_has_no_autosave_path():
+    """The device list reconfigures live connections, so only an explicit Apply may send it."""
     js = (ADMIN_DIR / "static/js/admin.js").read_text(encoding="utf-8")
-    success_block = _send_block(js, "success")
-    assert "sentDevices.forEach((device) => {" in success_block
-    assert "(result.settings?.devices || [])[i]" not in success_block
-    assert ".find((candidate) =>" in success_block
+    assert "queueSettings('devices')" not in js
+    assert "pendingKeys.has('devices')" not in js
+    assert "function syncDeviceInputs(" not in js and "function addInverter(" not in js
+    assert "function devicesValid()" not in js
+    editor = js[js.index("function renderDevicesSettings(card)"):js.index("function buildDeviceApplyBar(")]
+    assert "addEventListener('change'" not in editor  # edits are draft-only, on input
+    assert "addEventListener('input', onInput)" in editor
+    # Exactly one request site sends the devices key.
+    assert js.count("body: JSON.stringify({ devices") + js.count("payload = { devices: devicesPayload() }") == 1
+    template = (TEMPLATES / "dashboard.html").read_text(encoding="utf-8")
+    assert "saved automatically" not in template
+
+
+def test_device_apply_bar_is_explicit_accessible_and_guards_reset_and_unload():
+    js = (ADMIN_DIR / "static/js/admin.js").read_text(encoding="utf-8")
+    bar = js[js.index("function buildDeviceApplyBar("):js.index("function addDeviceRow(")]
+    assert "'Apply changes'" in bar and "apply.id = 'device-apply'" in bar and "'Discard'" in bar
+    assert "status.setAttribute('role', 'status')" in bar  # polite live region for the result
+    assert "error.tabIndex = -1" in bar
+    state = js[js.index("function refreshDeviceState(card)"):js.index("function rebuildDeviceSection()")]
+    assert "apply.disabled = deviceUi.applying || invalid || changes.count === 0;" in state
+    run = js[js.index("async function applyDevices(card)"):js.index("function buildGroupBody(")]
+    assert "if (deviceUi.applying) return;" in run
+    assert "confirm(`${RESET_NOTE}" in run and "changes.risky.length" in run
+    assert "document.getElementById('device-apply-error')?.focus()" in run
+    assert "error?.status === 409" in js and "error?.status === 504" in js
+    # The unload guard only fires while the draft differs from the server state.
+    outstanding = js[js.index("function outstandingWork()"):js.index("function reportSaveFailure(")]
+    assert "deviceDirty()" in outstanding
 
 
 def test_questdb_username_and_password_must_be_filled_together():
@@ -403,7 +428,7 @@ def test_ensure_session_does_not_cache_a_rejection():
 
 def test_flush_settings_propagates_the_result_of_an_in_flight_save():
     """Finding 3 (HIGH): the in-flight branch returned true regardless of what the running save
-    resolved, so "Add inverter" closed the dialog on a failed save."""
+    resolved."""
     js = JS.read_text(encoding="utf-8")
     flush = js[js.index("async function flushSettings({ sections = null } = {})"):js.index("// Synchronous wrapper")]
     assert "const result = await inFlight.promise.catch(() => false);" in flush
@@ -412,10 +437,6 @@ def test_flush_settings_propagates_the_result_of_an_in_flight_save():
     assert "if (requestedIncomplete(sections)) return false;" in flush
     assert "ok = (await sendSettings(sections).catch(() => false)) && ok;" in flush
     assert "return true;" not in flush
-    # Add inverter flushes scoped and keeps the dialog open on a false result.
-    add = js[js.index("async function addInverter(card, button)"):js.index("function buildGroupBody(")]
-    assert "if (!(await flushSettings({ sections: ['devices'] }))) return;" in add
-    assert "button.disabled = true;" in add and "clearTimeout(settingsTimer);" in add
 
 
 def test_the_settings_request_is_scoped_to_the_keys_it_carries():
@@ -486,9 +507,8 @@ def test_save_state_has_one_writer_and_five_distinguishable_states():
     assert "toast(message, 'danger');" in report
     # No Retry for general or parameters; devices additionally offers Discard changes.
     retries = js[js.index("const RETRY_ACTIONS = {"):js.index("function renderSectionAlert(")]
-    assert "export:" in retries and "devices:" in retries
+    assert "export:" in retries and "devices:" not in retries
     assert "general:" not in retries and "parameters:" not in retries
-    assert "discard.addEventListener('click', discardDeviceChanges);" in js
     # The parameters path is wired, not just declared.
     assert "setSectionState('parameters', 'unsaved');" in js
     assert "setSectionState('parameters', 'saving');" in js
@@ -500,37 +520,32 @@ def test_devices_are_bound_by_a_stable_identity_not_by_array_index():
     orphans the objects the live change handlers and the row DOM still reference."""
     js = JS.read_text(encoding="utf-8")
     assert "function withUid(device) { if (!device._uid) device._uid = `d${++deviceUid}`; return device; }" in js
-    assert "function adoptDevices(list) { settingsDraft.devices = (list || []).map(withUid); return settingsDraft.devices; }" in js
+    assert "settingsDraft.devices = (list || []).map(withUid);" in js
     assert js.count("device._uid = `d${++deviceUid}`") == 1  # exactly one place mints a _uid
     assert "if (Object.hasOwn(settingsDraft, 'devices')) adoptDevices(settingsDraft.devices);" in js
     assert "function deviceByUid(uid) { return (settingsDraft.devices || []).find((device) => device._uid === uid) || null; }" in js
-    # Both lookups resolve by _uid and skip a miss, which is a real state right after Discard changes.
-    assert js.count("const device = deviceByUid(row.dataset.uid);") == 2
-    assert js.count("if (!device) continue;") >= 2
+    # The row lookup resolves by _uid and skips a miss, which is a real state right after Discard.
+    assert js.count("const device = deviceByUid(row.dataset.uid);") == 1
+    assert js.count("if (!device) continue;") >= 1
     assert "settingsDraft.devices[Number(row.dataset.index)]" not in js
     assert "row.dataset.uid = device._uid;" in js
     # The payload is explicit instead of a spread, so no client-only key rides along.
-    payload = js[js.index("function devicesPayload()"):js.index("function devicesValid()")]
+    payload = js[js.index("function devicesPayload()"):js.index("// The device list is applied explicitly")]
     assert "{ ...device" not in payload
     for field in ("host:", "port:", "network_id:", "device_id:", "display_name:"):
         assert field in payload, field
 
 
-def test_device_remove_handler_persists_the_removal_and_keeps_focus():
+def test_device_remove_handler_only_edits_the_draft_and_keeps_focus():
     js = JS.read_text(encoding="utf-8")
     handler = js[js.index("remove.addEventListener('click', () => {"):js.index("const networkHelp = element(")]
-    assert "if (wasSaved && !confirm(" in handler          # only a saved row asks
+    assert "confirm(" not in handler                         # the reset warning belongs to Apply
     assert "const at = devices.indexOf(device);" in handler  # identity, not the captured index
     assert "if (at < 0) return;" in handler
     assert "devices.splice(index, 1)" not in js
     assert "rebuildDeviceSection();" in handler
     assert ".device-settings ~ button" in handler           # focus falls back to the Add button
-    assert "queueSettings('devices');" in handler           # the removal is what persists it
-    # The section owner keeps the state unstuck when a row becomes valid again.
-    state = js[js.index("function refreshDeviceState(card)"):js.index("function rebuildDeviceSection()")]
-    assert "pendingKeys.delete('devices');" in state
-    assert "setSectionState('devices', pendingKeys.has('devices') ? 'unsaved' : 'idle');" in state
-    assert "function devicesValid()" in js
+    assert "queueSettings(" not in handler and "api(" not in handler
 
 
 def test_build_group_body_is_shared_so_a_group_rerender_adds_no_second_heading():

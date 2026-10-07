@@ -2042,7 +2042,7 @@
 
   let settingsCommitted = {};
   let settingsDraft = {};
-  const pendingKeys = new Set();          // scalar + devices keys
+  const pendingKeys = new Set();          // scalar keys
   let pendingExportGroup = false;         // the export fields are queued as a group, never per key
   const secretRevision = new Map();       // secret key -> monotonically increasing edit counter
   const sendRevisions = new Map();        // secret key -> revision snapshot of the in-flight request
@@ -2649,7 +2649,12 @@
   // save would orphan every object the live handlers still hold.
   let deviceUid = 0;
   function withUid(device) { if (!device._uid) device._uid = `d${++deviceUid}`; return device; }
-  function adoptDevices(list) { settingsDraft.devices = (list || []).map(withUid); return settingsDraft.devices; }
+  // The draft becomes the server state; the baseline is what dirty-marking and Discard compare to.
+  function adoptDevices(list) {
+    settingsDraft.devices = (list || []).map(withUid);
+    deviceBaseline = settingsDraft.devices.map((device) => ({ ...deviceSnapshot(device), display_name: device.display_name || null }));
+    return settingsDraft.devices;
+  }
   function deviceByUid(uid) { return (settingsDraft.devices || []).find((device) => device._uid === uid) || null; }
 
   // Explicit fields instead of a spread, so the payload stays self-documenting and independent of
@@ -2664,15 +2669,51 @@
     }));
   }
 
-  // Pure predicate, no DOM: the send-time re-check in sendSettings() needs it for a draft that was
-  // mutated straight from the inputs (syncDeviceInputs) without a render in between.
-  function devicesValid() {
-    return (settingsDraft.devices || []).every((device) => isBlankNewRow(device) || !deviceProblem(device).field);
+  // The device list is applied explicitly: edits only change the draft, and one PUT (with the live
+  // reconfiguration it triggers) is sent on Apply. Unlike the other settings it never autosaves.
+  let deviceBaseline = [];                  // server state: [{ uid, host, port, network_id, device_id, display_name }]
+  const deviceUi = { applying: false, error: '', notice: '' };
+
+  function deviceSnapshot(device) {
+    return {
+      uid: device._uid,
+      host: String(device.host || '').trim(),
+      port: Number(device.port),
+      network_id: networkId(device.network_id),
+      device_id: device.device_id || null,
+    };
   }
 
-  // The only owner of the `devices` section state and of whether the `devices` key may stay queued.
+  // Dirty state is derived from draft vs baseline, so there is no flag a stale handler could leave behind.
+  function deviceChanges() {
+    const base = new Map(deviceBaseline.map((entry) => [entry.uid, entry]));
+    const rows = new Map();   // uid -> 'New' | 'Changed'
+    const risky = [];         // baseline entries whose live state is reset by an apply
+    const seen = new Set();
+    for (const device of settingsDraft.devices || []) {
+      if (isBlankNewRow(device)) continue;
+      const before = base.get(device._uid);
+      if (!before) { rows.set(device._uid, 'New'); continue; }
+      seen.add(device._uid);
+      const now = deviceSnapshot(device);
+      if (now.host !== before.host || now.port !== before.port || now.network_id !== before.network_id) rows.set(device._uid, 'Changed');
+      if (now.host.toLowerCase() !== before.host.toLowerCase() || now.port !== before.port || now.network_id !== before.network_id) risky.push(before);
+    }
+    const removed = deviceBaseline.filter((entry) => !seen.has(entry.uid));
+    risky.push(...removed);
+    return { rows, removed, risky, count: rows.size + removed.length };
+  }
+
+  function deviceDirty() { return deviceChanges().count > 0; }
+
+  const deviceLabel = (entry) => `${entry.host}:${entry.port}`;
+  const RESET_NOTE = 'Verification evidence, Engineering Mode and arming of these inverters are reset';
+
+  // The only owner of the row markers, the Apply bar and the controls' locked state. Returns true if
+  // every non-blank row is valid; an invalid draft can never be applied.
   function refreshDeviceState(card) {
     let invalid = false;
+    const changes = deviceChanges();
     for (const row of card.querySelectorAll('.device-settings-item')) {
       const device = deviceByUid(row.dataset.uid);
       if (!device) continue; // the row belongs to a draft generation that is already gone
@@ -2691,17 +2732,33 @@
         if (described) input.setAttribute('aria-describedby', described);
         else input.removeAttribute('aria-describedby');
       }
+      const flag = changes.rows.get(device._uid) || '';
+      row.classList.toggle('is-dirty', Boolean(flag));
+      const flagNode = row.querySelector('.device-row-flag');
+      flagNode.textContent = flag ? `${flag} — unsaved` : '';
+      flagNode.hidden = !flag;
       if (message) invalid = true;
     }
-    if (invalid) {
-      pendingKeys.delete('devices');                 // an invalid row is never sent …
-      setSectionState('devices', 'incomplete', DEVICES_INCOMPLETE_MSG);
-    } else if (saveSections.get('devices')?.state === 'incomplete') {
-      // … and leaving the invalid state must not claim success. 'failed' and 'saving' are left
-      // alone — they are not this function's to clear.
-      setSectionState('devices', pendingKeys.has('devices') ? 'unsaved' : 'idle');
-    } else {
-      renderSaveState();
+    for (const control of card.querySelectorAll('.device-settings input, .device-settings button, #device-add-row')) control.disabled = deviceUi.applying;
+    const apply = card.querySelector('#device-apply');
+    if (apply) {
+      apply.disabled = deviceUi.applying || invalid || changes.count === 0;
+      apply.setAttribute('aria-busy', String(deviceUi.applying));
+      card.querySelector('#device-discard').disabled = deviceUi.applying || (changes.count === 0 && !deviceUi.error);
+      const count = card.querySelector('#device-change-count');
+      count.hidden = changes.count === 0;
+      count.textContent = `${changes.count} unsaved ${changes.count === 1 ? 'change' : 'changes'}`;
+      const warning = card.querySelector('#device-reset-warning');
+      warning.hidden = changes.risky.length === 0;
+      warning.textContent = changes.risky.length ? `${RESET_NOTE} when you apply: ${changes.risky.map(deviceLabel).join(', ')}.` : '';
+      let status = deviceUi.notice;
+      if (deviceUi.applying) status = 'Applying — the inverter connections are being rebuilt …';
+      else if (invalid) status = 'Fix the marked inverter rows — nothing is applied until they are valid.';
+      else if (changes.count) status = 'Unsaved changes — nothing has been sent yet.';
+      card.querySelector('#device-apply-status').textContent = status;
+      const error = card.querySelector('#device-apply-error');
+      error.hidden = !deviceUi.error;
+      error.textContent = deviceUi.error;
     }
     return !invalid;
   }
@@ -2720,10 +2777,12 @@
 
   // The "rebuild consistently" branch: only ever on the operator's explicit request.
   function discardDeviceChanges() {
-    adoptDevices(structuredClone(settingsCommitted.devices || []));
-    pendingKeys.delete('devices');
-    setSectionState('devices', 'idle');
+    if (deviceUi.applying) return;
+    adoptDevices(deviceBaseline.map(({ uid, ...rest }) => rest));
+    deviceUi.error = '';
+    deviceUi.notice = '';
     rebuildDeviceSection();
+    toast('Inverter changes discarded.', 'info');
   }
 
   function renderDevicesSettings(card) {
@@ -2782,26 +2841,26 @@
       // The trailing empty row has nothing to remove; it is re-created on every render anyway.
       if (!isBlankNewRow(device)) removeCol.append(remove);
       grid.append(hostCol, portCol, networkCol, removeCol);
+      const flag = element('span', 'device-row-flag badge text-bg-warning mt-1');
+      flag.hidden = true;
       const feedback = element('div', 'invalid-feedback');
       feedback.id = `device-${index}-feedback`;
-      row.append(grid, feedback);
+      row.append(grid, flag, feedback);
       host.append(row);
-      const onChange = () => {
+      // Draft only: no request is sent until Apply, so a spinner step cannot reconfigure anything.
+      const onInput = () => {
         device.host = hostInput.value;
         device.port = portInput.value === '' ? null : Number(portInput.value);
         device.network_id = networkId(networkInput.value);
-        if (refreshDeviceState(card) && !isBlankNewRow(device)) queueSettings('devices');
+        deviceUi.notice = '';
+        refreshDeviceState(card);
       };
-      hostInput.addEventListener('change', onChange);
-      portInput.addEventListener('change', onChange);
-      networkInput.addEventListener('change', onChange);
+      hostInput.addEventListener('input', onInput);
+      portInput.addEventListener('input', onInput);
+      networkInput.addEventListener('input', onInput);
       remove.addEventListener('click', () => {
         const restoreFocus = document.activeElement === remove;
-        const wasSaved = !isBlankNewRow(device);
-        const label = device.host || '';
-        // confirm() is the established pattern here (token revocation uses it); an unsaved row is
-        // removed silently, as before, because there is nothing to lose.
-        if (wasSaved && !confirm(`Really remove inverter "${label}"?`)) return;
+        // Removing only edits the draft; the reset warning is shown before the removal is applied.
         const at = devices.indexOf(device);
         if (at < 0) return; // a stale closure must not delete a different row
         devices.splice(at, 1);
@@ -2813,72 +2872,103 @@
           (rows?.[Math.min(at, rows.length - 1)]?.querySelector('button')
             || editor?.parentElement?.querySelector('.device-settings ~ button'))?.focus();
         }
-        if (editor?.parentElement && refreshDeviceState(editor.parentElement) && wasSaved) queueSettings('devices');
+        deviceUi.notice = '';
+        if (editor?.parentElement) refreshDeviceState(editor.parentElement);
       });
     }
     const networkHelp = element('p', 'text-secondary small mt-2 mb-0', 'Network ID: leave empty for a direct connection. Only set it for an inverter reached through the master in the plant network.');
     networkHelp.id = 'device-network-help';
     host.append(networkHelp);
     if (devices.every(isBlankNewRow)) host.append(element('p', 'text-secondary small', 'No inverters configured yet.'));
-    const add = element('button', 'btn btn-outline-primary mt-3', 'Add inverter');
+    const add = element('button', 'btn btn-outline-primary mt-3', 'Add another inverter');
     add.type = 'button';
-    add.addEventListener('click', () => { addInverter(card, add); });
-    card.append(host, add);
+    add.id = 'device-add-row';
+    add.addEventListener('click', () => addDeviceRow(card));
+    card.append(host, add, buildDeviceApplyBar(card));
     refreshDeviceState(card);
   }
 
-  // The click can land while the cursor still sits in a field, where no change event has fired yet,
-  // so the live input values are read straight from the DOM. Returns true if the draft moved.
-  function syncDeviceInputs(card) {
-    let changed = false;
-    for (const row of card.querySelectorAll('.device-settings-item')) {
-      const device = deviceByUid(row.dataset.uid);
-      if (!device) continue;
-      const host = row.querySelector('input[data-field="host"]').value;
-      const portValue = row.querySelector('input[data-field="port"]').value;
-      const port = portValue === '' ? null : Number(portValue);
-      const network = networkId(row.querySelector('input[data-field="network_id"]').value);
-      if (device.host !== host || device.port !== port || device.network_id !== network) changed = true;
-      device.host = host;
-      device.port = port;
-      device.network_id = network;
-    }
-    return changed;
+  function buildDeviceApplyBar(card) {
+    const bar = element('div', 'device-apply-bar mt-4');
+    const actions = element('div', 'd-flex flex-wrap align-items-center gap-2');
+    const apply = element('button', 'btn btn-primary', 'Apply changes');
+    apply.type = 'button';
+    apply.id = 'device-apply';
+    apply.setAttribute('aria-describedby', 'device-apply-status');
+    apply.addEventListener('click', () => { applyDevices(card).catch((error) => toast(messageFrom(error), 'danger')); });
+    const discard = element('button', 'btn btn-outline-secondary', 'Discard');
+    discard.type = 'button';
+    discard.id = 'device-discard';
+    discard.addEventListener('click', discardDeviceChanges);
+    const count = element('span', 'badge text-bg-warning');
+    count.id = 'device-change-count';
+    actions.append(apply, discard, count);
+    const warning = element('div', 'alert alert-warning small mt-3 mb-0');
+    warning.id = 'device-reset-warning';
+    const status = element('p', 'text-secondary small mt-2 mb-0');
+    status.id = 'device-apply-status';
+    status.setAttribute('role', 'status'); // polite live region: progress and result are announced
+    const error = element('div', 'alert alert-danger mt-3 mb-0');
+    error.id = 'device-apply-error';
+    error.tabIndex = -1; // focus target after a failed apply; the toast carries the same text
+    bar.append(actions, warning, status, error);
+    return bar;
   }
 
-  // Bootstrap's JS bundle is loaded in base.html; the dismiss button is the fallback if it is not.
-  function closeInvertersModal() {
-    const modal = $('inverters-modal');
-    if (!modal) return;
-    const instance = window.bootstrap?.Modal?.getOrCreateInstance(modal);
-    if (instance) instance.hide();
-    else modal.querySelector('[data-bs-dismiss="modal"]')?.click();
+  // Adds a draft row only; a still-empty row is reused instead of stacking blanks.
+  function addDeviceRow(card) {
+    const devices = settingsDraft.devices || (settingsDraft.devices = []);
+    if (!devices.some(isBlankNewRow)) devices.push(withUid({ host: '', port: 8899, network_id: null }));
+    rebuildDeviceSection();
+    const blank = devices.find(isBlankNewRow);
+    card.querySelector(`.device-settings-item[data-uid="${blank._uid}"] input[data-field="host"]`)?.focus();
   }
 
-  // "Add inverter" confirms the row the operator just typed: save, then close. An invalid row keeps
-  // the dialog open with the existing validation markers; a rejected save does too.
-  async function addInverter(card, button) {
-    const dirty = syncDeviceInputs(card);
+  function applyFailureMessage(error) {
+    const reason = messageFrom(error);
+    if (error?.status === 409) return `The inverter list was rejected and rolled back (${reason}). The previous configuration is still active; your changes are kept.`;
+    if (error?.status === 504) return `Applying the inverter list timed out (${reason}). Check the dashboard before retrying; your changes are kept.`;
+    return `The inverters were not applied (${reason}). Your changes are kept; apply again or discard them.`;
+  }
+
+  // The one place that sends the device list. Re-addressing or removing an inverter resets its
+  // verification evidence, Engineering Mode and arming, so it needs an explicit confirmation.
+  async function applyDevices(card) {
+    if (deviceUi.applying) return;
     if (!refreshDeviceState(card)) {
-      // Best effort: the marked field is where the operator has to go. Moving the focus there does
-      // not take effect in headless Chromium, so the marker and the message carry the information.
-      const invalid = $('settings-sections')?.querySelector('.device-settings-item input.is-invalid');
-      invalid?.focus();
+      card.querySelector('.device-settings-item input.is-invalid')?.focus();
       return;
     }
-    if (dirty && settingsDraft.devices.some((device) => !isBlankNewRow(device))) queueSettings('devices');
-    button.disabled = true;
-    clearTimeout(settingsTimer); // the click supersedes the pending debounce
+    const changes = deviceChanges();
+    if (!changes.count) return;
+    if (changes.risky.length && !confirm(`${RESET_NOTE}: ${changes.risky.map(deviceLabel).join(', ')}.\n\nApply the change?`)) return;
+    deviceUi.applying = true;
+    deviceUi.error = '';
+    deviceUi.notice = '';
+    refreshDeviceState(card);
+    let failed = false;
     try {
-      // Scoped to the devices section: a foreign key's rejection must not decide this dialog, and
-      // a rejected devices save must keep it open (the alert and the toast say why).
-      if (!(await flushSettings({ sections: ['devices'] }))) return;
+      const payload = { devices: devicesPayload() };
+      const result = await api('settings', { method: 'PUT', body: JSON.stringify(payload) });
+      settingsCommitted = result.settings || { ...settingsCommitted, ...payload };
+      // After a successful apply the draft is the server state, including newly assigned ids.
+      adoptDevices(structuredClone(settingsCommitted.devices || payload.devices));
+      deviceUi.notice = `Applied ${hhmm(new Date())}.`;
+      showRestartNotice(result.restart_required);
+      if (page === 'dashboard') { loadDashboard().catch((error) => toast(messageFrom(error), 'danger')); loadMetricCount(); }
+      toast('Inverters applied.');
+    } catch (error) {
+      failed = true;
+      deviceUi.error = applyFailureMessage(error);
+      toast(deviceUi.error, 'danger');
     } finally {
-      button.disabled = false;
+      deviceUi.applying = false;
     }
-    // A fresh empty row for the next inverter, and the saved row now carries its server-side id.
-    rebuildDeviceSection();
-    closeInvertersModal();
+    const host = document.getElementById('device-editor');
+    if (!host?.parentElement) return;
+    if (failed) refreshDeviceState(host.parentElement);
+    else rebuildDeviceSection();
+    if (failed) document.getElementById('device-apply-error')?.focus();
   }
 
   // One builder for both renderSettings() and rerenderGroup(), so the heading suppression and the
@@ -3194,10 +3284,6 @@
       queueParameters(); renderParameters();
       window.bootstrap.Modal.getInstance($('add-metrics-modal'))?.hide();
     });
-    // sectionNotice() refuses to build the devices alert while the dialog is hidden (the failure is
-    // a toast then), so nothing holds the alert for a save that failed with the dialog closed.
-    // Re-running the single writer on show rebuilds it for a section whose failure is still open.
-    $('inverters-modal')?.addEventListener('shown.bs.modal', renderSaveState);
     $('add-metrics-modal')?.addEventListener('shown.bs.modal', () => $('parameter-search').focus());
     $('add-metrics-modal')?.addEventListener('hidden.bs.modal', () => { addMetricSelection.clear(); $('parameter-search').value = ''; renderParameters(); });
     $('exposed-list')?.addEventListener('dragover', (event) => event.preventDefault());

@@ -74,7 +74,16 @@ page.on('requestfailed', (r) => problems.push(`requestfailed: ${r.url()}`));
 const external = new Set();
 page.on('request', (r) => { if (!r.url().startsWith(base) && !r.url().startsWith('data:')) external.add(r.url()); });
 page.on('response', (r) => { if (r.status() >= 400) problems.push(`http ${r.status()}: ${r.request().method()} ${r.url()}`); });
-page.on('dialog', (d) => d.accept());
+// confirm() answers are scripted: the device Apply asks before re-addressing or removing an inverter.
+const dialogs = [];
+let dialogAnswer = true;
+page.on('dialog', (d) => { dialogs.push(d.message()); return dialogAnswer ? d.accept() : d.dismiss(); });
+// Every request that sends the device list; the Apply-only contract is asserted against this.
+const devicePuts = [];
+page.on('request', (r) => {
+  if (r.method() !== 'PUT' || !r.url().endsWith('/admin/api/settings')) return;
+  try { const body = JSON.parse(r.postData() || '{}'); if (Object.hasOwn(body, 'devices')) devicePuts.push(body); } catch { /* not JSON */ }
+});
 const shot = (name) => page.screenshot({ path: path.join(OUT, `${name}.png`), fullPage: true });
 const toastText = async () => (await page.locator('#toast-region').innerText()).trim();
 const overflow = async () => page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
@@ -255,6 +264,9 @@ await page.unroute('**/admin/api/devices');
 // longer exists in the DOM, so the checks below are written against the current
 // .device-subcard-power / .device-subcard-battery layout - querying the old classes returned null
 // and asserted nothing at all.
+// Module detection needs several consecutive stable reads (the pending state renders no tower), so
+// the second tower appears a few polls after the first paint; wait for it instead of sampling once.
+await page.waitForFunction(() => document.querySelectorAll('.device-subcard-battery').length >= 2, null, { timeout: 30000 }).catch(() => { /* reported by the checks below */ });
 const readLayout = () => page.evaluate(() => {
   const text = (node) => (node ? node.textContent.trim() : null);
   const box = (node) => {
@@ -367,8 +379,8 @@ check('battery cards share their row evenly', Math.abs(layout.towers[0].box.widt
   JSON.stringify([layout.power.box.width, ...layout.towers.map((tower) => tower.box.width)]));
 // The inverter state is shown exactly once per card, not repeated in the header.
 const stateMentions = await page.evaluate(() => [...document.querySelectorAll('.device-item *')]
-  .filter((n) => !n.children.length && /feed in/i.test(n.textContent)).length);
-check('inverter state is shown exactly once per card', stateMentions === 1, String(stateMentions));
+  .filter((n) => !n.children.length && /feed in/i.test(n.textContent)).map((n) => `${n.tagName}.${n.className}|${n.parentElement?.className}|${n.textContent.trim()}`));
+check('inverter state is shown exactly once per card', stateMentions.length === 1, JSON.stringify(stateMentions));
 
 // 2a-2. ITEM 5 and ITEM 0 rendered: module counts 2..6 must stay inside the height cap, and a slot
 // pattern that cannot describe a documented tower (7 populated slots, or a gap) must not render a
@@ -870,70 +882,184 @@ check('plus opens the inverter editor modal', (await page.locator('#inverters-mo
 await page.waitForFunction(() => document.getElementById('inverters-modal').contains(document.activeElement));
 check('focus stays in the modal', await page.evaluate(() => document.getElementById('inverters-modal').contains(document.activeElement)));
 const deviceRows = () => page.locator('.device-settings-item').count();
-const addInverter = () => page.click('.device-settings ~ button');
 const modalOpen = () => page.locator('#inverters-modal.show').count();
 const rowState = (index) => page.evaluate((i) => {
   const row = document.querySelectorAll('.device-settings-item')[i];
   return {
     invalid: [...row.querySelectorAll('input.is-invalid')].map((input) => input.dataset.field),
     feedback: row.querySelector('.invalid-feedback').textContent,
-    focused: document.activeElement?.id || '',
+    flag: row.querySelector('.device-row-flag').hidden ? '' : row.querySelector('.device-row-flag').textContent,
   };
 }, index);
+// A toast can sit over the bottom-right controls; closing it first keeps the click deterministic.
+const clearToasts = () => page.evaluate(() => document.querySelectorAll('#toast-region .alert').forEach((node) => node.remove()));
+const settleDevicePuts = async () => { await sleep(900); return devicePuts.length; }; // > the old 450 ms debounce
+const barState = () => page.evaluate(() => ({
+  apply: !document.getElementById('device-apply').disabled,
+  discard: !document.getElementById('device-discard').disabled,
+  count: document.getElementById('device-change-count').hidden ? '' : document.getElementById('device-change-count').textContent,
+  warning: document.getElementById('device-reset-warning').hidden ? '' : document.getElementById('device-reset-warning').textContent,
+  status: document.getElementById('device-apply-status').textContent,
+  error: document.getElementById('device-apply-error').hidden ? '' : document.getElementById('device-apply-error').textContent,
+}));
+const serverDevices = async () => (await (await context.request.get(base + '/admin/api/settings')).json()).settings.devices;
+const unloadWarns = () => page.evaluate(() => { const event = new Event('beforeunload', { cancelable: true }); window.dispatchEvent(event); return event.defaultPrevented; });
 check('the dialog offers one empty row below the saved inverter', (await deviceRows()) === 2, String(await deviceRows()));
 check('trash icon has an accessible label', (await page.locator('.device-settings-item').nth(0).locator('button[aria-label^="Remove inverter"] .material-icons').innerText()) === 'delete_outline');
 check('the empty row has no remove button', (await page.locator('.device-settings-item').nth(1).locator('button').count()) === 0);
 check('no id or name fields', (await page.locator('#device-0-device_id, #device-0-display_name').count()) === 0);
-// (b) invalid host: the dialog stays open, the host field is marked and focused, no row is added
+let bar = await barState();
+check('Apply and Discard are disabled while the draft is clean', !bar.apply && !bar.discard && bar.count === '' && bar.status === '', JSON.stringify(bar));
+check('the Apply button has an accessible name and a described status region',
+  (await page.locator('#device-apply').innerText()).trim() === 'Apply changes'
+  && (await page.locator('#device-apply').getAttribute('aria-describedby')) === 'device-apply-status'
+  && (await page.locator('#device-apply-status').getAttribute('role')) === 'status');
+check('a clean draft does not trigger the unload warning', !(await unloadWarns()));
+
+// (b)-(d) invalid rows: field-level errors as before, Apply stays disabled, nothing is sent
+const putsBefore = devicePuts.length;
 await page.fill('#device-1-host', 'http://nope/path');
-await addInverter();
-await sleep(300);
 let state = await rowState(1);
-check('invalid host keeps the dialog open', (await modalOpen()) === 1 && (await deviceRows()) === 2);
 check('invalid host is reported on the host field', state.invalid.join(',') === 'host' && state.feedback.includes('without scheme'), JSON.stringify(state));
-// (c) port out of range: marked on the port field, not on the host
+bar = await barState();
+check('an invalid draft keeps Apply disabled and says why', !bar.apply && bar.status.includes('Fix the marked'), JSON.stringify(bar));
 await page.fill('#device-1-host', '192.0.2.10');
 await page.fill('#device-1-port', '70000');
-await addInverter();
-await sleep(300);
 state = await rowState(1);
-check('out-of-range port keeps the dialog open', (await modalOpen()) === 1 && (await deviceRows()) === 2);
 check('out-of-range port is reported on the port field, not the host', state.invalid.join(',') === 'port' && state.feedback.includes('65535'), JSON.stringify(state));
-// (d) duplicate of the saved inverter: rejected client side, dialog stays open
 const savedHost = await page.inputValue('#device-0-host');
 const savedPort = await page.inputValue('#device-0-port');
 await page.fill('#device-1-host', savedHost);
 await page.fill('#device-1-port', savedPort);
-await addInverter();
-await sleep(300);
 state = await rowState(1);
-check('duplicate inverter keeps the dialog open', (await modalOpen()) === 1 && (await deviceRows()) === 2);
 check('duplicate inverter is reported on the host field', state.invalid.join(',') === 'host' && state.feedback.includes('already listed'), JSON.stringify(state));
-// (f) + (a) the host is typed last and never left, so no change event fired before the click
-await page.fill('#device-1-host', '');
+check('invalid edits sent no request', (await settleDevicePuts()) === putsBefore && (await modalOpen()) === 1);
+
+// (e) a valid new row: draft only, marked, counted, no request even past the old debounce window
+await page.fill('#device-1-host', '192.0.2.10');
 await page.fill('#device-1-port', '18899');
-await page.locator('#device-1-host').focus();
-await page.keyboard.type('192.0.2.10');
-await addInverter();
-await page.waitForSelector('#inverters-modal', { state: 'hidden' });
-check('Add inverter saves and closes the dialog', (await modalOpen()) === 0);
-await page.waitForFunction(() => document.getElementById('toast-region').textContent.includes('saved'), null, { timeout: 8000 }).catch(() => { });
-check('saving a new inverter takes effect without a restart', (await toastText()).includes('saved') && !(await toastText()).includes('restart'), await toastText());
-const savedDevices = (await (await context.request.get(base + '/admin/api/settings')).json()).settings.devices;
-check('the value typed without a change event was saved', savedDevices.some((d) => d.host === '192.0.2.10' && Number(d.port) === 18899), JSON.stringify(savedDevices));
+await page.locator('#device-1-port').dispatchEvent('change');
+await page.locator('#device-1-port').focus();
+await page.keyboard.press('ArrowUp');
+await page.keyboard.press('ArrowUp');
+await page.keyboard.press('ArrowDown');
+check('a changed field sends no request, not even after change events and spinner steps', (await settleDevicePuts()) === putsBefore);
+state = await rowState(1);
+bar = await barState();
+check('the changed row is marked as unsaved', state.flag.includes('New') && state.flag.includes('unsaved'), JSON.stringify(state));
+check('the draft is counted and Apply is enabled', bar.apply && bar.discard && bar.count === '1 unsaved change' && bar.status.includes('Unsaved changes'), JSON.stringify(bar));
+check('a new inverter needs no reset warning', bar.warning === '', bar.warning);
+check('leaving with an unsaved draft triggers the unload warning', await unloadWarns());
+await page.fill('#device-1-port', '18899');
+await clearToasts();
+await page.click('#device-apply');
+await page.waitForFunction(() => document.getElementById('toast-region').textContent.includes('Inverters applied'), null, { timeout: 8000 });
+check('Apply sends exactly one PUT with the new list', devicePuts.length === putsBefore + 1
+  && devicePuts.at(-1).devices.length === 2 && devicePuts.at(-1).devices[1].host === '192.0.2.10' && devicePuts.at(-1).devices[1].port === 18899,
+  JSON.stringify(devicePuts.slice(putsBefore)));
+check('the PUT carries nothing but the device list', Object.keys(devicePuts.at(-1)).join(',') === 'devices');
+check('Apply keeps the dialog open and the server has the new inverter', (await modalOpen()) === 1 && (await serverDevices()).some((d) => d.host === '192.0.2.10' && Number(d.port) === 18899));
+bar = await barState();
+check('after a successful apply the draft is the server state', !bar.apply && !bar.discard && bar.count === '' && /^Applied \d\d:\d\d/.test(bar.status) && (await deviceRows()) === 3, JSON.stringify(bar));
+check('no unload warning after apply', !(await unloadWarns()));
 await shot('inverter-added');
-// clean up the extra inverter so the later restart checks see the original single device
+
+// (f) Discard drops the draft without a request
+const putsAtDiscard = devicePuts.length;
+await page.fill('#device-0-port', String(Number(savedPort) + 1));
+check('editing a saved row marks it as changed and warns about the reset',
+  (await rowState(0)).flag.includes('Changed') && (await barState()).warning.includes('Engineering Mode') && (await barState()).warning.includes(`${savedHost}:${savedPort}`), JSON.stringify(await barState()));
+await clearToasts();
+await page.click('#device-discard');
+check('Discard restores the server state and sends nothing', (await page.inputValue('#device-0-port')) === savedPort && (await barState()).count === '' && (await settleDevicePuts()) === putsAtDiscard);
+
+// (g) re-addressing needs a confirmation that names the reset; cancelling sends nothing
+const extraRow = 1;
+await page.fill(`#device-${extraRow}-port`, '18898');
+await clearToasts();
+dialogAnswer = false;
+const dialogsBefore = dialogs.length;
+await page.click('#device-apply');
+await sleep(300);
+check('re-addressing asks for confirmation that names the reset', dialogs.length === dialogsBefore + 1
+  && dialogs.at(-1).includes('Verification evidence, Engineering Mode and arming') && dialogs.at(-1).includes('192.0.2.10:18899'), dialogs.at(-1));
+check('cancelling the confirmation sends nothing and keeps the draft', devicePuts.length === putsAtDiscard && (await barState()).apply);
+dialogAnswer = true;
+
+// (h) a rejected apply keeps the draft, toasts once, shows the error and moves focus to it
+await page.route('**/admin/api/settings', (route) => route.request().method() === 'PUT'
+  ? route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ detail: 'Injected failure' }) })
+  : route.continue());
+await clearToasts();
+await page.click('#device-apply');
+await page.waitForFunction(() => document.getElementById('device-apply-error') && !document.getElementById('device-apply-error').hidden, null, { timeout: 8000 });
+bar = await barState();
+check('a failed apply shows the error with the reason and keeps the draft', bar.error.includes('Injected failure') && bar.error.includes('kept') && bar.apply && bar.count === '1 unsaved change', JSON.stringify(bar));
+check('a failed apply raises the danger toast exactly once',
+  (await page.$$eval('#toast-region .alert-danger', (nodes) => nodes.filter((n) => n.textContent.includes('Injected failure')).length)) === 1);
+check('focus moves to the error after a failed apply', await page.evaluate(() => document.activeElement?.id === 'device-apply-error'));
+check('the draft value survives the failed apply', (await page.inputValue(`#device-${extraRow}-port`)) === '18898');
+await page.unroute('**/admin/api/settings');
+await page.route('**/admin/api/settings', (route) => route.request().method() === 'PUT'
+  ? route.fulfill({ status: 409, contentType: 'application/json', body: JSON.stringify({ detail: 'Device graph build failed' }) })
+  : route.continue());
+await clearToasts();
+await page.click('#device-apply');
+await page.waitForFunction(() => document.getElementById('device-apply-error').textContent.includes('rolled back'), null, { timeout: 8000 });
+check('a 409 reports the rollback and keeps the draft', (await barState()).error.includes('Device graph build failed') && (await barState()).apply);
+await page.unroute('**/admin/api/settings');
+await page.route('**/admin/api/settings', (route) => route.request().method() === 'PUT'
+  ? route.fulfill({ status: 504, contentType: 'application/json', body: JSON.stringify({ detail: 'Reconfiguration timed out' }) })
+  : route.continue());
+await clearToasts();
+await page.click('#device-apply');
+await page.waitForFunction(() => document.getElementById('device-apply-error').textContent.includes('timed out'), null, { timeout: 8000 });
+check('a 504 reports the timeout and keeps the draft', (await barState()).apply);
+await page.unroute('**/admin/api/settings');
+scrub(/http (500|409|504): PUT .*\/admin\/api\/settings|status of (500|409|504)/);
+
+// (i) the Apply button is locked while the request runs: no double submit
+const putsAtApply = devicePuts.length;
+await page.route('**/admin/api/settings', async (route) => {
+  if (route.request().method() === 'PUT') await sleep(700);
+  await route.continue();
+});
+await clearToasts();
+await page.click('#device-apply');
+const lockedWhileSending = await page.evaluate(() => document.getElementById('device-apply').disabled && document.getElementById('device-apply').getAttribute('aria-busy') === 'true');
+await page.locator('#device-apply').click({ force: true, timeout: 500 }).catch(() => { });
+await page.waitForFunction(() => document.getElementById('toast-region').textContent.includes('Inverters applied'), null, { timeout: 8000 });
+await page.unroute('**/admin/api/settings');
+check('Apply is locked during the request and sends exactly one PUT', lockedWhileSending && devicePuts.length === putsAtApply + 1, String(devicePuts.length - putsAtApply));
+check('the re-addressed inverter is on the server', (await serverDevices()).some((d) => d.host === '192.0.2.10' && Number(d.port) === 18898));
+
+// (j) removing an inverter is a draft edit until Apply; it carries the same reset warning
+await page.locator('.device-settings-item').nth(extraRow).locator('button').click();
+check('Remove drops the row from the draft only', (await deviceRows()) === 2 && (await serverDevices()).some((d) => d.host === '192.0.2.10'));
+bar = await barState();
+check('a pending removal is counted and warns about the reset', bar.count === '1 unsaved change' && bar.warning.includes('192.0.2.10:18898'), JSON.stringify(bar));
+const putsAtRemove = devicePuts.length;
+await clearToasts();
+await page.click('#device-apply');
+await page.waitForFunction(() => document.getElementById('toast-region').textContent.includes('Inverters applied'), null, { timeout: 8000 });
+check('Apply removes the inverter with exactly one PUT', devicePuts.length === putsAtRemove + 1 && devicePuts.at(-1).devices.length === 1
+  && !(await serverDevices()).some((d) => d.host === '192.0.2.10'));
+
+// (k) a draft survives closing and reopening the dialog
+await page.fill('#device-1-host', '192.0.2.55');
+await page.click('#inverters-modal .btn-close');
+await page.waitForSelector('#inverters-modal', { state: 'hidden' });
 await page.click('#add-inverter');
 await page.waitForSelector('#inverters-modal.show #device-0-host');
-check('the saved inverter is listed with a fresh empty row', (await deviceRows()) === 3, String(await deviceRows()));
-await page.locator('.device-settings-item').nth(1).locator('button').click();
-await sleep(900);
-check('Remove drops exactly that row', (await deviceRows()) === 2, String(await deviceRows()));
-check('the removed inverter is gone server side', !((await (await context.request.get(base + '/admin/api/settings')).json()).settings.devices.some((d) => d.host === '192.0.2.10')));
-// (e) nothing entered: the empty row is no error, the dialog just closes
-await addInverter();
+check('an unsaved draft survives closing the dialog', (await page.inputValue('#device-1-host')) === '192.0.2.55' && (await barState()).apply);
+await clearToasts();
+await page.click('#device-discard');
+check('Discard clears the leftover draft', (await page.inputValue('#device-1-host')) === '' && !(await barState()).apply);
+// "Add another inverter" reuses the empty row and focuses it
+await page.click('#device-add-row');
+check('Add another inverter focuses the empty row without sending anything', await page.evaluate(() => document.activeElement?.id === 'device-1-host') && (await deviceRows()) === 2);
+await page.click('#inverters-modal .btn-close');
 await page.waitForSelector('#inverters-modal', { state: 'hidden' });
-check('Add inverter without input just closes the dialog', (await modalOpen()) === 0 && !(await toastText()).toLowerCase().includes('enter an ip'));
 // (g) no stray bottom-right Close button
 await page.click('#add-inverter');
 await page.waitForSelector('#inverters-modal.show #device-0-host');
@@ -969,103 +1095,6 @@ check('.modal-body scrolls internally at a short viewport', shortViewport.bodySc
 check('shrinking the viewport does not grow the page past its default-viewport height', shortViewport.pageHeight <= pageHeightAtDefaultViewport, JSON.stringify({ ...shortViewport, pageHeightAtDefaultViewport }));
 await page.setViewportSize({ width: 1280, height: 800 });
 await sleep(200);
-// (j) editing an already-saved device row's port persists via the debounced autosave
-const persistedBefore = (await (await context.request.get(base + '/admin/api/settings')).json()).settings.devices;
-const savedPortBefore = Number(persistedBefore.find((d) => d.host === savedHost)?.port);
-const newPort = savedPortBefore === 18899 ? 18898 : savedPortBefore + 1;
-await page.fill('#device-0-port', String(newPort));
-await page.locator('#device-0-port').dispatchEvent('change');
-// The autosave is debounced 450ms (admin.js restartDebounce) and only then does flushSettings set
-// the section to `saving`, so a single synchronous read right after the change event can only ever
-// see `Unsaved changes`. Poll for the in-flight label instead of sampling once; the expectation is
-// unchanged, only the moment it is measured at.
-const savingLabel = await page.waitForFunction(() => (/Saving/.test(document.getElementById('save-state').textContent) ? document.getElementById('save-state').textContent : null), null, { timeout: 8000 })
-  .then((handle) => handle.jsonValue()).catch(() => '');
-check('#save-state reports Saving while the request is in flight', savingLabel.includes('Saving'), savingLabel);
-// The idle state is no longer an empty label: a confirmed save reads "Saved HH:MM", which is one of
-// the five distinguishable states (Incomplete / Unsaved / Saving / Saved / Failed).
-await page.waitForFunction(() => /^Saved\b/.test(document.getElementById('save-state').textContent), null, { timeout: 8000 });
-const persistedAfter = (await (await context.request.get(base + '/admin/api/settings')).json()).settings.devices;
-check('editing an already-saved device row persists via autosave', persistedAfter.some((d) => d.host === savedHost && Number(d.port) === newPort), JSON.stringify(persistedAfter));
-
-// 6b-2. a rejected devices save: the draft is kept (not rolled back onto orphaned objects), the
-// section carries a persistent alert with Retry next to the danger toast, and the value typed
-// *after* the failure is what the retry sends (finding 2 regression).
-await page.route('**/admin/api/settings', (route) => route.request().method() === 'PUT'
-  ? route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ detail: 'Injected failure' }) })
-  : route.continue());
-const failedPort = newPort === 18897 ? 18896 : 18897;
-await page.fill('#device-0-port', String(failedPort));
-await page.locator('#device-0-port').dispatchEvent('change');
-await page.waitForSelector('#save-error-devices', { timeout: 8000 });
-check('a failed devices save shows a persistent alert at the section', (await page.locator('#save-error-devices').count()) === 1);
-check('a failed devices save still raises the danger toast', (await page.locator('#toast-region .alert-danger').count()) >= 1);
-check('a failed devices save reads "Save failed"', (await page.locator('#save-state').innerText()).includes('Save failed'), await page.locator('#save-state').innerText());
-check('the failed devices alert offers a Retry', (await page.locator('#save-error-devices button:has-text("Retry")').count()) === 1);
-// The port typed after the failure must reach the server, i.e. the row object the input writes to
-// is still the one the draft holds; a rollback would have replaced it and orphaned the handler.
-const retryPort = failedPort + 1;
-await page.fill('#device-0-port', String(retryPort));
-await page.locator('#device-0-port').dispatchEvent('change');
-await page.unroute('**/admin/api/settings');
-// Editing the row again moves the devices section from `failed` to `unsaved`. The rejection is not
-// resolved by typing, so `setSectionState` carries a separate `failure` field forward across
-// `unsaved`/`saving`/`incomplete` and only `saved`/`idle` clear it — that is what keeps this alert
-// and its Retry on screen. A missing button is recorded as a FAIL instead of aborting the process:
-// the ~130 checks after this line, including the mobile export-grid assertion, used to go
-// unverified because an uncaught throw here ended the run.
-const retryClicked = await page.click('#save-error-devices button:has-text("Retry")', { timeout: 4000 })
-  .then(() => true).catch(() => false);
-check('the failed devices alert still offers a Retry after the row is edited again', retryClicked);
-await page.waitForFunction(() => /^Saved\b/.test(document.getElementById('save-state').textContent), null, { timeout: 8000 });
-const afterRetry = (await (await context.request.get(base + '/admin/api/settings')).json()).settings.devices;
-check('the value typed after a failed save is what the retry sends', afterRetry.some((d) => d.host === savedHost && Number(d.port) === retryPort), JSON.stringify(afterRetry));
-check('the persistent alert is removed once the save succeeds', (await page.locator('#save-error-devices').count()) === 0);
-scrub(/http 500: PUT .*\/admin\/api\/settings|status of 500/);
-
-// 6b-3. the same failure while the dialog is closed: the toast is the only surface at that moment,
-// and reopening the dialog shows the persistent alert, because the section stays failed.
-await page.route('**/admin/api/settings', (route) => route.request().method() === 'PUT'
-  ? route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ detail: 'Injected failure' }) })
-  : route.continue());
-await page.fill('#device-0-port', String(retryPort + 1));
-await page.locator('#device-0-port').dispatchEvent('change');
-await page.click('#inverters-modal .btn-close');
-await page.waitForSelector('#inverters-modal', { state: 'hidden' });
-await page.waitForFunction(() => [...document.querySelectorAll('#toast-region .alert-danger')].some((n) => n.textContent.includes('were not saved')), null, { timeout: 8000 });
-check('a devices save that fails with the dialog closed still toasts', true);
-await page.click('#add-inverter');
-await page.waitForSelector('#inverters-modal.show #device-0-host');
-// sectionNotice() returns null while the dialog is hidden (the failure is toast-only then), so
-// nothing holds the alert for a save that failed with the dialog closed. A `shown.bs.modal` handler
-// on #inverters-modal re-runs renderSaveState(), the single writer, which rebuilds the alert for a
-// section whose `failure` is still open. The wait is guarded so a regression is reported by the
-// check below rather than aborting the remaining run.
-await page.waitForSelector('#save-error-devices', { timeout: 8000 }).catch(() => { /* reported by the check below */ });
-check('reopening the dialog surfaces the persistent devices alert', (await page.locator('#save-error-devices').count()) === 1);
-
-// 6b-4. "Add inverter" must not close the dialog on a failed save (finding 3 regression).
-await page.fill('#device-1-host', '192.0.2.77');
-await addInverter();
-await sleep(600);
-check('Add inverter keeps the dialog open when the save fails', (await modalOpen()) === 1);
-await page.unroute('**/admin/api/settings');
-// Discard the failed edits so the later restart checks see the committed device list again. The
-// Discard button lives in the section alert, so it is only reachable while that alert is on screen.
-// The fallback is a safety net, not the expected path: if the button is ever missing the check above
-// fails, and reloading drops the in-memory draft the same way Discard does so the checks below still
-// start from a known state instead of inheriting an uncommitted one.
-const discarded = await page.click('#save-error-devices button:has-text("Discard changes")', { timeout: 4000 })
-  .then(() => true).catch(() => false);
-await sleep(300);
-check('Discard changes restores the committed inverter list', discarded && (await page.locator('#save-error-devices').count()) === 0);
-if (!discarded) {
-  await page.goto(base + '/ui/dashboard');
-  await page.waitForSelector('#devices-list .device-item');
-  await page.click('#add-inverter');
-  await page.waitForSelector('#inverters-modal.show #device-0-host');
-}
-scrub(/http 500: PUT .*\/admin\/api\/settings|status of 500/);
 await page.click('#inverters-modal .btn-close');
 await page.waitForSelector('#inverters-modal', { state: 'hidden' });
 await page.click('#add-inverter');

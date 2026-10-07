@@ -1200,6 +1200,12 @@ body {
     align-items: end;
 }
 
+/* Unsaved rows are marked by more than colour: the badge text carries the state too. */
+.device-settings-item.is-dirty {
+    border-color: var(--bs-warning);
+    border-left-width: .3rem;
+}
+
 .save-state {
     min-height: 1.5rem;
 }

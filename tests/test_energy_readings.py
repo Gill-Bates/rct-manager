@@ -109,8 +109,10 @@ class CountingGateway:
         self.transactions: list[tuple[str, str]] = []
         self._values: dict[tuple[str, str], tuple[object, float, CacheFreshness]] = {}
 
-    def put(self, name: str, value, *, age: float = 1.0, freshness=CacheFreshness.FRESH) -> None:
-        self._values[("main", name)] = (value, age, freshness)
+    def put(
+        self, name: str, value, *, age: float = 1.0, freshness=CacheFreshness.FRESH, device_id: str = "main"
+    ) -> None:
+        self._values[(device_id, name)] = (value, age, freshness)
 
     def cached_sample(self, device_id: str, name: str):
         return self._values.get((device_id, name))
@@ -184,6 +186,33 @@ def test_one_missing_string_still_yields_a_sum_and_stays_fresh() -> None:
     result = readings(rct).readings("main")
     assert result.pv_power_w.value == pytest.approx(1500.0)
     assert result.pv_power_w.stale is False  # staleness covers present strings only
+
+
+def test_a_string_that_vanishes_after_being_seen_makes_the_partial_sum_stale_until_it_returns() -> None:
+    rct = CountingGateway(ManualClock())
+    rct.put("solar_a_power", 1500.0)
+    rct.put("solar_b_power", 900.0)
+    adapter = readings(rct)
+    assert adapter.readings("main").pv_power_w.stale is False
+    del rct._values[("main", "solar_b_power")]  # cache expired / entry gone
+    partial = adapter.readings("main").pv_power_w
+    assert partial.value == pytest.approx(1500.0) and partial.stale is True
+    rct.put("solar_b_power", 950.0)
+    back = adapter.readings("main").pv_power_w
+    assert back.value == pytest.approx(2450.0) and back.stale is False
+
+
+def test_the_seen_string_state_is_kept_per_device() -> None:
+    rct = CountingGateway(ManualClock())
+    for device_id in ("main", "slave1"):
+        rct.put("solar_a_power", 1500.0, device_id=device_id)
+    rct.put("solar_b_power", 900.0)  # only "main" has a second string
+    adapter = readings(rct)
+    adapter.readings("main")
+    adapter.readings("slave1")
+    del rct._values[("main", "solar_b_power")]
+    assert adapter.readings("main").pv_power_w.stale is True  # seen on main, gone now
+    assert adapter.readings("slave1").pv_power_w.stale is False  # never had string B: stays fresh
 
 
 def test_a_grace_value_is_published_with_its_age_and_marked_stale() -> None:

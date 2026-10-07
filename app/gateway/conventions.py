@@ -40,7 +40,13 @@ class RctGridPowerConvention:
 
 
 def soc_percent(value: float) -> float:
-    """The catalog reports ``battery_soc`` as a ratio; the dispatch contract and the UI use percent."""
+    """The catalog reports ``battery_soc`` as a ratio 0..1; the dispatch contract and the UI use percent.
+
+    Values above 1.5 are passed through unchanged only as a compatibility fallback for firmware that
+    already reports percent. There is no hardware evidence either way, and strict validation would
+    make dispatch and restore fail closed on real hardware. Once it is confirmed that ``battery_soc``
+    is always a ratio, drop the fallback and reject out-of-range values.
+    """
     return value * 100.0 if value <= 1.5 else value
 
 

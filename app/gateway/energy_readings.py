@@ -43,6 +43,9 @@ class RctEnergyReadings:
         # and a verification has to take effect live, without a restart. An empty registry answers
         # with the same assumption defaults the dispatch adapter already works with.
         self._capabilities = capabilities
+        # (device_id, string) pairs that have delivered a value at least once. In memory only: a
+        # restart relearns it. Set.add is atomic, and readings() runs on the event loop anyway.
+        self._seen_strings: set[tuple[str, str]] = set()
 
     def readings(self, device_id: str) -> EnergyReadings:
         return EnergyReadings(
@@ -90,13 +93,20 @@ class RctEnergyReadings:
         return DeviceReading(watts, reading.age_seconds, reading.stale)
 
     def _pv(self, device_id: str) -> DeviceReading:
-        parts = [self._sample(device_id, name) for name in _SOLAR_POWER]
-        present = [part for part in parts if part.value is not None]
+        parts = [(name, self._sample(device_id, name)) for name in _SOLAR_POWER]
+        present = [part for _name, part in parts if part.value is not None]
+        for name, part in parts:
+            if part.value is not None:
+                self._seen_strings.add((device_id, name))
         if not present:
             return ABSENT  # None only when neither string is present
+        # A string that never reported (single-string plant) does not count against freshness; one
+        # that did report before and is gone now makes the partial sum stale.
+        vanished = any(
+            part.value is None and (device_id, name) in self._seen_strings for name, part in parts
+        )
         return DeviceReading(
             sum(part.value for part in present),
             max((part.age_seconds for part in present if part.age_seconds is not None), default=None),
-            # One ageing present string makes the sum ageing; an absent string does not.
-            any(part.stale for part in present),
+            vanished or any(part.stale for part in present),
         )
