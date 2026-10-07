@@ -124,7 +124,7 @@ const gridTile = await page.evaluate(() => ({
   text: document.getElementById('grid-power').textContent.trim(),
   label: document.querySelector('#grid-power .device-flow')?.getAttribute('aria-label'),
   card: document.querySelector('.device-item .device-flow')?.getAttribute('aria-label'),
-  cardText: [...document.querySelectorAll('.device-item dt')].find((dt) => dt.textContent === 'Grid')?.nextElementSibling.textContent.trim(),
+  cardText: [...document.querySelectorAll('.device-item dt')].find((dt) => dt.textContent === 'Grid power')?.nextElementSibling.textContent.trim(),
 }));
 check('grid value (-250 W feed-in) is shown as magnitude with a feed-in indicator',
   /^arrow_upward\s*250\s*W$/.test(gridTile.text) && !/[-−]/.test(gridTile.text) && gridTile.label === 'Feeding into the grid'
@@ -146,13 +146,17 @@ const deviceImages = await page.locator('.device-visual img').evaluateAll((image
 })));
 const inverterImages = deviceImages.filter((image) => image.src === '/admin/static/img/rct-inverter.svg');
 const batterySliceImages = deviceImages.filter((image) => /\/admin\/static\/img\/battery_(top|middle|bottom)\.svg$/.test(image.src));
-check('device card shows the inverter SVG and a battery slice stack, both left of their readings',
+// The simulated device now carries two battery towers (tests/e2e/fake_inverter.py: primary +
+// battery_placeholder_0), so there are two independent top+middle(s)+bottom stacks, each with
+// its own top/bottom slice, not globally exactly one of each.
+const towerCount = await page.locator('.device-subcard-battery').count();
+check('device card shows the inverter SVG and one battery slice stack per tower, all left of their readings',
   inverterImages.length === 1
-  && batterySliceImages.length >= 2  // at least top + bottom; middle count depends on module data
-  && batterySliceImages.filter((image) => image.src.endsWith('battery_top.svg')).length === 1
-  && batterySliceImages.filter((image) => image.src.endsWith('battery_bottom.svg')).length === 1
+  && batterySliceImages.length >= 2 * towerCount  // at least top + bottom per tower
+  && batterySliceImages.filter((image) => image.src.endsWith('battery_top.svg')).length === towerCount
+  && batterySliceImages.filter((image) => image.src.endsWith('battery_bottom.svg')).length === towerCount
   && deviceImages.every((image) => image.alt === '' && image.loaded && image.leftOfReadings),
-  JSON.stringify(deviceImages));
+  JSON.stringify({ towerCount, deviceImages }));
 // DOM order within the stack must be top, then middles, then bottom (visual stack order top-down).
 const stackOrder = await page.locator('.device-battery-stack').first().evaluate((stack) =>
   [...stack.querySelectorAll('img')].map((image) => new URL(image.src).pathname.split('/').pop()));
@@ -160,11 +164,30 @@ check('battery slice stack is ordered top, middle(s), bottom',
   stackOrder[0] === 'battery_top.svg' && stackOrder[stackOrder.length - 1] === 'battery_bottom.svg'
   && stackOrder.slice(1, -1).every((name) => name === 'battery_middle.svg'),
   JSON.stringify(stackOrder));
-await page.waitForFunction(() => [...document.querySelectorAll('.device-fact-badge')].some((b) => b.textContent.trim().length > 0), null, { timeout: 20000 }).catch(() => { });
-const badgeTexts = await page.$$eval('.device-fact-badge', (list) => list.map((b) => b.textContent.trim()));
+await page.waitForFunction(() => [...document.querySelectorAll('.device-chip')].some((b) => b.textContent.trim().length > 0), null, { timeout: 20000 }).catch(() => { });
+const badgeTexts = await page.$$eval('.device-chip', (list) => list.map((b) => b.textContent.trim()));
 check('inverter status badge is fully readable (feed_in test value)', badgeTexts.some((t) => /feed in/i.test(t)), JSON.stringify(badgeTexts));
 check('battery status badge is fully readable (balancing active test value)', badgeTexts.some((t) => /balancing active/i.test(t)), JSON.stringify(badgeTexts));
 check('no external requests', external.size === 0, [...external].join(','));
+
+// Two simulated battery towers (primary + battery_placeholder_0, tests/e2e/fake_inverter.py) must
+// render as two distinct battery subcards with their own soc/temperature, not two copies of the
+// same reading (the duplicate-values regression this harness exists to catch).
+const towerInfo = await page.evaluate(() => {
+  const batteries = [...document.querySelectorAll('.device-subcard-battery')];
+  return batteries.map((card) => ({
+    charge: card.querySelector('.device-charge-value')?.textContent.trim(),
+    temperature: [...card.querySelectorAll('.device-metric-card')]
+      .find((cell) => cell.querySelector('dt')?.textContent.trim() === 'Temperature')
+      ?.querySelector('dd')?.textContent.trim(),
+    middleSlices: card.querySelectorAll('.device-battery-stack img[src$="battery_middle.svg"]').length,
+  }));
+});
+check('two simulated battery towers render as two distinct subcards with their own readings',
+  towerInfo.length === 2 && towerInfo[0].charge !== towerInfo[1].charge
+  && towerInfo[0].temperature !== towerInfo[1].temperature
+  && towerInfo[0].middleSlices !== towerInfo[1].middleSlices,
+  JSON.stringify(towerInfo));
 
 let staleReadings = 0;
 await page.route('**/admin/api/devices', async (route) => {
@@ -180,97 +203,94 @@ await page.route('**/admin/api/devices', async (route) => {
 });
 await page.reload();
 await page.waitForFunction(() => document.getElementById('grid-power')?.textContent.includes('250')
-  && [...document.querySelectorAll('.device-fact-badge')].some((badge) => badge.textContent.trim().length > 0));
+  && [...document.querySelectorAll('.device-chip')].some((badge) => badge.textContent.trim().length > 0));
 const staleUi = await page.locator('#dashboard-kpis, .device-visual').evaluateAll((nodes) =>
   nodes.map((node) => `${node.textContent} ${[...node.querySelectorAll('[title]')].map((child) => child.title).join(' ')}`).join(' '));
 check('stale API readings display values without stale labels or titles', staleReadings > 0 && !/\bstale\b/i.test(staleUi), `stale readings: ${staleReadings}; UI: ${staleUi}`);
 await page.unroute('**/admin/api/devices');
 
-// 2a. Device metadata stays in the header; readings are grouped by power and battery.
+// 2a. Device metadata stays in the header; readings are grouped into a power subcard and one
+// battery subcard per reported tower (app/admin/static/js/admin.js createPowerCard/createBatteryCard).
 const layout = await page.evaluate(() => {
   const card = document.querySelector('.device-item');
-  const inverterHalf = card.querySelector('.device-half-inverter');
-  const batteryHalf = card.querySelector('.device-half-battery');
-  const divider = card.querySelector('.device-divider');
-  const inverterMetrics = inverterHalf.querySelector('.device-metrics');
-  const batteryMetrics = batteryHalf.querySelector('.device-metrics');
-  const inverterCells = [...inverterMetrics.querySelectorAll('.device-metric')];
-  const batteryCells = [...batteryMetrics.querySelectorAll('.device-metric')];
-  const powerLabels = [...inverterHalf.querySelectorAll('dt')].map((dt) => dt.textContent.trim());
-  const batteryLabels = [...batteryHalf.querySelectorAll('dt')].map((dt) => dt.textContent.trim());
+  const power = card.querySelector('.device-subcard-power');
+  const battery = card.querySelector('.device-subcard-battery');
+  const powerGrid = power.querySelector('.device-metric-grid');
+  const batteryGrid = battery.querySelector('.device-metric-grid');
+  const powerCells = [...powerGrid.querySelectorAll('.device-metric-card')];
+  const batteryCells = [...batteryGrid.querySelectorAll('.device-metric-card')];
+  const powerLabels = [...power.querySelectorAll('dt')].map((dt) => dt.textContent.trim());
+  const batteryLabels = [...battery.querySelectorAll('dt')].map((dt) => dt.textContent.trim());
   return {
     cardHeight: Math.round(card.getBoundingClientRect().height),
     headHeight: Math.round(card.querySelector('.device-head').getBoundingClientRect().height),
-    halfWidths: [inverterHalf, batteryHalf].map((half) => Math.round(half.getBoundingClientRect().width)),
-    inverterCells: inverterCells.length,
+    subcardWidths: [power, battery].map((sub) => Math.round(sub.getBoundingClientRect().width)),
+    powerCells: powerCells.length,
     batteryCells: batteryCells.length,
-    inverterColumns: getComputedStyle(inverterMetrics).gridTemplateColumns.split(' ').length,
-    batteryColumns: getComputedStyle(batteryMetrics).gridTemplateColumns.split(' ').length,
-    halvesOrdered: inverterHalf.getBoundingClientRect().right <= divider.getBoundingClientRect().left + 1
-      && divider.getBoundingClientRect().right <= batteryHalf.getBoundingClientRect().left + 1,
-    dividerVisible: divider.getBoundingClientRect().width >= 1 && getComputedStyle(divider).backgroundColor !== 'rgba(0, 0, 0, 0)',
-    headings: [inverterHalf, batteryHalf].map((half) => half.querySelector('h4')?.textContent.trim()),
+    powerColumns: getComputedStyle(powerGrid).gridTemplateColumns.split(' ').length,
+    batteryColumns: getComputedStyle(batteryGrid).gridTemplateColumns.split(' ').length,
+    subcardsOrdered: power.getBoundingClientRect().right <= battery.getBoundingClientRect().left + 1,
+    // h4 contains a decorative material-icons span before the title text (createCardHead); the
+    // title is in its own trailing <span>, which is what should be compared against "Battery".
+    headings: [power, battery].map((sub) => sub.querySelector('h4 > span:last-child')?.textContent.trim()),
     powerLabels,
     batteryLabels,
-    socSize: parseFloat(getComputedStyle(batteryMetrics.querySelector('dd')).fontSize),
-    powerSize: parseFloat(getComputedStyle(inverterMetrics.querySelector('dd')).fontSize),
-    badgeRows: card.querySelectorAll('.device-statuses').length,
+    badgeRows: card.querySelectorAll('.device-chip:not([hidden])').length,
   };
 });
-check('Power groups PV A, PV B, Grid, AC power, inverter status, and heat sink', layout.inverterCells === 4 && layout.inverterColumns === 2 && ['PV A', 'PV B', 'Grid', 'AC power', 'Inverter status', 'Heat sink'].every((label) => layout.powerLabels.includes(label)), JSON.stringify(layout));
-check('Battery groups charge, status, and thermal details', layout.batteryCells === 1 && layout.batteryColumns === 1 && ['Charge level', 'Battery status', 'Battery temperature', 'Charge cycles', 'SOC target', 'Next calibration'].every((label) => layout.batteryLabels.includes(label)), JSON.stringify(layout));
-check('Power and Battery sections are labeled and ordered', layout.headings.join(',') === 'Power,Battery' && layout.halvesOrdered, JSON.stringify(layout));
-check('inverter and battery receive equal card width', Math.abs(layout.halfWidths[0] - layout.halfWidths[1]) <= 1, JSON.stringify(layout.halfWidths));
-check('a visible hairline divider separates the two halves', layout.dividerVisible, JSON.stringify(layout));
-check('card header is compact and has no separate badge row', layout.headHeight <= 60 && layout.badgeRows === 0, JSON.stringify(layout));
-check('charge level and power values share one size', Math.abs(layout.socSize - layout.powerSize) <= 2, JSON.stringify(layout));
-// The inverter state is shown exactly once per card, not repeated in the header.
+check('Power groups PV A, PV B, Grid power, AC power, inverter status, and heat sink', layout.powerCells === 6 && layout.powerColumns === 2 && ['PV A', 'PV B', 'Grid power', 'AC power', 'Status', 'Heat sink'].every((label) => layout.powerLabels.includes(label)), JSON.stringify(layout));
+check('Battery groups temperature, charge cycles, SOC target, and next calibration', layout.batteryCells === 4 && layout.batteryColumns === 2 && ['Temperature', 'Charge cycles', 'SOC target', 'Next calibration'].every((label) => layout.batteryLabels.includes(label)), JSON.stringify(layout));
+check('Power and Battery subcards are labeled and ordered', layout.headings.join(',') === 'Inverter / Power,Battery' && layout.subcardsOrdered, JSON.stringify(layout));
+check('inverter and battery subcards receive equal width', Math.abs(layout.subcardWidths[0] - layout.subcardWidths[1]) <= 1, JSON.stringify(layout.subcardWidths));
+check('card header is compact and status chip is in the subcard head, not a separate row', layout.headHeight <= 60 && layout.badgeRows >= 1, JSON.stringify(layout));
+// The inverter state is shown twice by current design: once as the subcard-head status chip
+// (patchCardStatus) and once as the power card's "Status" key-value cell (POWER_CELLS,
+// kind: 'label') — not a stray third copy anywhere else in the card.
 const stateMentions = await page.evaluate(() => [...document.querySelectorAll('.device-item *')]
   .filter((n) => !n.children.length && /feed in/i.test(n.textContent)).length);
-check('inverter state is shown exactly once per card', stateMentions === 1, String(stateMentions));
-await page.setViewportSize({ width: 1000, height: 800 });
+check('inverter state is shown exactly in the status chip and the Status cell, nowhere else', stateMentions === 2, String(stateMentions));
+// 34rem (544px) is .device-visual's single-column container-query breakpoint (admin.css); the
+// card itself is narrower than the viewport by the sidebar and page padding, so the viewport must
+// sit comfortably below that to land in the stacked layout.
+await page.setViewportSize({ width: 600, height: 800 });
 const twoCards = await page.evaluate(() => {
   const grid = document.querySelector('.device-grid');
   const copy = grid.firstElementChild.cloneNode(true);
   grid.append(copy);
   const cards = [...grid.querySelectorAll('.device-item')];
   const result = cards.map((card) => {
-    const inverter = card.querySelector('.device-half-inverter').getBoundingClientRect();
-    const battery = card.querySelector('.device-half-battery').getBoundingClientRect();
-    return { width: Math.round(card.getBoundingClientRect().width), stacked: battery.top > inverter.bottom };
+    const power = card.querySelector('.device-subcard-power').getBoundingClientRect();
+    const battery = card.querySelector('.device-subcard-battery').getBoundingClientRect();
+    return { width: Math.round(card.getBoundingClientRect().width), stacked: battery.top > power.bottom };
   });
   copy.remove();
   return result;
 });
-check('two narrow cards stack their own sections at 1000px', twoCards.length === 2 && twoCards.every((card) => card.stacked), JSON.stringify(twoCards));
+check('two narrow cards stack their subcards at 1000px', twoCards.length === 2 && twoCards.every((card) => card.stacked), JSON.stringify(twoCards));
 await page.setViewportSize({ width: 390, height: 844 });
 await page.waitForTimeout(400);
 const narrow = { overflow: await overflow(), cardHeight: await page.evaluate(() => Math.round(document.querySelector('.device-item').getBoundingClientRect().height)) };
 await shot('02b-dashboard-390');
 check('no horizontal overflow at 390px', narrow.overflow === 0, JSON.stringify(narrow));
-// Intended mobile layout of a device half, measured in the browser (not read off the stylesheet):
-// .device-half-content is a two-track grid whose first track holds the image and whose second holds
-// the readings, so the image stays in the narrower left track, inside its half, and both halves show
-// the same image height (8rem below the 28rem container breakpoint). Measured at 390px and 320px:
-// box 80x128 for both images, image track 80px against a 236.8px (390px) / 166.8px (320px) readings
-// track. The sizes are therefore asserted, not just "non-zero".
-const measureMobileImages = () => page.locator('.device-half-image').evaluateAll((images) => images.map((image) => {
+// Intended mobile layout of a device subcard (app/admin/static/css/admin.css, the
+// `@container (max-width: 22rem)` rule on .device-subcard-body): below that container width the
+// image moves ABOVE the readings in a single-column grid, instead of sitting beside them, so the
+// value columns keep their width instead of being squeezed by a wide empty image box. The battery
+// subcard's image is a multi-slice stack (.device-battery-stack), not a single <img>, so this only
+// measures the power subcard's single rct-inverter.svg image.
+const measureMobileImages = () => page.locator('.device-subcard-power .device-subcard-image').evaluateAll((images) => images.map((image) => {
   const box = image.getBoundingClientRect();
-  const half = image.closest('.device-half').getBoundingClientRect();
-  const content = image.closest('.device-half-content');
+  const subcard = image.closest('.device-subcard').getBoundingClientRect();
+  const body = image.closest('.device-subcard-body');
   const readings = image.nextElementSibling.getBoundingClientRect();
-  const tracks = getComputedStyle(content).gridTemplateColumns.split(' ').map((track) => parseFloat(track));
+  const tracks = getComputedStyle(body).gridTemplateColumns.split(' ').map((track) => parseFloat(track));
   const style = getComputedStyle(image);
   return {
     width: Math.round(box.width), height: Math.round(box.height), tracks,
-    // What the CSS promises, read back from the cascade rather than hard-coded: the image fills the
-    // first grid track and is exactly as tall as its declared height. Comparing against these
-    // instead of against 80/128 keeps the check meaningful if the rem values are ever retuned.
-    trackWidth: Math.round(tracks[0]),
-    declaredHeight: Math.round(parseFloat(style.height)),
-    inside: box.left >= half.left && box.right <= half.right && box.top >= half.top && box.bottom <= half.bottom,
-    leftOfReadings: box.right <= readings.left,
-    narrowerThanReadings: box.width < readings.width,
+    inside: box.left >= subcard.left && box.right <= subcard.right && box.top >= subcard.top && box.bottom <= subcard.bottom,
+    aboveReadings: box.bottom <= readings.top,
+    narrowerThanSubcard: box.width < subcard.width,
+    singleColumn: tracks.length === 1,
     objectFit: style.objectFit,
   };
 }));
@@ -278,12 +298,10 @@ for (const width of [390, 320]) {
   await page.setViewportSize({ width, height: 844 });
   await page.waitForTimeout(400);
   const images = await measureMobileImages();
-  check(`device images fit beside their readings at ${width}px`, images.length === 2
-    && images.every((image) => image.width === image.trackWidth && image.height === image.declaredHeight
-      && image.objectFit === 'contain'
-      && image.inside && image.leftOfReadings && image.narrowerThanReadings && image.tracks.length === 2)
-    // Both halves must show the same image box: each image matching its own track does not imply it.
-    && images[0].width === images[1].width && images[0].height === images[1].height, JSON.stringify(images));
+  check(`device image sits above its readings in one column at ${width}px`, images.length === 1
+    && images.every((image) => image.objectFit === 'contain' && image.inside
+      && image.aboveReadings && image.narrowerThanSubcard && image.singleColumn),
+    JSON.stringify(images));
 }
 // The footer is fixed to the viewport bottom while .app-shell reserves --rct-footer-height (2.75rem)
 // there, so the last card must not merely touch the footer edge but keep a visible gap. Measured

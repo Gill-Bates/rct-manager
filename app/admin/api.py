@@ -604,6 +604,7 @@ def devices(request: Request) -> dict:
         "inverter_state", "battery_status2", "battery_placeholder_0_status2",
         "battery_soc_target", "power_mng_bat_next_calib_date", "heat_sink_temperature",
         "battery_temperature", "battery_cycles",
+        "battery_placeholder_0_temperature", "battery_placeholder_0_soc",
     )
     selected = [name for name in preferred if name in exposed]
     selected += [name for name in card_names if runtime.catalog.exists(name)]

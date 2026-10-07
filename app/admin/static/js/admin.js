@@ -288,13 +288,22 @@
     { name: 'heat_sink_temperature', label: 'Heat sink', icon: 'device_thermostat', optional: true },
     { name: 'inverter_state', label: 'Status', icon: 'tune', kind: 'label', optional: true },
   ];
-  // The battery card's 2x2 fact grid below the charge level and its bar.
-  const BATTERY_CELLS = [
-    { name: 'battery_temperature', label: 'Temperature', icon: 'device_thermostat', optional: true },
-    { name: 'battery_cycles', label: 'Charge cycles', icon: 'loop', optional: true },
-    { name: 'battery_soc_target', label: 'SOC target', icon: 'flag', optional: true },
-    { name: 'power_mng_bat_next_calib_date', label: 'Next calibration', icon: 'event_repeat', optional: true },
-  ];
+  // The battery card's 2x2 fact grid below the charge level and its bar. `temperature` and
+  // `cycles` are per-tower readings in the catalog (app/catalog/objects.json carries both
+  // `battery_temperature`/`battery_placeholder_0_temperature` and `battery_cycles`/no placeholder
+  // counterpart — a second tower simply has no `cycles` register and shows n/a there, which is
+  // correct, not a bug), so their cell name is built from the tower's own prefix. `soc_target` and
+  // `power_mng_bat_next_calib_date` have no `battery_placeholder_0_*` counterpart in the catalog at
+  // all — SOC target and calibration scheduling are system-wide `power_mng`/global settings, not a
+  // per-tower attribute — so both towers intentionally show the same shared value.
+  function batteryCellSpecs(prefix) {
+    return [
+      { name: `${prefix}_temperature`, label: 'Temperature', icon: 'device_thermostat', optional: true },
+      { name: `${prefix}_cycles`, label: 'Charge cycles', icon: 'loop', optional: true },
+      { name: 'battery_soc_target', label: 'SOC target', icon: 'flag', optional: true },
+      { name: 'power_mng_bat_next_calib_date', label: 'Next calibration', icon: 'event_repeat', optional: true },
+    ];
+  }
 
   // Metric names that prove a battery system is attached; without any of them no battery card is
   // rendered at all rather than an empty one. Fallback only — used when the server's `batteries`
@@ -315,12 +324,13 @@
     if (Array.isArray(batteries) && batteries.length) {
       return batteries.map((battery) => ({
         title: 'Battery',
+        prefix: battery.id,
         statusMetric: `${battery.id}_status2`,
         moduleCount: typeof battery.module_count === 'number' ? battery.module_count : null,
       }));
     }
     if (!BATTERY_PRESENCE.some((name) => metrics.has(name))) return [];
-    return [{ title: 'Battery', statusMetric: 'battery_status2', moduleCount: null }];
+    return [{ title: 'Battery', prefix: 'battery', statusMetric: 'battery_status2', moduleCount: null }];
   }
 
   // The three battery slices (app/admin/static/img/battery_{top,middle,bottom}.svg) share a 220-wide
@@ -462,7 +472,7 @@
     bar.append(element('div', 'device-soc-fill'));
     charge.append(bar);
     const grid = element('dl', 'device-metric-grid mb-0');
-    const cells = BATTERY_CELLS.map((spec) => {
+    const cells = batteryCellSpecs(tower.prefix).map((spec) => {
       const { node, dd } = createMetricCell(spec);
       grid.append(node);
       return { ...spec, dd, node };
@@ -475,7 +485,7 @@
     card.append(head.node, body);
     return {
       node: card, head, grid, cells, chargeValue, bar, stack, moduleCount: -1,
-      statusMetric: tower.statusMetric,
+      statusMetric: tower.statusMetric, socMetric: `${tower.prefix}_soc`,
     };
   }
 
@@ -546,7 +556,7 @@
       card.stack.replaceChildren(...buildBatteryStack(wanted));
     }
     patchCardStatus(card.head, metrics, card.statusMetric);
-    const metric = metrics.get('battery_soc');
+    const metric = metrics.get(card.socMetric);
     const value = metric && metric.value !== null && metric.value !== undefined ? Number(metric.value) : NaN;
     const available = Number.isFinite(value);
     const [number, unit] = metricParts(value, metric?.unit);
