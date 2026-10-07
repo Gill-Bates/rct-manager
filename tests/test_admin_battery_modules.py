@@ -270,12 +270,20 @@ def test_an_established_topology_is_held_while_a_later_scan_is_incomplete() -> N
     runtime = _runtime(serials)
     trusted = _report(runtime, "battery")
     assert trusted["module_count"] == 6
-    mid_scan = {f"battery_module_sn_{i}": f"SN-{i}" for i in range(3)}  # slots 3..6 now UNKNOWN
-    runtime_mid_scan = _runtime(mid_scan)
-    runtime_mid_scan.gateway = runtime.gateway  # same gateway instance -> same stability state
-    held = _report(runtime_mid_scan, "battery")
-    assert held["module_count"] == 6, "an incomplete re-scan must hold the established topology"
-    assert held["module_count_status"] == "ok"
+    # Same gateway INSTANCE (so the stability state carries over) but a swapped-in reader that
+    # actually answers from the mid-scan dict (slots 3..6 now UNKNOWN) - replacing the whole
+    # gateway object would also replace cached_reading's closure and silently keep re-reading the
+    # original complete snapshot, making this assertion pass even with the hold branch deleted.
+    mid_scan = _partial_slots("battery", 3)  # slots 3..6 now UNKNOWN
+    runtime.gateway.cached_reading = _runtime(mid_scan).gateway.cached_reading
+    # Poll the SAME incomplete snapshot _BATTERY_MODULE_STABILITY_READS+1 times: without the
+    # dedicated incomplete-read hold, an incomplete-but-identical-looking read would still repeat
+    # enough times to pass the ordinary candidate/stability debounce and get promoted to trusted,
+    # which must never happen for a read that was never complete.
+    for _ in range(_BATTERY_MODULE_STABILITY_READS + 1):
+        held = _report(runtime, "battery")
+        assert held["module_count"] == 6, "an incomplete re-scan must hold the established topology"
+        assert held["module_count_status"] == "ok"
 
 
 def test_a_single_complete_but_different_read_is_not_enough_either() -> None:
@@ -306,11 +314,12 @@ def test_a_single_flaky_read_does_not_flip_an_already_trusted_count() -> None:
     runtime = _runtime(serials)
     first = _report(runtime, "battery")
     assert first["module_count"] == 5 and first["module_count_status"] == "ok"
-    # One poll catches the loop mid-refresh: slot 3 has not been re-read yet and looks empty, so the
-    # raw read for this single poll would be a gap-anomaly (0, 1, 2, 4) rather than 5 modules.
+    # One poll catches the loop mid-refresh: slot 3 has not been re-read yet, so it is UNKNOWN
+    # again (not "read as empty") and this single poll's snapshot is incomplete, held by the
+    # completeness gate rather than debounced as a changed-but-complete reading.
     del serials["battery_module_sn_3"]
     flaky = _report(runtime, "battery")
-    assert flaky["module_count"] == 5, "a single changed read must not override the trusted count yet"
+    assert flaky["module_count"] == 5, "an incomplete re-read must hold the trusted count"
     assert flaky["module_count_status"] == "ok"
     assert flaky["populated_module_slots"] == [0, 1, 2, 3, 4]
     # The next poll sees the real (unchanged) hardware again; the trusted count is unaffected by the
@@ -330,7 +339,7 @@ def test_alternating_reads_never_settle_on_either_alternative() -> None:
     trusted = _report(runtime, "battery")
     assert trusted["module_count"] == 6
     for _ in range(6):
-        del serials["battery_module_sn_5"]
+        del serials["battery_module_sn_5"]  # makes slot 5 UNKNOWN again -> incomplete, held
         report = _report(runtime, "battery")
         assert report["module_count"] == 6, "must not flip to the alternative reading"
         serials["battery_module_sn_5"] = "SN-5"

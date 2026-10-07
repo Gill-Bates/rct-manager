@@ -273,6 +273,7 @@ const readLayout = () => page.evaluate(() => {
       // One shadow for the whole tower, none on the individual slices.
       stackShadow: getComputedStyle(stack).filter,
       noteHidden: tower.querySelector('.device-battery-note').hidden,
+      noteText: text(tower.querySelector('.device-battery-note')),
       box: box(tower),
       bodyTracks: getComputedStyle(tower.querySelector('.device-subcard-body')).gridTemplateColumns
         .split(' ').map((track) => Math.round(parseFloat(track))),
@@ -435,6 +436,20 @@ for (const [name, slots] of [['seven populated slots', [0, 1, 2, 3, 4, 5, 6]], [
       && /^55\s*%$|^42\s*%$/.test(tower.charge)),
     JSON.stringify(towers.map((tower) => ({ slices: tower.slices, noteHidden: tower.noteHidden, charge: tower.charge }))));
 }
+// A scan still in progress (module_count_status 'pending', no trusted count yet) must render a
+// neutral "detecting modules" placeholder, never the old fabricated one-module tower nor the
+// "layout unclear" anomaly text - the three no-tower branches must stay textually distinct.
+await patchBatteries((batteries) => batteries.forEach((battery) => {
+  battery.module_count = null;
+  battery.module_count_status = 'pending';
+  battery.populated_module_slots = [];
+}));
+const pendingTowers = await towerGeometry();
+await page.unroute('**/admin/api/devices');
+check('a mid-scan tower (module_count_status pending) renders a neutral "detecting modules" placeholder, not a one-module tower',
+  pendingTowers.length > 0 && pendingTowers.every((tower) => tower.slices === 0 && tower.noteHidden === false
+    && /detecting modules/i.test(tower.noteText || '')),
+  JSON.stringify(pendingTowers.map((tower) => ({ slices: tower.slices, noteHidden: tower.noteHidden, noteText: tower.noteText }))));
 await forceDashboardPoll();
 await page.waitForTimeout(300);
 

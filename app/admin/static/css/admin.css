@@ -64,7 +64,7 @@ html {
     scroll-padding-top: 6.5rem;
 }
 
-/* sticky header (4.1rem) plus a safety gap when scrolling to a target or focused field */
+/* sticky header (4.1rem) plus the .75rem .admin-navbar::after gap and a safety margin for targets/focus */
 body {
     min-width: 0;
     min-height: 100dvh;
@@ -86,6 +86,25 @@ body {
     background: var(--rct-brand);
     min-height: 4.1rem;
     padding-inline: .3rem;
+}
+
+/* Gap under the sticky header: a strip hanging off the header's bottom edge hides scrolling content
+   so it never touches the banner. It belongs to the header (no fixed overlay, no extra scroll
+   height) and repeats the sidebar colour/border over the sidebar column so that stays seamless. */
+.admin-navbar::after {
+    content: "";
+    position: absolute;
+    inset: 100% 0 auto 0;
+    height: .75rem;
+    background: var(--bs-tertiary-bg);
+    pointer-events: none;
+}
+
+@media (min-width: 992px) {
+    .admin-navbar::after {
+        background: linear-gradient(to right,
+            var(--rct-sidebar) calc(14rem - 1px), var(--rct-line) 0 14rem, var(--bs-tertiary-bg) 0);
+    }
 }
 
 .navbar-brand {
