@@ -74,6 +74,25 @@ the SoC target policy, power limits, engineering mode and the hardware verificat
 collapsed **Advanced / Diagnostics** section. Verification is entered by an operator with measured
 evidence; nothing is verified by default.
 
+### Hardware verification (admin API)
+
+The verification form uses two session-guarded admin endpoints (CSRF header required, not part of
+the public API):
+
+| Method | Path | Effect |
+|---|---|---|
+| `PUT` | `/admin/api/energy/devices/{device_id}/hardware-verification` | Verifies `write_path_convention`, `battery_power_sign_convention` and `grid_power_sign_convention` in one transaction, all or none. |
+| `DELETE` | `/admin/api/energy/devices/{device_id}/hardware-verification` | Revokes the same three; only the status changes, recorded evidence stays. |
+
+The `PUT` body needs `verified_device_model`, `verified_firmware`, a non-empty `note`,
+`soc_strategy_external_code` (0-255), `enum_byte_width` and `bool_byte_width` (1-4), and the booleans
+`write_frame_layout_verified`, `apply_sequence_verified`, `battery_discharge_positive` and
+`grid_import_positive`. Both verification flags must be `true`, otherwise the answer is `400`. A
+running operation of the device answers `409 dispatch_capability_conflict`. Both calls return the
+admin device status, whose capability rows now also carry the two verification flags.
+
+The hardware verification form covers the write path and both sign conventions only. `export_limit_convention` cannot be set there; it matters only with `limit_export_during_discharge`, which is off by default.
+
 ## Hold is unverified
 
 `hold` has not been demonstrated on this unit and ships behind the same per-device capability gate

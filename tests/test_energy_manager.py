@@ -596,22 +596,27 @@ async def test_an_actor_without_a_usable_name_is_recorded_as_none() -> None:
 # --- item 6b: a revoked approval ------------------------------------------------------------------
 
 
-async def test_a_revoked_approval_blocks_every_action_and_refuses_the_command() -> None:
+async def test_auto_stays_allowed_without_write_approval_but_never_submits_a_new_dispatch() -> None:
+    """Invariant: `auto` only ends the manager's own operation (restores the stored snapshot) and
+    starts no new write, so a revoked approval refuses charge/discharge/hold but never `auto`.
+    (The gateway allowlist still guards the restore writes themselves; that is not tested here.)"""
     port = SpyPort()
     # Armed, but the operator removed the register approvals on the Inverters page afterwards.
     service = manager(port, approvals=ApprovalSpy(EXISTING_WRITES))
     status = await service.status("main")
-    # The handback needs no write approval, so `auto` stays available.
     available = {item.action: item.available for item in status.actions}
     assert available.pop(EnergyAction.AUTO) is True
     assert not any(available.values())
     assert {item.reason for item in status.actions if item.action is not EnergyAction.AUTO} == {
         ActionReason.WRITE_NOT_PERMITTED
     }
-    with pytest.raises(EnergyRejected) as info:
-        await service.command("main", EnergyCommand(EnergyAction.CHARGE, 80.0), actor=None)
-    assert info.value.code == "energy_action_unavailable"
-    assert port.calls == ["status"]  # only the status GET above, no device access for the command
+    for refused in (EnergyCommand(EnergyAction.CHARGE, 80.0), EnergyCommand(EnergyAction.DISCHARGE, 20.0), EnergyCommand(EnergyAction.HOLD)):
+        with pytest.raises(EnergyRejected) as info:
+            await service.command("main", refused, actor=None)
+        assert info.value.code == "energy_action_unavailable"
+    assert port.calls == ["status"]  # only the status GET above, no device access for the refusals
+    await service.command("main", EnergyCommand(EnergyAction.AUTO), actor=None)
+    assert "submit" not in port.calls and port.submitted == []  # the handback is a cancel, never a submit
 
 
 async def test_without_a_reader_the_approval_check_is_skipped() -> None:

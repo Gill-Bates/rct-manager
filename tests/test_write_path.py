@@ -384,7 +384,7 @@ def _settings_with_bool(tmp_path: Path):
     return make_settings(enable_write_support=True, **paths)
 
 
-async def _put(h, name: str, value, readback: bytes):
+async def _put_readback(h, name: str, value, readback: bytes):
     h.net.freeze_writes = True  # the test dictates what the device reads back
     h.net.payloads[BOOL_ID if name == BOOL_NAME else TARGET_OBJECT_ID] = readback
     return await h.client.put(f"/api/v1/devices/main/metrics/{name}", json={"value": value}, headers=WRITER)
@@ -392,22 +392,22 @@ async def _put(h, name: str, value, readback: bytes):
 
 async def test_bool_write_is_confirmed_by_a_nonzero_readback(tmp_path) -> None:
     async with running_app(_settings_with_bool(tmp_path), behavior=_IGNORE_WRITE) as h:
-        response = await _put(h, BOOL_NAME, True, b"\x07")
+        response = await _put_readback(h, BOOL_NAME, True, b"\x07")
         assert response.status_code == 200, response.text
         assert response.json()["confirmed"] is True and response.json()["readback_value"] is True
 
 
 async def test_bool_write_with_opposite_readback_stays_unconfirmed(tmp_path) -> None:
     async with running_app(_settings_with_bool(tmp_path), behavior=_IGNORE_WRITE) as h:
-        response = await _put(h, BOOL_NAME, True, b"\x00")
+        response = await _put_readback(h, BOOL_NAME, True, b"\x00")
         assert response.status_code == 502 and response.json()["code"] == "write_outcome_unknown"
 
 
 async def test_float_write_is_confirmed_despite_float32_rounding(tmp_path) -> None:
     async with running_app(_settings_with_bool(tmp_path), behavior=_IGNORE_WRITE) as h:
-        response = await _put(h, TARGET_NAME, 0.1, float_payload(0.1))
+        response = await _put_readback(h, TARGET_NAME, 0.1, float_payload(0.1))
         assert response.status_code == 200, response.text
-        wrong = await _put(h, TARGET_NAME, 0.1, float_payload(0.5))
+        wrong = await _put_readback(h, TARGET_NAME, 0.1, float_payload(0.5))
         assert wrong.status_code == 502 and wrong.json()["code"] == "write_outcome_unknown"
 
 

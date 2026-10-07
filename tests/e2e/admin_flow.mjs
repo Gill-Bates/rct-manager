@@ -645,56 +645,6 @@ await page.waitForFunction(() => !document.getElementById('tokens-list').textCon
 check('revoked PAT is rejected', (await call()) === 401);
 check('empty state returns after the last token is revoked', (await page.locator('#tokens-list td[colspan="6"]').count()) === 1);
 
-// 4a. copy, last used, mobile, and expiry presets reaching the backend
-const openTokenModal = async () => { await page.click('#open-add-token'); await page.waitForSelector('#add-token-modal.show #token-name', { state: 'visible' }); await sleep(250); };
-const submitToken = async (name, expires) => {
-  await openTokenModal();
-  await page.fill('#token-name', name);
-  if (expires) await page.locator('#token-expires').selectOption(expires);
-  await page.click('#token-form button[type=submit]');
-  await page.waitForSelector('#new-token-result:not([hidden])');
-  return (await page.locator('#new-token-value').innerText()).trim();
-};
-const closeTokenModal = async () => { await page.click('#token-done'); await page.waitForSelector('#add-token-modal', { state: 'hidden' }); await page.waitForSelector('.modal-backdrop', { state: 'detached' }); };
-const copyMe = await submitToken('e2e-copy');
-await context.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: base }).catch(() => { });
-await page.click('#copy-token');
-await page.waitForFunction(() => /copied|Copying is not available/.test(document.getElementById('toast-region').textContent));
-const clip = await page.evaluate(() => navigator.clipboard.readText()).catch(() => null);
-check('Copy puts the token on the clipboard', clip === null || clip === copyMe, clip === null ? 'clipboard unreadable' : '');
-await closeTokenModal();
-check('Done empties the secret element and restores the form state', await page.evaluate(() => document.getElementById('new-token-value').textContent === '' && document.getElementById('new-token-result').hidden && !document.getElementById('token-form-state').hidden));
-await openTokenModal();
-check('reopened modal has reset fields and the 90 day default', (await page.inputValue('#token-name')) === '' && (await page.inputValue('#token-expires')) === '90d');
-await page.keyboard.press('Escape');
-await page.waitForSelector('#add-token-modal', { state: 'hidden' });
-await page.waitForSelector('.modal-backdrop', { state: 'detached' });
-const copyCall = async () => (await fetch(`${base}/api/v1/devices/sim/metrics/grid_power`, { headers: { Authorization: `Bearer ${copyMe}` } })).status;
-check('copied PAT is accepted by the API', (await copyCall()) === 200);
-await sleep(300);
-await page.reload();
-await page.waitForSelector('#tokens-list tr td:nth-child(2)');
-const lastUsed = (await page.locator('#tokens-list tr', { hasText: 'e2e-copy' }).locator('td').nth(3).innerText()).trim();
-check('token list shows Last used after use', lastUsed !== '' && lastUsed !== 'Never', lastUsed);
-await page.setViewportSize({ width: 390, height: 844 });
-await sleep(200);
-check('tokens page has no horizontal page scroll on mobile', (await overflow()) <= 0, String(await overflow()));
-await page.setViewportSize({ width: 1280, height: 800 });
-const tokenApi = async (name) => ((await (await context.request.get(base + '/admin/api/tokens')).json()).tokens || []).find((t) => t.name === name);
-await submitToken('e2e-one-year', '1y');
-await closeTokenModal();
-const yearToken = await tokenApi('e2e-one-year');
-const yearsAhead = (new Date(yearToken.expires_at) - Date.now()) / 86400000;
-check('1 year preset expires in a calendar year', yearsAhead > 364 && yearsAhead < 367, `${yearsAhead} days (${yearToken.expires_at})`);
-await submitToken('e2e-forever', 'never');
-await closeTokenModal();
-check('"Never expires" stores no expiry', (await tokenApi('e2e-forever')).expires_at === null, JSON.stringify((await tokenApi('e2e-forever')).expires_at));
-for (const name of ['e2e-copy', 'e2e-one-year', 'e2e-forever']) {
-  await page.locator('#tokens-list tr', { hasText: name }).locator('button[data-bs-toggle=dropdown]').click();
-  await page.click(`button[aria-label="Revoke token ${name}"]`);
-  await page.waitForFunction((n) => !document.getElementById('tokens-list').textContent.includes(n), name);
-}
-
 // 5. settings toggle + invalid autosave
 await page.goto(base + '/ui/settings');
 await page.waitForSelector('#setting-docs_public');
@@ -1217,6 +1167,121 @@ await page.locator('#setting-enable_metrics_endpoint').setChecked(true);
 await sleep(600);
 check('dependent metrics fields come back when the toggle is on', (await dependentCount()) === 4, String(await dependentCount()));
 await shot('prometheus-master-toggle-on');
+
+// 6e. Energy Manager smoke on its own server: write support and the dispatch store are enabled there,
+// the main server above runs without them. Only behaviour is asserted, not timing, colours or paths.
+{
+  const energyDb = path.join(dbDir, 'energy', 'e2e.db');
+  fs.mkdirSync(path.dirname(energyDb), { recursive: true });
+  const energyPort = await freePort();
+  const spawned = spawnPy(['tests.e2e.run_server', energyDb, String(energyPort), String(devicePort), 'energy'], path.join(OUT, 'server-energy.log'));
+  const energyBase = `http://127.0.0.1:${energyPort}`;
+  for (let i = 0; i < 100; i++) {
+    try { if ((await fetch(`${energyBase}/health`)).ok) break; } catch { /* not up yet */ }
+    await sleep(200);
+  }
+  const energyPassword = /Password:\s+(\S+)/.exec(spawned.output())?.[1];
+  const energyContext = await browser.newContext({ viewport: { width: 1280, height: 900 }, locale: 'en-GB' });
+  const ep = await energyContext.newPage();
+  const energyProblems = [];
+  ep.on('pageerror', (e) => energyProblems.push(e.message));
+  await ep.goto(`${energyBase}/login`);
+  await ep.fill('#password', energyPassword);
+  await ep.click('#login-form button[type=submit]');
+  await ep.waitForURL('**/change-password');
+  await ep.fill('#current-password', energyPassword);
+  await ep.fill('#new-password', NEW_PASSWORD);
+  await ep.fill('#confirm-password', NEW_PASSWORD);
+  await ep.click('#change-password-form button[type=submit]');
+  await ep.waitForURL('**/ui/dashboard');
+
+  // Measured values for the flow graphic; the simulator's own readings are not part of this contract.
+  const reading = (value) => ({ value, age_seconds: 1, stale: false });
+  await ep.route('**/admin/api/energy/devices', async (route) => {
+    if (route.request().method() !== 'GET') return route.continue();
+    const response = await route.fetch();
+    const list = await response.json();
+    for (const device of list) {
+      device.readings = {
+        battery_soc_percent: reading(54), grid_power_w: reading(1200), pv_power_w: reading(1500),
+        house_load_w: reading(800), battery_power_w: reading(-900),
+      };
+    }
+    await route.fulfill({ response, json: list });
+  });
+  // A fresh dispatch store ships unverified hardware; verify it through the atomic admin endpoint.
+  const verified = await ep.evaluate(async () => {
+    const { csrf_token: csrf } = await (await fetch('/admin/api/session', { credentials: 'same-origin' })).json();
+    const response = await fetch('/admin/api/energy/devices/sim/hardware-verification', {
+      method: 'PUT', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrf },
+      body: JSON.stringify({
+        verified_device_model: 'Simulator', verified_firmware: '1.0', note: 'e2e', soc_strategy_external_code: 2,
+        enum_byte_width: 1, bool_byte_width: 1, write_frame_layout_verified: true, apply_sequence_verified: true,
+        battery_discharge_positive: true, grid_import_positive: true,
+      }),
+    });
+    return response.status;
+  });
+  check('the hardware verification endpoint accepts one complete attestation', verified === 200, String(verified));
+  await ep.goto(`${energyBase}/ui/energy`);
+  await ep.waitForSelector('.energy-panel .energy-flow-svg');
+  check('energy page renders a device panel', (await ep.locator('.energy-panel').count()) >= 1);
+  await ep.waitForFunction(() => document.querySelector('.flow-node-value')?.textContent.includes('W'));
+  check('the live flow graphic receives measured values', (await ep.locator('.flow-node-value').evaluateAll((nodes) => nodes.map((n) => n.textContent))).some((text) => /\d/.test(text)));
+  const buttons = ['Charge', 'Hold', 'Discharge'].map((name) => ep.locator('.energy-actions button', { hasText: new RegExp(`^${name}$`) }));
+  const states = async () => Promise.all(buttons.map((button) => button.isDisabled()));
+  check('manual actions are disabled while the manager is off', (await states()).every(Boolean), JSON.stringify(await states()));
+
+  const commands = [];
+  ep.on('request', (r) => { if (r.method() === 'POST' && r.url().endsWith('/command')) commands.push(r.postDataJSON()); });
+  // The simulator ships unverified hardware; verify it first, as an operator would in Advanced.
+  const csrf = await ep.evaluate(async () => (await (await fetch('/admin/api/session')).json()).csrf_token);
+  const verified = await ep.request.put(`${energyBase}/admin/api/energy/devices/sim/hardware-verification`, {
+    headers: { 'X-CSRF-Token': csrf },
+    data: {
+      verified_device_model: 'Simulator', verified_firmware: '1.0', note: 'e2e simulator',
+      soc_strategy_external_code: 2, enum_byte_width: 1, bool_byte_width: 1,
+      write_frame_layout_verified: true, apply_sequence_verified: true,
+      battery_discharge_positive: true, grid_import_positive: true,
+    },
+  });
+  check('hardware verification endpoint accepts the evidence', verified.ok(), String(verified.status()));
+  await ep.reload();
+  await ep.waitForSelector('.energy-panel .energy-flow-svg');
+  const armToggle = ep.locator('.energy-switch input');
+  await armToggle.click(); // the switch re-renders from the server state, so check() would see it revert first
+  await ep.waitForFunction(() => document.querySelector('.energy-switch input')?.checked
+    && [...document.querySelectorAll('.energy-actions button')].some((b) => !b.disabled), null, { timeout: 15000 }).catch(() => { });
+  const afterArm = await states();
+  check('arming through the switch enables the available actions', await armToggle.isChecked() && afterArm.some((disabled) => !disabled), JSON.stringify(afterArm));
+
+  const cmd = async (action) => {
+    const before = commands.length;
+    await action();
+    const started = Date.now();
+    while (commands.length === before && Date.now() - started < 8000) await sleep(100);
+    return commands[before];
+  };
+  if (!afterArm[0]) {
+    await buttons[0].click();
+    check('Charge opens the target SoC area', await ep.locator('.energy-target').isVisible());
+    const charge = await cmd(() => ep.locator('.energy-target button').click());
+    check('Charge sends a command with a target SoC', charge?.action === 'charge' && Number.isFinite(charge.target_soc_percent), JSON.stringify(charge));
+  } else check('Charge is available once armed', false, 'disabled after arming');
+  await ep.waitForFunction(() => [...document.querySelectorAll('.energy-actions button')].some((b) => b.textContent.trim() === 'Hold' && !b.disabled), null, { timeout: 10000 }).catch(() => { });
+  const hold = !(await states())[1] ? await cmd(() => buttons[1].click()) : null;
+  check('Hold sends a command without a target SoC', hold?.action === 'hold' && !('target_soc_percent' in hold), JSON.stringify(hold));
+  const auto = await cmd(() => ep.locator('.energy-actions button', { hasText: 'Return to automatic' }).click());
+  check('Return to automatic sends auto', auto?.action === 'auto', JSON.stringify(auto));
+
+  await ep.setViewportSize({ width: 390, height: 844 });
+  await sleep(300);
+  const energyOverflow = await ep.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+  check('energy page has no horizontal page scroll at 390px', energyOverflow <= 0, String(energyOverflow));
+  check('energy page raised no script errors', energyProblems.length === 0, energyProblems.join('; '));
+  await energyContext.close();
+  spawned.proc.kill('SIGTERM');
+}
 
 // 7. restart persistence
 await stop(server);

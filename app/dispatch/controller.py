@@ -537,6 +537,26 @@ class DispatchController:
             await asyncio.to_thread(self._store.put_capability, record)
             self._capabilities.replace(record)
 
+    async def set_capabilities(self, device_id: str, records: list[CapabilityRecord]) -> None:
+        """Persist several capabilities of one device in one transaction, then take them all over.
+
+        Same lock and active-operation guard as ``set_capability()``; a failed commit leaves the
+        registry untouched, so a verification can never end up half applied.
+        """
+        if any(record.device_id != device_id for record in records):
+            raise ValueError("capability record belongs to another device")
+        async with self._lock(device_id):
+            current = await self._get(device_id)
+            blocking_mode = self._active_mode_blocking(current)
+            if blocking_mode is not None:
+                blocked = required_for(blocking_mode, limit_export=True) | required_for(blocking_mode, limit_export=False)
+                if any(record.name in blocked for record in records):
+                    assert current.intent is not None
+                    raise CapabilityConflict(device_id, current.intent.operation_id, blocking_mode)
+            await asyncio.to_thread(self._store.put_capabilities, records)
+            for record in records:
+                self._capabilities.replace(record)
+
     async def set_device_limits(self, device_id: str, limits: DeviceLimits) -> None:
         """Persist the power limits and the engineering-mode switch of one device, then take over."""
         async with self._lock(device_id):

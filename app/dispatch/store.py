@@ -243,6 +243,22 @@ class DispatchStore:
                 (record.device_id, record.name.value, record.status.value, encrypted),
             )
 
+    def put_capabilities(self, records: list[CapabilityRecord]) -> None:
+        """Persist several capability rows in one transaction: all of them or none."""
+        rows = [
+            (r.device_id, r.name.value, r.status.value, self._encrypt(f"{r.device_id}/{r.name.value}", r.to_dict()))
+            for r in records
+        ]
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            db.executemany(
+                """INSERT INTO dispatch_capabilities(device_id,name,status,encrypted)
+                   VALUES(?,?,?,?)
+                   ON CONFLICT(device_id,name) DO UPDATE SET status=excluded.status,
+                       encrypted=excluded.encrypted""",
+                rows,
+            )
+
     def get_device_configs(self) -> dict[str, DeviceLimits]:
         with self.connect() as db:
             rows = db.execute(

@@ -908,7 +908,12 @@
     loadTokens().catch((error) => toast(messageFrom(error), 'danger'));
     const modal = $('add-token-modal');
     const form = $('token-form');
-    const showResult = (shown) => { $('token-form-state').hidden = shown; $('new-token-result').hidden = !shown; };
+    const showResult = (shown) => {
+      $('token-form-state').hidden = shown;
+      $('new-token-result').hidden = !shown;
+      // The dialog is named by whichever title is visible.
+      modal.setAttribute('aria-labelledby', shown ? 'token-created-title' : 'add-token-title');
+    };
     modal.addEventListener('shown.bs.modal', () => { if (!$('token-form-state').hidden) $('token-name').focus(); });
     // Closing by any path wipes the plaintext secret from the DOM and restores the form state.
     modal.addEventListener('hidden.bs.modal', () => {
@@ -1098,7 +1103,12 @@
       if (item.reason === 'hardware_not_verified' && gate && gate.reject_detail) text += ` (${gate.reject_detail})`;
       reasons.push(`${ENERGY_ACTION_LABELS[action]}: ${text}`);
     }
-    if (reasons.length) return { ready: false, text: 'Control unavailable', detail: [...new Set(reasons)].join('; ') };
+    if (reasons.length === 3) return { ready: false, text: 'Control unavailable', detail: [...new Set(reasons)].join('; ') };
+    if (reasons.length) {
+      const open = ['charge', 'discharge', 'hold'].filter((action) => energyAvailability(device, action).available);
+      const names = open.map((action) => ENERGY_ACTION_LABELS[action]).join(', ');
+      return { ready: true, limited: true, text: 'Limited', detail: `${names} available · ${[...new Set(reasons)].join('; ')}` };
+    }
     return { ready: true, text: 'Ready', detail: '' };
   }
 
@@ -1112,14 +1122,17 @@
   }
 
   function energyActualText(device) {
-    const battery = readingValue(device.readings.battery_power_w);
+    const reading = device.readings.battery_power_w;
+    const battery = readingValue(reading);
     if (battery === null) return 'No measurement';
+    if (reading.stale) return `Last known: ${formatPower(battery)} (stale)`;
     if (Math.abs(battery) < ENERGY_IDLE_WATTS) return 'Battery idle';
     return `${battery > 0 ? 'Discharging' : 'Charging'} ${formatPower(battery)}`;
   }
 
   function energyTargetRange(device, action) {
-    const soc = readingValue(device.readings.battery_soc_percent);
+    // A stale SoC must not narrow the slider; only the server window applies then.
+    const soc = liveValue(device.readings.battery_soc_percent);
     const window = device.target_soc_window;
     let lo = Math.ceil(window.min);
     let hi = Math.floor(window.max);
@@ -1303,8 +1316,9 @@
       statusBox.className = `energy-status ${readyState.ready ? 'is-ready' : 'is-blocked'}`;
       statusIcon.textContent = readyState.ready ? 'check_circle' : 'info';
       statusMain.textContent = readyState.text;
-      statusDetail.textContent = readyState.ready ? '' : readyState.detail;
-      statusDetail.hidden = readyState.ready;
+      const showDetail = !readyState.ready || Boolean(readyState.limited);
+      statusDetail.textContent = showDetail ? readyState.detail : '';
+      statusDetail.hidden = !showDetail;
 
       requestedMain.textContent = energyRequestedText(device);
       const requestedLines = [];
@@ -1453,30 +1467,31 @@
     );
     verifySection.append(verifyForm);
 
-    const evidence = (extra) => ({
-      status: 'verified', verified_device_model: model.value.trim(), verified_firmware: firmware.value.trim(), ...extra,
-    });
     verifyForm.addEventListener('submit', guarded(verifyButton, async () => {
       if (!attest.input.checked) throw new Error('Confirm that the values were verified on the hardware.');
+      if (!model.value.trim() || !firmware.value.trim()) throw new Error('Device model and firmware are required.');
+      if (!note.value.trim()) throw new Error('An evidence note is required.');
+      if (!frame.input.checked || !sequence.input.checked) throw new Error('Confirm the write frame layout and the apply sequence.');
       const numbers = [code, enumWidth, boolWidth];
-      if (numbers.some((input) => input.value === '')) throw new Error('Strategy code and both byte widths are required.');
-      const base = `dispatch/devices/${encodeURIComponent(id)}/capabilities`;
-      const put = (name, body) => api(`${base}/${name}`, { method: 'PUT', body: JSON.stringify(body) });
-      await put('write_path_convention', evidence({
-        soc_strategy_external_code: Number(code.value), enum_byte_width: Number(enumWidth.value),
-        bool_byte_width: Number(boolWidth.value), write_frame_layout_verified: frame.input.checked,
-        apply_sequence_verified: sequence.input.checked, note: note.value,
-      }));
-      await put('battery_power_sign_convention', evidence({ battery_discharge_positive: batterySign.value === 'true' }));
-      await put('grid_power_sign_convention', evidence({ grid_import_positive: gridSign.value === 'true' }));
+      if (numbers.some((input) => input.value === '' || !input.checkValidity())) {
+        throw new Error('Strategy code (0-255) and both byte widths (1-4) are required.');
+      }
+      await api(`${path}/hardware-verification`, {
+        method: 'PUT',
+        body: JSON.stringify({
+          verified_device_model: model.value.trim(), verified_firmware: firmware.value.trim(), note: note.value.trim(),
+          soc_strategy_external_code: Number(code.value), enum_byte_width: Number(enumWidth.value),
+          bool_byte_width: Number(boolWidth.value), write_frame_layout_verified: frame.input.checked,
+          apply_sequence_verified: sequence.input.checked, battery_discharge_positive: batterySign.value === 'true',
+          grid_import_positive: gridSign.value === 'true',
+        }),
+      });
       attest.input.checked = false;
       toast('Hardware verification saved.');
     }));
     revokeButton.addEventListener('click', guarded(revokeButton, async () => {
-      const base = `dispatch/devices/${encodeURIComponent(id)}/capabilities`;
-      for (const name of ['write_path_convention', 'battery_power_sign_convention', 'grid_power_sign_convention']) {
-        await api(`${base}/${name}`, { method: 'PUT', body: JSON.stringify({ status: 'unverified' }) });
-      }
+      // Server side: status only, the recorded evidence stays.
+      await api(`${path}/hardware-verification`, { method: 'DELETE' });
       toast('Verification revoked.');
     }));
 
@@ -1560,6 +1575,8 @@
         enumWidth.value = write.enum_byte_width ?? '';
         boolWidth.value = write.bool_byte_width ?? '';
         note.value = write.note || '';
+        frame.input.checked = Boolean(write.write_frame_layout_verified);
+        sequence.input.checked = Boolean(write.apply_sequence_verified);
       }
       if (battery) batterySign.value = String(battery.battery_discharge_positive);
       if (grid) gridSign.value = String(grid.grid_import_positive);
@@ -1616,7 +1633,9 @@
       } else {
         for (const device of devices) energyPanels.get(device.device_id).update(device);
       }
-      status.textContent = `Live · updated ${new Date().toLocaleTimeString('en-GB')}`;
+      const ages = devices.flatMap((item) => Object.values(item.readings || {})).map((item) => item && item.age_seconds).filter(Number.isFinite);
+      const oldest = ages.length ? ` · oldest measurement ${Math.round(Math.max(...ages))} s` : '';
+      status.textContent = `Updated ${new Date().toLocaleTimeString('en-GB')}${oldest}`;
       setClass(status, 'text-danger', false);
     } catch (error) {
       status.textContent = `Update failed: ${messageFrom(error)}`;

@@ -1317,7 +1317,9 @@ samp,
     user-select: all;
 }
 
+/* Positioned so the absolutely placed .visually-hidden header text cannot widen the page. */
 .token-table-wrap {
+    position: relative;
     overflow-x: auto;
 }
 

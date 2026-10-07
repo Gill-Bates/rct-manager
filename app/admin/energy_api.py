@@ -18,6 +18,7 @@ imported read-only (``require_admin``), exactly as ``app.admin.dispatch_api`` do
 """
 
 import logging
+from dataclasses import replace
 from datetime import datetime
 from typing import Annotated
 
@@ -26,7 +27,7 @@ from pydantic import BaseModel, ConfigDict, Field, StrictBool
 
 from app.admin.api import require_admin
 from app.api.routers.energy import EnergyCommandBody, EnergyStatusResponse
-from app.dispatch.capabilities import CapabilityStatus
+from app.dispatch.capabilities import CapabilityName, CapabilityRecord, CapabilityStatus
 from app.dispatch.controller import CapabilityConflict
 from app.dispatch.soc_policy import NOTE_MAX_LENGTH, SocTargetMode, SocTargetPolicy
 from app.energy.base import EnergyAdminPort
@@ -130,7 +131,33 @@ class CapabilityView(BaseModel):
     bool_byte_width: int | None
     battery_discharge_positive: bool
     grid_import_positive: bool
+    write_frame_layout_verified: bool
+    apply_sequence_verified: bool
     note: str | None
+
+
+class HardwareVerificationBody(BaseModel):
+    """Everything one hardware verification attests, so it is applied or refused as a whole."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    verified_device_model: str = Field(min_length=1, max_length=128)
+    verified_firmware: str = Field(min_length=1, max_length=64)
+    note: str = Field(min_length=1, max_length=NOTE_MAX_LENGTH)
+    soc_strategy_external_code: int = Field(ge=0, le=255)
+    enum_byte_width: int = Field(ge=1, le=4)
+    bool_byte_width: int = Field(ge=1, le=4)
+    write_frame_layout_verified: StrictBool
+    apply_sequence_verified: StrictBool
+    battery_discharge_positive: StrictBool
+    grid_import_positive: StrictBool
+
+
+_VERIFIED_CAPABILITIES = (
+    CapabilityName.WRITE_PATH,
+    CapabilityName.BATTERY_POWER_SIGN,
+    CapabilityName.GRID_POWER_SIGN,
+)
 
 
 class AdminEnergyDeviceStatus(EnergyStatusResponse):
@@ -193,6 +220,8 @@ async def _admin_status(request: Request, device_id: str) -> AdminEnergyDeviceSt
                 bool_byte_width=record.bool_byte_width,
                 battery_discharge_positive=record.battery_discharge_positive,
                 grid_import_positive=record.grid_import_positive,
+                write_frame_layout_verified=record.write_frame_layout_verified,
+                apply_sequence_verified=record.apply_sequence_verified,
                 note=record.note,
             )
             for record in dispatch.capabilities(device_id)
@@ -248,6 +277,104 @@ async def put_armed(
     runtime.ensure_accepting()
     energy = _energy_or_503(request)
     await energy.set_armed(device_id, armed=body.armed, actor=_ADMIN_ACTOR)
+    return await _admin_status(request, device_id)
+
+
+def _conflict(exc: CapabilityConflict) -> HTTPException:
+    return HTTPException(
+        409,
+        {
+            "detail": "dispatch_capability_conflict: an operation of this device is active",
+            "operation_id": exc.operation_id,
+            "mode": exc.mode.value,
+        },
+    )
+
+
+@router.put("/devices/{device_id}/hardware-verification")
+async def put_hardware_verification(
+    request: Request,
+    device_id: str,
+    body: HardwareVerificationBody,
+    admin: Annotated[dict | None, Depends(_require_admin_write)],
+) -> AdminEnergyDeviceStatus:
+    """Verify the write path and both sign conventions in one transaction (all or none)."""
+    del admin
+    _device_or_404(request, device_id)
+    dispatch = _dispatch_or_503(request)
+    missing = [
+        flag for flag in ("write_frame_layout_verified", "apply_sequence_verified") if not getattr(body, flag)
+    ]
+    if not body.note.strip():
+        missing.append("note")
+    if missing:
+        raise HTTPException(400, f"missing evidence for write_path_convention: {', '.join(missing)}")
+    now = request.app.state.runtime.clock.now()
+    stamp = {
+        "status": CapabilityStatus.VERIFIED,
+        "verified_device_model": body.verified_device_model,
+        "verified_firmware": body.verified_firmware,
+        "verified_at": now,
+        "verified_by": _ADMIN_ACTOR,
+    }
+    try:
+        records = [
+            CapabilityRecord(
+                device_id=device_id,
+                name=CapabilityName.WRITE_PATH,
+                soc_strategy_external_code=body.soc_strategy_external_code,
+                enum_byte_width=body.enum_byte_width,
+                bool_byte_width=body.bool_byte_width,
+                write_frame_layout_verified=body.write_frame_layout_verified,
+                apply_sequence_verified=body.apply_sequence_verified,
+                note=body.note,
+                **stamp,
+            ),
+            CapabilityRecord(
+                device_id=device_id,
+                name=CapabilityName.BATTERY_POWER_SIGN,
+                battery_discharge_positive=body.battery_discharge_positive,
+                **stamp,
+            ),
+            CapabilityRecord(
+                device_id=device_id,
+                name=CapabilityName.GRID_POWER_SIGN,
+                grid_import_positive=body.grid_import_positive,
+                **stamp,
+            ),
+        ]
+        await dispatch.set_capabilities(device_id, records)
+    except CapabilityConflict as exc:
+        raise _conflict(exc) from exc
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    log.warning(
+        "Energy hardware verification saved: device=%s model=%s firmware=%s admin=%s",
+        device_id, body.verified_device_model, body.verified_firmware, _ADMIN_ACTOR,
+    )  # fmt: skip
+    return await _admin_status(request, device_id)
+
+
+@router.delete("/devices/{device_id}/hardware-verification")
+async def delete_hardware_verification(
+    request: Request,
+    device_id: str,
+    admin: Annotated[dict | None, Depends(_require_admin_write)],
+) -> AdminEnergyDeviceStatus:
+    """Revoke the verification: only the status changes, the recorded evidence stays."""
+    del admin
+    _device_or_404(request, device_id)
+    dispatch = _dispatch_or_503(request)
+    current = {record.name: record for record in dispatch.capabilities(device_id)}
+    revoked = [
+        replace(current[name], status=CapabilityStatus.UNVERIFIED, verified_at=None, verified_by=None)
+        for name in _VERIFIED_CAPABILITIES
+    ]
+    try:
+        await dispatch.set_capabilities(device_id, revoked)
+    except CapabilityConflict as exc:
+        raise _conflict(exc) from exc
+    log.warning("Energy hardware verification revoked: device=%s admin=%s", device_id, _ADMIN_ACTOR)
     return await _admin_status(request, device_id)
 
 

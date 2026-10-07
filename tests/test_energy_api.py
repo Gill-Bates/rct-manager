@@ -250,7 +250,7 @@ async def test_the_public_api_has_no_arming_endpoint(tmp_path: Path) -> None:
             response = await harness.client.put(
                 "/api/v1/devices/main/energy/armed", headers=headers, json={"armed": True}
             )
-            assert response.status_code in (403, 404, 405), response.text
+            assert response.status_code == 404, response.text  # 403 would mean the route still exists
         status = await harness.client.get("/api/v1/devices/main/energy", headers=WRITER)
         assert status.json()["armed"] is False
 
@@ -556,6 +556,20 @@ async def test_admin_arming_adds_the_register_approvals_add_only(tmp_path: Path)
         assert harness.app.state.admin_store.get("write_names") == names
 
 
+async def test_required_dispatch_registers_cannot_be_revoked_while_a_device_is_armed(tmp_path: Path) -> None:
+    """A restore writes those registers through the allowlist, so revoking them under an armed
+    device would leave the handback rejected forever."""
+    async with running_app(energy_settings(tmp_path)) as harness:
+        await arm(harness)
+        headers = await admin_session(harness)
+        exposed = harness.app.state.admin_store.get("exposed_names")
+        refused = await harness.client.put(
+            "/admin/api/parameters", headers=headers, json={"exposed_names": exposed, "write_names": []}
+        )
+        assert refused.status_code == 409, refused.text
+        assert set(harness.app.state.admin_store.get("write_names")) == set(DISPATCH_WRITE_NAMES)
+
+
 async def test_the_admin_status_carries_the_raw_gate_detail_and_the_policy(tmp_path: Path) -> None:
     async with running_app(energy_settings(tmp_path)) as harness:
         headers = await admin_session(harness)
@@ -589,6 +603,84 @@ async def test_the_admin_status_carries_the_raw_gate_detail_and_the_policy(tmp_p
         assert public.status_code == 200, public.text
         for admin_only in ("gates", "soc_target_policy", "added_write_names", "armed_by"):
             assert admin_only not in public.json()
+
+
+VERIFICATION = {
+    "verified_device_model": "RCT Power DC 10.0",
+    "verified_firmware": "2.3.5687",
+    "note": "H-1 probe, strategy code measured",
+    "soc_strategy_external_code": 2,
+    "enum_byte_width": 1,
+    "bool_byte_width": 1,
+    "write_frame_layout_verified": True,
+    "apply_sequence_verified": True,
+    "battery_discharge_positive": False,
+    "grid_import_positive": False,
+}
+_VERIFICATION_NAMES = ("write_path_convention", "battery_power_sign_convention", "grid_power_sign_convention")
+VERIFICATION_URL = "/admin/api/energy/devices/main/hardware-verification"
+
+
+def _capabilities(entry: dict) -> dict[str, dict]:
+    return {item["name"]: item for item in entry["capabilities"]}
+
+
+async def test_hardware_verification_is_atomic_and_round_trips_its_evidence(tmp_path: Path) -> None:
+    async with running_app(energy_settings(tmp_path)) as harness:
+        headers = await admin_session(harness)
+        # The fixture ships verified hardware; start from an unverified one.
+        await harness.client.delete(VERIFICATION_URL, headers=headers)
+        before = (await harness.client.get("/admin/api/energy/devices")).json()
+        assert {c["status"] for n, c in _capabilities(before[0]).items() if n in _VERIFICATION_NAMES} == {"unverified"}
+        # A missing attestation refuses the whole request and verifies nothing.
+        refused = await harness.client.put(
+            VERIFICATION_URL, headers=headers, json={**VERIFICATION, "apply_sequence_verified": False}
+        )
+        assert refused.status_code == 400, refused.text
+        after_refusal = (await harness.client.get("/admin/api/energy/devices")).json()
+        assert _capabilities(after_refusal[0]) == _capabilities(before[0])
+
+        saved = await harness.client.put(VERIFICATION_URL, headers=headers, json=VERIFICATION)
+        assert saved.status_code == 200, saved.text
+        caps = _capabilities(saved.json())
+        assert {caps[name]["status"] for name in _VERIFICATION_NAMES} == {"verified"}
+        write = caps["write_path_convention"]
+        # The flags the form prefills from must come back, or a reload loses them.
+        assert write["write_frame_layout_verified"] is True and write["apply_sequence_verified"] is True
+        assert write["soc_strategy_external_code"] == 2 and write["note"] == VERIFICATION["note"]
+        assert caps["battery_power_sign_convention"]["battery_discharge_positive"] is False
+        assert caps["grid_power_sign_convention"]["grid_import_positive"] is False
+
+
+async def test_revoking_the_verification_changes_only_the_status(tmp_path: Path) -> None:
+    async with running_app(energy_settings(tmp_path)) as harness:
+        headers = await admin_session(harness)
+        await harness.client.put(VERIFICATION_URL, headers=headers, json=VERIFICATION)
+        revoked = await harness.client.delete(VERIFICATION_URL, headers=headers)
+        assert revoked.status_code == 200, revoked.text
+        caps = _capabilities(revoked.json())
+        assert {caps[name]["status"] for name in _VERIFICATION_NAMES} == {"unverified"}
+        write = caps["write_path_convention"]
+        assert write["soc_strategy_external_code"] == 2 and write["enum_byte_width"] == 1
+        assert write["write_frame_layout_verified"] is True and write["note"] == VERIFICATION["note"]
+        assert caps["battery_power_sign_convention"]["battery_discharge_positive"] is False
+        assert caps["grid_power_sign_convention"]["grid_import_positive"] is False
+        # The evidence survives, so the same form can verify again without retyping.
+        again = await harness.client.put(VERIFICATION_URL, headers=headers, json=VERIFICATION)
+        assert again.status_code == 200, again.text
+
+
+async def test_hardware_verification_needs_a_session_and_validates_the_body(tmp_path: Path) -> None:
+    async with running_app(energy_settings(tmp_path)) as harness:
+        assert (await harness.client.put(VERIFICATION_URL, json=VERIFICATION)).status_code == 401
+        headers = await admin_session(harness)
+        for bad in ({"enum_byte_width": 9}, {"note": ""}, {"battery_discharge_positive": "yes"}):
+            response = await harness.client.put(VERIFICATION_URL, headers=headers, json={**VERIFICATION, **bad})
+            assert response.status_code == 422, (bad, response.text)
+        unknown = await harness.client.put(
+            "/admin/api/energy/devices/nope/hardware-verification", headers=headers, json=VERIFICATION
+        )
+        assert unknown.status_code == 404
 
 
 async def test_the_soc_target_policy_round_trips_through_the_admin_surface(tmp_path: Path) -> None:
@@ -671,6 +763,7 @@ _VERIFIED_FIXTURES = {
     "tests/test_dispatch_core.py",
     "app/dispatch/capabilities.py",  # the enum member itself
     "app/admin/dispatch_api.py",  # the admin PUT that an operator uses to enter one
+    "app/admin/energy_api.py",  # the same operator action as one atomic request
     "app/api/app_factory.py",  # only resets a record when a device is re-addressed
 }
 _VERIFIED = re.compile(r"CapabilityStatus\.VERIFIED|\"status\"\s*:\s*\"verified\"|status=\"verified\"")

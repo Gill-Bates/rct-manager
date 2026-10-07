@@ -32,7 +32,7 @@ TEMPLATES = ADMIN_DIR / "templates"
 DOCS_NAV = Path(__file__).resolve().parent.parent / "app" / "api" / "docs_nav.py"
 
 
-PAGES = ("dashboard", "inverters", "tsdb", "prometheus", "tokens", "settings")
+PAGES = ("dashboard", "inverters", "energy", "tsdb", "prometheus", "tokens", "settings")
 
 
 def _send_block(js: str, part: str) -> str:
