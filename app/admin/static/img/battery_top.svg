@@ -1,4 +1,12 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 220 74" width="220" height="74">
+<!--
+  battery_top.svg - top slice of the stacked battery tower.
+  The viewBox ends exactly where the ink ends (the 3-unit dark separator at y=68.5 covers 67..70),
+  so the slice carries no transparent bottom margin and the next slice butts directly against it.
+  No drop shadow here on purpose: one shadow is applied to the assembled tower
+  (.device-battery-stack in app/admin/static/css/admin.css), otherwise every module would get its
+  own shadow and the stack would read as separate boxes instead of one case.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 220 70" width="220" height="70">
 <defs>
   <linearGradient id="face" x1="0" y1="0" x2="1" y2="0">
     <stop offset="0%" stop-color="#eef2f4"/>
@@ -10,16 +18,8 @@
     <stop offset="0%" stop-color="#cfd6db"/>
     <stop offset="100%" stop-color="#f5f7f8"/>
   </linearGradient>
-  <linearGradient id="base" x1="0" y1="0" x2="0" y2="1">
-    <stop offset="0%" stop-color="#ffffff"/>
-    <stop offset="75%" stop-color="#f2f4f5"/>
-    <stop offset="100%" stop-color="#dfe4e7"/>
-  </linearGradient>
-  <filter id="shadow" x="-20%" y="-20%" width="140%" height="160%">
-    <feDropShadow dx="0" dy="2" stdDeviation="2.5" flood-color="#000000" flood-opacity=".20"/>
-  </filter>
 </defs>
-<g filter="url(#shadow)">
+<g>
   <path d="M18 16 Q18 7 30 5 H190 Q202 7 202 16 V68 H18 Z" fill="url(#face)" stroke="#d8dde1" stroke-width="1"/>
   <path d="M18 18 Q18 8 30 6 H40 L30 19 V68 H18 Z" fill="url(#edgeL)" opacity=".9"/>
   <line x1="18" y1="68.5" x2="202" y2="68.5" stroke="#34383b" stroke-width="3"/>

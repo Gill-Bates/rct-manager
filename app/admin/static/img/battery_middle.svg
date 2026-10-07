@@ -1,4 +1,11 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 220 112" width="220" height="112">
+<!--
+  battery_middle.svg - one battery module, repeated once per module of the tower.
+  Drawn flush from its top edge (y=0) to its bottom edge: the viewBox ends at 109, which is exactly
+  where the 3-unit dark separator at y=107.5 ends (106..109). No transparent margin on either edge,
+  so modules butt together seamlessly at gap:0.
+  No drop shadow here - the assembled tower gets a single one in admin.css.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 220 109" width="220" height="109">
 <defs>
   <linearGradient id="face" x1="0" y1="0" x2="1" y2="0">
     <stop offset="0%" stop-color="#eef2f4"/>
@@ -10,16 +17,8 @@
     <stop offset="0%" stop-color="#cfd6db"/>
     <stop offset="100%" stop-color="#f5f7f8"/>
   </linearGradient>
-  <linearGradient id="base" x1="0" y1="0" x2="0" y2="1">
-    <stop offset="0%" stop-color="#ffffff"/>
-    <stop offset="75%" stop-color="#f2f4f5"/>
-    <stop offset="100%" stop-color="#dfe4e7"/>
-  </linearGradient>
-  <filter id="shadow" x="-20%" y="-20%" width="140%" height="160%">
-    <feDropShadow dx="0" dy="2" stdDeviation="2.5" flood-color="#000000" flood-opacity=".20"/>
-  </filter>
 </defs>
-<g filter="url(#shadow)">
+<g>
   <rect x="18" y="0" width="184" height="107" fill="url(#face)" stroke="#d8dde1" stroke-width="1"/>
   <path d="M18 0 H31 V107 H18 Z" fill="url(#edgeL)" opacity=".9"/>
   <line x1="18" y1="107.5" x2="202" y2="107.5" stroke="#34383b" stroke-width="3"/>

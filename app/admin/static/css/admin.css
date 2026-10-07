@@ -537,14 +537,23 @@ body {
     background: var(--bs-warning);
 }
 
-/* Image left, readings right. The image track is a fixed small column: a secondary illustration,
-   so the metric cells carry the card's visual weight. */
+/* Image left, readings right. The two subcards size their image track separately: the inverter is
+   the card's subject and was a postage stamp in a shared 4rem column, while the battery tower is a
+   narrow vertical stack that needs far less width than the inverter does. */
 .device-subcard-body {
     display: grid;
-    grid-template-columns: 4rem minmax(0, 1fr);
+    grid-template-columns: 5rem minmax(0, 1fr);
     align-items: start;
     gap: .85rem;
     min-width: 0;
+}
+
+.device-subcard-power .device-subcard-body {
+    grid-template-columns: 8rem minmax(0, 1fr);
+}
+
+.device-subcard-battery .device-subcard-body {
+    grid-template-columns: 5rem minmax(0, 1fr);
 }
 
 .device-subcard-image {
@@ -555,19 +564,43 @@ body {
     object-position: center top;
 }
 
-/* Battery tower built from three edge-to-edge SVG slices (bottom once, one middle per module,
-   top once) instead of one static image. No gap/margin between slices: they are drawn to align
-   pixel-perfect at a shared width, so any gap or overlap would break the single-case illusion. */
+/* The inverter fills its wider column instead of being capped by the shared 7rem height:
+   rct-inverter.svg is 120x127, so 8rem of width wants about 8.5rem of height. */
+.device-subcard-power .device-subcard-image {
+    height: 8.5rem;
+}
+
+.device-battery-column {
+    min-width: 0;
+}
+
+/* Battery tower built from three flush SVG slices (top once, one middle per module, bottom once)
+   instead of one static image. No gap/margin between slices, and none inside them: each slice is
+   drawn exactly to its own top and bottom edge, so the modules butt together into one case.
+   The width comes from JS (batterySliceWidth): it is derived from the module count so that a tall
+   tower gets narrower instead of taller, capped at BATTERY_TOWER_MAX_HEIGHT.
+   One drop shadow for the whole assembled tower - the slices deliberately carry no feDropShadow of
+   their own, which would outline every single module and make the stack read as separate boxes. */
 .device-battery-stack {
     display: flex;
     flex-direction: column;
-    width: 100%;
+    width: max-content;
+    max-width: 100%;
+    filter: drop-shadow(0 2px 2.5px rgb(0 0 0 / 20%));
 }
 
 .device-battery-slice {
     display: block;
     width: 100%;
     height: auto;
+}
+
+/* Diagnostic replacement for the tower when the reported module serials cannot describe a
+   documented tower; the full explanation is in the title attribute. */
+.device-battery-note {
+    font-size: .72rem;
+    line-height: 1.25;
+    color: var(--bs-secondary-color);
 }
 
 .device-subcard-readings {
@@ -661,11 +694,17 @@ body {
    becomes auto so the illustration keeps its own aspect ratio instead of being stretched across
    the full row, which left the tall battery tower as a thin sliver in a wide empty box. */
 @container (max-width: 22rem) {
-    .device-subcard-body {
+
+    /* Matches the specificity of the per-subcard image-column rules above, otherwise those would
+       keep their two-track grid here and the single-column mobile layout would never apply. */
+    .device-subcard-body,
+    .device-subcard-power .device-subcard-body,
+    .device-subcard-battery .device-subcard-body {
         grid-template-columns: minmax(0, 1fr);
     }
 
-    .device-subcard-image {
+    .device-subcard-image,
+    .device-subcard-power .device-subcard-image {
         width: auto;
         max-width: 100%;
         height: 5rem;
@@ -673,9 +712,9 @@ body {
         object-position: center;
     }
 
+    /* The tower keeps its computed width (it is already height-capped and narrow); it only moves to
+       the middle of the row now that the image sits above the readings. */
     .device-battery-stack {
-        width: auto;
-        max-width: 60%;
         margin-inline: auto;
     }
 }

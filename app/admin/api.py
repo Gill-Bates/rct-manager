@@ -548,13 +548,39 @@ def _device_card_label(catalog, name: str, value: Any) -> str | None:
     return _humanize_enum_label(label) if label else None
 
 
-# Prefixes of the per-tower module_sn_0..6 string slots (app/catalog/objects.json); no dedicated
-# module-count register exists on the device, so the count is derived from populated slots. Each
-# prefix corresponds to one physical battery tower that could share the inverter. The registry
-# carries entries for both prefixes unconditionally, so catalog presence alone cannot tell whether
-# a given tower actually exists on this device; _battery_tower_present answers that from readings.
+# Prefixes of the per-tower module_sn string slots (app/catalog/objects.json). Each prefix is one
+# physical battery tower that could share the inverter. The registry carries entries for both
+# prefixes unconditionally, so catalog presence alone cannot tell whether a given tower actually
+# exists on this device; _battery_tower_present answers that from readings.
 _BATTERY_TOWER_PREFIXES = ("battery", "battery_placeholder_0")
-_BATTERY_MODULE_SLOTS = 7
+
+# Two different limits that must not be conflated.
+#
+# RCT_MAX_MODULES_PER_TOWER is hardware: RCT documents the Power Battery / BMS V2 as 2 to 6 battery
+# modules per tower - the 3.8 / 5.7 / 7.6 / 9.6 / 11.5 kWh variants correspond to 2 / 3 / 4 / 5 / 6
+# modules, and a double-tower installation also allows up to 6 modules per tower.
+#
+# RCT_MODULE_SN_SLOTS is the protocol/catalog side: battery_module_sn_0 .. battery_module_sn_6 is an
+# array with seven elements (indices 0-6). That is the size of the data structure and nothing else;
+# "seven slots" does not mean "seven modules can be installed". Why the vendor sized the array at
+# seven is not answered by any documentation available here, and no claim is made about it.
+#
+# The device has no module-count register, so the count is derived from the populated slots - but
+# counting and hardware validation stay separate, see _battery_module_report.
+RCT_MAX_MODULES_PER_TOWER = 6
+RCT_MODULE_SN_SLOTS = 7
+
+# Card roles that exist once per tower, with the catalog suffix that carries them.
+_BATTERY_TOWER_METRIC_SUFFIXES = {"soc": "soc", "temperature": "temperature", "status": "status2"}
+# Card roles with no per-tower equivalent in the catalog: battery_placeholder_0_cycles and
+# battery_placeholder_0_soc_target do not exist, and power_mng_bat_next_calib_date belongs to the
+# power manager, not to one tower. They are therefore reported once, for the first tower, rather
+# than invented for the second - a per-tower name the device does not have cannot be read.
+_BATTERY_DEVICE_METRIC_NAMES = {
+    "cycles": "battery_cycles",
+    "soc_target": "battery_soc_target",
+    "next_calibration": "power_mng_bat_next_calib_date",
+}
 # A plain numeric/status reading alone does not prove the *placeholder* tower is real: a device
 # answers a periodically-registered read with some value even for a register nothing is wired to
 # (an unpopulated numeric register reads back as 0, not as "no reading"), so soc/temperature/
@@ -565,21 +591,8 @@ _BATTERY_MODULE_SLOTS = 7
 _BATTERY_PRESENCE_SUFFIXES = ("soc", "temperature", "cycles", "status2")
 
 
-def _battery_module_count(runtime, device_id: str, prefix: str) -> int:
-    """Number of populated module_sn slots for one tower, 0 when none are populated (yet)."""
-    count = 0
-    for i in range(_BATTERY_MODULE_SLOTS):
-        name = f"{prefix}_module_sn_{i}"
-        if not runtime.catalog.exists(name):
-            continue
-        reading = runtime.gateway.cached_reading(device_id, name)
-        if reading is not None and isinstance(reading[0], str) and reading[0].strip():
-            count += 1
-    return count
-
-
-def _battery_tower_present(runtime, device_id: str, prefix: str, module_count: int) -> bool:
-    if module_count > 0:
+def _battery_tower_present(runtime, device_id: str, prefix: str, populated_module_slots: list[int]) -> bool:
+    if populated_module_slots:
         return True
     if prefix != "battery":
         return False  # a placeholder tower with no module serials is not installed
@@ -588,6 +601,65 @@ def _battery_tower_present(runtime, device_id: str, prefix: str, module_count: i
         if runtime.catalog.exists(name) and runtime.gateway.cached_reading(device_id, name) is not None:
             return True
     return False
+
+
+def _battery_populated_module_slots(runtime, device_id: str, prefix: str) -> list[int]:
+    """Indices of the module_sn slots that carry a non-empty serial; all slots are read, not just 6."""
+    populated = []
+    for i in range(RCT_MODULE_SN_SLOTS):
+        name = f"{prefix}_module_sn_{i}"
+        if not runtime.catalog.exists(name):
+            continue
+        reading = runtime.gateway.cached_reading(device_id, name)
+        if reading is not None and isinstance(reading[0], str) and reading[0].strip():
+            populated.append(i)
+    return populated
+
+
+def _battery_module_report(runtime, device_id: str, prefix: str, populated: list[int]) -> dict:
+    """Module count for one tower, with counting kept separate from hardware validation.
+
+    Which slots are populated matters, not only how many: a contiguous run 0..n-1 with the rest
+    empty is unambiguous and is trusted. Anything else - a gap in the middle, or more populated
+    slots than the documented hardware takes - is a data anomaly and not a taller tower, so the
+    count becomes None and the card renders the battery without a module-accurate tower instead of
+    claiming a tower no documented RCT product has.
+
+    `module_count_status` tells the client which case it is looking at:
+      "ok"      - trusted count, render that many modules
+      "pending" - no serial read yet; the periodic loop fills seven string slots over several
+                  cycles, so this is the normal startup state, not an error
+      "anomaly" - populated slots that cannot describe a documented tower; diagnostic case
+    """
+    if not populated:
+        return {"module_count": None, "module_count_status": "pending", "populated_module_slots": []}
+    contiguous = populated == list(range(len(populated)))
+    if contiguous and len(populated) <= RCT_MAX_MODULES_PER_TOWER:
+        # A count of 1 is below the documented minimum of 2, but a read that has only partly
+        # completed looks exactly like this. Rendering what was actually read is the
+        # non-destructive choice; discarding it would hide a real serial the device reported.
+        return {"module_count": len(populated), "module_count_status": "ok",
+                "populated_module_slots": populated}
+    log.warning(
+        "%s on %s reports module serials in slots %s: not a contiguous run of at most %d slots, so no "
+        "module count is derived from it (catalog carries %d slots; documented hardware takes %d modules)",
+        prefix, device_id, populated, RCT_MAX_MODULES_PER_TOWER, RCT_MODULE_SN_SLOTS,
+        RCT_MAX_MODULES_PER_TOWER,
+    )
+    return {"module_count": None, "module_count_status": "anomaly", "populated_module_slots": populated}
+
+
+def _battery_metric_names(runtime, prefix: str, *, include_device_wide: bool) -> dict[str, str]:
+    """Catalog names for one tower's card roles; only names the catalog actually carries."""
+    names = {}
+    for role, suffix in _BATTERY_TOWER_METRIC_SUFFIXES.items():
+        name = f"{prefix}_{suffix}"
+        if runtime.catalog.exists(name):
+            names[role] = name
+    if include_device_wide:
+        names.update({role: name for role, name in _BATTERY_DEVICE_METRIC_NAMES.items()
+                      if runtime.catalog.exists(name)})
+    return names
 
 
 @router.get("/devices")
@@ -604,7 +676,9 @@ def devices(request: Request) -> dict:
         "inverter_state", "battery_status2", "battery_placeholder_0_status2",
         "battery_soc_target", "power_mng_bat_next_calib_date", "heat_sink_temperature",
         "battery_temperature", "battery_cycles",
-        "battery_placeholder_0_temperature", "battery_placeholder_0_soc",
+        # Second tower's own readings: without them the battery_placeholder_0 card had nothing but
+        # shared values to show and repeated the first tower's numbers.
+        "battery_placeholder_0_soc", "battery_placeholder_0_temperature",
     )
     selected = [name for name in preferred if name in exposed]
     selected += [name for name in card_names if runtime.catalog.exists(name)]
@@ -623,11 +697,24 @@ def devices(request: Request) -> dict:
             if label is not None:
                 metric["label"] = label
             readings.append(metric)
+        # One entry per physically present tower, each carrying its OWN metric names. The client used
+        # to read battery_soc/battery_temperature for every tower, which made two towers show
+        # identical values; the mapping is resolved here because only the server knows which
+        # per-tower names the catalog actually has (battery_placeholder_0_cycles, for one, has none).
+        # Vendor register names are fine on this admin-only surface; /api/v1 keeps its business
+        # semantics and never sees them.
         batteries = []
         for prefix in _BATTERY_TOWER_PREFIXES:
-            module_count = _battery_module_count(runtime, item.device_id, prefix)
-            if _battery_tower_present(runtime, item.device_id, prefix, module_count):
-                batteries.append({"id": prefix, "module_count": module_count})
+            populated_module_slots = _battery_populated_module_slots(runtime, item.device_id, prefix)
+            if not _battery_tower_present(runtime, item.device_id, prefix, populated_module_slots):
+                continue
+            tower = {
+                "id": prefix,
+                "title": f"Battery {len(batteries) + 1}",
+                "metrics": _battery_metric_names(runtime, prefix, include_device_wide=not batteries),
+            }
+            tower.update(_battery_module_report(runtime, item.device_id, prefix, populated_module_slots))
+            batteries.append(tower)
         reported = runtime.gateway.reported_name(item.device_id)
         result.append({
             "id": item.device_id, "name": item.display_name or reported or item.device_id,

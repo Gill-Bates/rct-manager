@@ -209,99 +209,249 @@ const staleUi = await page.locator('#dashboard-kpis, .device-visual').evaluateAl
 check('stale API readings display values without stale labels or titles', staleReadings > 0 && !/\bstale\b/i.test(staleUi), `stale readings: ${staleReadings}; UI: ${staleUi}`);
 await page.unroute('**/admin/api/devices');
 
-// 2a. Device metadata stays in the header; readings are grouped into a power subcard and one
-// battery subcard per reported tower (app/admin/static/js/admin.js createPowerCard/createBatteryCard).
-const layout = await page.evaluate(() => {
+// 2a. Device metadata stays in the header; the readings live in one power subcard plus one subcard
+// per battery tower. The previous .device-half-* / .device-divider / .device-metrics structure no
+// longer exists in the DOM, so the checks below are written against the current
+// .device-subcard-power / .device-subcard-battery layout - querying the old classes returned null
+// and asserted nothing at all.
+const readLayout = () => page.evaluate(() => {
+  const text = (node) => (node ? node.textContent.trim() : null);
+  const box = (node) => {
+    const r = node.getBoundingClientRect();
+    return { left: r.left, right: r.right, top: r.top, bottom: r.bottom, width: Math.round(r.width), height: Math.round(r.height) };
+  };
+  const labels = (node) => [...node.querySelectorAll('dt')].map((dt) => dt.textContent.trim());
+  const title = (card) => text(card.querySelector('.device-subcard-title span:last-of-type'));
+  const chip = (card) => {
+    const node = card.querySelector('.device-chip');
+    return node && !node.hidden ? text(node) : null;
+  };
   const card = document.querySelector('.device-item');
+  const visual = card.querySelector('.device-visual');
   const power = card.querySelector('.device-subcard-power');
-  const battery = card.querySelector('.device-subcard-battery');
-  const powerGrid = power.querySelector('.device-metric-grid');
-  const batteryGrid = battery.querySelector('.device-metric-grid');
-  const powerCells = [...powerGrid.querySelectorAll('.device-metric-card')];
-  const batteryCells = [...batteryGrid.querySelectorAll('.device-metric-card')];
-  const powerLabels = [...power.querySelectorAll('dt')].map((dt) => dt.textContent.trim());
-  const batteryLabels = [...battery.querySelectorAll('dt')].map((dt) => dt.textContent.trim());
+  const powerImage = power.querySelector('.device-subcard-image');
+  const readTower = (tower) => {
+    const stack = tower.querySelector('.device-battery-stack');
+    const slices = [...stack.querySelectorAll('img')];
+    return {
+      title: title(tower), chip: chip(tower),
+      charge: text(tower.querySelector('.device-charge-value')),
+      labels: labels(tower),
+      cells: tower.querySelectorAll('.device-metric-card').length,
+      middles: slices.filter((image) => image.src.endsWith('battery_middle.svg')).length,
+      slices: slices.length,
+      stack: box(stack),
+      // Seams: consecutive slices must touch exactly, with no transparent strip between them.
+      seams: slices.slice(1).map((image, index) => Math.round((image.getBoundingClientRect().top
+        - slices[index].getBoundingClientRect().bottom) * 100) / 100),
+      sliceWidths: [...new Set(slices.map((image) => Math.round(image.getBoundingClientRect().width)))],
+      // One shadow for the whole tower, none on the individual slices.
+      stackShadow: getComputedStyle(stack).filter,
+      noteHidden: tower.querySelector('.device-battery-note').hidden,
+      box: box(tower),
+      bodyTracks: getComputedStyle(tower.querySelector('.device-subcard-body')).gridTemplateColumns
+        .split(' ').map((track) => Math.round(parseFloat(track))),
+    };
+  };
   return {
-    cardHeight: Math.round(card.getBoundingClientRect().height),
+    visualColumns: getComputedStyle(visual).gridTemplateColumns.split(' ').length,
+    batteryCountVar: visual.style.getPropertyValue('--battery-count').trim(),
     headHeight: Math.round(card.querySelector('.device-head').getBoundingClientRect().height),
-    subcardWidths: [power, battery].map((sub) => Math.round(sub.getBoundingClientRect().width)),
-    powerCells: powerCells.length,
-    batteryCells: batteryCells.length,
-    powerColumns: getComputedStyle(powerGrid).gridTemplateColumns.split(' ').length,
-    batteryColumns: getComputedStyle(batteryGrid).gridTemplateColumns.split(' ').length,
-    subcardsOrdered: power.getBoundingClientRect().right <= battery.getBoundingClientRect().left + 1,
-    // h4 contains a decorative material-icons span before the title text (createCardHead); the
-    // title is in its own trailing <span>, which is what should be compared against "Battery".
-    headings: [power, battery].map((sub) => sub.querySelector('h4 > span:last-child')?.textContent.trim()),
-    powerLabels,
-    batteryLabels,
-    badgeRows: card.querySelectorAll('.device-chip:not([hidden])').length,
+    power: {
+      title: title(power), chip: chip(power), labels: labels(power),
+      cells: power.querySelectorAll('.device-metric-card').length,
+      columns: getComputedStyle(power.querySelector('.device-metric-grid')).gridTemplateColumns.split(' ').length,
+      image: box(powerImage),
+      bodyTracks: getComputedStyle(power.querySelector('.device-subcard-body')).gridTemplateColumns
+        .split(' ').map((track) => Math.round(parseFloat(track))),
+      box: box(power),
+      valueSize: parseFloat(getComputedStyle(power.querySelector('.device-metric-card dd')).fontSize),
+    },
+    towers: [...card.querySelectorAll('.device-subcard-battery')].map(readTower),
+    chargeSize: parseFloat(getComputedStyle(card.querySelector('.device-charge-value')).fontSize),
   };
 });
-check('Power groups PV A, PV B, Grid power, AC power, inverter status, and heat sink', layout.powerCells === 6 && layout.powerColumns === 2 && ['PV A', 'PV B', 'Grid power', 'AC power', 'Status', 'Heat sink'].every((label) => layout.powerLabels.includes(label)), JSON.stringify(layout));
-check('Battery groups temperature, charge cycles, SOC target, and next calibration', layout.batteryCells === 4 && layout.batteryColumns === 2 && ['Temperature', 'Charge cycles', 'SOC target', 'Next calibration'].every((label) => layout.batteryLabels.includes(label)), JSON.stringify(layout));
-check('Power and Battery subcards are labeled and ordered', layout.headings.join(',') === 'Inverter / Power,Battery' && layout.subcardsOrdered, JSON.stringify(layout));
-check('inverter and battery subcards receive equal width', Math.abs(layout.subcardWidths[0] - layout.subcardWidths[1]) <= 1, JSON.stringify(layout.subcardWidths));
-check('card header is compact and status chip is in the subcard head, not a separate row', layout.headHeight <= 60 && layout.badgeRows >= 1, JSON.stringify(layout));
-// The inverter state is shown twice by current design: once as the subcard-head status chip
-// (patchCardStatus) and once as the power card's "Status" key-value cell (POWER_CELLS,
-// kind: 'label') — not a stray third copy anywhere else in the card.
+const layout = await readLayout();
+console.log(JSON.stringify(layout, null, 1));
+check('card header is compact', layout.headHeight <= 60, JSON.stringify({ headHeight: layout.headHeight }));
+check('the power subcard is labelled and carries the inverter facts in two columns',
+  layout.power.title === 'Inverter / Power' && layout.power.columns === 2
+  && ['PV A', 'PV B', 'Grid power', 'AC power'].every((label) => layout.power.labels.includes(label)),
+  JSON.stringify(layout.power.labels));
+check('the inverter status is shown on the power subcard chip', /feed in/i.test(layout.power.chip || ''), String(layout.power.chip));
+// ITEM 3/4: the simulated device has two towers (5 and 4 modules) with deliberately different SoC
+// and status values, so shared-metric rendering would be visible as two identical towers.
+check('one subcard per battery tower, titled Battery 1 and Battery 2',
+  layout.towers.length === 2 && layout.towers.map((tower) => tower.title).join(',') === 'Battery 1,Battery 2'
+  && layout.batteryCountVar === '2' && layout.visualColumns === 3,
+  JSON.stringify({ titles: layout.towers.map((t) => t.title), countVar: layout.batteryCountVar, columns: layout.visualColumns }));
+check('each tower shows its own charge level (55 % and 42 %), not a shared one',
+  /^55\s*%$/.test(layout.towers[0].charge) && /^42\s*%$/.test(layout.towers[1].charge),
+  JSON.stringify(layout.towers.map((tower) => tower.charge)));
+check('each tower shows its own status (balancing active vs synchronizing), not a shared one',
+  /balancing active/i.test(layout.towers[0].chip || '') && /synchroniz/i.test(layout.towers[1].chip || '')
+  && layout.towers[0].chip !== layout.towers[1].chip,
+  JSON.stringify(layout.towers.map((tower) => tower.chip)));
+check('each tower renders its own module count (5 and 4 middle slices)',
+  layout.towers[0].middles === 5 && layout.towers[1].middles === 4
+  && layout.towers.every((tower) => tower.slices === tower.middles + 2),
+  JSON.stringify(layout.towers.map((tower) => ({ middles: tower.middles, slices: tower.slices }))));
+// ITEM 3, device-wide values: battery_cycles, battery_soc_target and power_mng_bat_next_calib_date
+// have no battery_placeholder_0_* equivalent in the catalog, so they are shown once (first tower)
+// instead of being duplicated or invented for the second.
+check('temperature is per tower while device-wide battery facts appear only once',
+  layout.towers.every((tower) => tower.labels.includes('Temperature'))
+  && ['Charge cycles', 'SOC target'].every((label) => layout.towers[0].labels.includes(label))
+  && !['Charge cycles', 'SOC target', 'Next calibration'].some((label) => layout.towers[1].labels.includes(label)),
+  JSON.stringify(layout.towers.map((tower) => tower.labels)));
+// ITEM 1: the slices are flush (no transparent trailing space inside them, so no gap at gap:0) and
+// the shadow sits on the assembled tower, not on every module.
+check('battery slices butt together with no visible seam',
+  layout.towers.every((tower) => tower.seams.every((seam) => Math.abs(seam) <= 0.5)),
+  JSON.stringify(layout.towers.map((tower) => tower.seams)));
+check('all slices of a tower share one width', layout.towers.every((tower) => tower.sliceWidths.length === 1),
+  JSON.stringify(layout.towers.map((tower) => tower.sliceWidths)));
+check('one drop shadow is applied to the assembled tower',
+  layout.towers.every((tower) => /drop-shadow/.test(tower.stackShadow)),
+  JSON.stringify(layout.towers.map((tower) => tower.stackShadow)));
+// ITEM 2: the two subcards no longer share one 4rem image column.
+check('the inverter image column is wider than the battery tower column',
+  layout.power.bodyTracks[0] > layout.towers[0].bodyTracks[0]
+  && layout.power.bodyTracks[0] >= 120 && layout.power.image.width >= 110 && layout.power.image.height >= 120,
+  JSON.stringify({ power: layout.power.bodyTracks, battery: layout.towers[0].bodyTracks, image: layout.power.image }));
+check('charge level and the power values keep comparable sizes', layout.chargeSize >= layout.power.valueSize,
+  JSON.stringify({ charge: layout.chargeSize, power: layout.power.valueSize }));
+check('subcards share the row evenly', Math.abs(layout.power.box.width - layout.towers[0].box.width) <= 1
+  && Math.abs(layout.towers[0].box.width - layout.towers[1].box.width) <= 1,
+  JSON.stringify([layout.power.box.width, ...layout.towers.map((tower) => tower.box.width)]));
+// The inverter state is shown exactly once per card, not repeated in the header.
 const stateMentions = await page.evaluate(() => [...document.querySelectorAll('.device-item *')]
   .filter((n) => !n.children.length && /feed in/i.test(n.textContent)).length);
-check('inverter state is shown exactly in the status chip and the Status cell, nowhere else', stateMentions === 2, String(stateMentions));
-// 34rem (544px) is .device-visual's single-column container-query breakpoint (admin.css); the
-// card itself is narrower than the viewport by the sidebar and page padding, so the viewport must
-// sit comfortably below that to land in the stacked layout.
-await page.setViewportSize({ width: 600, height: 800 });
+check('inverter state is shown exactly once per card', stateMentions === 1, String(stateMentions));
+
+// 2a-2. ITEM 5 and ITEM 0 rendered: module counts 2..6 must stay inside the height cap, and a slot
+// pattern that cannot describe a documented tower (7 populated slots, or a gap) must not render a
+// tower at all. Both are driven through the admin payload, because the simulated inverter reports
+// one fixed pair of towers.
+const TOWER_HEIGHT_CAP = 190;
+const patchBatteries = (mutate) => page.route('**/admin/api/devices', async (route) => {
+  const response = await route.fetch();
+  const data = await response.json();
+  for (const device of data.devices) mutate(device.batteries || []);
+  await route.fulfill({ response, json: data });
+});
+// A dashboard poll without waiting out the 10s timer; the dashboard listens for visibilitychange.
+const forceDashboardPoll = () => page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
+const towerGeometry = async () => {
+  await forceDashboardPoll();
+  await page.waitForResponse((response) => response.url().endsWith('/admin/api/devices'), { timeout: 20000 }).catch(() => { });
+  await page.waitForTimeout(250);
+  return (await readLayout()).towers;
+};
+for (const modules of [2, 3, 4, 5, 6]) {
+  await patchBatteries((batteries) => batteries.forEach((battery) => {
+    battery.module_count = modules;
+    battery.module_count_status = 'ok';
+    battery.populated_module_slots = [...Array(modules).keys()];
+  }));
+  const towers = await towerGeometry();
+  await page.unroute('**/admin/api/devices');
+  check(`a ${modules}-module tower stays within the ${TOWER_HEIGHT_CAP}px height cap and shows all its modules`,
+    towers.length > 0 && towers.every((tower) => tower.middles === modules
+      && tower.stack.height <= TOWER_HEIGHT_CAP + 1 && tower.stack.height > 0
+      && tower.stack.width > 0 && tower.stack.width <= 80),
+    JSON.stringify(towers.map((tower) => ({ middles: tower.middles, height: tower.stack.height, width: tower.stack.width }))));
+}
+// Taller towers must get narrower rather than taller: that is what keeps the cap without dropping
+// modules from the drawing.
+const widthAt = async (modules) => {
+  await patchBatteries((batteries) => batteries.forEach((battery) => {
+    battery.module_count = modules;
+    battery.module_count_status = 'ok';
+    battery.populated_module_slots = [...Array(modules).keys()];
+  }));
+  const towers = await towerGeometry();
+  await page.unroute('**/admin/api/devices');
+  return towers[0].stack.width;
+};
+const widthTwo = await widthAt(2);
+const widthSix = await widthAt(6);
+check('a six-module tower is drawn narrower than a two-module one instead of taller', widthSix < widthTwo,
+  JSON.stringify({ widthTwo, widthSix }));
+// ITEM 0: seven populated slots are a data anomaly (the catalog array has seven elements, the
+// documented hardware takes six modules), and a gap in the middle is one too. Neither may render a
+// seven-storey tower; the card keeps its readings and says so instead.
+for (const [name, slots] of [['seven populated slots', [0, 1, 2, 3, 4, 5, 6]], ['a gap in the middle', [0, 1, 4]]]) {
+  await patchBatteries((batteries) => batteries.forEach((battery) => {
+    battery.module_count = null;
+    battery.module_count_status = 'anomaly';
+    battery.populated_module_slots = slots;
+  }));
+  const towers = await towerGeometry();
+  await page.unroute('**/admin/api/devices');
+  check(`${name} renders a diagnostic note instead of a tower`,
+    towers.length > 0 && towers.every((tower) => tower.slices === 0 && tower.noteHidden === false
+      && /^55\s*%$|^42\s*%$/.test(tower.charge)),
+    JSON.stringify(towers.map((tower) => ({ slices: tower.slices, noteHidden: tower.noteHidden, charge: tower.charge }))));
+}
+await forceDashboardPoll();
+await page.waitForTimeout(300);
+
+await page.setViewportSize({ width: 1000, height: 800 });
+await page.waitForTimeout(400);
 const twoCards = await page.evaluate(() => {
   const grid = document.querySelector('.device-grid');
   const copy = grid.firstElementChild.cloneNode(true);
   grid.append(copy);
-  const cards = [...grid.querySelectorAll('.device-item')];
-  const result = cards.map((card) => {
-    const power = card.querySelector('.device-subcard-power').getBoundingClientRect();
-    const battery = card.querySelector('.device-subcard-battery').getBoundingClientRect();
-    return { width: Math.round(card.getBoundingClientRect().width), stacked: battery.top > power.bottom };
+  const result = [...grid.querySelectorAll('.device-item')].map((card) => {
+    const subcards = [...card.querySelectorAll('.device-subcard')].map((node) => node.getBoundingClientRect());
+    return {
+      width: Math.round(card.getBoundingClientRect().width),
+      subcards: subcards.length,
+      // Below the 56rem container width the subcards reflow to two columns, so the last one wraps
+      // onto a second row instead of all three sharing one.
+      wrapped: subcards.some((rect) => rect.top > subcards[0].bottom - 1),
+    };
   });
   copy.remove();
   return result;
 });
-check('two narrow cards stack their subcards at 1000px', twoCards.length === 2 && twoCards.every((card) => card.stacked), JSON.stringify(twoCards));
+check('two narrow cards reflow their subcards onto more than one row at 1000px',
+  twoCards.length === 2 && twoCards.every((card) => card.subcards === 3 && card.wrapped), JSON.stringify(twoCards));
 await page.setViewportSize({ width: 390, height: 844 });
 await page.waitForTimeout(400);
 const narrow = { overflow: await overflow(), cardHeight: await page.evaluate(() => Math.round(document.querySelector('.device-item').getBoundingClientRect().height)) };
 await shot('02b-dashboard-390');
 check('no horizontal overflow at 390px', narrow.overflow === 0, JSON.stringify(narrow));
-// Intended mobile layout of a device subcard (app/admin/static/css/admin.css, the
-// `@container (max-width: 22rem)` rule on .device-subcard-body): below that container width the
-// image moves ABOVE the readings in a single-column grid, instead of sitting beside them, so the
-// value columns keep their width instead of being squeezed by a wide empty image box. The battery
-// subcard's image is a multi-slice stack (.device-battery-stack), not a single <img>, so this only
-// measures the power subcard's single rct-inverter.svg image.
-const measureMobileImages = () => page.locator('.device-subcard-power .device-subcard-image').evaluateAll((images) => images.map((image) => {
-  const box = image.getBoundingClientRect();
-  const subcard = image.closest('.device-subcard').getBoundingClientRect();
-  const body = image.closest('.device-subcard-body');
-  const readings = image.nextElementSibling.getBoundingClientRect();
-  const tracks = getComputedStyle(body).gridTemplateColumns.split(' ').map((track) => parseFloat(track));
-  const style = getComputedStyle(image);
-  return {
-    width: Math.round(box.width), height: Math.round(box.height), tracks,
-    inside: box.left >= subcard.left && box.right <= subcard.right && box.top >= subcard.top && box.bottom <= subcard.bottom,
-    aboveReadings: box.bottom <= readings.top,
-    narrowerThanSubcard: box.width < subcard.width,
-    singleColumn: tracks.length === 1,
-    objectFit: style.objectFit,
-  };
-}));
+// Mobile layout of a subcard, measured in the browser rather than read off the stylesheet: below the
+// 22rem container width .device-subcard-body collapses to a single track, so the illustration moves
+// above the readings, stays centred and never widens the card. Both the inverter image and the
+// battery tower are checked, since they are sized by different rules now.
+const measureMobileImages = () => page.evaluate(() => {
+  const columns = (node) => getComputedStyle(node).gridTemplateColumns.split(' ').length;
+  return [...document.querySelectorAll('.device-subcard')].map((card) => {
+    const body = card.querySelector('.device-subcard-body');
+    const visualNode = card.querySelector('.device-subcard-image, .device-battery-stack');
+    const readings = card.querySelector('.device-metric-grid, .device-subcard-readings');
+    const visual = visualNode.getBoundingClientRect();
+    const cardBox = card.getBoundingClientRect();
+    return {
+      kind: card.classList.contains('device-subcard-power') ? 'power' : 'battery',
+      tracks: columns(body),
+      width: Math.round(visual.width), height: Math.round(visual.height),
+      inside: visual.left >= cardBox.left - 1 && visual.right <= cardBox.right + 1,
+      aboveReadings: visual.bottom <= readings.getBoundingClientRect().top + 1,
+      centred: Math.abs((visual.left - cardBox.left) - (cardBox.right - visual.right)) <= 2,
+    };
+  });
+});
 for (const width of [390, 320]) {
   await page.setViewportSize({ width, height: 844 });
   await page.waitForTimeout(400);
   const images = await measureMobileImages();
-  check(`device image sits above its readings in one column at ${width}px`, images.length === 1
-    && images.every((image) => image.objectFit === 'contain' && image.inside
-      && image.aboveReadings && image.narrowerThanSubcard && image.singleColumn),
-    JSON.stringify(images));
+  check(`subcard illustrations sit above their readings and inside the card at ${width}px`,
+    images.length === 3 && images.every((image) => image.tracks === 1 && image.width > 0 && image.height > 0
+      && image.inside && image.aboveReadings && image.centred), JSON.stringify(images));
 }
 // The footer is fixed to the viewport bottom while .app-shell reserves --rct-footer-height (2.75rem)
 // there, so the last card must not merely touch the footer edge but keep a visible gap. Measured

@@ -23,19 +23,25 @@ from tests.fakes import response_to
 
 VALUES = {"solar_a_power": 1234.5, "solar_b_power": 800.0, "grid_power": -250.0, "battery_soc": 0.55,
           "battery_temperature": 28.5,
-          # The second, placeholder tower carries its own distinct soc/temperature so an e2e check
-          # can prove the two rendered battery cards show different readings, not duplicates of the
-          # primary tower (battery_placeholder_0 has no stack_cycles/soc_target/next_calib
-          # counterpart in the catalog, see app/catalog/objects.json; those stay shared by design).
-          "battery_placeholder_0_soc": 0.81, "battery_placeholder_0_temperature": 19.0}
+          # The second battery tower reports its own SoC and temperature. The values differ from the
+          # first tower's on purpose: a card that falls back to the shared battery_* names would then
+          # show two identical towers, which the browser test asserts against.
+          "battery_placeholder_0_soc": 0.42, "battery_placeholder_0_temperature": 24.5}
 # Device-card status badges (Requirement: dashboard shows inverter_state/battery_status2 as text);
 # feed_in=13 and the community-observed "balancing active" bit combination exercise the labels.
-INT_VALUES = {"inverter_state": 13, "battery_status2": 2304, "battery_cycles": 142}
-# battery_module_sn_0..2 of the primary tower and battery_placeholder_0_module_sn_0..1 of a second,
-# smaller tower, so the dashboard's dynamic battery-slice stack has something concrete to count per
-# tower (module_count 3 and 2) and _battery_tower_present (app/admin/api.py) reports two towers.
-STRING_VALUES = {f"battery_module_sn_{i}": f"SIM-{i:03d}" for i in range(3)}
-STRING_VALUES.update({f"battery_placeholder_0_module_sn_{i}": f"SIM-P0-{i:03d}" for i in range(2)})
+INT_VALUES = {"inverter_state": 13, "battery_status2": 2304, "battery_cycles": 142,
+              # Second tower's own status: "Synchronizing", deliberately different from tower 1's
+              # "Balancing active" so a card that reuses the first tower's status is visible.
+              "battery_placeholder_0_status2": 2}
+# Two simulated towers with different module counts, so the dashboard has to render each tower from
+# its own data: tower 1 has 5 modules (a Power Battery 9.6), tower 2 has 4 (a 7.6). The remaining
+# module_sn slots of each tower stay unmodeled and answer with a t_string zero value, i.e. the empty
+# string an unpopulated slot really returns - so the derived counts are 5 and 4, not 7. Seven slots
+# exist in the catalog; at most 6 modules exist in the documented hardware.
+STRING_VALUES = {
+    **{f"battery_module_sn_{i}": f"SIM-{i:03d}" for i in range(5)},
+    **{f"battery_placeholder_0_module_sn_{i}": f"SIM-B{i:03d}" for i in range(4)},
+}
 
 
 def _default_payload(data_type: DataType) -> bytes:

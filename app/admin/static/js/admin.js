@@ -288,22 +288,18 @@
     { name: 'heat_sink_temperature', label: 'Heat sink', icon: 'device_thermostat', optional: true },
     { name: 'inverter_state', label: 'Status', icon: 'tune', kind: 'label', optional: true },
   ];
-  // The battery card's 2x2 fact grid below the charge level and its bar. `temperature` and
-  // `cycles` are per-tower readings in the catalog (app/catalog/objects.json carries both
-  // `battery_temperature`/`battery_placeholder_0_temperature` and `battery_cycles`/no placeholder
-  // counterpart — a second tower simply has no `cycles` register and shows n/a there, which is
-  // correct, not a bug), so their cell name is built from the tower's own prefix. `soc_target` and
-  // `power_mng_bat_next_calib_date` have no `battery_placeholder_0_*` counterpart in the catalog at
-  // all — SOC target and calibration scheduling are system-wide `power_mng`/global settings, not a
-  // per-tower attribute — so both towers intentionally show the same shared value.
-  function batteryCellSpecs(prefix) {
-    return [
-      { name: `${prefix}_temperature`, label: 'Temperature', icon: 'device_thermostat', optional: true },
-      { name: `${prefix}_cycles`, label: 'Charge cycles', icon: 'loop', optional: true },
-      { name: 'battery_soc_target', label: 'SOC target', icon: 'flag', optional: true },
-      { name: 'power_mng_bat_next_calib_date', label: 'Next calibration', icon: 'event_repeat', optional: true },
-    ];
-  }
+  // The battery card's fact grid below the charge level and its bar. Cells name a *role*, not a
+  // metric: the server maps each role to the catalog name that belongs to this particular tower
+  // (app/admin/api.py, _battery_metric_names), so two towers no longer render the same numbers. A
+  // role the server reports no name for is dropped from that tower's grid - 'cycles', 'soc_target'
+  // and 'next_calibration' have no per-tower register, so they are only mapped for the first tower
+  // and the second tower simply does not show them.
+  const BATTERY_CELLS = [
+    { role: 'temperature', label: 'Temperature', icon: 'device_thermostat', optional: true },
+    { role: 'cycles', label: 'Charge cycles', icon: 'loop', optional: true },
+    { role: 'soc_target', label: 'SOC target', icon: 'flag', optional: true },
+    { role: 'next_calibration', label: 'Next calibration', icon: 'event_repeat', optional: true },
+  ];
 
   // Metric names that prove a battery system is attached; without any of them no battery card is
   // rendered at all rather than an empty one. Fallback only — used when the server's `batteries`
@@ -312,62 +308,106 @@
     'battery_placeholder_0_status2'];
 
   // Describes the battery cards to render for one device. /admin/api/devices (app/admin/api.py,
-  // devices()) returns a `batteries` list, one entry per physical tower sharing the inverter, each
-  // with its own `module_count` derived server-side from the populated battery_module_sn_0..6 /
-  // battery_placeholder_0_module_sn_0..6 slots. `module_count` is the number of modules *in that
-  // one tower*, not the number of towers. The status metric name follows the same per-tower prefix
-  // as those slots (`battery_status2` for id `battery`, `battery_placeholder_0_status2` for id
-  // `battery_placeholder_0`). A registry without any module_sn slots reports no `batteries` entries
-  // at all; BATTERY_PRESENCE then falls back to a single descriptor with an unknown module count so
-  // older/simpler registries still show one battery card.
+  // devices()) returns a `batteries` list, one entry per physical tower sharing the inverter. Each
+  // entry carries its own title, its own role->metric-name map and its own module report, so every
+  // tower is rendered from its own readings instead of from shared `battery_*` names.
+  //
+  // `module_count` is the number of modules *in that one tower*, not the number of towers, and it is
+  // null whenever the server could not derive a trustworthy count; `module_count_status` says which
+  // case it is ("ok" / "pending" / "anomaly", see _battery_module_report).
+  //
+  // A registry without any module_sn slots reports no `batteries` entries at all; BATTERY_PRESENCE
+  // then falls back to a single descriptor so older/simpler registries still show one battery card.
   function batteryTowers(metrics, batteries) {
     if (Array.isArray(batteries) && batteries.length) {
-      return batteries.map((battery) => ({
-        title: 'Battery',
-        prefix: battery.id,
-        statusMetric: `${battery.id}_status2`,
+      return batteries.map((battery, index) => ({
+        id: battery.id,
+        title: battery.title || `Battery ${index + 1}`,
+        metrics: battery.metrics && typeof battery.metrics === 'object' ? battery.metrics : {},
         moduleCount: typeof battery.module_count === 'number' ? battery.module_count : null,
+        moduleCountStatus: battery.module_count_status || (battery.module_count === null ? 'anomaly' : 'ok'),
+        populatedModuleSlots: Array.isArray(battery.populated_module_slots) ? battery.populated_module_slots : [],
       }));
     }
     if (!BATTERY_PRESENCE.some((name) => metrics.has(name))) return [];
-    return [{ title: 'Battery', prefix: 'battery', statusMetric: 'battery_status2', moduleCount: null }];
+    return [{
+      id: 'battery',
+      title: 'Battery 1',
+      metrics: {
+        soc: 'battery_soc', temperature: 'battery_temperature', status: 'battery_status2',
+        cycles: 'battery_cycles', soc_target: 'battery_soc_target',
+        next_calibration: 'power_mng_bat_next_calib_date',
+      },
+      moduleCount: null, moduleCountStatus: 'pending', populatedModuleSlots: [],
+    }];
   }
 
   // The three battery slices (app/admin/static/img/battery_{top,middle,bottom}.svg) share a 220-wide
-  // viewBox and are drawn edge-to-edge, so stacking top + middle*N + bottom at one common rendered
-  // width with no gap reproduces one continuous tower. Height per slice follows from its own viewBox
-  // aspect ratio at that width, so slices never need matching/hardcoded heights.
-  const BATTERY_SLICE_WIDTH = 64;  // matches the previous single rct-batterystack.svg image width
+  // viewBox and are drawn flush to their own top/bottom edges with no transparent margin, so
+  // stacking top + middle*N + bottom at one common rendered width with no gap reproduces one
+  // continuous case. Height per slice follows from its own viewBox aspect ratio at that width, so
+  // slices never need matching/hardcoded heights. These viewBox heights must stay in sync with the
+  // SVGs.
   const BATTERY_SLICE_VIEWBOX_WIDTH = 220;
   const BATTERY_SLICES = {
-    top: { file: 'battery_top.svg', viewBoxHeight: 74 },
-    middle: { file: 'battery_middle.svg', viewBoxHeight: 112 },
-    bottom: { file: 'battery_bottom.svg', viewBoxHeight: 140 },
+    top: { file: 'battery_top.svg', viewBoxHeight: 70 },
+    middle: { file: 'battery_middle.svg', viewBoxHeight: 109 },
+    bottom: { file: 'battery_bottom.svg', viewBoxHeight: 132 },
   };
+  // Upper bound for the rendered tower. In viewBox units an assembled tower is
+  // 70 + N*109 + 132, i.e. 420 units at N=2 and 856 at N=6, so a fixed width makes a six-module
+  // tower more than twice as tall as a two-module one and drags the whole card down. The width is
+  // therefore derived from the cap for the given module count: a tall tower gets *narrower*, never
+  // shorter and never fewer modules, so the module count stays visually apparent.
+  const BATTERY_TOWER_MAX_HEIGHT = 190;
+  // Width a short tower is allowed to reach; also the battery card's image column (5rem in admin.css).
+  const BATTERY_SLICE_MAX_WIDTH = 80;
 
-  function batterySliceImage(kind) {
+  function batteryTowerViewBoxHeight(moduleCount) {
+    return BATTERY_SLICES.top.viewBoxHeight + moduleCount * BATTERY_SLICES.middle.viewBoxHeight
+      + BATTERY_SLICES.bottom.viewBoxHeight;
+  }
+
+  // Shared slice width that keeps the assembled tower inside BATTERY_TOWER_MAX_HEIGHT.
+  function batterySliceWidth(moduleCount) {
+    const units = batteryTowerViewBoxHeight(moduleCount);
+    const fitted = (BATTERY_TOWER_MAX_HEIGHT * BATTERY_SLICE_VIEWBOX_WIDTH) / units;
+    return Math.max(1, Math.min(BATTERY_SLICE_MAX_WIDTH, Math.floor(fitted)));
+  }
+
+  function batterySliceImage(kind, width) {
     const { file, viewBoxHeight } = BATTERY_SLICES[kind];
     const image = element('img', 'device-battery-slice');
     image.src = `/admin/static/img/${file}`;
     image.alt = '';
-    image.width = BATTERY_SLICE_WIDTH;
-    image.height = Math.round((BATTERY_SLICE_WIDTH * viewBoxHeight) / BATTERY_SLICE_VIEWBOX_WIDTH);
+    image.width = width;
+    image.height = Math.round((width * viewBoxHeight) / BATTERY_SLICE_VIEWBOX_WIDTH);
     return image;
   }
 
-  // Bottom once, N middles, top once — DOM order top-to-bottom, matching the visual stack order.
+  // Top once, N middles, bottom once — DOM order top-to-bottom, matching the visual stack order.
   function buildBatteryStack(moduleCount) {
-    const nodes = [batterySliceImage('top')];
-    for (let i = 0; i < moduleCount; i += 1) nodes.push(batterySliceImage('middle'));
-    nodes.push(batterySliceImage('bottom'));
+    const width = batterySliceWidth(moduleCount);
+    const nodes = [batterySliceImage('top', width)];
+    for (let i = 0; i < moduleCount; i += 1) nodes.push(batterySliceImage('middle', width));
+    nodes.push(batterySliceImage('bottom', width));
     return nodes;
   }
 
-  // An unknown count (registry without module_sn slots) falls back to a single middle slice so the
-  // tower never collapses to just top+bottom; an explicit, confirmed zero stays zero rather than
-  // fabricating a module that was not actually found.
-  function effectiveModuleCount(moduleCount) {
-    return moduleCount === null || moduleCount === undefined ? 1 : Math.max(0, moduleCount);
+  // How many module slices a tower descriptor may render. The catalog's seven serial slots are the
+  // size of a data structure; the documented hardware takes at most six modules per tower, so six is
+  // the hard visual ceiling here as well. A count that cannot be trusted renders no tower at all
+  // (see patchBatteryTower) rather than a fabricated one.
+  const BATTERY_MAX_MODULES_PER_TOWER = 6;
+
+  // null -> nothing renderable. "pending" (no serial read yet - the seven string slots arrive over
+  // several poll cycles) keeps the previous behaviour of a single-module placeholder tower so the
+  // card does not flicker between states during startup.
+  function renderableModuleCount(tower) {
+    if (tower.moduleCountStatus === 'pending') return 1;
+    if (typeof tower.moduleCount !== 'number' || tower.moduleCount < 1) return null;
+    if (tower.moduleCount > BATTERY_MAX_MODULES_PER_TOWER) return null;
+    return tower.moduleCount;
   }
 
   // Reconciles a parent's children with the wanted nodes in order; untouched nodes are not re-inserted.
@@ -423,7 +463,8 @@
     const titleNode = element('h4', 'device-subcard-title mb-0');
     const iconNode = element('span', 'material-icons', icon);
     iconNode.setAttribute('aria-hidden', 'true');
-    titleNode.append(iconNode, element('span', null, title));
+    const titleText = element('span', null, title);
+    titleNode.append(iconNode, titleText);
     const chip = element('span', 'device-chip');
     const dot = element('span', 'device-chip-dot');
     dot.setAttribute('aria-hidden', 'true');
@@ -431,7 +472,9 @@
     chip.append(dot, text);
     chip.hidden = true;
     head.append(titleNode, chip);
-    return { node: head, chip, chipText: text };
+    // titleText is exposed separately so a renamed tower ("Battery 1" -> "Battery 2") can be patched
+    // without touching the decorative icon beside it.
+    return { node: head, chip, chipText: text, titleText };
   }
 
   function cardImage(imageName, width, height) {
@@ -461,6 +504,12 @@
 
   // Battery card: header, tower image on the left, and on the right the charge level with its bar
   // directly beneath the value, then a 2x2 fact grid. Same outer shape as the power card.
+  // Identity of a tower descriptor for reuse purposes: same tower and same metric mapping means the
+  // existing card can be patched; a different mapping needs a fresh grid, so the card is rebuilt.
+  function batteryTowerKey(tower) {
+    return `${tower.id}\u0000${BATTERY_CELLS.map((cell) => tower.metrics[cell.role] || '').join('\u0001')}`;
+  }
+
   function createBatteryCard(tower) {
     const card = element('section', 'device-subcard device-subcard-battery');
     const head = createCardHead(tower.title, 'battery_charging_full');
@@ -472,20 +521,27 @@
     bar.append(element('div', 'device-soc-fill'));
     charge.append(bar);
     const grid = element('dl', 'device-metric-grid mb-0');
-    const cells = batteryCellSpecs(tower.prefix).map((spec) => {
+    // Only the roles this tower actually has a metric name for; a role the device reports per
+    // device rather than per tower is absent from the second tower's map and gets no cell here.
+    const cells = BATTERY_CELLS.filter((spec) => tower.metrics[spec.role]).map((spec) => {
       const { node, dd } = createMetricCell(spec);
       grid.append(node);
-      return { ...spec, dd, node };
+      return { ...spec, name: tower.metrics[spec.role], dd, node };
     });
     const readings = element('div', 'device-subcard-readings');
     readings.append(charge, grid);
     const stack = element('div', 'device-battery-stack');
+    // Shown instead of the tower when no module count can be trusted; see patchBatteryCard.
+    const note = element('p', 'device-battery-note mb-0');
+    note.hidden = true;
+    const column = element('div', 'device-battery-column');
+    column.append(stack, note);
     const body = element('div', 'device-subcard-body');
-    body.append(stack, readings);
+    body.append(column, readings);
     card.append(head.node, body);
     return {
-      node: card, head, grid, cells, chargeValue, bar, stack, moduleCount: -1,
-      statusMetric: tower.statusMetric, socMetric: `${tower.prefix}_soc`,
+      node: card, head, grid, cells, chargeValue, bar, stack, note, renderedModules: -1,
+      towerKey: batteryTowerKey(tower), socMetric: tower.metrics.soc, statusMetric: tower.metrics.status,
     };
   }
 
@@ -499,10 +555,11 @@
 
   // Shows the server-decoded status text as a compact chip. A status that needs an explanation
   // carries it in the title tooltip only, so no long prose sits permanently in the card.
+  // No cross-tower fallback: a tower shows its own status or none. Falling back from
+  // battery_status2 to battery_placeholder_0_status2 made a second tower's status appear on the
+  // first tower's chip, which is exactly the kind of shared-value bug this card had.
   function patchCardStatus(head, metrics, statusMetric) {
-    const reading = statusMetric
-      ? metrics.get(statusMetric) || (statusMetric === 'battery_status2' ? metrics.get('battery_placeholder_0_status2') : undefined)
-      : undefined;
+    const reading = statusMetric ? metrics.get(statusMetric) : undefined;
     if (!reading?.label) { head.chip.hidden = true; return; }
     const text = reading.label;
     setText(head.chipText, text);
@@ -547,22 +604,44 @@
     syncChildren(card.grid, nodes);
   }
 
-  function patchBatteryCard(card, metrics, moduleCount) {
-    const wanted = effectiveModuleCount(moduleCount);
+  function patchBatteryCard(card, metrics, tower) {
+    const wanted = renderableModuleCount(tower);
     // Rebuilds the slice stack only when the module count actually changed, not on every poll —
     // same no-churn pattern as syncChildren/patchDeviceVisual elsewhere in this file.
-    if (card.moduleCount !== wanted) {
-      card.moduleCount = wanted;
-      card.stack.replaceChildren(...buildBatteryStack(wanted));
+    if (card.renderedModules !== wanted) {
+      card.renderedModules = wanted;
+      if (wanted === null) {
+        // Diagnostic case: the populated serial slots do not describe a documented tower (a gap in
+        // the middle, or more populated slots than the hardware takes). The card keeps its readings
+        // but shows no tower, because any drawn tower here would be a claim about the hardware that
+        // the data does not support - and a seven-storey tower in particular does not exist.
+        card.stack.replaceChildren();
+        card.note.hidden = false;
+      } else {
+        card.stack.replaceChildren(...buildBatteryStack(wanted));
+        card.note.hidden = true;
+      }
+    }
+    if (wanted === null) {
+      const slots = tower.populatedModuleSlots || [];
+      setText(card.note, 'Module layout unclear');
+      const detail = slots.length
+        ? `The battery reports module serials in slots ${slots.join(', ')}, which does not describe a documented tower (at most ${BATTERY_MAX_MODULES_PER_TOWER} modules, numbered without gaps). No module tower is drawn for it.`
+        : 'No usable module serials were reported, so no module tower is drawn.';
+      if (card.note.title !== detail) card.note.title = detail;
     }
     patchCardStatus(card.head, metrics, card.statusMetric);
-    const metric = metrics.get(card.socMetric);
+    const metric = card.socMetric ? metrics.get(card.socMetric) : undefined;
     const value = metric && metric.value !== null && metric.value !== undefined ? Number(metric.value) : NaN;
     const available = Number.isFinite(value);
-    const [number, unit] = metricParts(value, metric?.unit);
+    // The catalog documents the unit "ratio" only on battery_soc; battery_placeholder_0_soc carries
+    // an empty unit for the same 0..1 quantity, so the charge reading falls back to ratio instead of
+    // printing a bare 0.42 for the second tower.
+    const socUnit = metric?.unit || 'ratio';
+    const [number, unit] = metricParts(value, socUnit);
     if (available) setReading(card.chargeValue, number, unit); else setReading(card.chargeValue, 'n/a');
     setClass(card.chargeValue, 'text-secondary', !available);
-    const percent = available ? Math.min(100, Math.max(0, metric.unit === 'ratio' ? value * 100 : value)) : 0;
+    const percent = available ? Math.min(100, Math.max(0, socUnit === 'ratio' ? value * 100 : value)) : 0;
     const width = `${percent}%`;
     if (card.bar.firstElementChild.style.width !== width) card.bar.firstElementChild.style.width = width;
     patchCardGrid(card, metrics);
@@ -577,8 +656,14 @@
     // keep their nodes, so a poll does not rebuild the whole card.
     while (visual.batteries.length > towers.length) visual.batteries.pop();
     towers.forEach((tower, index) => {
-      if (!visual.batteries[index]) visual.batteries[index] = createBatteryCard(tower);
-      patchBatteryCard(visual.batteries[index], metrics, tower.moduleCount);
+      // A card is reused only while it still describes the same tower with the same metric mapping;
+      // the fact cells are built from that mapping, so a changed one needs a new card.
+      const existing = visual.batteries[index];
+      if (!existing || existing.towerKey !== batteryTowerKey(tower)) {
+        visual.batteries[index] = createBatteryCard(tower);
+      }
+      setText(visual.batteries[index].head.titleText, tower.title);
+      patchBatteryCard(visual.batteries[index], metrics, tower);
     });
     // Drives the column count of the card grid, so one tower fills the row and two share it.
     visual.node.style.setProperty('--battery-count', String(towers.length));

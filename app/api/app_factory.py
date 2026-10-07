@@ -20,7 +20,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.security import HTTPBearer
 
 from app import __version__
-from app.admin.api import _settings_persisted
+from app.admin.api import RCT_MODULE_SN_SLOTS, _settings_persisted
 from app.admin.api import router as admin_router
 from app.admin.dispatch_api import router as admin_dispatch_router
 from app.admin.store import AdminStore
@@ -305,15 +305,16 @@ _DASHBOARD_METRIC_NAMES = (
     "heat_sink_temperature",  # inverter-side actual temperature, not the sink_temp power-reduction target
     "battery_temperature",  # battery pack temperature, distinct from the inverter's heat_sink_temperature
     "battery_cycles",  # battery.cycles - aggregate pack charge-cycle counter
-    # battery_placeholder_0's own soc/temperature so a second physical tower shows its own
-    # readings instead of the primary tower's values; no battery_placeholder_0_cycles register
-    # exists in the catalog, so the second tower's charge-cycle cell stays n/a (shared only).
-    "battery_placeholder_0_temperature", "battery_placeholder_0_soc",
+    # Second tower's own SoC and temperature; the battery card renders every tower from its own
+    # metric names (app/admin/api.py, _battery_metric_names) instead of sharing the first tower's.
+    "battery_placeholder_0_soc",
+    "battery_placeholder_0_temperature",
     # module_sn_0..6 per tower (t_string, non-numeric so the usual periodic-selection filter would
     # skip them): read so app/admin/api.py's devices() can derive each tower's module count from
-    # the populated slots. No dedicated module-count register exists on the device.
-    *(f"battery_module_sn_{i}" for i in range(7)),
-    *(f"battery_placeholder_0_module_sn_{i}" for i in range(7)),
+    # the populated slots. Seven slots is the size of the catalog array, not a module limit - the
+    # documented hardware takes at most 6 modules per tower (see RCT_MAX_MODULES_PER_TOWER).
+    *(f"battery_module_sn_{i}" for i in range(RCT_MODULE_SN_SLOTS)),
+    *(f"battery_placeholder_0_module_sn_{i}" for i in range(RCT_MODULE_SN_SLOTS)),
 )
 
 
