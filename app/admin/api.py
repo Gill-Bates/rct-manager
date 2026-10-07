@@ -624,8 +624,8 @@ def _battery_populated_module_slots(runtime, device_id: str, prefix: str) -> lis
     return populated
 
 
-def _battery_module_report(runtime, device_id: str, prefix: str, populated: list[int]) -> dict:
-    """Module count for one tower, with counting kept separate from hardware validation.
+def _raw_battery_module_report(populated: list[int]) -> dict:
+    """Pure classification of one read's populated slots - no memory of any previous read.
 
     Which slots are populated matters, not only how many: a contiguous run 0..n-1 with the rest
     empty is unambiguous and is trusted. Anything else - a gap in the middle, or more populated
@@ -638,6 +638,10 @@ def _battery_module_report(runtime, device_id: str, prefix: str, populated: list
       "pending" - no serial read yet; the periodic loop fills seven string slots over several
                   cycles, so this is the normal startup state, not an error
       "anomaly" - populated slots that cannot describe a documented tower; diagnostic case
+
+    See `_battery_module_report` for the stability layer built on top of this: a single read here
+    can catch the multi-cycle slot refresh mid-flight, so this function alone is not what callers
+    should poll on repeatedly.
     """
     if not populated:
         return {"module_count": None, "module_count_status": "pending", "populated_module_slots": []}
@@ -648,13 +652,77 @@ def _battery_module_report(runtime, device_id: str, prefix: str, populated: list
         # non-destructive choice; discarding it would hide a real serial the device reported.
         return {"module_count": len(populated), "module_count_status": "ok",
                 "populated_module_slots": populated}
-    log.warning(
-        "%s on %s reports module serials in slots %s: not a contiguous run of at most %d slots, so no "
-        "module count is derived from it (catalog carries %d slots; documented hardware takes %d modules)",
-        prefix, device_id, populated, RCT_MAX_MODULES_PER_TOWER, RCT_MODULE_SN_SLOTS,
-        RCT_MAX_MODULES_PER_TOWER,
-    )
     return {"module_count": None, "module_count_status": "anomaly", "populated_module_slots": populated}
+
+
+# How many consecutive reads of a *changed* classification are required before the reported count
+# is allowed to replace the previously trusted one. The periodic loop refreshes the seven
+# module_sn string slots over several read/refresh cycles (PeriodicManager.setup and
+# RctGateway.refresh_stale_periodic in app/gateway/rct.py bound a single catch-up pass to
+# REFRESH_MAX_PER_CYCLE stale entries every _REFRESH_CYCLE_SECONDS), and a cache entry for one slot
+# can also simply expire (app/cache.py) between two polls while a sibling slot's does not. Both
+# make cached_reading() answer differently for the same still-unchanged tower from one admin API
+# call to the next. A single changed read is therefore not enough to flip the reported count; it
+# must repeat before it is believed, while a sustained real change - an actual module added or
+# removed - still takes effect rather than being frozen out forever.
+_BATTERY_MODULE_STABILITY_READS = 2
+
+_battery_module_lock = threading.Lock()
+# Attribute name under which the stability state lives on runtime.gateway. Storing it there instead
+# of in module-level state keyed by device id/prefix means a reconfigured or test-created gateway
+# starts from a clean slate instead of inheriting another instance's history, and the state is
+# garbage-collected along with the gateway it belongs to - no separate cleanup needed.
+_BATTERY_MODULE_STATE_ATTR = "_battery_module_stability"
+
+
+def _battery_report_signature(report: dict) -> tuple:
+    return (report["module_count_status"], report["module_count"], tuple(report["populated_module_slots"]))
+
+
+def _stabilize_battery_module_report(runtime, device_id: str, prefix: str, raw: dict) -> dict:
+    key = (device_id, prefix)
+    with _battery_module_lock:
+        per_gateway = getattr(runtime.gateway, _BATTERY_MODULE_STATE_ATTR, None)
+        if per_gateway is None:
+            per_gateway = {}
+            setattr(runtime.gateway, _BATTERY_MODULE_STATE_ATTR, per_gateway)
+        state = per_gateway.get(key)
+        if state is None:
+            per_gateway[key] = {"trusted": raw, "candidate": None, "candidate_count": 0}
+            return raw
+        trusted = state["trusted"]
+        if _battery_report_signature(raw) == _battery_report_signature(trusted):
+            state["candidate"] = None
+            state["candidate_count"] = 0
+            return trusted
+        if (state["candidate"] is not None
+                and _battery_report_signature(raw) == _battery_report_signature(state["candidate"])):
+            state["candidate_count"] += 1
+        else:
+            state["candidate"] = raw
+            state["candidate_count"] = 1
+        if state["candidate_count"] < _BATTERY_MODULE_STABILITY_READS:
+            return trusted
+        state["trusted"] = raw
+        state["candidate"] = None
+        state["candidate_count"] = 0
+        return raw
+
+
+def _battery_module_report(runtime, device_id: str, prefix: str, populated: list[int]) -> dict:
+    """Module count for one tower, with counting kept separate from hardware validation and
+    debounced across polls so it does not flap on every single read (see
+    `_stabilize_battery_module_report`)."""
+    raw = _raw_battery_module_report(populated)
+    report = _stabilize_battery_module_report(runtime, device_id, prefix, raw)
+    if report is raw and report["module_count_status"] == "anomaly":
+        log.warning(
+            "%s on %s reports module serials in slots %s: not a contiguous run of at most %d slots, so no "
+            "module count is derived from it (catalog carries %d slots; documented hardware takes %d modules)",
+            prefix, device_id, report["populated_module_slots"], RCT_MAX_MODULES_PER_TOWER, RCT_MODULE_SN_SLOTS,
+            RCT_MAX_MODULES_PER_TOWER,
+        )
+    return report
 
 
 def _battery_metric_names(runtime, prefix: str, *, include_device_wide: bool) -> dict[str, str]:

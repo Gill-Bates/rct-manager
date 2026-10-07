@@ -15,6 +15,7 @@ seven-module tower.
 from types import SimpleNamespace
 
 from app.admin.api import (
+    _BATTERY_MODULE_STABILITY_READS,
     RCT_MAX_MODULES_PER_TOWER,
     RCT_MODULE_SN_SLOTS,
     _battery_metric_names,
@@ -168,3 +169,113 @@ def test_placeholder_tower_needs_a_module_serial_but_the_primary_one_does_not() 
 def test_metric_names_skip_roles_the_catalog_does_not_carry() -> None:
     runtime = _runtime({}, known={"battery_soc"})
     assert _battery_metric_names(runtime, "battery", include_device_wide=True) == {"soc": "battery_soc"}
+
+
+# --- Stability across polls -------------------------------------------------------------------
+#
+# The underlying periodic loop fills the seven module_sn slots over several read/refresh cycles
+# (see _battery_module_report's docstring), so cached_reading() can answer differently for the same
+# physically unchanging tower from one /admin/api/devices call to the next - some slots mid-refresh,
+# some still at their previous value. A single read that looks different from the last trusted one
+# must not immediately flip module_count; it has to repeat before it is believed.
+#
+# These tests share one `runtime` (and so one `runtime.gateway`) across several `_report` calls -
+# unlike the tests above, which create a fresh runtime per call - because the stability state lives
+# on the gateway instance and only shows its effect across repeated calls against the same one.
+
+
+def test_a_single_flaky_read_does_not_flip_an_already_trusted_count() -> None:
+    serials = _slots("battery", 5)
+    runtime = _runtime(serials)
+    first = _report(runtime, "battery")
+    assert first["module_count"] == 5 and first["module_count_status"] == "ok"
+    # One poll catches the loop mid-refresh: slot 3 has not been re-read yet and looks empty, so the
+    # raw read for this single poll would be a gap-anomaly (0, 1, 2, 4) rather than 5 modules.
+    del serials["battery_module_sn_3"]
+    flaky = _report(runtime, "battery")
+    assert flaky["module_count"] == 5, "a single changed read must not override the trusted count yet"
+    assert flaky["module_count_status"] == "ok"
+    assert flaky["populated_module_slots"] == [0, 1, 2, 3, 4]
+    # The next poll sees the real (unchanged) hardware again; the trusted count is unaffected by the
+    # one flaky read in between.
+    serials["battery_module_sn_3"] = "SN-3"
+    recovered = _report(runtime, "battery")
+    assert recovered["module_count"] == 5
+    assert recovered["module_count_status"] == "ok"
+
+
+def test_alternating_reads_never_settle_on_either_alternative() -> None:
+    # A tower whose raw read keeps flip-flopping between two readings, poll after poll, must keep
+    # reporting the originally trusted count rather than settling on whichever reading happened last -
+    # that would just be flicker with extra steps.
+    serials = _slots("battery", 6)
+    runtime = _runtime(serials)
+    trusted = _report(runtime, "battery")
+    assert trusted["module_count"] == 6
+    for _ in range(6):
+        del serials["battery_module_sn_5"]
+        report = _report(runtime, "battery")
+        assert report["module_count"] == 6, "must not flip to the alternative reading"
+        serials["battery_module_sn_5"] = "SN-5"
+        report = _report(runtime, "battery")
+        assert report["module_count"] == 6
+
+
+def test_a_sustained_new_reading_eventually_updates_the_trusted_count() -> None:
+    # A real hardware change (a module actually added) looks identical, at the protocol level, to a
+    # read that happens to repeat: _BATTERY_MODULE_STABILITY_READS consecutive matching reads of the
+    # new value is what tells the two apart, so a genuine change must still take effect and not be
+    # frozen out forever.
+    serials = _slots("battery", 4)
+    runtime = _runtime(serials)
+    assert _report(runtime, "battery")["module_count"] == 4
+    serials.update(_slots("battery", 5))
+    for i in range(_BATTERY_MODULE_STABILITY_READS):
+        report = _report(runtime, "battery")
+        if i < _BATTERY_MODULE_STABILITY_READS - 1:
+            assert report["module_count"] == 4, "must not update before the new reading is confirmed"
+    assert report["module_count"] == 5, "a sustained new reading must eventually be trusted"
+    # And it stays trusted afterwards, without needing to keep re-confirming it.
+    assert _report(runtime, "battery")["module_count"] == 5
+
+
+def test_the_very_first_read_is_trusted_immediately_with_no_history_to_compare_against() -> None:
+    # No prior poll exists yet (startup), so there is nothing to debounce against: the first read
+    # for a given tower is reported as-is.
+    runtime = _runtime(_slots("battery", 3))
+    assert _report(runtime, "battery")["module_count"] == 3
+
+
+def test_towers_and_devices_each_keep_their_own_stability_state() -> None:
+    # One tower flapping must not affect the trusted state of a different tower or device, and vice
+    # versa; the debounce key is (device_id, prefix), not just the gateway.
+    serials = {**_slots("battery", 5), **_slots("battery_placeholder_0", 3)}
+    runtime = _runtime(serials)
+    assert _report(runtime, "battery")["module_count"] == 5
+    assert _report(runtime, "battery_placeholder_0")["module_count"] == 3
+    del serials["battery_module_sn_4"]  # flaky read on "battery" only
+    flaky = _report(runtime, "battery")
+    assert flaky["module_count"] == 5
+    assert _report(runtime, "battery_placeholder_0")["module_count"] == 3
+
+
+def test_anomaly_is_only_logged_once_the_transition_is_actually_confirmed(caplog) -> None:
+    # A tower trusted as "ok" that then reads back as anomalous once must not log a warning yet -
+    # same debounce as the module count itself, see test_a_single_flaky_read_does_not_flip_an_
+    # already_trusted_count - and must log it once the anomalous reading repeats enough to be
+    # believed.
+    serials = _slots("battery", 4)
+    runtime = _runtime(serials)
+    assert _report(runtime, "battery")["module_count"] == 4
+    serials["battery_module_sn_6"] = "x"  # turns the read into a gap anomaly: 0,1,2,3,6
+    with caplog.at_level("WARNING"):
+        unconfirmed = _report(runtime, "battery")
+    assert unconfirmed["module_count"] == 4, "still the trusted count while the anomaly is unconfirmed"
+    assert not any(record.levelname == "WARNING" for record in caplog.records), \
+        "must not warn about an anomaly that has not been confirmed yet"
+    caplog.clear()
+    with caplog.at_level("WARNING"):
+        confirmed = _report(runtime, "battery")
+    assert confirmed["module_count"] is None
+    assert confirmed["module_count_status"] == "anomaly"
+    assert any(record.levelname == "WARNING" for record in caplog.records)
