@@ -114,6 +114,9 @@ class RctDispatchGateway:
             all_fresh=all(r.source == "device" for r in (strategy, target, power, grid_charge)),
         )
 
+    def restore_barrier(self, device_id: str):
+        return self._rct.restore_barrier(device_id)
+
     async def apply_setpoint(self, device_id: str, setpoint: PowerSetpoint):
         return await self._rct.write_metric(
             device_id,

@@ -201,6 +201,7 @@ _TEXT: dict[ErrorCode, tuple[str, str]] = {
 _ALIASES = {
     "budget_exhausted": E.DEVICE_BUDGET_EXHAUSTED,
     "shutdown": E.NOT_READY,
+    "restore_in_progress": E.DEVICE_MAINTENANCE,
     "invalid_float": E.PROTOCOL_ERROR,
     "decode_length_mismatch": E.PROTOCOL_ERROR,
 }

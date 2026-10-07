@@ -653,6 +653,8 @@
         card.note.hidden = false;
       } else {
         card.stack.replaceChildren(...buildBatteryStack(wanted));
+        // The stack's CSS width is a fixed 5rem; the height cap needs the narrower per-count width.
+        card.stack.style.width = `${batterySliceWidth(wanted)}px`;
       }
     }
     if (wanted !== null) {
@@ -2067,24 +2069,20 @@
   const saveSections = new Map();         // id -> { state, message, lastSavedAt }
   const anySection = (states) => [...saveSections.values()].some((entry) => states.includes(entry.state));
 
-  const DEVICES_INCOMPLETE_MSG = 'Fix the marked inverter rows — nothing was saved yet.';
   const FAILURE_MESSAGES = {
     general: (reason) => `Not saved (${reason}). The value was restored — enter it again.`,
-    devices: (reason) => `The inverters were not saved (${reason}). Retry, or discard the changes.`,
     export: (reason) => `The export settings were not saved (${reason}).`,
     parameters: (reason) => `Not saved (${reason}). The list was reloaded from the server — apply your change again.`,
   };
   function failureMessage(id, reason) { return (FAILURE_MESSAGES[id] || FAILURE_MESSAGES.general)(reason); }
 
   function sectionOf(key) {
-    if (key === 'devices') return 'devices';
     return exportFields.some((field) => field.key === key) ? 'export' : 'general';
   }
 
   // Every anchor is block level, and null when the section has no surface on this page.
   // #exposed-list is a <tbody>, so the parameters anchor on prometheus is its table wrapper.
   function anchorFor(id) {
-    if (id === 'devices') return document.getElementById('device-editor');
     if (id === 'export') return document.querySelector('.export-layout');
     if (id === 'parameters') return document.querySelector(page === 'prometheus' ? '.prometheus-table-wrap' : '#writable-list');
     return document.getElementById('settings-sections');
@@ -2099,8 +2097,6 @@
   function sectionNotice(id, kind) {
     const anchor = anchorFor(id);
     if (!anchor) return null;
-    const modal = anchor.closest('#inverters-modal');
-    if (modal && !modal.classList.contains('show')) return null; // toast-only while the dialog is hidden
     const host = anchor.closest('details') || anchor; // never insert into a folded disclosure
     if (host.tagName === 'DETAILS' && kind === 'error') host.open = true; // the error must be on screen
     const nodeId = `${NOTICE_IDS[kind]}-${id}`;
@@ -2124,7 +2120,6 @@
   // server's own state and could overwrite a concurrent change from another session.
   const RETRY_ACTIONS = {
     export: () => { queueExportSettings(); flushSettings({ sections: ['export'] }).catch(() => { }); },
-    devices: () => { queueSettings('devices'); flushSettings({ sections: ['devices'] }).catch(() => { }); },
   };
 
   function renderSectionAlert(id, message) {
@@ -2138,12 +2133,6 @@
       retry.type = 'button';
       retry.addEventListener('click', RETRY_ACTIONS[id]);
       actions.append(retry);
-    }
-    if (id === 'devices') {
-      const discard = element('button', 'btn btn-outline-secondary btn-sm', 'Discard changes');
-      discard.type = 'button';
-      discard.addEventListener('click', discardDeviceChanges);
-      actions.append(discard);
     }
     if (actions.childElementCount) node.append(actions);
   }
@@ -2185,10 +2174,10 @@
   }
 
   // Derived on demand instead of a cached counter four writers had to keep correct. `failed` is
-  // deliberately absent: `general` rolled its value back, and `devices`/`export` failures keep
+  // deliberately absent: `general` rolled its value back, and `export` failures keep
   // their keys queued, so genuine leftover work is already covered by hasPending(null).
   function outstandingWork() {
-    return hasPending(null) || parameterDirty || parameterSending || anySection(['saving', 'incomplete']);
+    return hasPending(null) || deviceDirty() || parameterDirty || parameterSending || anySection(['saving', 'incomplete']);
   }
 
   function reportSaveFailure(section, message) {
@@ -2266,11 +2255,6 @@
       pendingExportGroup = false;
       setSectionState('export', 'incomplete', missingExportHint(type));
     }
-    // The symmetric devices re-check: the draft can be mutated without a render (syncDeviceInputs).
-    if (pendingKeys.has('devices') && !devicesValid()) {
-      pendingKeys.delete('devices');
-      setSectionState('devices', 'incomplete', DEVICES_INCOMPLETE_MSG);
-    }
     const keys = keysFor(sections);
     if (!keys.length) {
       renderSaveState();
@@ -2296,8 +2280,7 @@
 
   async function sendSettingsInner(keys) {
     const sentSections = new Set(keys.map(sectionOf));
-    const sentDevices = keys.includes('devices') ? settingsDraft.devices.filter((device) => !isBlankNewRow(device)) : [];
-    const payload = Object.fromEntries(keys.map((key) => [key, key === 'devices' ? devicesPayload() : structuredClone(settingsDraft[key])]));
+    const payload = Object.fromEntries(keys.map((key) => [key, structuredClone(settingsDraft[key])]));
     for (const key of keys) if (isSecretKey(key)) sendRevisions.set(key, secretRevision.get(key) || 0);
     try {
       const result = await api('settings', { method: 'PUT', body: JSON.stringify(payload) });
@@ -2312,20 +2295,8 @@
         const control = $(`setting-${key}`);
         if (control) { control.value = ''; control.placeholder = 'set'; }
       }
-      // Only the server-assigned id is adopted; copying back the whole entry would overwrite
-      // edits the operator made while this request was still in flight. Matched by the same
-      // (host, port, network_id) tuple deviceProblem() uses, not by array index, since the server
-      // is not guaranteed to echo devices back in exactly the order they were sent.
-      sentDevices.forEach((device) => {
-        const assigned = (result.settings?.devices || []).find((candidate) =>
-          String(candidate.host || '').trim().toLowerCase() === String(device.host || '').trim().toLowerCase()
-          && Number(candidate.port) === Number(device.port)
-          && networkId(candidate.network_id) === networkId(device.network_id));
-        if (assigned && !device.device_id && assigned.device_id) device.device_id = assigned.device_id;
-      });
       showRestartNotice(result.restart_required);
       if (page === 'prometheus') markPrometheusSaved();
-      if (page === 'dashboard' && keys.includes('devices')) { loadDashboard().catch((error) => toast(messageFrom(error), 'danger')); loadMetricCount(); }
       for (const id of sentSections) setSectionState(id, 'saved');
       if (keys.some((key) => result.restart_required?.includes(key))) toast('Saved. A restart is required for this setting.', 'warning');
       else toast('Settings saved and active.');
@@ -2336,7 +2307,6 @@
       // in that unrelated section. Only the controls for the keys that actually failed are refreshed.
       for (const key of keys) {
         if (pendingKeys.has(key)) continue;  // re-queued during the request: that value wins
-        if (key === 'devices') continue;     // the draft is kept; a rollback would orphan the row objects
         if (isSecretKey(key)) continue;      // the committed view holds no raw secret, only _configured
         settingsDraft[key] = structuredClone(settingsCommitted[key]);
         const control = $(`setting-${key}`);

@@ -105,7 +105,7 @@ body {
 @media (min-width: 992px) {
     .admin-navbar::after {
         background: linear-gradient(to right,
-            var(--rct-sidebar) calc(14rem - 1px), var(--rct-line) 0 14rem, var(--bs-tertiary-bg) 0);
+                var(--rct-sidebar) calc(14rem - 1px), var(--rct-line) 0 14rem, var(--bs-tertiary-bg) 0);
     }
 }
 
@@ -687,6 +687,7 @@ body {
     display: flex;
     flex-direction: column;
     width: min(100%, 5rem);
+    max-width: 100%;
     filter: drop-shadow(0 2px 2.5px rgb(0 0 0 / 20%));
 }
 
@@ -988,18 +989,15 @@ body {
     animation-direction: reverse;
 }
 
-/* Final flow-color semantics (supersedes the earlier discharge=orange/charge=green grouping):
-   green marks generation and export (PV, grid export); red marks the battery discharging;
-   orange marks energy drawn from the grid (import); blue/neutral marks energy going into
-   storage (battery charge) rather than being spent, so storing is visually distinct from both
-   generation and consumption. */
+/* Final flow-color semantics (supersedes the earlier discharge=red/charge=green grouping):
+   green marks energy reaching the house or the grid, whether generated (PV), exported, or drawn
+   from storage (battery discharge); orange/red marks energy drawn from the grid (import); blue/
+   neutral marks energy going into storage (battery charge) rather than being spent, so storing is
+   visually distinct from both generation and consumption. */
 .flow-line.flow-pv,
-.flow-line.flow-export {
-    --flow-color: #198754;
-}
-
+.flow-line.flow-export,
 .flow-line.flow-discharge {
-    --flow-color: #dc3545;
+    --flow-color: #198754;
 }
 
 .flow-line.flow-import {
@@ -1011,12 +1009,9 @@ body {
 }
 
 [data-bs-theme="dark"] .flow-line.flow-pv,
-[data-bs-theme="dark"] .flow-line.flow-export {
-    --flow-color: #4ade80;
-}
-
+[data-bs-theme="dark"] .flow-line.flow-export,
 [data-bs-theme="dark"] .flow-line.flow-discharge {
-    --flow-color: #f87171;
+    --flow-color: #4ade80;
 }
 
 [data-bs-theme="dark"] .flow-line.flow-import {
@@ -1612,6 +1607,7 @@ samp,
 .device-flow-draw {
     color: var(--bs-warning-text-emphasis);
 }
+
 /* Connection-lost modal: the page behind it is blurred and inert until the server answers again. */
 body.is-reconnecting .main-content,
 body.is-reconnecting .sidebar {
@@ -1635,8 +1631,17 @@ body.is-reconnecting .modal-backdrop.show {
 }
 
 @keyframes reconnect-soft-pulse {
-    0%, 100% { transform: scale(1); box-shadow: 0 0 0 rgb(var(--bs-primary-rgb), 0); }
-    50% { transform: scale(1.012); box-shadow: 0 0 .85rem rgb(var(--bs-primary-rgb), .22); }
+
+    0%,
+    100% {
+        transform: scale(1);
+        box-shadow: 0 0 0 rgb(var(--bs-primary-rgb), 0);
+    }
+
+    50% {
+        transform: scale(1.012);
+        box-shadow: 0 0 .85rem rgb(var(--bs-primary-rgb), .22);
+    }
 }
 
 body.is-reconnecting #reconnect-modal.show .reconnect-pulse {

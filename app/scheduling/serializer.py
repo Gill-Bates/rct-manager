@@ -13,6 +13,7 @@ from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
+from app.config import DeviceKey
 from app.errors import BudgetExhausted, DeviceApiError, QueueFullError, QueueTimeout
 from app.scheduling.budget import BudgetHandle, WorkBudget
 from app.transport.endpoint import TransportEndpoint
@@ -115,6 +116,16 @@ class _BoundedDeque:
     def get_nowait(self) -> _Item:
         return self._items.popleft()
 
+    async def remove_where(self, predicate: Callable[[_Item], bool]) -> list[_Item]:
+        """Take every queued (not yet started) item matching ``predicate`` out of the queue."""
+        async with self._condition:
+            taken = [item for item in self._items if predicate(item)]
+            for item in taken:
+                self._items.remove(item)
+                self._unfinished -= 1
+            self._condition.notify_all()
+            return taken
+
     async def reset(self) -> None:
         """Forget unfinished work whose items were taken out by stop() without a task_done()."""
         async with self._condition:
@@ -156,6 +167,7 @@ class AccessSerializer:
         self._worker: asyncio.Task[None] | None = None
         self._current: _Item | None = None
         self._accepting = True
+        self._barriers: dict[DeviceKey, int] = {}
 
     def start(self) -> None:
         if self._worker is None:
@@ -213,9 +225,40 @@ class AccessSerializer:
         self._current = None
         return len(items)
 
+    @staticmethod
+    def _is_caller_mutation(request: TransactionRequest) -> bool:
+        return request.origin is TransactionOrigin.CALLER and request.kind == "write"
+
+    async def raise_barrier(self, device_key: DeviceKey) -> None:
+        """Restore barrier: no caller write for this device may run after the restore starts.
+
+        Queued caller writes are rejected (safer than running them first, they would be about to
+        overwrite the restored state), later ones are refused until ``lower_barrier()``. Reads pass.
+        """
+        self._barriers[device_key] = self._barriers.get(device_key, 0) + 1
+        queued = await self._queue.remove_where(
+            lambda item: item.request.device_key == device_key and self._is_caller_mutation(item.request)
+        )
+        for item in queued:
+            item.request.abandoned = True
+            self._release(item)
+            for future in (item.started, item.result):
+                if not future.done():
+                    future.set_exception(DeviceApiError("restore_in_progress"))
+                    future.add_done_callback(_consume)
+
+    def lower_barrier(self, device_key: DeviceKey) -> None:
+        count = self._barriers.get(device_key, 0) - 1
+        if count > 0:
+            self._barriers[device_key] = count
+        else:
+            self._barriers.pop(device_key, None)
+
     async def submit(self, request: TransactionRequest) -> TransactionResult:
         if not self._accepting:
             raise DeviceApiError("not_ready")
+        if request.device_key in self._barriers and self._is_caller_mutation(request):
+            raise DeviceApiError("restore_in_progress")
         item = _Item(request)
         item.result.add_done_callback(_consume)
         try:

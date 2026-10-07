@@ -28,8 +28,10 @@ A PAT has the form `pat_` followed by 40 base62 characters and a 6 character CRC
 `read` tokens get 403 on the settings and token endpoints and on every change. Listing, creating or
 deleting tokens needs a signed-in session. `GET /admin/api/settings` is readable with a `read/write` PAT, but omits the
 authentication and proxy-trust values listed next. Changing `auth_required`, `trusted_proxies`, `bind_address`,
-`behind_reverse_proxy`, `forwarded_header`, `metrics_require_token` or
-`metrics_trusted_sources` needs a signed-in session; a PAT gets 403 there.
+`behind_reverse_proxy`, `forwarded_header`, `metrics_require_token`,
+`metrics_trusted_sources`, `enable_write_support`, `devices` or `docs_public` needs a signed-in session;
+a PAT gets 403 for a real change of these (re-sending the current value is accepted). Enabling
+`enable_metrics_endpoint` is session-only as well while scrapes would not require a token.
 
 Create named PATs with a `read` or `read/write` role and an expiry of 30 days, 90 days (the
 preselected value), 1 year or never on the **API tokens** page. Copy the secret when it is shown: it cannot be retrieved

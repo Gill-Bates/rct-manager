@@ -481,6 +481,14 @@ class DispatchController:
     async def _restore(
         self, record: DispatchRecord, reason: StopReason, fault_code: str | None = None
     ) -> None:
+        # The barrier spans the whole sequence, failures included, so a caller write queued before
+        # the restore can never run after it and overwrite the restored values.
+        async with self._gateway.restore_barrier(record.device_id):
+            await self._restore_guarded(record, reason, fault_code)
+
+    async def _restore_guarded(
+        self, record: DispatchRecord, reason: StopReason, fault_code: str | None = None
+    ) -> None:
         if record.snapshot is None:
             record.state = DispatchState.IDLE
             record.intent = None

@@ -26,6 +26,7 @@ from app.admin.api import (
     _BATTERY_MODULE_STABILITY_READS,
     RCT_MAX_MODULES_PER_TOWER,
     RCT_MODULE_SN_SLOTS,
+    RCT_NON_MODULE_SLOTS,
     _battery_metric_names,
     _battery_module_report,
     _battery_module_slot_states,
@@ -58,11 +59,13 @@ def _runtime(serials: dict[str, str], *, known: set[str] | None = None):
 
 
 def _slots(prefix: str, count: int) -> dict[str, str]:
-    """A COMPLETE read of `count` populated slots followed by explicitly-read-empty slots up to
+    """A COMPLETE read of a tower with `count` battery modules: count + RCT_NON_MODULE_SLOTS populated
+    slots (the base/top part carries a serial too) followed by explicitly-read-empty slots up to
     RCT_MODULE_SN_SLOTS - i.e. a finished scan, not a mid-scan snapshot. Use `_partial_slots` to
     build a snapshot that still has UNKNOWN slots."""
-    populated = {f"{prefix}_module_sn_{i}": f"SN-{i}" for i in range(count)}
-    rest_empty = {f"{prefix}_module_sn_{i}": "" for i in range(count, RCT_MODULE_SN_SLOTS)}
+    populated_slots = count + RCT_NON_MODULE_SLOTS
+    populated = {f"{prefix}_module_sn_{i}": f"SN-{i}" for i in range(populated_slots)}
+    rest_empty = {f"{prefix}_module_sn_{i}": "" for i in range(populated_slots, RCT_MODULE_SN_SLOTS)}
     return {**populated, **rest_empty}
 
 
@@ -89,7 +92,7 @@ def test_contiguous_run_within_the_hardware_limit_is_trusted() -> None:
         report = _report(_runtime(_slots("battery", count)), "battery")
         assert report["module_count"] == count, count
         assert report["module_count_status"] == "ok"
-        assert report["populated_module_slots"] == list(range(count))
+        assert report["populated_module_slots"] == list(range(count + RCT_NON_MODULE_SLOTS))
 
 
 def test_no_serial_read_yet_is_pending_not_zero_modules() -> None:
@@ -105,7 +108,7 @@ def test_blank_serials_do_not_count_as_populated() -> None:
                "battery_module_sn_3": "", "battery_module_sn_4": "", "battery_module_sn_5": "",
                "battery_module_sn_6": ""}
     report = _report(_runtime(serials), "battery")
-    assert report["module_count"] == 1
+    assert report["module_count"] == 0, "the only populated slot is the base/top part, not a module"
     assert report["module_count_status"] == "ok"
 
 
@@ -122,16 +125,21 @@ def test_null_and_control_byte_garbage_does_not_count_as_populated() -> None:
         "battery_module_sn_6": "",
     }
     report = _report(_runtime(serials), "battery")
-    assert report["module_count"] == 1
+    assert report["module_count"] == 0, "the only populated slot is the base/top part, not a module"
     assert report["module_count_status"] == "ok"
     assert report["populated_module_slots"] == [0]
 
 
-def test_all_seven_slots_populated_is_an_anomaly_not_a_seven_module_tower(caplog) -> None:
-    report = _report(_runtime(_slots("battery", RCT_MODULE_SN_SLOTS)), "battery")
-    assert report["module_count"] is None, "seven populated slots must not be reported as seven modules"
-    assert report["module_count_status"] == "anomaly"
+def test_all_seven_slots_populated_is_the_six_module_maximum_plus_the_base_part() -> None:
+    report = _report(_runtime(_slots("battery", RCT_MAX_MODULES_PER_TOWER)), "battery")
+    assert report["module_count"] == RCT_MAX_MODULES_PER_TOWER
+    assert report["module_count_status"] == "ok"
     assert report["populated_module_slots"] == list(range(RCT_MODULE_SN_SLOTS))
+
+
+_GAPPED_SERIALS = {"battery_module_sn_0": "a", "battery_module_sn_1": "b", "battery_module_sn_4": "e",
+                   "battery_module_sn_2": "", "battery_module_sn_3": "", "battery_module_sn_5": "",
+                   "battery_module_sn_6": ""}
 
 
 def test_a_gap_in_the_middle_is_an_anomaly() -> None:
@@ -157,7 +165,7 @@ def test_a_populated_slot_six_alone_is_an_anomaly() -> None:
 
 def test_anomalous_slot_pattern_is_logged_as_a_warning(caplog) -> None:
     with caplog.at_level("WARNING"):
-        _report(_runtime(_slots("battery", RCT_MODULE_SN_SLOTS)), "battery")
+        _report(_runtime(_GAPPED_SERIALS), "battery")
     assert any(record.levelname == "WARNING" for record in caplog.records)
 
 
@@ -321,7 +329,7 @@ def test_a_single_flaky_read_does_not_flip_an_already_trusted_count() -> None:
     flaky = _report(runtime, "battery")
     assert flaky["module_count"] == 5, "an incomplete re-read must hold the trusted count"
     assert flaky["module_count_status"] == "ok"
-    assert flaky["populated_module_slots"] == [0, 1, 2, 3, 4]
+    assert flaky["populated_module_slots"] == [0, 1, 2, 3, 4, 5]
     # The next poll sees the real (unchanged) hardware again; the trusted count is unaffected by the
     # one flaky read in between.
     serials["battery_module_sn_3"] = "SN-3"
@@ -416,7 +424,7 @@ def test_slots_the_device_repeatedly_leaves_unanswered_do_not_hold_pending_forev
     assert states[3:] == ["empty"] * (RCT_MODULE_SN_SLOTS - 3)
     for _ in range(_BATTERY_MODULE_STABILITY_READS):
         report = _report(runtime)
-    assert (report["module_count"], report["module_count_status"]) == (3, "ok")
+    assert (report["module_count"], report["module_count_status"]) == (2, "ok")
 
 
 def test_a_slot_not_yet_confirmed_unanswered_still_counts_as_unknown() -> None:

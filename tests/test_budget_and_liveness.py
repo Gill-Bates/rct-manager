@@ -261,6 +261,62 @@ def test_readback_is_bounded_only_while_the_shutdown_restore_runs() -> None:
     assert asyncio.run(scenario()) == [None, SYSTEM_READBACK_TIMEOUT_SECONDS]
 
 
+def test_restore_barrier_drops_queued_caller_writes_and_refuses_new_ones_until_lowered() -> None:
+    """Race: caller write A queued, restore R starts. A must never run after R restored the device."""
+
+    async def scenario() -> list[str]:
+        _budget, serializer, release = await _skipped_and_blocked(queue_max_length=8)
+        serializer._max_wait = 5.0
+        key = DeviceKey(KEY)
+        running = asyncio.create_task(serializer.submit(_request(serializer)))
+        async with asyncio.timeout(1):
+            while serializer._current is None:
+                await asyncio.sleep(0)
+
+        def caller(kind: str) -> TransactionRequest:
+            return TransactionRequest(key, Frame(Command.WRITE, 1), TransactionOrigin.CALLER, kind)
+
+        queued_write = asyncio.create_task(serializer.submit(caller("write")))
+        await asyncio.sleep(0.01)
+        outcome: list[str] = []
+        await serializer.raise_barrier(key)
+        with pytest.raises(DeviceApiError) as dropped:
+            await queued_write  # rejected at the barrier, not executed after the restore
+        outcome.append(dropped.value.code)
+        with pytest.raises(DeviceApiError) as refused:
+            await serializer.submit(caller("write"))
+        outcome.append(refused.value.code)
+        read = asyncio.create_task(serializer.submit(caller("read")))  # reads pass the barrier
+        await asyncio.sleep(0.01)
+        outcome.append("read-queued" if serializer.queue_length() == 1 else "read-lost")
+        release.set()
+        await asyncio.gather(running, read)
+        serializer.lower_barrier(key)
+        await serializer.submit(caller("write"))  # accepted again
+        outcome.append("write-after-barrier-ok")
+        await serializer.stop()
+        return outcome
+
+    assert asyncio.run(scenario()) == [
+        "restore_in_progress", "restore_in_progress", "read-queued", "write-after-barrier-ok",
+    ]
+
+
+def test_gateway_restore_barrier_is_lowered_when_the_restore_fails() -> None:
+    async def scenario() -> list[int]:
+        gateway, binding, _budget, _net, _catalog = await _gateway(5)
+        sizes = []
+        with pytest.raises(RuntimeError):
+            async with gateway.restore_barrier("inv1"):
+                sizes.append(len(binding.serializer._barriers))
+                raise RuntimeError("restore failed")
+        sizes.append(len(binding.serializer._barriers))
+        await binding.serializer.stop()
+        return sizes
+
+    assert asyncio.run(scenario()) == [1, 0]
+
+
 async def _gateway(limit: int, fail_connects: int = 0):
     clock = AutoClock()
     net = FakeNetwork(clock, fail_connects=fail_connects)

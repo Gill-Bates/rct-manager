@@ -136,7 +136,7 @@ async def test_admin_writes_need_admin_session_or_read_write_pat(tmp_path, auth_
     app = create_app(settings)
     password = app.state.first_start_password
     store = app.state.admin_store
-    change = {"docs_public": True}
+    change = {"metrics_rate_limit_requests": 120}
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver") as client:
         def bearer(token):
             return {"Authorization": "Bearer " + token}
@@ -161,24 +161,24 @@ async def test_admin_writes_need_admin_session_or_read_write_pat(tmp_path, auth_
         assert (await client.get("/admin/api/settings", headers=bearer(read_pat))).status_code == 403
         assert (await client.get("/admin/api/tokens", headers=bearer(read_pat))).status_code == 403
         done = await client.put("/admin/api/settings", json=change, headers=bearer(write_pat))
-        assert done.status_code == 200 and done.json()["settings"]["docs_public"] is True
+        assert done.status_code == 200 and done.json()["settings"]["metrics_rate_limit_requests"] == 120
         # Token endpoints and trust/authentication settings (read or write) are session-only; a PAT
         # may read the other settings but never sees those values.
         assert (await client.get("/admin/api/tokens", headers=bearer(write_pat))).status_code == 403
         seen = (await client.get("/admin/api/settings", headers=bearer(write_pat))).json()["settings"]
-        assert "docs_public" in seen
-        assert not ({"auth_required", "trusted_proxies", "bind_address", "behind_reverse_proxy",
+        assert "metrics_rate_limit_requests" in seen
+        assert not ({"docs_public", "auth_required", "trusted_proxies", "bind_address", "behind_reverse_proxy",
                      "forwarded_header", "metrics_require_token", "metrics_trusted_sources"} & set(seen))
         made = await client.post("/admin/api/tokens", json={"name": "x", "role": "read"}, headers=bearer(write_pat))
         assert made.status_code == 403
         for key, value in (
             ("auth_required", not auth_required), ("trusted_proxies", ["10.0.0.0/8"]),
-            ("enable_write_support", True), ("devices", [{"host": "192.0.2.99", "port": 8899}]),
+            ("enable_write_support", True), ("docs_public", True), ("devices", [{"host": "192.0.2.99", "port": 8899}]),
         ):
             denied = await client.put("/admin/api/settings", json={key: value}, headers=bearer(write_pat))
             assert denied.status_code == 403, key
         # Echoing the current value of a protected field is not a change.
-        echo = await client.put("/admin/api/settings", json={"auth_required": auth_required},
+        echo = await client.put("/admin/api/settings", json={"auth_required": auth_required, "docs_public": False},
                                 headers=bearer(write_pat))
         assert echo.status_code == 200
         # Widening the write allowlist needs the session too.
@@ -425,3 +425,71 @@ def test_admin_input_for_a_display_name_is_still_rejected_strictly():
         with pytest.raises(HTTPException) as excinfo:
             _display_name(bad)
         assert excinfo.value.status_code == 400
+
+
+@pytest.mark.parametrize(("behavior", "status", "rollback"), [
+    ("raise", 500, False),    # failure after the teardown began: the live graph is unknown
+    ("hang", 504, False),     # still running: neither success nor rollback can be claimed
+    ("build", 409, True),     # nothing torn down: the old list must be restored
+])
+def test_reconfigure_failures_are_reported_and_only_a_build_failure_rolls_back(behavior, status, rollback):
+    import asyncio
+    import threading
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from fastapi import HTTPException
+
+    from app.admin import api
+    from app.errors import ReconfigurationBuildError
+
+    async def reconfigure():
+        if behavior == "raise":
+            raise RuntimeError("boom")
+        if behavior == "build":
+            raise ReconfigurationBuildError("bad address")
+        await asyncio.sleep(5)
+
+    loop = asyncio.new_event_loop()
+    thread = threading.Thread(target=loop.run_forever, daemon=True)
+    thread.start()
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(reconfigure_devices=reconfigure, loop=loop)))
+    try:
+        with patch.object(api, "_RECONFIGURE_TIMEOUT_SECONDS", 0.05), pytest.raises(HTTPException) as excinfo:
+            api._reconfigure_devices(request)
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+        thread.join(timeout=2)
+    assert excinfo.value.status_code == status
+    assert excinfo.value.rollback is rollback
+
+
+@pytest.mark.parametrize("value", [float("inf"), float("nan"), 50_001.0])
+def test_dispatch_body_rejects_an_unbounded_max_power(value):
+    from datetime import UTC, datetime
+
+    from app.api.routers.dispatch import DispatchBody
+
+    with pytest.raises(ValidationError):
+        DispatchBody(mode="charge_from_grid", target_soc_percent=80, max_power_w=value,
+                     valid_until=datetime(2030, 1, 1, tzinfo=UTC))
+
+
+def test_enabling_the_metrics_endpoint_is_session_only_where_it_would_serve_without_a_token():
+    from types import SimpleNamespace
+
+    from app.admin.api import _changed_session_only
+    from app.config import Settings
+
+    def request(**settings):
+        desired = Settings(_env_file=None, hmac_secret="s" * 48, enable_metrics_endpoint=False, **settings)
+        return SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(admin_desired_settings=desired)))
+
+    on = {"enable_metrics_endpoint": True}
+    assert _changed_session_only(request(), on) == set()  # token still required: not a privilege change
+    assert _changed_session_only(request(metrics_require_token=False), on) == {"enable_metrics_endpoint"}
+    assert _changed_session_only(request(metrics_trusted_sources=["10.0.0.0/8"]), on) == {"enable_metrics_endpoint"}
+    assert _changed_session_only(request(), {**on, "metrics_require_token": False}) >= {
+        "enable_metrics_endpoint", "metrics_require_token",
+    }
+    assert _changed_session_only(request(metrics_require_token=False), {"enable_metrics_endpoint": False}) == set()

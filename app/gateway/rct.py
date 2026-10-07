@@ -7,9 +7,10 @@
 """RctGateway: the only adapter that turns metric names into frames (Requirement 30.17)."""
 
 import asyncio
+import contextlib
 import logging
 import math
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -227,6 +228,19 @@ class RctGateway:
     def add_device(self, binding: DeviceBinding) -> None:
         self._devices[binding.entry.device_id] = binding
         self._by_address[(binding.entry.key.endpoint, binding.entry.network_id)] = binding.entry.device_id
+
+    @contextlib.asynccontextmanager
+    async def restore_barrier(self, device_id: str) -> AsyncIterator[None]:
+        """Hold off caller writes to ``device_id`` while a battery restore runs (lowered on any exit)."""
+        binding = self._devices.get(device_id)
+        if binding is None:
+            yield
+            return
+        await binding.serializer.raise_barrier(binding.entry.key)
+        try:
+            yield
+        finally:
+            binding.serializer.lower_barrier(binding.entry.key)
 
     def begin_shutdown_restore(self) -> None:
         """From now on system-write readbacks use the short shutdown bound."""

@@ -523,9 +523,9 @@ class Settings(BaseSettings):
             raise ValueError("FORWARDED_HEADER must name a single-address header such as X-Forwarded-For")
         if self.behind_reverse_proxy and not self.trusted_proxies:
             _warn_once(
-                "BEHIND_REVERSE_PROXY is set but TRUSTED_PROXIES is empty: X-Forwarded-Proto is ignored, so "
-                "behind a TLS-terminating proxy every administration login and change fails the same-origin "
-                "check with 403. List the proxy network in TRUSTED_PROXIES (environment, then restart)."
+                "BEHIND_REVERSE_PROXY=true but TRUSTED_PROXIES is empty. HTTPS admin requests through an HTTP "
+                "upstream proxy may fail CSRF validation (403). Configure TRUSTED_PROXIES for the reverse "
+                "proxy and restart."
             )
         if any(
             scrape.version == proxy.version and scrape.overlaps(proxy)

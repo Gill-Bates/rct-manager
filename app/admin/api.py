@@ -102,7 +102,7 @@ _SECRET_EDITABLE = frozenset({"influxdb_token", "questdb_password"})
 # switch authentication off or widen who is trusted, so they need the cookie session.
 _SESSION_ONLY_SETTINGS = frozenset({
     "auth_required", "trusted_proxies", "bind_address", "behind_reverse_proxy", "forwarded_header",
-    "metrics_require_token", "metrics_trusted_sources", "enable_write_support", "devices",
+    "metrics_require_token", "metrics_trusted_sources", "enable_write_support", "devices", "docs_public",
 })
 _SETTINGS_LOCK = threading.Lock()
 # Serializes live device reconfigurations without holding _SETTINGS_LOCK while they run.
@@ -540,7 +540,15 @@ def _changed_session_only(request: Request, body: dict[str, Any]) -> set[str]:
     Re-sending an unchanged value (a client echoing the whole settings dict) is not a change.
     """
     current = _settings_view(request.app.state.admin_desired_settings)
-    return {key for key in body if key in _SESSION_ONLY_SETTINGS and current.get(key) != body[key]}
+    changed = {key for key in body if key in _SESSION_ONLY_SETTINGS and current.get(key) != body[key]}
+    # Switching the scrape endpoint on is a privilege change only where it would serve metrics
+    # without a token (token requirement off, or trusted scrape sources configured). Switching it
+    # off, or on behind the token requirement, stays available to a PAT.
+    if body.get("enable_metrics_endpoint") is True and not current.get("enable_metrics_endpoint"):
+        require_token = body.get("metrics_require_token", current.get("metrics_require_token"))
+        if not require_token or current.get("metrics_trusted_sources"):
+            changed.add("enable_metrics_endpoint")
+    return changed
 
 
 @router.put("/settings")
@@ -680,6 +688,10 @@ _BATTERY_TOWER_PREFIXES = ("battery", "battery_placeholder_0")
 # counting and hardware validation stay separate, see _battery_module_report.
 RCT_MAX_MODULES_PER_TOWER = 6
 RCT_MODULE_SN_SLOTS = 7
+# One populated serial slot per tower belongs to the tower's base/top part, not to a battery module
+# (observed: a 5-module tower reports six populated slots), so module_count is populated slots
+# minus this. 6 modules + 1 = the 7 slots of the array.
+RCT_NON_MODULE_SLOTS = 1
 
 # Card roles that exist once per tower, with the catalog suffix that carries them.
 _BATTERY_TOWER_METRIC_SUFFIXES = {"soc": "soc", "temperature": "temperature", "status": "status2"}
@@ -799,11 +811,11 @@ def _raw_battery_module_report(states: list[str]) -> dict:
         return {"module_count": None, "module_count_status": "pending",
                 "populated_module_slots": [], "_complete": True}
     contiguous = populated == list(range(len(populated)))
-    if contiguous and len(populated) <= RCT_MAX_MODULES_PER_TOWER:
+    if contiguous and len(populated) - RCT_NON_MODULE_SLOTS <= RCT_MAX_MODULES_PER_TOWER:
         # A count of 1 is below the documented minimum of 2, but that is a legitimate complete
         # read (e.g. a tower stripped down to one module for service), not a mid-scan artifact -
         # the completeness gate above already ruled the mid-scan case out.
-        return {"module_count": len(populated), "module_count_status": "ok",
+        return {"module_count": len(populated) - RCT_NON_MODULE_SLOTS, "module_count_status": "ok",
                 "populated_module_slots": populated, "_complete": True}
     return {"module_count": None, "module_count_status": "anomaly",
             "populated_module_slots": populated, "_complete": True}

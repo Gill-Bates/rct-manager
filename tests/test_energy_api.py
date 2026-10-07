@@ -907,3 +907,15 @@ async def test_a_failing_status_projection_after_an_executed_action_still_report
             )
         assert response.status_code == 202, response.text
         assert response.json() == {"executed": True, "status_available": False, "device_id": "main"}
+
+
+async def test_the_admin_status_shows_the_restore_retry_state_but_the_public_status_does_not(
+    tmp_path: Path,
+) -> None:
+    async with running_app(energy_settings(tmp_path)) as harness:
+        seed_payloads(harness)
+        headers = await admin_session(harness)
+        admin = (await harness.client.get("/admin/api/energy/devices", headers=headers)).json()[0]
+        assert admin["restore_attempts"] == 0 and admin["next_restore_at"] is None
+        public = (await harness.client.get("/api/v1/devices/main/energy", headers=WRITER)).json()
+        assert "restore_attempts" not in public and "next_restore_at" not in public

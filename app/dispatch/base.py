@@ -6,6 +6,7 @@
 
 """Ports for the battery dispatch domain (REQ-001)."""
 
+from contextlib import AbstractAsyncContextManager
 from typing import Protocol
 
 from app.dispatch.capabilities import CapabilityRecord
@@ -45,6 +46,8 @@ class BatteryDispatchPort(Protocol):
 
 
 class BatteryDispatchGateway(Protocol):
+    # Held around a whole restore: caller writes to the device are refused or dropped meanwhile.
+    def restore_barrier(self, device_id: str) -> AbstractAsyncContextManager[None]: ...
     async def read_control_telemetry(self, device_id: str) -> ControlTelemetry: ...
     async def read_snapshot(self, device_id: str) -> DeviceControlSnapshot: ...
     async def read_soc(self, device_id: str) -> float: ...

@@ -298,7 +298,18 @@ def test_dispatch_store_detects_a_capability_blob_moved_to_another_row(tmp_path:
         store.get_capabilities()
 
 
+class _NoBarrier:
+    async def __aenter__(self) -> None:
+        return None
+
+    async def __aexit__(self, *exc) -> None:
+        return None
+
+
 class FakeDispatchGateway:
+    def restore_barrier(self, device_id: str):
+        return _NoBarrier()
+
     def __init__(self, clock: ManualClock, *, soc_target_policies: SocTargetPolicyRegistry | None = None) -> None:
         self.clock = clock
         self.calls: list[tuple] = []

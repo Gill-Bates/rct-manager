@@ -149,6 +149,22 @@ const flowInfo = await page.evaluate(() => {
 check('dashboard device card shows the flow graphic above the inverter/battery subcards',
   flowInfo.present && !flowInfo.hidden && flowInfo.aboveCards, JSON.stringify(flowInfo));
 check('the dashboard flow graphic animates from non-zero energy_flow data', flowInfo.activeLines > 0, JSON.stringify(flowInfo));
+// Final colour semantics: PV/export/discharge green, import red/orange, charge blue/neutral.
+// Probed on disposable elements, not the live graphic — the simulator's battery leg can be idle,
+// so flow-charge/flow-discharge may not be applied to any current DOM node.
+const flowColors = await page.evaluate(() => {
+  const read = (cls) => {
+    const probe = document.createElement('div');
+    probe.className = `flow-line ${cls}`;
+    document.body.append(probe);
+    const value = getComputedStyle(probe).getPropertyValue('--flow-color').trim();
+    probe.remove();
+    return value;
+  };
+  return { pv: read('flow-pv'), discharge: read('flow-discharge'), import: read('flow-import'), charge: read('flow-charge') };
+});
+check('discharge and PV/export share the same (green) flow colour', flowColors.discharge === flowColors.pv, JSON.stringify(flowColors));
+check('import and charge use distinct, non-green flow colours', flowColors.import !== flowColors.pv && flowColors.charge !== flowColors.pv && flowColors.import !== flowColors.charge, JSON.stringify(flowColors));
 const dashboardNetworkLegs = [];
 page.on('request', (r) => { if (r.url().includes('/admin/api/energy/devices')) dashboardNetworkLegs.push(r.url()); });
 await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
@@ -627,10 +643,11 @@ const setVisibility = (state) => page.evaluate((value) => {
   document.dispatchEvent(new Event('visibilitychange'));
 }, state);
 await page.route('**/health', (route) => route.abort());
-await setVisibility('hidden');
+await sleep(800); // Bootstrap ignores show() while the previous hide transition still runs
 await page.evaluate(() => window.RCTReconnect.start());
 await page.waitForSelector('#reconnect-modal.show', { timeout: 8000 });
-await sleep(1500); // let the first (failing) probe end while hidden
+await setVisibility('hidden');
+await sleep(3500); // the scheduled retry fires and fails while hidden, leaving no further timer
 await page.unroute('**/health');
 await setVisibility('visible');
 await page.waitForFunction(() => !document.querySelector('#reconnect-modal.show') && !document.body.classList.contains('is-reconnecting'), null, { timeout: 15000 });

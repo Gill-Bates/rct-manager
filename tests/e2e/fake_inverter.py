@@ -34,13 +34,13 @@ INT_VALUES = {"inverter_state": 13, "battery_status2": 2304, "battery_cycles": 1
               # "Balancing active" so a card that reuses the first tower's status is visible.
               "battery_placeholder_0_status2": 2}
 # Two simulated towers with different module counts, so the dashboard has to render each tower from
-# its own data: tower 1 has 5 modules (a Power Battery 9.6), tower 2 has 4 (a 7.6). The remaining
+# its own data: tower 1 has 5 modules (a Power Battery 9.6), tower 2 has 4 (a 7.6); each tower also reports one extra populated serial slot for its base/top part. The remaining
 # module_sn slots of each tower stay unmodeled and answer with a t_string zero value, i.e. the empty
-# string an unpopulated slot really returns - so the derived counts are 5 and 4, not 7. Seven slots
+# string an unpopulated slot really returns - so the derived counts are 5 and 4 (6 and 5 populated slots minus one). Seven slots
 # exist in the catalog; at most 6 modules exist in the documented hardware.
 STRING_VALUES = {
-    **{f"battery_module_sn_{i}": f"SIM-{i:03d}" for i in range(5)},
-    **{f"battery_placeholder_0_module_sn_{i}": f"SIM-B{i:03d}" for i in range(4)},
+    **{f"battery_module_sn_{i}": f"SIM-{i:03d}" for i in range(6)},
+    **{f"battery_placeholder_0_module_sn_{i}": f"SIM-B{i:03d}" for i in range(5)},
 }
 
 
