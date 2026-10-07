@@ -139,6 +139,16 @@ class EnergyManager:
         """The armed row of one device, for the admin surface's display-only fields."""
         return self._record(device_id)
 
+    def approved_write_names(self) -> tuple[str, ...]:
+        """The live write allowlist, state-independent, for the admin Setup checklist.
+
+        This is the same reader ``_missing_write_names`` consults, so it is authoritative in every
+        arm state — unlike ``ArmedRecord.added_write_names``, which only records what arming itself
+        contributed. A never-armed or disarmed device whose required writes were approved on the
+        Inverters page still reports them here.
+        """
+        return tuple(self._approved_writes()) if self._approved_writes is not None else ()
+
     def gate_decisions(self, device_id: str) -> tuple[tuple[EnergyAction, GateDecision], ...]:
         """The raw gate decision per action, for the admin surface only.
 

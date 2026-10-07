@@ -556,6 +556,27 @@ async def test_admin_arming_adds_the_register_approvals_add_only(tmp_path: Path)
         assert harness.app.state.admin_store.get("write_names") == names
 
 
+async def test_admin_status_carries_state_independent_approved_write_names(tmp_path: Path) -> None:
+    """``approved_write_names`` is the live write allowlist, authoritative in every arm state —
+    unlike ``added_write_names``, which only records what arming itself contributed. With all four
+    required writes approved up front but the device never armed, the Setup checklist's
+    ``REQUIRED_WRITES ⊆ approved_write_names`` must hold while ``added_write_names`` stays empty
+    (the case the old field got wrong). Design §4.4 / §12 / §16 item 3."""
+    settings = energy_settings(tmp_path)
+    async with running_app(settings) as harness:
+        # Approve all four required writes on the admin store before any arming.
+        harness.app.state.admin_store.put("write_names", list(DISPATCH_WRITE_NAMES))
+        headers = await admin_session(harness)
+        response = await harness.client.get("/admin/api/energy/devices", headers=headers)
+        assert response.status_code == 200, response.text
+        main = next(item for item in response.json() if item["device_id"] == "main")
+        assert "approved_write_names" in main
+        # Never armed: added_write_names is empty, but approved_write_names covers the requirements.
+        assert main["armed"] is False
+        assert main["added_write_names"] == []
+        assert set(DISPATCH_WRITE_NAMES) <= set(main["approved_write_names"])
+
+
 async def test_required_dispatch_registers_cannot_be_revoked_while_a_device_is_armed(tmp_path: Path) -> None:
     """A restore writes those registers through the allowlist, so revoking them under an armed
     device would leave the handback rejected forever."""
@@ -692,6 +713,37 @@ async def test_hardware_verification_keeps_a_note_already_stored_on_a_sign_recor
         # The body note documents the write path; it must not spread onto a sign record.
         assert caps["write_path_convention"]["note"] == VERIFICATION["note"]
         assert caps["grid_power_sign_convention"]["note"] is None
+
+
+async def test_hardware_verification_drops_a_sign_note_recorded_under_different_hardware(
+    tmp_path: Path,
+) -> None:
+    """A sign-record note observed under one model/firmware must not be re-stamped as if it were
+    evidence for a different one the next verification attests (release-blocking finding)."""
+    async with running_app(energy_settings(tmp_path)) as harness:
+        headers = await admin_session(harness)
+        # "unverified" on purpose (AC-20: no test may write a verified record directly) — the
+        # model/firmware mismatch this test exercises does not depend on the record's own status.
+        seeded = await harness.client.put(
+            "/admin/api/dispatch/devices/main/capabilities/battery_power_sign_convention",
+            headers=headers,
+            json={
+                "status": "unverified",
+                "battery_discharge_positive": True,
+                "note": "measured on firmware 1.0",
+                "verified_device_model": "RCT Power DC 8.0",
+                "verified_firmware": "1.0.0",
+            },
+        )
+        assert seeded.status_code == 200, seeded.text
+
+        # Re-verify under a different model/firmware: the old note must not survive the carry-over.
+        saved = await harness.client.put(VERIFICATION_URL, headers=headers, json=VERIFICATION)
+        assert saved.status_code == 200, saved.text
+        caps = _capabilities(saved.json())
+        assert caps["battery_power_sign_convention"]["note"] is None
+        assert caps["battery_power_sign_convention"]["verified_device_model"] == VERIFICATION["verified_device_model"]
+        assert caps["battery_power_sign_convention"]["verified_firmware"] == VERIFICATION["verified_firmware"]
 
 
 async def test_hardware_verification_needs_a_session_and_validates_the_body(tmp_path: Path) -> None:

@@ -130,6 +130,31 @@ check('grid value (-250 W feed-in) is shown as magnitude with a feed-in indicato
   /^arrow_upward\s*250\s*W$/.test(gridTile.text) && !/[-−]/.test(gridTile.text) && gridTile.label === 'Feeding into the grid'
   && gridTile.card === 'Feeding into the grid' && /^arrow_upward\s*250\s*W$/.test(gridTile.cardText), JSON.stringify(gridTile));
 check('battery ratio 0.55 shown as 55 %', /^55\s*%/.test(kpi['battery-soc']), kpi['battery-soc']);
+
+// Dashboard flow graphic (stage 1): fed from device.energy_flow on /admin/api/devices, no second
+// energy/devices fetch, present in every card above the inverter/battery subcards, and animated
+// because the simulator's PV/grid/battery readings above are all non-zero.
+await page.waitForSelector('.device-item .device-flow-graphic:not([hidden]) .energy-flow-svg');
+const flowInfo = await page.evaluate(() => {
+  const card = document.querySelector('.device-item');
+  const flowBox = card.querySelector('.device-flow-graphic');
+  const cards = card.querySelector('.device-visual-cards');
+  return {
+    present: Boolean(flowBox?.querySelector('.energy-flow-svg')),
+    hidden: flowBox?.hidden,
+    aboveCards: Boolean(flowBox && cards && flowBox.compareDocumentPosition(cards) & Node.DOCUMENT_POSITION_FOLLOWING),
+    activeLines: [...flowBox.querySelectorAll('.flow-line')].filter((line) => !line.classList.contains('is-idle')).length,
+  };
+});
+check('dashboard device card shows the flow graphic above the inverter/battery subcards',
+  flowInfo.present && !flowInfo.hidden && flowInfo.aboveCards, JSON.stringify(flowInfo));
+check('the dashboard flow graphic animates from non-zero energy_flow data', flowInfo.activeLines > 0, JSON.stringify(flowInfo));
+const dashboardNetworkLegs = [];
+page.on('request', (r) => { if (r.url().includes('/admin/api/energy/devices')) dashboardNetworkLegs.push(r.url()); });
+await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
+await page.waitForTimeout(300);
+check('the dashboard poll makes no energy/devices request', dashboardNetworkLegs.length === 0, dashboardNetworkLegs.join(','));
+
 // The inverter image sits beside the power card's readings; the battery tower is now a stack of
 // top + N middle + bottom slices (app/admin/static/img/battery_{top,middle,bottom}.svg) beside the
 // battery card's readings, so the device no longer carries exactly 2 images.
@@ -348,7 +373,13 @@ const towerGeometry = async () => {
   await page.waitForTimeout(250);
   return (await readLayout()).towers;
 };
-for (const modules of [2, 3, 4, 5, 6]) {
+// Graphic contract (owner-mandated): the drawn tower is 1 top cap + 1..BATTERY_TOWER_MAX_SEGMENTS
+// (5) battery segments + 1 bottom cap. 2..5 modules are within that ceiling and must still render
+// every module; 6 modules is real, trusted hardware (RCT_MAX_MODULES_PER_TOWER) the GRAPHIC does
+// not cover, so it renders no tower at all (see renderableSegmentCount/patchBatteryCard in
+// admin.js) rather than a fabricated maximum-size stand-in - this replaces the former "6-module
+// tower stays within the height cap" assertion, which assumed the graphic drew up to 6 segments.
+for (const modules of [2, 3, 4, 5]) {
   await patchBatteries((batteries) => batteries.forEach((battery) => {
     battery.module_count = modules;
     battery.module_count_status = 'ok';
@@ -362,8 +393,18 @@ for (const modules of [2, 3, 4, 5, 6]) {
       && tower.stack.width > 0 && tower.stack.width <= 80),
     JSON.stringify(towers.map((tower) => ({ middles: tower.middles, height: tower.stack.height, width: tower.stack.width }))));
 }
+await patchBatteries((batteries) => batteries.forEach((battery) => {
+  battery.module_count = 6;
+  battery.module_count_status = 'ok';
+  battery.populated_module_slots = [...Array(6).keys()];
+}));
+const sixModuleTowers = await towerGeometry();
+await page.unroute('**/admin/api/devices');
+check('a trusted 6-module tower (above the 5-segment graphic ceiling) renders no tower, not a fabricated one',
+  sixModuleTowers.length > 0 && sixModuleTowers.every((tower) => tower.slices === 0 && tower.noteHidden === false),
+  JSON.stringify(sixModuleTowers.map((tower) => ({ slices: tower.slices, noteHidden: tower.noteHidden }))));
 // Taller towers must get narrower rather than taller: that is what keeps the cap without dropping
-// modules from the drawing.
+// modules from the drawing. Both widths are within the graphic's 5-segment ceiling.
 const widthAt = async (modules) => {
   await patchBatteries((batteries) => batteries.forEach((battery) => {
     battery.module_count = modules;
@@ -375,9 +416,9 @@ const widthAt = async (modules) => {
   return towers[0].stack.width;
 };
 const widthTwo = await widthAt(2);
-const widthSix = await widthAt(6);
-check('a six-module tower is drawn narrower than a two-module one instead of taller', widthSix < widthTwo,
-  JSON.stringify({ widthTwo, widthSix }));
+const widthFive = await widthAt(5);
+check('a five-module tower is drawn narrower than a two-module one instead of taller', widthFive < widthTwo,
+  JSON.stringify({ widthTwo, widthFive }));
 // ITEM 0: seven populated slots are a data anomaly (the catalog array has seven elements, the
 // documented hardware takes six modules), and a gap in the middle is one too. Neither may render a
 // seven-storey tower; the card keeps its readings and says so instead.
@@ -1195,7 +1236,8 @@ await shot('prometheus-master-toggle-on');
   await ep.click('#change-password-form button[type=submit]');
   await ep.waitForURL('**/ui/dashboard');
 
-  // Measured values for the flow graphic; the simulator's own readings are not part of this contract.
+  // Measured values for the panel's own readings-derived text (e.g. the battery state sentence);
+  // the simulator's own readings are not part of this contract.
   const reading = (value) => ({ value, age_seconds: 1, stale: false });
   await ep.route('**/admin/api/energy/devices', async (route) => {
     if (route.request().method() !== 'GET') return route.continue();
@@ -1209,6 +1251,28 @@ await shot('prometheus-master-toggle-on');
     }
     await route.fulfill({ response, json: list });
   });
+
+  // Before any verification: the device ships unverified, so Operate must show the Setup checklist
+  // and its single "Complete setup"/"Set up manual control" CTA — and must NOT leak raw capability
+  // names (write_path_convention etc.) onto the Operate surface (requirement 5, design §9/§12).
+  await ep.goto(`${energyBase}/ui/energy`);
+  await ep.waitForSelector('.energy-panel');
+  await ep.waitForSelector('.energy-setup:not([hidden])', { timeout: 15000 }).catch(() => { });
+  check('Setup checklist is shown while hardware is unverified', await ep.locator('.energy-setup:not([hidden])').count() >= 1);
+  // Wait until the inverter has connected, so the §9 branch order (connection first) advances from
+  // "Not connected." to the hardware-unverified "needs setup" banner.
+  await ep.waitForFunction(() => {
+    const list = document.querySelector('.energy-setup-list');
+    const connectedRow = list && list.querySelector('.energy-setup-item.is-met');
+    return connectedRow && /Inverter connected/.test(connectedRow.textContent);
+  }, null, { timeout: 20000 }).catch(() => { });
+  const setupText = await ep.locator('.energy-panel').first().innerText();
+  check('Operate shows the plain "needs setup" wording while unverified', /Manual control needs setup\./.test(setupText), setupText.slice(0, 500));
+  check('a single "Complete setup"/"Set up manual control" CTA is offered',
+    (await ep.locator('.energy-panel button:visible', { hasText: /^(Complete setup|Set up manual control)$/ }).count()) === 1);
+  check('no raw capability names leak onto the Operate surface',
+    !/write_path_convention|battery_power_sign_convention|grid_power_sign_convention/.test(setupText), setupText.slice(0, 500));
+
   // A fresh dispatch store ships unverified hardware; verify it through the atomic admin endpoint.
   const verified = await ep.evaluate(async () => {
     const { csrf_token: csrf } = await (await fetch('/admin/api/session', { credentials: 'same-origin' })).json();
@@ -1224,17 +1288,20 @@ await shot('prometheus-master-toggle-on');
   });
   check('the hardware verification endpoint accepts one complete attestation', verified === 200, String(verified));
   await ep.goto(`${energyBase}/ui/energy`);
-  await ep.waitForSelector('.energy-panel .energy-flow-svg');
+  await ep.waitForSelector('.energy-panel');
   check('energy page renders a device panel', (await ep.locator('.energy-panel').count()) >= 1);
-  await ep.waitForFunction(() => document.querySelector('.flow-node-value')?.textContent.includes('W'));
-  check('the live flow graphic receives measured values', (await ep.locator('.flow-node-value').evaluateAll((nodes) => nodes.map((n) => n.textContent))).some((text) => /\d/.test(text)));
-  const buttons = ['Charge', 'Hold', 'Discharge'].map((name) => ep.locator('.energy-actions button', { hasText: new RegExp(`^${name}$`) }));
+  // Stage 1 moved the flow graphic to the dashboard and removed the Energy page's own instance
+  // (energyFlowGraphic() is now shared, single-instance); the panel keeps its control column.
+  check('the Energy Manager panel no longer contains its own flow graphic', (await ep.locator('.energy-panel .energy-flow-svg').count()) === 0);
+  // The relabelled, Operate-layer action buttons (presentation only; REST names unchanged).
+  const buttons = ['Charge battery', 'Keep battery idle', 'Discharge battery']
+    .map((name) => ep.locator('.energy-actions button', { hasText: new RegExp(`^${name}$`) }));
   const states = async () => Promise.all(buttons.map((button) => button.isDisabled()));
-  check('manual actions are disabled while the manager is off', (await states()).every(Boolean), JSON.stringify(await states()));
+  const operateText = async () => (await ep.locator('.energy-panel').first().innerText());
 
   const commands = [];
   ep.on('request', (r) => { if (r.method() === 'POST' && r.url().endsWith('/command')) commands.push(r.postDataJSON()); });
-  // The simulator ships unverified hardware; verify it first, as an operator would in Advanced.
+  // The simulator ships unverified hardware; verify it first, as an operator would in Expert.
   const csrf = await ep.evaluate(async () => (await (await fetch('/admin/api/session')).json()).csrf_token);
   const verification = await ep.request.put(`${energyBase}/admin/api/energy/devices/sim/hardware-verification`, {
     headers: { 'X-CSRF-Token': csrf },
@@ -1247,7 +1314,7 @@ await shot('prometheus-master-toggle-on');
   });
   check('hardware verification endpoint accepts the evidence', verification.ok(), String(verification.status()));
   await ep.reload();
-  await ep.waitForSelector('.energy-panel .energy-flow-svg');
+  await ep.waitForSelector('.energy-panel');
   const armToggle = ep.locator('.energy-switch input');
   await armToggle.click(); // the switch re-renders from the server state, so check() would see it revert first
   await ep.waitForFunction(() => document.querySelector('.energy-switch input')?.checked
@@ -1268,11 +1335,28 @@ await shot('prometheus-master-toggle-on');
     const charge = await cmd(() => ep.locator('.energy-target button').click());
     check('Charge sends a command with a target SoC', charge?.action === 'charge' && Number.isFinite(charge.target_soc_percent), JSON.stringify(charge));
   } else check('Charge is available once armed', false, 'disabled after arming');
-  await ep.waitForFunction(() => [...document.querySelectorAll('.energy-actions button')].some((b) => b.textContent.trim() === 'Hold' && !b.disabled), null, { timeout: 10000 }).catch(() => { });
+  await ep.waitForFunction(() => [...document.querySelectorAll('.energy-actions button')].some((b) => b.textContent.trim() === 'Keep battery idle' && !b.disabled), null, { timeout: 10000 }).catch(() => { });
   const hold = !(await states())[1] ? await cmd(() => buttons[1].click()) : null;
-  check('Hold sends a command without a target SoC', hold?.action === 'hold' && !('target_soc_percent' in hold), JSON.stringify(hold));
+  check('Keep battery idle sends a hold command without a target SoC', hold?.action === 'hold' && !('target_soc_percent' in hold), JSON.stringify(hold));
   const auto = await cmd(() => ep.locator('.energy-actions button', { hasText: 'Return to automatic' }).click());
   check('Return to automatic sends auto', auto?.action === 'auto', JSON.stringify(auto));
+
+  // The relabels are visible on Operate (presentation-only; the REST action names stayed on the wire
+  // above: hold/charge/auto). Manual-control enable/disable wording replaces the old ON/OFF switch.
+  const operate = await operateText();
+  check('Operate shows the Manual control relabel', /Manual control:/.test(operate), operate.slice(0, 400));
+  check('Operate shows the relabelled battery actions',
+    /Charge battery/.test(operate) && /Keep battery idle/.test(operate) && /Discharge battery/.test(operate), operate.slice(0, 400));
+
+  // Raw capability names must STILL be available in Diagnostics (requirement c), and power limits
+  // are shown in kW in Expert (requirement d).
+  await ep.locator('.energy-diagnostics summary').first().click();
+  const diagText = await ep.locator('.energy-diagnostics').first().innerText();
+  check('Diagnostics still exposes raw capability names',
+    /write_path_convention/.test(diagText) && /battery_power_sign_convention/.test(diagText), diagText.slice(0, 400));
+  await ep.locator('.energy-expert summary').first().click();
+  const expertText = await ep.locator('.energy-expert').first().innerText();
+  check('Expert shows power limits in kW', /Max charge \(kW\)/.test(expertText) && /Max discharge \(kW\)/.test(expertText), expertText.slice(0, 400));
 
   await ep.setViewportSize({ width: 390, height: 844 });
   await sleep(300);

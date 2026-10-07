@@ -10,7 +10,7 @@ import asyncio
 import contextlib
 import logging
 from collections.abc import AsyncIterator, Callable, Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import timedelta
 from pathlib import Path
 
@@ -46,7 +46,6 @@ from app.config import DeviceEntry, Settings, url_host
 from app.dispatch.capabilities import (
     CapabilityRecord,
     CapabilityRegistry,
-    CapabilityStatus,
 )
 from app.dispatch.controller import DispatchController
 from app.dispatch.models import DeviceLimits, DispatchConfig
@@ -634,11 +633,24 @@ def _lifespan(
                     await runtime.dispatch.force_restore_or_raise(device_id)  # raises: abort, nothing torn down yet
                 for device_id in readdressed:
                     # Evidence and arming were given for the old physical device, not the new one.
+                    # Every capability is reset, not only the VERIFIED ones: a revoke keeps its
+                    # evidence (strategy code, byte widths, sign assumptions, ...) on an UNVERIFIED
+                    # record, and that evidence must not survive onto whatever device now answers
+                    # at this device_id — only a VERIFIED->default reset here would let it.
                     for capability in runtime.dispatch.capabilities(device_id):
-                        if capability.status is CapabilityStatus.VERIFIED:
-                            await runtime.dispatch.set_capability(
-                                device_id, CapabilityRecord(device_id=device_id, name=capability.name)
-                            )
+                        await runtime.dispatch.set_capability(
+                            device_id, CapabilityRecord(device_id=device_id, name=capability.name)
+                        )
+                    # Engineering mode is the per-device switch that lets dispatch run on unverified
+                    # hardware; it is a decision about the old physical device and must not carry
+                    # over either. The power limits themselves (max_charge/discharge_power_w) are
+                    # a site/installation property, not a hardware-identity claim, so they are left
+                    # as the operator configured them.
+                    old_limits = runtime.dispatch.device_limits(device_id)
+                    if old_limits is not None and old_limits.engineering_mode:
+                        await runtime.dispatch.set_device_limits(
+                            device_id, replace(old_limits, engineering_mode=False)
+                        )
                     if runtime.energy is not None and runtime.energy.armed(device_id):
                         await runtime.energy.set_armed(device_id, armed=False, actor=None)
 
@@ -833,8 +845,11 @@ def create_app(settings: Settings, *, clock: Clock | None = None, connector: Con
         ),
     )
     dispatch_store = None
-    energy_readings = None
     energy_armed: dict[str, ArmedRecord] = {}
+    # Built unconditionally so the dashboard's energy_flow projection (app/admin/api.py::devices())
+    # reads cache-only, sign-normalized figures even with write support/dispatch disabled; the
+    # dispatch-enabled branch below replaces this with the live capability registry.
+    runtime.energy_readings = RctEnergyReadings(gateway, capabilities=CapabilityRegistry())
     if _dispatch_enabled(settings):
         dispatch_store = DispatchStore(settings.dispatch_db_path, settings.hmac_secret.get_secret_value())
         dispatch_store.initialize()
@@ -850,7 +865,7 @@ def create_app(settings: Settings, *, clock: Clock | None = None, connector: Con
         )
         # The live capability registry, so a verification reaches the published grid sign without a
         # restart. The readings are cache-only and never queue a device transaction.
-        energy_readings = RctEnergyReadings(gateway, capabilities=dispatch_capabilities)
+        runtime.energy_readings = RctEnergyReadings(gateway, capabilities=dispatch_capabilities)
         energy_armed = dispatch_store.get_energy_states()
         # The store is the truth for the per-device limits and the engineering switch: they are an
         # operator setting, made through the admin dispatch API, and must survive a restart. The
@@ -903,7 +918,7 @@ def create_app(settings: Settings, *, clock: Clock | None = None, connector: Con
         runtime.energy = EnergyManager(
             port=runtime.dispatch,
             store=dispatch_store,
-            readings=energy_readings or RctEnergyReadings(gateway, capabilities=CapabilityRegistry()),
+            readings=runtime.energy_readings,
             clock=clock,
             config=dispatch_config,
             devices=runtime.devices,

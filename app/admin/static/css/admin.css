@@ -444,6 +444,20 @@ body {
    width is exactly what pushes a grid past its container and creates a horizontal ghost scroll,
    so the narrow cases are handled by the container queries below instead. */
 .device-visual {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+}
+
+/* The flow graphic shares the SVG and sizing of the Energy page's own .energy-flow-svg; only the
+   dashboard-specific box around it lives here. Hidden (not removed) when the device has no energy
+   reading, so patchDeviceFlow() can toggle it without rebuilding the SVG. */
+.device-flow-graphic {
+    display: flex;
+    justify-content: center;
+}
+
+.device-visual-cards {
     min-width: 0;
     display: grid;
     grid-template-columns: repeat(calc(var(--battery-count, 1) + 1), minmax(0, 1fr));
@@ -455,13 +469,13 @@ body {
    column on a phone. Container queries, not viewport ones: the card's own width is what decides
    whether the columns fit, and it already differs from the viewport by sidebar and padding. */
 @container (max-width: 56rem) {
-    .device-visual {
+    .device-visual-cards {
         grid-template-columns: repeat(2, minmax(0, 1fr));
     }
 }
 
 @container (max-width: 34rem) {
-    .device-visual {
+    .device-visual-cards {
         grid-template-columns: minmax(0, 1fr);
     }
 }
@@ -752,8 +766,8 @@ body {
     flex: 1 1 auto;
 }
 
-/* Energy Manager: one panel per inverter, live flow on the left, control on the right. Everything
-   animated is driven by measured values only (see updateEnergyFlow in admin.js). */
+/* Energy Manager: one panel per inverter, battery control only (the flow graphic lives on the
+   dashboard). */
 .energy-grid {
     display: grid;
     grid-template-columns: minmax(0, 1fr);
@@ -801,15 +815,9 @@ body {
 
 .energy-body {
     display: grid;
-    grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr);
+    grid-template-columns: minmax(0, 1fr);
     gap: 1.5rem;
     align-items: start;
-}
-
-@container (max-width: 46rem) {
-    .energy-body {
-        grid-template-columns: minmax(0, 1fr);
-    }
 }
 
 .energy-flow-svg {
@@ -893,28 +901,37 @@ body {
     animation-direction: reverse;
 }
 
-/* Generation flows green, consumption red: PV and export/discharge feed the house; import and
-   battery discharge draws from the battery (red); charge stores energy (green). */
+/* Final flow-color semantics (supersedes the earlier discharge=orange/charge=green grouping):
+   green marks energy reaching the house or the grid (PV generation, battery discharge, export);
+   red/orange marks energy drawn from the grid (import); blue/neutral marks energy going into
+   storage (battery charge) rather than being spent, so storing is visually distinct from both
+   generation and consumption. */
 .flow-line.flow-pv,
 .flow-line.flow-export,
-.flow-line.flow-charge {
+.flow-line.flow-discharge {
     --flow-color: #198754;
 }
 
-.flow-line.flow-import,
-.flow-line.flow-discharge {
+.flow-line.flow-import {
     --flow-color: #c2410c;
+}
+
+.flow-line.flow-charge {
+    --flow-color: #0d6efd;
 }
 
 [data-bs-theme="dark"] .flow-line.flow-pv,
 [data-bs-theme="dark"] .flow-line.flow-export,
-[data-bs-theme="dark"] .flow-line.flow-charge {
+[data-bs-theme="dark"] .flow-line.flow-discharge {
     --flow-color: #4ade80;
 }
 
-[data-bs-theme="dark"] .flow-line.flow-import,
-[data-bs-theme="dark"] .flow-line.flow-discharge {
+[data-bs-theme="dark"] .flow-line.flow-import {
     --flow-color: #fb923c;
+}
+
+[data-bs-theme="dark"] .flow-line.flow-charge {
+    --flow-color: #60a5fa;
 }
 
 /* One dash period (14 user units) per cycle; the duration is set per line from the measured power. */
@@ -951,31 +968,56 @@ body {
     background: var(--bs-warning-bg-subtle);
 }
 
-.energy-compare {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: .75rem;
+.energy-switch-help {
+    margin: -.4rem 0 1rem;
+}
+
+/* Operate: current mode + one plain sentence (design §8/§10). */
+.energy-mode {
     margin-bottom: 1rem;
 }
 
-.energy-compare-box {
-    border: 1px solid var(--rct-line);
+.energy-mode .energy-soc {
+    margin-top: .15rem;
+}
+
+.energy-freshness {
+    margin-top: .3rem;
+}
+
+/* Setup: the state-independent readiness checklist (design §12). Shown only when a step is unmet. */
+.energy-setup {
+    border: 1px solid var(--bs-warning-border-subtle);
+    background: var(--bs-warning-bg-subtle);
     border-radius: .5rem;
-    padding: .65rem .8rem;
-    min-width: 0;
+    padding: .7rem .9rem;
+    margin-bottom: 1rem;
 }
 
-.energy-compare-box h3 {
-    font-size: .75rem;
-    text-transform: uppercase;
-    letter-spacing: .04em;
+.energy-setup-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: grid;
+    gap: .3rem;
+}
+
+.energy-setup-item {
+    display: flex;
+    align-items: center;
+    gap: .4rem;
+}
+
+.energy-setup-item .material-icons {
+    font-size: 1.1rem;
+}
+
+.energy-setup-item.is-met .material-icons {
+    color: var(--bs-success);
+}
+
+.energy-setup-item.is-unmet {
     color: var(--bs-secondary-color);
-    margin: 0 0 .35rem;
-}
-
-.energy-compare-main {
-    font-weight: 600;
-    overflow-wrap: anywhere;
 }
 
 .energy-actions {
@@ -1009,9 +1051,15 @@ body {
     color: var(--bs-secondary-color);
 }
 
-.energy-advanced summary {
+.energy-advanced summary,
+.energy-expert summary,
+.energy-diagnostics summary {
     cursor: pointer;
     color: var(--bs-secondary-color);
+}
+
+.energy-expert-warning {
+    margin: .5rem 0 0;
 }
 
 .energy-advanced-section {

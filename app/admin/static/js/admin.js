@@ -1865,7 +1865,6 @@
     if (energyPolling) return;
     energyPolling = true;
     const host = $('energy-list');
-    const status = $('energy-poll-status');
     try {
       const devices = await api('energy/devices');
       const ids = devices.map((item) => item.device_id);
@@ -1879,15 +1878,23 @@
         }
         if (!devices.length) host.append(element('p', 'text-secondary mb-0', 'No inverters configured yet.'));
       } else {
-        for (const device of devices) energyPanels.get(device.device_id).update(device);
+        for (const device of devices) energyPanels.get(device.device_id).update(device, { poll503: false, pollFailed: false });
       }
-      const ages = devices.flatMap((item) => Object.values(item.readings || {})).map((item) => item && item.age_seconds).filter(Number.isFinite);
-      const oldest = ages.length ? ` · oldest measurement ${Math.round(Math.max(...ages))} s` : '';
-      status.textContent = `Updated ${new Date().toLocaleTimeString('en-GB')}${oldest}`;
-      setClass(status, 'text-danger', false);
+      // The absolute timestamp lives in Diagnostics now (design §13), not a top-of-page line.
+      const stamp = `Updated ${new Date().toLocaleTimeString('en-GB')}`;
+      for (const device of devices) {
+        const ages = Object.values(device.readings || {}).map((item) => item && item.age_seconds).filter(Number.isFinite);
+        const oldest = ages.length ? ` · oldest measurement ${Math.round(Math.max(...ages))} s` : '';
+        energyPanels.get(device.device_id).setTimestamp(`${stamp}${oldest}`);
+      }
     } catch (error) {
-      status.textContent = `Update failed: ${messageFrom(error)}`;
-      setClass(status, 'text-danger', true);
+      // 503 means write support/dispatch is disabled (design §9.2): render the config empty-state on
+      // every panel; it clears on the next 200. Any other failure is a transient note (§13).
+      const poll503 = error && error.status === 503;
+      for (const panel of energyPanels.values()) panel.setPollState({ poll503, pollFailed: !poll503 });
+      if (poll503 && !energyPanels.size) {
+        host.replaceChildren(element('p', 'text-secondary mb-0', 'Manual battery control requires write support to be enabled.'));
+      }
     } finally { energyPolling = false; }
   }
 

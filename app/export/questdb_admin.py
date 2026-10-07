@@ -164,27 +164,33 @@ class QuestDbProvisioner:
         if not self._view_current(view):
             log.warning("QuestDB rollup view '%s' is not refreshed yet; raw TTL is unchanged", view)
             return False
-        self._drop_stale_rollups(view)
+        self._warn_about_superseded_rollups(view)
         # The raw TTL only shortens once the rollup holds the data that it would drop.
         return self._apply_ttl(view, self.total_days, view=True) and self._apply_ttl(
             self.table, self.raw_days or 0, view=False
         )
 
-    def _drop_stale_rollups(self, current: str) -> None:
-        """Drop earlier service-created rollup views of this table once ``current`` is up to date."""
+    def _warn_about_superseded_rollups(self, current: str) -> None:
+        """Report earlier service-created rollup views of this table that a schema change replaced.
+
+        Never auto-dropped: a schema change (e.g. a newly exported metric) rebuilds ``current``
+        from the raw table alone, which can only reconstruct whatever the (possibly already
+        shortened) raw TTL still holds. The superseded view may still hold older rollup data the
+        raw table no longer has — exactly the historical aggregates the raw TTL was only safe to
+        shorten because of. Dropping it immediately would destroy that data with no way back; it is
+        left in place for an administrator to remove once a verified retention/overlap window has
+        passed and no aggregate held only there is still needed.
+        """
         rows = self._exec(
             f"SELECT view_name FROM materialized_views() WHERE base_table_name = {literal(self.table)};"
         ).get("dataset") or []
         prefix = f"{self.table}_rollup_"
         for (name, *_) in rows:
             if str(name).startswith(prefix) and name != current:
-                self._exec(f"DROP MATERIALIZED VIEW IF EXISTS {ident(name)};")
-                # QuestDB has no DELETE; a NULL TTL retires the recorded state of the dropped view.
-                self._exec(
-                    f"UPDATE {ident(STATE_TABLE)} SET ttl_days = NULL WHERE measurement = {literal(self.table)} "
-                    f"AND object = {literal(name)};"
+                log.warning(
+                    "QuestDB rollup view '%s' is superseded by '%s' and is kept, not dropped, to avoid"
+                    " losing historical rollup data the raw table may no longer hold", name, current
                 )
-                log.info("QuestDB dropped superseded rollup view '%s'", name)
 
     def _view_current(self, view: str) -> bool:
         rows = self._exec(

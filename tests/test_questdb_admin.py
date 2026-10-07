@@ -135,11 +135,14 @@ def test_rollup_view_follows_a_changed_column_set() -> None:
     assert any('"rct_new_metric_avg"' in s for s in db2.sql if s.startswith("CREATE MATERIALIZED"))
 
 
-def test_superseded_rollup_views_are_dropped_with_their_state() -> None:
+def test_superseded_rollup_views_are_kept_not_dropped() -> None:
+    """A schema change can only rebuild the new view from the raw table, which may hold less
+    history than an old, already-shortened raw TTL allows the superseded view to cover. Dropping
+    it would destroy that historical rollup data irrecoverably, so it must survive the run."""
     db = FakeQuestDb()
     assert QuestDbProvisioner(db, "rct", "medium", 3, 90).run()
-    assert 'DROP MATERIALIZED VIEW IF EXISTS "rct_rollup_1m_vold";' in db.sql
-    assert any(s.startswith('UPDATE "_rct_export_state" SET ttl_days = NULL') and "rct_rollup_1m_vold" in s for s in db.sql)
+    assert not any(s.startswith("DROP MATERIALIZED VIEW") for s in db.sql)
+    assert not any(s.startswith("UPDATE") and "ttl_days = NULL" in s for s in db.sql)
 
 
 def test_raw_ttl_waits_for_a_current_view_and_for_data() -> None:

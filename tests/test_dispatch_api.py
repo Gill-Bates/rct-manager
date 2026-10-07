@@ -317,3 +317,53 @@ async def test_reconfiguration_succeeds_and_rebuilds_limits_after_a_clean_restor
         # so it is refused as unverified (not for missing limits).
         assert dispatch_response.status_code == 409, dispatch_response.text
         assert dispatch_response.json()["code"] == "dispatch_unverified"
+
+
+async def test_readdressing_clears_unverified_evidence_and_engineering_mode_too(tmp_path: Path) -> None:
+    """A revoke keeps a capability's evidence while it is UNVERIFIED (by design); a readdressing
+    must not let that leftover evidence, or an engineering-mode switch, follow onto whatever
+    physical device now answers under the same device_id — not only the capabilities that still
+    happened to be VERIFIED when the device list was saved."""
+    config = settings(tmp_path, devices=[DeviceEntry(device_id="main", host=HOST, port=PORT)])
+    token = admin_write_token(config)
+    headers = {"Authorization": f"Bearer {token}"}
+    async with running_app(config) as harness:
+        # UNVERIFIED but carrying evidence a revoke would leave behind (strategy code, note).
+        put_cap = await harness.client.put(
+            "/admin/api/dispatch/devices/main/capabilities/write_path_convention",
+            headers=headers,
+            json={
+                "status": "unverified",
+                "soc_strategy_external_code": 2,
+                "enum_byte_width": 1,
+                "bool_byte_width": 1,
+                "write_frame_layout_verified": True,
+                "apply_sequence_verified": True,
+                "note": "evidence from the previous physical device",
+            },
+        )
+        assert put_cap.status_code == 200, put_cap.text
+        assert put_cap.json()["soc_strategy_external_code"] == 2
+
+        put_limits = await harness.client.put(
+            "/admin/api/dispatch/devices/main",
+            headers=headers,
+            json={"max_charge_power_w": 3000, "max_discharge_power_w": 5000, "engineering_mode": True},
+        )
+        assert put_limits.status_code == 200, put_limits.text
+        assert harness.runtime.dispatch.device_limits("main").engineering_mode is True
+
+        response = await harness.client.put(
+            "/admin/api/settings", headers=ADMIN_WRITER,
+            json={"devices": [{"host": "192.0.2.91", "port": 48998}]},
+        )
+        assert response.status_code == 200, response.text
+
+        after = await harness.client.get(
+            "/admin/api/dispatch/devices/main/capabilities", headers=headers
+        )
+        write_path = next(r for r in after.json() if r["name"] == "write_path_convention")
+        assert write_path["status"] == "unverified"
+        assert write_path["soc_strategy_external_code"] is None
+        assert write_path["note"] is None
+        assert harness.runtime.dispatch.device_limits("main").engineering_mode is False

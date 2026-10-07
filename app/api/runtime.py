@@ -19,6 +19,7 @@ from app.clock import Clock
 from app.config import DeviceEntry, Settings
 from app.dispatch.base import BatteryDispatchPort
 from app.energy.base import EnergyManagerPort
+from app.energy.readings import EnergyReadingsPort
 from app.errors import DeviceApiError, UnknownDevice, UnknownMetric
 from app.gateway.base import DeviceGateway, DeviceState
 from app.gateway.vendor import VendorDiagnostics
@@ -48,6 +49,9 @@ class Runtime:
     # Typed against the narrow protocol in app/energy/base.py, not the concrete manager, so this
     # module keeps its ports-only rule and a router can be tested against a stub.
     energy: EnergyManagerPort | None = None
+    # Cache-only sign-normalized readings, independent of dispatch/Energy-Manager state, so the
+    # dashboard's energy_flow projection works even with write support disabled (design §4.2).
+    energy_readings: EnergyReadingsPort | None = None
     export_task: asyncio.Task | None = None  # the running push-exporter task; an explicit handle (not list position)
 
     def shutting_down(self) -> bool:

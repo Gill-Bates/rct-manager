@@ -154,6 +154,7 @@ class AdminEnergyDeviceStatus(EnergyStatusResponse):
     limits: LimitsView | None
     capabilities: list[CapabilityView]
     added_write_names: list[str]  # what arming contributed, display only
+    approved_write_names: list[str]  # the live write allowlist, state-independent (Setup checklist)
     armed_at: datetime | None
     armed_by: str | None
 
@@ -209,6 +210,7 @@ async def _admin_status(request: Request, device_id: str) -> AdminEnergyDeviceSt
             for record in dispatch.capabilities(device_id)
         ],
         added_write_names=list(record.added_write_names),
+        approved_write_names=list(energy.approved_write_names()),
         armed_at=record.armed_at,
         armed_by=record.armed_by,
     )
@@ -283,7 +285,18 @@ async def put_hardware_verification(
     now = request.app.state.runtime.clock.now()
     # A sign record's note is evidence this endpoint has no input field for; carry it over instead
     # of dropping it when the records are rewritten. body.note documents the write path only.
-    kept_notes = {record.name: record.note for record in dispatch.capabilities(device_id)}
+    # Carried only when it cannot be mis-attributed: either it was never stamped under a specific
+    # model/firmware (a bare note, nothing to contradict), or it was stamped under the SAME
+    # model/firmware this verification attests again. A note recorded under a different hardware
+    # identity (e.g. firmware 1.0) must not be re-stamped as if observed under this one (firmware
+    # 2.0) — it is dropped instead of silently following the new attestation.
+    kept_notes = {
+        record.name: record.note
+        for record in dispatch.capabilities(device_id)
+        if (record.verified_device_model is None and record.verified_firmware is None)
+        or (record.verified_device_model, record.verified_firmware)
+        == (body.verified_device_model, body.verified_firmware)
+    }
     stamp = {
         "status": CapabilityStatus.VERIFIED,
         "verified_device_model": body.verified_device_model,

@@ -303,3 +303,38 @@ def test_fresh_install_starts_with_empty_write_selection(tmp_path):
     assert app.state.admin_store.get("write_names") == []
     assert app.state.default_write_entries  # the shipped catalog stays selectable in the GUI
     assert len(app.state.runtime.gateway._allowlist) == 0  # nothing is writable until the operator selects it
+
+
+def test_devices_and_energy_manager_share_one_rct_energy_readings_instance(tmp_path):
+    """The dashboard energy_flow projection (devices()) and the EnergyManager must read through the
+    SAME RctEnergyReadings instance, so a verified sign is reflected in both without a restart and a
+    future refactor cannot silently split them (design §4.2 / §16 item 2). The reach into the
+    manager's private ``_readings`` is intentional: the port exposes no public readings accessor and
+    ``runtime.energy`` is typed ``EnergyManagerPort`` (which has none)."""
+    # Dispatch disabled: a single default RctEnergyReadings, shared with the manager.
+    disabled = Settings(_env_file=None, hmac_secret="s" * 48, admin_db_path=tmp_path / "rct.db")
+    app = create_app(disabled)
+    runtime = app.state.runtime
+    assert runtime.dispatch is None
+    assert runtime.energy is not None
+    assert runtime.energy_readings is runtime.energy._readings
+
+    # Dispatch enabled: still exactly one shared instance, and it uses the LIVE dispatch capability
+    # registry (not a fresh CapabilityRegistry()), so a verification reaches the published sign.
+    from app.dispatch.capabilities import CapabilityRegistry
+
+    enabled = Settings(
+        _env_file=None,
+        hmac_secret="s" * 48,
+        admin_db_path=tmp_path / "rct-enabled.db",
+        dispatch_db_path=tmp_path / "rct-dispatch.db",
+        enable_write_support=True,
+    )
+    app2 = create_app(enabled)
+    runtime2 = app2.state.runtime
+    assert runtime2.dispatch is not None
+    assert runtime2.energy is not None
+    assert runtime2.energy_readings is runtime2.energy._readings
+    # The shared instance's registry is the live dispatch registry, not an empty default.
+    assert isinstance(runtime2.energy_readings._capabilities, CapabilityRegistry)
+    assert runtime2.energy_readings._capabilities is runtime2.dispatch._capabilities

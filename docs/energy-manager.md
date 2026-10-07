@@ -64,15 +64,40 @@ An action whose hardware capability is unverified reports `available: false` wit
 
 ## Admin GUI
 
-The page shows a live flow graphic (PV, grid, battery, house). It is animated from measured values
-only: speed follows the power, direction follows the sign, and flows below 20 W stand still. The
-animation stops under `prefers-reduced-motion`. The browser polls the cache every 3 s.
+The live energy-flow graphic (PV, grid, battery, house) lives on the **dashboard**, animated from the
+measured, sign-normalized readings each inverter card already receives; the Energy Manager page is
+pure battery control. The browser polls the cache every 3 s.
 
-The master switch **Energy Manager OFF/ON** arms the device; while it is off, manual actions are
-disabled. **Requested** shows the last command, **Actual** the measured battery power. Gate detail,
-the SoC target policy, power limits, engineering mode and the hardware verification form sit in the
-collapsed **Advanced / Diagnostics** section. Verification is entered by an operator with measured
-evidence; nothing is verified by default.
+Two orthogonal facts are kept separate on the page:
+
+- **Manual control (Enabled / Disabled)** — whether manual commands are *allowed*. Enabling does not
+  by itself charge or discharge the battery; it is the arm toggle (`PUT …/armed`).
+- **Current mode** — what the battery is actually doing: Automatic / Charging to X % / Keeping battery
+  idle / Discharging to X %, shown as one plain-language sentence (with the measured rate in kW while
+  running).
+
+The page is layered by in-page progressive disclosure:
+
+- **Operate** (always shown) — device name and connection, the Manual-control toggle, the current
+  mode sentence, SoC, the actions **Charge battery / Keep battery idle / Discharge battery** with a
+  contextual target-SoC slider and a primary button (e.g. "Charge battery to 80 %"), and **Return to
+  automatic**. When the battery data is healthy nothing is shown about polling; a stale reading shows
+  "Measurements are N seconds old." and a transient failure "Live data unavailable."
+- **Setup** (shown only when a prerequisite is missing) — a state-independent readiness checklist
+  (Inverter connected / Write access enabled / Power limits configured / Hardware control verified)
+  with a single call-to-action that routes to the first unmet step. Power limits are shown in **kW**.
+- **Expert** (collapsed) — the hardware verification form, engineering mode and the kW power limits
+  behind a warning, and the SoC target policy. Verification is entered by an operator with measured
+  evidence; nothing is verified by default.
+- **Diagnostics** (collapsed) — the gate table (the only place raw `reject_detail` and capability
+  register names appear), the capability table, the approved/added write names, per-reading age and
+  staleness, and the poll timestamp.
+
+The action **relabels are presentation-only**: the REST action names on the wire are unchanged
+(`charge`, `discharge`, `hold`, `auto`); only the GUI strings differ.
+
+If write support (dispatch) is disabled, the Operate poll answers 503 and the page shows "Manual
+battery control requires write support to be enabled." instead of the control.
 
 ### Hardware verification (admin API)
 
