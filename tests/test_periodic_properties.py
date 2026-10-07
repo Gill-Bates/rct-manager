@@ -50,14 +50,16 @@ def test_partial_registration_leaves_available_false_until_retried() -> None:
 
         first = await manager.setup()
         registrations_after_partial = manager.registrations
+        failure = manager.last_failure
 
         # Fix the device response and retry: ensure() must redo the full setup, not skip it.
         net.behavior = lambda frame: "respond"
         second = await manager.ensure()
-        return first, second, registrations_after_partial
+        return first, second, registrations_after_partial, failure
 
-    first, second, registrations_after_partial = asyncio.run(scenario())
+    first, second, registrations_after_partial, failure = asyncio.run(scenario())
     assert first is False
+    assert failure is not None  # the retry warning must name a reason
     # The timeout on the failing object drops the connection (Requirement 9.18), so the next
     # object in this same setup round reconnects on a new epoch. A setup round belongs to one
     # epoch: the mid-round reconnect discards every registration made so far

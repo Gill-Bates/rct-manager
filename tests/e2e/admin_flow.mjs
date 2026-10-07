@@ -309,8 +309,8 @@ check('the inverter status is shown on the power subcard chip', /feed in/i.test(
 // and status values, so shared-metric rendering would be visible as two identical towers.
 check('one subcard per battery tower, titled Battery 1 and Battery 2',
   layout.towers.length === 2 && layout.towers.map((tower) => tower.title).join(',') === 'Battery 1,Battery 2'
-  && layout.batteryCountVar === '2' && layout.visualColumns === 3,
-  JSON.stringify({ titles: layout.towers.map((t) => t.title), countVar: layout.batteryCountVar, columns: layout.visualColumns }));
+  && layout.towers.length === 2,
+  JSON.stringify({ titles: layout.towers.map((t) => t.title) }));
 check('each tower shows its own charge level (55 % and 42 %), not a shared one',
   /^55\s*%$/.test(layout.towers[0].charge) && /^42\s*%$/.test(layout.towers[1].charge),
   JSON.stringify(layout.towers.map((tower) => tower.charge)));
@@ -347,8 +347,7 @@ check('the inverter image column is wider than the battery tower column',
   JSON.stringify({ power: layout.power.bodyTracks, battery: layout.towers[0].bodyTracks, image: layout.power.image }));
 check('charge level and the power values keep comparable sizes', layout.chargeSize >= layout.power.valueSize,
   JSON.stringify({ charge: layout.chargeSize, power: layout.power.valueSize }));
-check('subcards share the row evenly', Math.abs(layout.power.box.width - layout.towers[0].box.width) <= 1
-  && Math.abs(layout.towers[0].box.width - layout.towers[1].box.width) <= 1,
+check('battery cards share their row evenly', Math.abs(layout.towers[0].box.width - layout.towers[1].box.width) <= 1,
   JSON.stringify([layout.power.box.width, ...layout.towers.map((tower) => tower.box.width)]));
 // The inverter state is shown exactly once per card, not repeated in the header.
 const stateMentions = await page.evaluate(() => [...document.querySelectorAll('.device-item *')]
@@ -1268,11 +1267,13 @@ await shot('prometheus-master-toggle-on');
   // Measured values for the panel's own readings-derived text (e.g. the battery state sentence);
   // the simulator's own readings are not part of this contract.
   const reading = (value) => ({ value, age_seconds: 1, stale: false });
+  let mockNoLimits = false;
   await ep.route('**/admin/api/energy/devices', async (route) => {
     if (route.request().method() !== 'GET') return route.continue();
     const response = await route.fetch();
     const list = await response.json();
     for (const device of list) {
+      if (mockNoLimits) device.limits = null;
       device.readings = {
         battery_soc_percent: reading(54), grid_power_w: reading(1200), pv_power_w: reading(1500),
         house_load_w: reading(800), battery_power_w: reading(-900),
@@ -1307,6 +1308,32 @@ await shot('prometheus-master-toggle-on');
     /Write access|Power limits|Hardware verification/.test(shownStep) && !/Engineering mode/.test(shownStep), shownStep.slice(0, 300));
   check('no raw capability names leak onto the Operate surface',
     !/write_path_convention|battery_power_sign_convention|grid_power_sign_convention/.test(setupText), setupText.slice(0, 500));
+
+  // The verification form must never pre-select the sign conventions or the evidence checkboxes.
+  const verifyPuts = [];
+  ep.on('request', (r) => { if (r.method() === 'PUT' && r.url().endsWith('/hardware-verification')) verifyPuts.push(r.postDataJSON()); });
+  const uiForm = ep.locator('.energy-setup-step form');
+  if (await uiForm.locator('label', { hasText: 'Device model' }).count()) {
+    const blank = await uiForm.evaluate((form) => ({
+      signs: [...form.querySelectorAll('select')].map((select) => select.value),
+      checked: [...form.querySelectorAll('input[type=checkbox]')].filter((box) => box.checked).length,
+    }));
+    check('the verification form starts with empty sign selects and no evidence boxes ticked',
+      blank.signs.length === 2 && blank.signs.every((value) => value === '') && blank.checked === 0, JSON.stringify(blank));
+    await uiForm.getByLabel('Device model').fill('Simulator');
+    await uiForm.getByLabel('Firmware').fill('1.0');
+    await uiForm.getByLabel('Strategy code').fill('2');
+    await uiForm.getByLabel('Enum byte width').fill('1');
+    await uiForm.getByLabel('Bool byte width').fill('1');
+    await uiForm.getByLabel('Evidence note').fill('e2e form');
+    await uiForm.getByLabel('Write frame layout verified').check();
+    await uiForm.getByLabel('Apply sequence verified').check();
+    await uiForm.getByLabel('I verified these values on the hardware').check();
+    await uiForm.locator('button[type=submit]').click();
+    await sleep(500);
+    check('submitting without choosing the sign conventions is rejected on the field',
+      verifyPuts.length === 0 && (await uiForm.locator('.is-invalid').count()) >= 1, JSON.stringify(verifyPuts));
+  }
 
   // A fresh dispatch store ships unverified hardware; verify it through the atomic admin endpoint.
   const verified = await ep.evaluate(async () => {
@@ -1404,7 +1431,34 @@ await shot('prometheus-master-toggle-on');
   check('Expert shows power limits in kW', /Maximum charging power \(kW\)/.test(expertText) && /Maximum discharging power \(kW\)/.test(expertText), expertText.slice(0, 400));
   await ep.locator('#energy-expert-mode').uncheck();
   check('Expert mode OFF hides expert content again; toggling sent no write request',
-    (await ep.locator('.energy-expert').count()) === 0 && writes.length === 0, writes.join(', '));
+    (await ep.locator('.energy-expert').count()) === 0 && (await ep.getByText('Revoke verification').count()) === 0
+    && writes.length === 0, writes.join(', '));
+
+  // Saving the power limits must carry the existing engineering_mode instead of resetting it.
+  const limitPuts = [];
+  ep.on('request', (r) => { if (r.method() === 'PUT' && /\/dispatch\/devices\//.test(r.url())) limitPuts.push(r.postDataJSON()); });
+  await ep.locator('#energy-expert-mode').check();
+  const expertBox = ep.locator('.energy-expert').first();
+  await expertBox.getByLabel('Engineering mode').check();
+  await expertBox.getByRole('button', { name: 'Save engineering mode' }).click();
+  await sleep(1000);
+  await expertBox.getByRole('button', { name: 'Save limits' }).click();
+  await sleep(800);
+  check('saving the power limits keeps the existing engineering_mode',
+    limitPuts.length >= 2 && limitPuts.at(-1).engineering_mode === true, JSON.stringify(limitPuts));
+  await expertBox.getByLabel('Engineering mode').uncheck(); // restore the simulator state
+  await expertBox.getByRole('button', { name: 'Save engineering mode' }).click();
+  await sleep(500);
+  await ep.locator('#energy-expert-mode').uncheck();
+
+  // Missing power limits open the limits step, without the engineering-mode control.
+  mockNoLimits = true;
+  await ep.reload();
+  await ep.waitForSelector('.energy-setup-step', { timeout: 15000 }).catch(() => { });
+  const noLimitsText = await ep.locator('.energy-panel').first().innerText();
+  check('missing power limits show the limits step without engineering mode',
+    /Maximum charging power/.test(noLimitsText) && !/Engineering mode/.test(noLimitsText), noLimitsText.slice(0, 400));
+  mockNoLimits = false;
 
   await ep.setViewportSize({ width: 390, height: 844 });
   await sleep(300);

@@ -59,6 +59,7 @@ class PeriodicManager:
         self.period_enabled = False
         self._retry_delay = RETRY_BASE_SECONDS
         self._retry_at = 0.0  # monotonic; no new setup before this point after a failure
+        self.last_failure: str | None = None  # reason of the latest failed setup, for the retry log
         self._registered: set[int] = set()
         self._registered_epoch = -1
         self._setup_lock = asyncio.Lock()  # one setup at a time: it rewrites the device-global pas.period
@@ -101,7 +102,11 @@ class PeriodicManager:
             self._retry_delay = RETRY_BASE_SECONDS
         else:
             self._retry_at = self._clock.monotonic() + self._retry_delay
-            log.warning("Periodic setup failed; next attempt in %.0f s", self._retry_delay)
+            log.warning(
+                "Periodic setup failed (%s); next attempt in %.0f s",
+                self.last_failure or "unknown reason",
+                self._retry_delay,
+            )
             self._retry_delay = min(self._retry_delay * 2, RETRY_MAX_SECONDS)
         return ok
 
@@ -126,11 +131,13 @@ class PeriodicManager:
         self._endpoint.unregister_all_periodic(self._key)
         self.available, self.registrations = False, 0
         self._registered.clear()
+        self.last_failure = None
         try:
             result = await self._serializer.submit(self._pas_write(self._interval, TransactionOrigin.SYSTEM_WRITE))
             if not result.ok:
                 self.period_enabled = result.committed
                 if not (result.committed and await self._confirmed_by_readback(self._interval)):
+                    self.last_failure = f"pas.period not confirmed (write error: {result.error!r})"
                     log.warning("Periodic reads unavailable for device (pas.period not confirmed)")
                     return False
                 log.debug("pas.period confirmed by readback (device does not answer WRITE)")
@@ -158,6 +165,7 @@ class PeriodicManager:
                     self._endpoint.unregister_all_periodic(self._key)
                     self._registered.clear()
                     self.registrations = 0
+                    self.last_failure = "connection replaced during registration"
                     return False
                 # Success means a value frame for this object id was actually observed: the device
                 # answers the registration with its first periodic value immediately.
@@ -167,8 +175,9 @@ class PeriodicManager:
                     continue
                 self._registered.add(object_id)
                 self.registrations += 1
-        except Exception as exc:  # noqa: BLE001  # the periodic feature must never disturb plain reads
-            log.warning("Periodic setup failed: %s", type(exc).__name__)
+        except Exception as exc:  # the periodic feature must never disturb plain reads
+            self.last_failure = f"{type(exc).__name__}: {exc}"
+            log.warning("Periodic setup failed: %s", self.last_failure, exc_info=True)
             return False
         self._registered_epoch = epoch
         self._epoch = epoch
@@ -176,6 +185,7 @@ class PeriodicManager:
         if self.available:
             log.info("Periodic reads active: %d of %d registered", self.registrations, len(self._object_ids))
         else:
+            self.last_failure = f"{self.registrations} of {len(self._object_ids)} objects registered"
             log.warning("Periodic reads partial: %d of %d registered", self.registrations, len(self._object_ids))
         return self.available
 

@@ -499,11 +499,12 @@ body {
 }
 
 /* Battery cards fill the available width: one tower takes the full row, several share it in
-   columns of at least 16rem, so any number of towers wraps instead of squeezing. */
+   columns of at least 22rem (enough for tower and readings side by side), so any number of towers
+   wraps instead of squeezing. */
 .device-battery-grid {
     min-width: 0;
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(min(16rem, 100%), 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(min(22rem, 100%), 1fr));
     align-items: stretch;
     gap: 1rem;
 }
@@ -512,11 +513,12 @@ body {
     display: none;
 }
 
-/* Tablet: flow graphic on its own row, then power and batteries in two columns. The battery grid
-   dissolves into the panel grid so its cards flow next to the power card. */
-@container (min-width: 40rem) {
+/* Tablet (flow graphic on its own row): power and batteries in two columns where room allows,
+   otherwise stacked. The battery grid dissolves into the panel grid so its cards sit next to the
+   power card. */
+@container (min-width: 41.5rem) {
     .device-detail-panel {
-        grid-template-columns: repeat(2, minmax(0, 1fr));
+        grid-template-columns: repeat(auto-fit, minmax(min(20rem, 100%), 1fr));
     }
 
     .device-battery-grid {
@@ -524,34 +526,44 @@ body {
     }
 }
 
-/* Desktop: flow graphic left (about 42%), details right (about 58%) with the power card on top and
-   the battery grid below it. */
-@container (min-width: 64rem) {
+/* Desktop: flow graphic left (about 45%), details right with the power card on top and the
+   battery grid below it. */
+@container (min-width: 56rem) {
     .device-visual.has-flow {
-        grid-template-columns: minmax(0, 42fr) minmax(0, 58fr);
+        grid-template-columns: minmax(0, 45fr) minmax(0, 55fr);
     }
 
-    .device-detail-panel {
+    .device-visual.has-flow .device-detail-panel {
         grid-template-columns: minmax(0, 1fr);
     }
 
-    .device-battery-grid {
+    .device-visual.has-flow .device-battery-grid {
         display: grid;
     }
 
-    .device-battery-grid:empty {
+    .device-visual.has-flow .device-battery-grid:empty {
         display: none;
     }
-}
 
-/* Without a flow graphic the details use the full width in the tablet layout. */
-@container (min-width: 64rem) {
-    .device-visual:not(.has-flow) .device-detail-panel {
-        grid-template-columns: repeat(2, minmax(0, 1fr));
+    /* Several towers: the right column would grow far taller than the graphic, leaving it floating
+       in empty space. Power stays beside the graphic and the towers use the full width below. */
+    .device-visual.has-flow.has-many-batteries .device-detail-panel {
+        display: contents;
     }
 
-    .device-visual:not(.has-flow) .device-battery-grid {
-        display: contents;
+    .device-visual.has-flow.has-many-batteries .device-flow-graphic {
+        grid-column: 1;
+        grid-row: 1;
+    }
+
+    .device-visual.has-flow.has-many-batteries .device-subcard-power {
+        grid-column: 2;
+        grid-row: 1;
+    }
+
+    .device-visual.has-flow.has-many-batteries .device-battery-grid {
+        grid-column: 1 / -1;
+        grid-row: 2;
     }
 }
 
@@ -674,8 +686,7 @@ body {
 .device-battery-stack {
     display: flex;
     flex-direction: column;
-    width: max-content;
-    max-width: 100%;
+    width: min(100%, 5rem);
     filter: drop-shadow(0 2px 2.5px rgb(0 0 0 / 20%));
 }
 
@@ -978,14 +989,17 @@ body {
 }
 
 /* Final flow-color semantics (supersedes the earlier discharge=orange/charge=green grouping):
-   green marks energy reaching the house or the grid (PV generation, battery discharge, export);
-   red/orange marks energy drawn from the grid (import); blue/neutral marks energy going into
+   green marks generation and export (PV, grid export); red marks the battery discharging;
+   orange marks energy drawn from the grid (import); blue/neutral marks energy going into
    storage (battery charge) rather than being spent, so storing is visually distinct from both
    generation and consumption. */
 .flow-line.flow-pv,
-.flow-line.flow-export,
-.flow-line.flow-discharge {
+.flow-line.flow-export {
     --flow-color: #198754;
+}
+
+.flow-line.flow-discharge {
+    --flow-color: #dc3545;
 }
 
 .flow-line.flow-import {
@@ -997,9 +1011,12 @@ body {
 }
 
 [data-bs-theme="dark"] .flow-line.flow-pv,
-[data-bs-theme="dark"] .flow-line.flow-export,
-[data-bs-theme="dark"] .flow-line.flow-discharge {
+[data-bs-theme="dark"] .flow-line.flow-export {
     --flow-color: #4ade80;
+}
+
+[data-bs-theme="dark"] .flow-line.flow-discharge {
+    --flow-color: #f87171;
 }
 
 [data-bs-theme="dark"] .flow-line.flow-import {

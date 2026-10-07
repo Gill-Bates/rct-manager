@@ -713,7 +713,7 @@
       setText(visual.batteries[index].head.titleText, tower.title);
       patchBatteryCard(visual.batteries[index], metrics, tower);
     });
-    visual.batteryGrid.style.setProperty('--battery-count', String(towers.length));
+    setClass(visual.node, 'has-many-batteries', towers.length > 1);
     syncChildren(visual.batteryGrid, visual.batteries.map((card) => card.node));
     patchDeviceFlow(visual, device);
     syncChildren(visual.node, [visual.flowBox, visual.cards]);
@@ -1317,6 +1317,7 @@
     const setupHeading = element('h3', 'h6 mb-2', 'Manual battery control setup');
     const setupList = element('ul', 'energy-setup-list');
     const setupStep = element('div', 'energy-setup-step');
+    setupStep.setAttribute('aria-live', 'polite');
     setupBox.append(setupHeading, setupList, setupStep);
     control.append(setupBox);
 
@@ -1457,7 +1458,7 @@
     function renderSetup(checklist) {
       const unmet = SETUP_ROWS.some(([key]) => !checklist[key]);
       setupBox.hidden = !unmet;
-      if (!unmet) { advanced.layout(null); return; }
+      if (!unmet) { if (!advanced.busy()) advanced.layout(null); return; }
       setupList.replaceChildren();
       for (const [key, label] of SETUP_ROWS) {
         const met = checklist[key];
@@ -1467,10 +1468,17 @@
         row.append(icon, element('span', null, label));
         setupList.append(row);
       }
+      if (advanced.busy()) return; // a save is running; the step moves on once it finished
       const first = energyFirstUnmet(checklist);
       advanced.layout(first);
       const node = advanced.step(first);
-      if (setupStep.firstChild !== node) setupStep.replaceChildren(...(node ? [node] : []));
+      if (setupStep.firstChild !== node) {
+        const moved = setupStep.firstChild !== null;
+        setupStep.replaceChildren(...(node ? [node] : []));
+        // Keyboard and screen-reader users land on the new step instead of a vanished form.
+        const heading = moved && node && node.querySelector('h4');
+        if (heading) { heading.tabIndex = -1; heading.focus(); }
+      }
     }
 
     function render() {
@@ -1520,7 +1528,7 @@
       if (!operable && selected) selected = null;
       if (selected && buttons[selected].disabled) selected = null;
       renderTarget();
-      advanced.update(device);
+      advanced.update(device, expertOn);
       if (expertOn !== (advanced.expert.parentNode === body)) {
         if (expertOn) body.append(advanced.expert); else advanced.expert.remove();
       }
@@ -1603,12 +1611,42 @@
       parent.append(node);
       return node;
     };
-    const guarded = (button, task) => async (event) => {
+    // While a save runs, the panel must not move forms or swap the Setup step under it.
+    let saving = 0;
+    const dirty = { verify: false, limits: false, engineering: false, policy: false };
+    const guarded = (button, task, formKey) => async (event) => {
       event.preventDefault();
       button.disabled = true;
-      try { await task(); await onChange(await api('energy/devices').then((list) => list.find((item) => item.device_id === id) || getDevice())); }
-      catch (error) { toast(messageFrom(error), 'danger'); }
-      finally { button.disabled = false; }
+      saving += 1;
+      try {
+        await task();
+        if (formKey) dirty[formKey] = false;
+      } catch (error) {
+        toast(messageFrom(error), 'danger');
+        return;
+      } finally { saving -= 1; button.disabled = false; }
+      // The save succeeded; a failed refresh is not an error, the next poll catches up.
+      try { await onChange(await api('energy/devices').then((list) => list.find((item) => item.device_id === id) || getDevice())); }
+      catch { /* next poll refreshes */ }
+    };
+    const markInvalid = (input, message) => {
+      const col = input.parentNode;
+      let note = col.querySelector('.invalid-feedback');
+      if (!note) {
+        note = element('div', 'invalid-feedback');
+        note.id = `${input.id}-error`;
+        col.append(note);
+      }
+      note.textContent = message;
+      input.classList.add('is-invalid');
+      input.setAttribute('aria-invalid', 'true');
+      input.setAttribute('aria-describedby', note.id);
+      input.focus();
+      input.addEventListener('change', () => {
+        input.classList.remove('is-invalid');
+        input.removeAttribute('aria-invalid');
+      }, { once: true });
+      throw new Error(message);
     };
 
     // 1. Gate detail (Diagnostics)
@@ -1654,13 +1692,13 @@
     const enumWidth = numberInput(1, 4, 1);
     const boolWidth = numberInput(1, 4, 1);
     const batterySign = element('select', 'form-select form-select-sm');
-    for (const [value, text] of [['true', 'Positive value discharges the battery'], ['false', 'Positive value charges the battery']]) {
+    for (const [value, text] of [['', 'Select…'], ['true', 'Positive value discharges the battery'], ['false', 'Positive value charges the battery']]) {
       const option = element('option', null, text);
       option.value = value;
       batterySign.append(option);
     }
     const gridSign = element('select', 'form-select form-select-sm');
-    for (const [value, text] of [['true', 'Positive value is grid import'], ['false', 'Positive value is grid export']]) {
+    for (const [value, text] of [['', 'Select…'], ['true', 'Positive value is grid import'], ['false', 'Positive value is grid export']]) {
       const option = element('option', null, text);
       option.value = value;
       gridSign.append(option);
@@ -1690,6 +1728,8 @@
       if (!model.value.trim() || !firmware.value.trim()) throw new Error('Device model and firmware are required.');
       if (!note.value.trim()) throw new Error('An evidence note is required.');
       if (!frame.input.checked || !sequence.input.checked) throw new Error('Confirm the write frame layout and the apply sequence.');
+      if (batterySign.value === '') markInvalid(batterySign, 'Select the battery power sign.');
+      if (gridSign.value === '') markInvalid(gridSign, 'Select the grid power sign.');
       const numbers = [code, enumWidth, boolWidth];
       if (numbers.some((input) => input.value === '' || !input.checkValidity())) {
         throw new Error('Strategy code (0-255) and both byte widths (1-4) are required.');
@@ -1706,7 +1746,7 @@
       });
       attest.input.checked = false;
       toast('Hardware verification saved.');
-    }));
+    }, 'verify'));
     revokeButton.addEventListener('click', guarded(revokeButton, async () => {
       // Server side: status only, the recorded evidence stays.
       await api(`${path}/hardware-verification`, { method: 'DELETE' });
@@ -1738,7 +1778,7 @@
       await putLimits(Math.round(Number(maxCharge.value) * 1000), Math.round(Number(maxDischarge.value) * 1000),
         Boolean(current && current.engineering_mode));
       toast('Limits saved.');
-    }));
+    }, 'limits'));
 
     // 4b. Engineering mode (Expert only); keeps the saved power limits untouched.
     const engineeringSection = section(expertInner, 'Engineering mode',
@@ -1758,7 +1798,7 @@
       if (!current) throw new Error('Set the power limits first.');
       await putLimits(current.max_charge_power_w, current.max_discharge_power_w, engineering.input.checked);
       toast('Engineering mode saved.');
-    }));
+    }, 'engineering'));
 
     // 5. SoC target policy (Expert)
     const policySection = section(expertInner, 'SoC target policy',
@@ -1784,7 +1824,7 @@
         body: JSON.stringify({ mode: policyMode.value, below_margin_percent: Number(policyMargin.value), note: policy.note || null }),
       });
       toast('SoC target policy saved.');
-    }));
+    }, 'policy'));
 
     expertInner.append(diagnostics);
 
@@ -1833,36 +1873,42 @@
       verifySetupNote.hidden = firstUnmet !== 'hardware';
     }
 
-    let prefilled = false;
-    function prefill(device) {
-      const write = device.capabilities.find((item) => item.name === 'write_path_convention');
-      const battery = device.capabilities.find((item) => item.name === 'battery_power_sign_convention');
-      const grid = device.capabilities.find((item) => item.name === 'grid_power_sign_convention');
-      if (write) {
-        model.value = write.verified_device_model || '';
-        firmware.value = write.verified_firmware || '';
-        code.value = write.soc_strategy_external_code ?? '';
-        enumWidth.value = write.enum_byte_width ?? '';
-        boolWidth.value = write.bool_byte_width ?? '';
-        note.value = write.note || '';
-        frame.input.checked = Boolean(write.write_frame_layout_verified);
-        sequence.input.checked = Boolean(write.apply_sequence_verified);
+    // A form is refilled from the server only while the user has not edited it, so a poll never
+    // overwrites typing. Evidence checkboxes and the attestation are never prefilled.
+    for (const [key, form] of Object.entries({ verify: verifyForm, limits: limitForm, engineering: engineeringForm, policy: policyForm })) {
+      const mark = () => { dirty[key] = true; };
+      form.addEventListener('input', mark);
+      form.addEventListener('change', mark);
+    }
+    function refill(device) {
+      if (!dirty.verify) {
+        const caps = Object.fromEntries(device.capabilities.map((item) => [item.name, item]));
+        const isVerified = (name) => caps[name] && caps[name].status === 'verified';
+        const write = isVerified('write_path_convention') ? caps.write_path_convention : null;
+        model.value = (write && write.verified_device_model) || '';
+        firmware.value = (write && write.verified_firmware) || '';
+        code.value = write ? (write.soc_strategy_external_code ?? '') : '';
+        enumWidth.value = write ? (write.enum_byte_width ?? '') : '';
+        boolWidth.value = write ? (write.bool_byte_width ?? '') : '';
+        note.value = (write && write.note) || '';
+        batterySign.value = isVerified('battery_power_sign_convention') ? String(caps.battery_power_sign_convention.battery_discharge_positive) : '';
+        gridSign.value = isVerified('grid_power_sign_convention') ? String(caps.grid_power_sign_convention.grid_import_positive) : '';
       }
-      if (battery) batterySign.value = String(battery.battery_discharge_positive);
-      if (grid) gridSign.value = String(grid.grid_import_positive);
-      if (device.limits) {
-        maxCharge.value = (device.limits.max_charge_power_w / 1000).toFixed(2);
-        maxDischarge.value = (device.limits.max_discharge_power_w / 1000).toFixed(2);
-        engineering.input.checked = device.limits.engineering_mode;
+      if (!dirty.limits) {
+        maxCharge.value = device.limits ? (device.limits.max_charge_power_w / 1000).toFixed(2) : '';
+        maxDischarge.value = device.limits ? (device.limits.max_discharge_power_w / 1000).toFixed(2) : '';
       }
-      policyMode.value = device.soc_target_policy.mode;
-      policyMargin.value = device.soc_target_policy.below_margin_percent;
+      if (!dirty.engineering) engineering.input.checked = Boolean(device.limits && device.limits.engineering_mode);
+      if (!dirty.policy) {
+        policyMode.value = device.soc_target_policy.mode;
+        policyMargin.value = device.soc_target_policy.below_margin_percent;
+      }
     }
 
-    function update(device) {
+    function update(device, expertOn) {
       revokeButton.hidden = !energyChecklist(device).hardwareVerified;
-      // Inputs are filled once and never overwritten by a poll, so typing is not interrupted.
-      if (!prefilled) { prefill(device); prefilled = true; }
+      refill(device);
+      if (!expertOn) return; // the Expert section is not on the page; build its tables when it is
       gateHost.replaceChildren(simpleTable(
         ['Action', 'Allowed', 'Engineering mode', 'Unverified', 'Reject detail'],
         device.gates.map((gate) => [
@@ -1893,7 +1939,7 @@
     // Relocated poll timestamp (design §13): fed from pollEnergy, shown only in Diagnostics.
     function setTimestamp(text) { pollStamp.textContent = text; }
 
-    return { expert, update, setTimestamp, layout, step: (name) => steps[name] || null };
+    return { expert, update, setTimestamp, layout, busy: () => saving > 0, step: (name) => steps[name] || null };
   }
 
   async function pollEnergy() {

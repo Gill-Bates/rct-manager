@@ -18,8 +18,6 @@ async def test_prometheus_settings_apply_live_and_persist(tmp_path):
     settings = Settings(_env_file=None, hmac_secret="s" * 48, admin_db_path=tmp_path / "rct.db")
     app = create_app(settings)
     assert app.state.admin_store.change_password(app.state.first_start_password, "a much stronger password")
-    token = app.state.admin_store.create_token("settings", "read/write", None)[1]
-    headers = {"Authorization": f"Bearer {token}"}
     updates = {
         "metrics_require_token": False,
         "metrics_trusted_sources": ["192.0.2.10", "2001:db8::/32"],
@@ -27,6 +25,11 @@ async def test_prometheus_settings_apply_live_and_persist(tmp_path):
         "metrics_rate_limit_window_seconds": 120,
     }
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver") as client:
+        # Trust and authentication settings need the cookie session, a PAT is refused for them.
+        csrf = (await client.get("/admin/api/session")).json()["csrf_token"]
+        login = await client.post("/admin/api/login", headers={"X-CSRF-Token": csrf},
+                                  json={"username": "admin", "password": "a much stronger password"})
+        headers = {"X-CSRF-Token": login.json()["csrf_token"]}
         response = await client.put("/admin/api/settings", headers=headers, json=updates)
         assert response.status_code == 200
         result = response.json()

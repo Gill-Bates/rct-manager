@@ -367,3 +367,38 @@ async def test_readdressing_clears_unverified_evidence_and_engineering_mode_too(
         assert write_path["soc_strategy_external_code"] is None
         assert write_path["note"] is None
         assert harness.runtime.dispatch.device_limits("main").engineering_mode is False
+
+
+async def test_failed_graph_build_leaves_identity_bound_state_untouched(tmp_path: Path) -> None:
+    """A readdressing whose new graph does not build must roll back completely: the old device
+    keeps running, so its capability evidence and engineering mode must not have been reset."""
+    config = settings(tmp_path, devices=[DeviceEntry(device_id="main", host=HOST, port=PORT)])
+    token = admin_write_token(config)
+    headers = {"Authorization": f"Bearer {token}"}
+    async with running_app(config) as harness:
+        put_cap = await harness.client.put(
+            "/admin/api/dispatch/devices/main/capabilities/write_path_convention",
+            headers=headers,
+            json={"status": "unverified", "soc_strategy_external_code": 2, "note": "keep me"},
+        )
+        assert put_cap.status_code == 200, put_cap.text
+        put_limits = await harness.client.put(
+            "/admin/api/dispatch/devices/main",
+            headers=headers,
+            json={"max_charge_power_w": 3000, "max_discharge_power_w": 5000, "engineering_mode": True},
+        )
+        assert put_limits.status_code == 200, put_limits.text
+
+        with patch("app.api.app_factory._build_device_graph", side_effect=RuntimeError("boom")):
+            response = await harness.client.put(
+                "/admin/api/settings", headers=ADMIN_WRITER,
+                json={"devices": [{"host": "192.0.2.91", "port": 48998}]},
+            )
+        assert response.status_code >= 400, response.text
+
+        after = await harness.client.get("/admin/api/dispatch/devices/main/capabilities", headers=headers)
+        write_path = next(r for r in after.json() if r["name"] == "write_path_convention")
+        assert write_path["soc_strategy_external_code"] == 2
+        assert write_path["note"] == "keep me"
+        assert harness.runtime.dispatch.device_limits("main").engineering_mode is True
+        assert harness.runtime.devices["main"].host == HOST

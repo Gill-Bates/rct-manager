@@ -608,6 +608,7 @@ def _lifespan(
             """
             if runtime.shutting_down():
                 return
+            readdressed: set[str] = set()
             if runtime.dispatch is not None:
                 old_ids = set(runtime.devices)
                 new_devices = {d.device_id: d for d in runtime.settings.devices}
@@ -628,28 +629,6 @@ def _lifespan(
                 }
                 for device_id in removed | readdressed:
                     await runtime.dispatch.force_restore_or_raise(device_id)  # raises: abort, nothing torn down yet
-                for device_id in readdressed:
-                    # Evidence and arming were given for the old physical device, not the new one.
-                    # Every capability is reset, not only the VERIFIED ones: a revoke keeps its
-                    # evidence (strategy code, byte widths, sign assumptions, ...) on an UNVERIFIED
-                    # record, and that evidence must not survive onto whatever device now answers
-                    # at this device_id — only a VERIFIED->default reset here would let it.
-                    for capability in runtime.dispatch.capabilities(device_id):
-                        await runtime.dispatch.set_capability(
-                            device_id, CapabilityRecord(device_id=device_id, name=capability.name)
-                        )
-                    # Engineering mode is the per-device switch that lets dispatch run on unverified
-                    # hardware; it is a decision about the old physical device and must not carry
-                    # over either. The power limits themselves (max_charge/discharge_power_w) are
-                    # a site/installation property, not a hardware-identity claim, so they are left
-                    # as the operator configured them.
-                    old_limits = runtime.dispatch.device_limits(device_id)
-                    if old_limits is not None and old_limits.engineering_mode:
-                        await runtime.dispatch.set_device_limits(
-                            device_id, replace(old_limits, engineering_mode=False)
-                        )
-                    if runtime.energy is not None and runtime.energy.armed(device_id):
-                        await runtime.energy.set_armed(device_id, armed=False, actor=None)
 
             selected_exposed = getattr(app.state, "active_exposed_names", None)
             if selected_exposed is None and store is not None:
@@ -669,6 +648,31 @@ def _lifespan(
                 raise ReconfigurationBuildError(str(exc)) from exc
             finally:
                 gateway.replace_devices(old_bindings)
+
+            # Identity-bound resets run only now that the new graph built: a failed build above must
+            # leave evidence, engineering mode and arming exactly as they were.
+            for device_id in readdressed:
+                # Evidence and arming were given for the old physical device, not the new one.
+                # Every capability is reset, not only the VERIFIED ones: a revoke keeps its
+                # evidence (strategy code, byte widths, sign assumptions, ...) on an UNVERIFIED
+                # record, and that evidence must not survive onto whatever device now answers
+                # at this device_id — only a VERIFIED->default reset here would let it.
+                for capability in runtime.dispatch.capabilities(device_id):
+                    await runtime.dispatch.set_capability(
+                        device_id, CapabilityRecord(device_id=device_id, name=capability.name)
+                    )
+                # Engineering mode is the per-device switch that lets dispatch run on unverified
+                # hardware; it is a decision about the old physical device and must not carry
+                # over either. The power limits themselves (max_charge/discharge_power_w) are
+                # a site/installation property, not a hardware-identity claim, so they are left
+                # as the operator configured them.
+                old_limits = runtime.dispatch.device_limits(device_id)
+                if old_limits is not None and old_limits.engineering_mode:
+                    await runtime.dispatch.set_device_limits(
+                        device_id, replace(old_limits, engineering_mode=False)
+                    )
+                if runtime.energy is not None and runtime.energy.armed(device_id):
+                    await runtime.energy.set_armed(device_id, armed=False, actor=None)
 
             old_tasks = [
                 *connect_tasks, *startup_tasks, *heartbeat_tasks, *periodic_tasks, *refresh_tasks, *dispatch_tasks,

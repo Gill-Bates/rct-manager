@@ -155,11 +155,10 @@ def _csrf(request: Request, session: dict | None = None) -> None:
         raise HTTPException(403, "Invalid CSRF token")
 
 
-def _bearer_admin(request: Request) -> bool:
-    """Authorize by a read/write PAT (no cookie session); independent of the auth_required setting.
+def _bearer_admin(request: Request, privileged: bool) -> bool:
+    """Authorize by a PAT (no cookie session); independent of the auth_required setting.
 
-    Every admin endpoint needs the read/write role, reads included: the admin surface exposes
-    settings and token metadata that a business-level read token has no use for.
+    ``privileged`` (mutations and the settings/token listings) needs the read/write role.
     """
     header = request.headers.get("authorization", "")
     scheme, _, secret = header.partition(" ")
@@ -177,15 +176,22 @@ def _bearer_admin(request: Request) -> bool:
     # Tokens stay inert until the first-login password change completed.
     if store.password_change_pending():
         raise HTTPException(403, "Password change required")
-    if entry.role != "read/write":
+    if privileged and entry.role != "read/write":
         raise HTTPException(403, "Read/write token required")
     return True
 
 
 def require_admin(
-    request: Request, *, mutation: bool = False, allow_password_change: bool = False, session_only: bool = False
+    request: Request,
+    *,
+    mutation: bool = False,
+    allow_password_change: bool = False,
+    session_only: bool = False,
+    sensitive: bool = False,
 ) -> dict | None:
-    """Return the cookie session, or None for a valid read/write PAT.
+    """Return the cookie session, or None for a valid PAT.
+
+    ``sensitive`` marks a read that exposes settings or token metadata: it needs read/write like a mutation.
 
     ``session_only`` refuses a PAT outright: security-relevant changes (tokens, trust and
     authentication settings) must not be reachable with a leaked automation token.
@@ -193,7 +199,7 @@ def require_admin(
     bearer = not allow_password_change and "authorization" in request.headers and not request.cookies.get(_COOKIE)
     if bearer and session_only:
         raise HTTPException(403, "Administration session required")
-    if bearer and _bearer_admin(request):
+    if bearer and _bearer_admin(request, mutation or sensitive):
         return None
     session = admin_session(request)
     if session is None:
@@ -368,7 +374,7 @@ def _repair_device_names(request: Request) -> None:
 
 @router.get("/settings")
 def get_settings(request: Request) -> dict:
-    require_admin(request)
+    require_admin(request, sensitive=True)
     _repair_device_names(request)
     return {"settings": _settings_view(request.app.state.admin_desired_settings),
             "restart_required": _pending_restart(request), "live": sorted(_LIVE)}
@@ -1070,7 +1076,7 @@ def put_parameters(body: ParameterSelection, request: Request) -> dict:
 
 @router.get("/tokens")
 def get_tokens(request: Request) -> dict:
-    require_admin(request)
+    require_admin(request, sensitive=True)
     return {"tokens": _store(request).list_tokens()}
 
 
