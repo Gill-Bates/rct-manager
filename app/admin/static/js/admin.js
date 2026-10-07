@@ -72,15 +72,23 @@
 
   async function api(path, options = {}) {
     const method = options.method || 'GET';
-    const response = await fetch(`/admin/api/${path}`, {
-      credentials: 'same-origin',
-      ...options,
-      headers: {
-        ...(method !== 'GET' ? { 'X-CSRF-Token': csrfToken } : {}),
-        ...(options.body ? { 'Content-Type': 'application/json' } : {}),
-        ...options.headers,
-      },
-    });
+    let response;
+    try {
+      response = await fetch(`/admin/api/${path}`, {
+        credentials: 'same-origin',
+        ...options,
+        headers: {
+          ...(method !== 'GET' ? { 'X-CSRF-Token': csrfToken } : {}),
+          ...(options.body ? { 'Content-Type': 'application/json' } : {}),
+          ...options.headers,
+        },
+      });
+    } catch (error) {
+      // A genuine network failure (not a caller abort) opens the connection-lost modal at once.
+      if (error?.name !== 'AbortError') window.RCTReconnect?.start();
+      throw error;
+    }
+    if (response.ok && window.RCTReconnect?.isActive()) window.RCTReconnect.stop();
     const data = await response.json().catch(() => ({}));
     if (!response.ok) {
       if (response.status === 401 && !['login', 'change-password'].includes(page)) {
@@ -766,7 +774,6 @@
   let dashboardTimer = null;
   let dashboardController = null;
   let dashboardGeneration = 0;
-  let dashboardLastSuccess = null;
 
   function dashboardDelay() {
     const base = Math.min(DASHBOARD_INTERVAL_MS * 2 ** dashboardFailures, DASHBOARD_MAX_INTERVAL_MS);
@@ -854,9 +861,6 @@
       dashboardPollFailing = false;
       dashboardFailures = 0;
       renderDashboard(Array.isArray(data.devices) ? data.devices : [], data.tsdb || null);
-      dashboardLastSuccess = new Date();
-      const updated = $('dashboard-updated');
-      if (updated) updated.textContent = `Updated ${hhmm(dashboardLastSuccess)}`;
       return 'ok';
     } catch (error) {
       if (generation !== dashboardGeneration) return 'skipped';
@@ -1021,6 +1025,7 @@
   const SVG_NS = 'http://www.w3.org/2000/svg';
   const energyPanels = new Map();
   let energyPolling = false;
+  let energyExpertMode = false; // page-wide display switch; never persisted, resets on every load
 
   function svgEl(tag, attrs = {}, text) {
     const node = document.createElementNS(SVG_NS, tag);
@@ -1176,8 +1181,8 @@
   // The first unmet checklist item in the fixed order the Setup CTA targets (design §12).
   function energyFirstUnmet(checklist) {
     if (!checklist.connected) return 'connection';
-    if (!checklist.limits) return 'limits';
     if (!checklist.writeAccess) return 'write_access';
+    if (!checklist.limits) return 'limits';
     if (!checklist.hardwareVerified) return 'hardware';
     return null;
   }
@@ -1306,13 +1311,10 @@
     // The state-independent Setup checklist (design §12), shown only when a prerequisite is unmet.
     const setupBox = element('div', 'energy-setup');
     setupBox.hidden = true;
-    const setupHeading = element('h3', 'h6 mb-2', 'Manual battery control needs setup');
+    const setupHeading = element('h3', 'h6 mb-2', 'Manual battery control setup');
     const setupList = element('ul', 'energy-setup-list');
-    const setupButton = element('button', 'btn btn-sm btn-primary mt-2', 'Set up manual control');
-    setupButton.type = 'button';
-    const setupHint = element('p', 'small text-secondary mt-2 mb-0');
-    setupHint.hidden = true;
-    setupBox.append(setupHeading, setupList, setupButton, setupHint);
+    const setupStep = element('div', 'energy-setup-step');
+    setupBox.append(setupHeading, setupList, setupStep);
     control.append(setupBox);
 
     const statusBox = element('div', 'energy-status');
@@ -1321,10 +1323,7 @@
     const statusText = element('div');
     const statusMain = element('div', 'fw-semibold');
     const statusDetail = element('div', 'small text-secondary');
-    const statusButton = element('button', 'btn btn-sm btn-primary mt-2', 'Complete setup');
-    statusButton.type = 'button';
-    statusButton.hidden = true;
-    statusText.append(statusMain, statusDetail, statusButton);
+    statusText.append(statusMain, statusDetail);
     statusBox.append(statusIcon, statusText);
 
     // One plain-language block: current mode + a single human sentence (design §10).
@@ -1370,25 +1369,7 @@
     control.append(statusBox, modeBox, actions, target);
 
     const advanced = energyAdvanced(id, () => device, (next) => panel.update(next));
-    body.append(advanced.expert, advanced.diagnostics);
-
-    // Setup CTA routing (design §12): point the operator at the first unmet step.
-    function routeSetup(firstUnmet) {
-      if (firstUnmet === 'limits') { advanced.openExpert(); advanced.focusLimits(); }
-      else if (firstUnmet === 'hardware') { advanced.openExpert(); advanced.focusVerification(); }
-      else if (firstUnmet === 'write_access') {
-        setupHint.hidden = false;
-        setupHint.textContent = 'Approve the required register writes on the Inverters page, then they appear here as enabled.';
-      } else {
-        setupHint.hidden = false;
-        setupHint.textContent = 'Check the inverter connection on the Inverters page.';
-      }
-    }
-    setupButton.addEventListener('click', () => routeSetup(energyFirstUnmet(energyChecklist(device))));
-    statusButton.addEventListener('click', () => {
-      const state = energyControlState(device, lastPoll503);
-      routeSetup(state.firstUnmet || energyFirstUnmet(energyChecklist(device)));
-    });
+    let expertOn = energyExpertMode;
 
     function setBusy(value) {
       busy = value;
@@ -1464,15 +1445,16 @@
     // Which Setup rows the checklist renders, in display order.
     const SETUP_ROWS = [
       ['connected', 'Inverter connected'],
-      ['writeAccess', 'Write access enabled'],
-      ['limits', 'Power limits configured'],
-      ['hardwareVerified', 'Hardware control verified'],
+      ['writeAccess', 'Write access'],
+      ['limits', 'Power limits'],
+      ['hardwareVerified', 'Hardware verification'],
     ];
 
-    function renderSetup(checklist, bannerOwnsCta) {
+    // Shows only the editor of the first unmet step; the rest of the checklist stays a status list.
+    function renderSetup(checklist) {
       const unmet = SETUP_ROWS.some(([key]) => !checklist[key]);
       setupBox.hidden = !unmet;
-      if (!unmet) return;
+      if (!unmet) { advanced.layout(null); return; }
       setupList.replaceChildren();
       for (const [key, label] of SETUP_ROWS) {
         const met = checklist[key];
@@ -1482,9 +1464,10 @@
         row.append(icon, element('span', null, label));
         setupList.append(row);
       }
-      // Exactly one CTA (design §9/§12): when the §9 banner owns it, the §12 button is suppressed.
-      setupButton.hidden = bannerOwnsCta;
-      if (bannerOwnsCta) { setupHint.hidden = true; }
+      const first = energyFirstUnmet(checklist);
+      advanced.layout(first);
+      const node = advanced.step(first);
+      if (setupStep.firstChild !== node) setupStep.replaceChildren(...(node ? [node] : []));
     }
 
     function render() {
@@ -1496,17 +1479,15 @@
       armedInput.disabled = busy || lastPoll503;
       armedLabel.textContent = `Manual control: ${device.armed ? 'Enabled' : 'Disabled'}`;
 
-      // The §9 banner owns the single CTA whenever it reads "needs setup".
-      const bannerOwnsCta = readyState.kind === 'setup';
-      renderSetup(energyChecklist(device), bannerOwnsCta);
+      renderSetup(energyChecklist(device));
 
       statusBox.className = `energy-status ${readyState.ready ? 'is-ready' : 'is-blocked'}`;
-      statusBox.hidden = readyState.ready; // nothing shown when healthy
+      // Nothing when healthy; the Setup block replaces the "needs setup" line.
+      statusBox.hidden = readyState.ready || readyState.kind === 'setup';
       statusIcon.textContent = readyState.kind === 'config' ? 'info' : 'info';
       statusMain.textContent = readyState.text;
       statusDetail.textContent = readyState.detail || '';
       statusDetail.hidden = !readyState.detail;
-      statusButton.hidden = readyState.kind !== 'setup';
 
       // Mode + one plain sentence; the whole block is hidden until manual control is ready.
       const operable = readyState.ready;
@@ -1537,6 +1518,9 @@
       if (selected && buttons[selected].disabled) selected = null;
       renderTarget();
       advanced.update(device);
+      if (expertOn !== (advanced.expert.parentNode === body)) {
+        if (expertOn) body.append(advanced.expert); else advanced.expert.remove();
+      }
     }
 
     const panel = {
@@ -1549,26 +1533,30 @@
       // Lets pollEnergy signal a 503/transient failure without a fresh device payload.
       setPollState(flags) { lastPoll503 = Boolean(flags.poll503); lastPollFailed = Boolean(flags.pollFailed); render(); },
       setTimestamp(text) { advanced.setTimestamp(text); },
+      // Display only: no request, no stored value.
+      setExpert(on) { expertOn = Boolean(on); render(); },
     };
     render();
     return panel;
   }
 
-  // Two disclosures (design §13). Expert: hardware verification, engineering mode + kW power limits,
-  // and the SoC-target policy — rarely needed, behind a warning. Diagnostics: the gate/capability
-  // tables (the ONLY place raw reject_detail / capability names appear), write approvals, per-reading
-  // age/stale values and the poll timestamp. Raw register names are fine on this admin surface.
+  // Expert mode is a page-wide display switch, never persisted and never a backend setting. The
+  // required setup steps (write access, power limits, hardware verification) live in the guided
+  // Setup block; this function builds their editors plus the Expert-only section. The Expert section
+  // is attached to the page only while Expert mode is on; it holds the full hardware verification,
+  // engineering mode, the SoC-target policy and Diagnostics (the ONLY place raw reject_detail,
+  // capability names and write approvals appear). Raw register names are fine on this admin surface.
   function energyAdvanced(id, getDevice, onChange) {
     const path = `energy/devices/${encodeURIComponent(id)}`;
 
-    const expert = element('details', 'energy-expert mt-3');
-    expert.append(element('summary', 'small', 'Expert settings…'));
-    const expertInner = element('div', 'energy-advanced-inner');
+    const expert = element('section', 'energy-expert mt-3');
+    expert.append(element('h3', 'h5 mb-1', 'Expert settings'));
     expert.append(element('p', 'small text-warning energy-expert-warning',
-      'Advanced hardware settings. Changing these can stop the battery from responding.'));
+      'Advanced hardware settings. Incorrect values can prevent battery control from working correctly.'));
+    const expertInner = element('div', 'energy-advanced-inner');
     expert.append(expertInner);
 
-    const diagnostics = element('details', 'energy-diagnostics mt-3');
+    const diagnostics = element('details', 'energy-diagnostics energy-advanced-section');
     diagnostics.append(element('summary', 'small', 'Diagnostics…'));
     const diagInner = element('div', 'energy-advanced-inner');
     diagnostics.append(diagInner);
@@ -1649,9 +1637,13 @@
     const pollStamp = element('p', 'small text-secondary mb-0', 'Updated –');
     freshSection.append(freshHost, pollStamp);
 
-    // 3. Hardware verification (Expert)
+    // 3. Hardware verification: one form, shown in the Setup step while that step is open and in
+    // the Expert section otherwise (re-verify). Never prefilled with guessed hardware values.
     const verifySection = section(expertInner, 'Hardware verification',
       'Enter what you measured on this inverter. The server stamps who verified it and when; a verification applies to this device only.');
+    const verifyExpertSlot = element('div');
+    const verifySetupNote = element('p', 'small text-secondary mb-0', 'Complete the hardware verification step in the setup block above.');
+    verifySetupNote.hidden = true;
     const verifyForm = element('form', 'row g-2 align-items-end');
     const model = textInput(128);
     const firmware = textInput(64);
@@ -1681,14 +1673,14 @@
     const checks = element('div', 'col-12');
     checks.append(frame.wrap, sequence.wrap, attest.wrap);
     const buttonRow = element('div', 'col-12 d-flex gap-2');
-    buttonRow.append(verifyButton, revokeButton);
+    buttonRow.append(verifyButton);
     verifyForm.append(
       field('Device model', model, 'col-sm-6 col-lg-3'), field('Firmware', firmware, 'col-sm-6 col-lg-3'),
       field('Strategy code', code), field('Enum byte width', enumWidth), field('Bool byte width', boolWidth),
       field('Battery power sign', batterySign, 'col-sm-6'), field('Grid power sign', gridSign, 'col-sm-6'),
       field('Evidence note', note, 'col-12'), checks, buttonRow,
     );
-    verifySection.append(verifyForm);
+    verifySection.append(verifyExpertSlot, verifySetupNote, revokeButton);
 
     verifyForm.addEventListener('submit', guarded(verifyButton, async () => {
       if (!attest.input.checked) throw new Error('Confirm that the values were verified on the hardware.');
@@ -1718,32 +1710,51 @@
       toast('Verification revoked.');
     }));
 
-    // 4. Limits and engineering mode (Expert). Shown/entered in kW; converted to watts on submit.
-    const limitSection = section(expertInner, 'Power limits and engineering mode',
-      'Engineering mode releases unverified hardware for short, time-capped commands. It is not needed once the hardware is verified.');
+    // 4. Power limits (Setup step or Expert section). Entered in kW, converted to watts on submit.
+    // The saved request always carries the existing engineering_mode so Basic Setup never changes it.
+    const limitSection = section(expertInner, 'Power limits');
+    const limitExpertSlot = element('div');
+    limitSection.append(limitExpertSlot);
     const limitForm = element('form', 'row g-2 align-items-end');
     const maxCharge = numberInput(0.001, 100, 0.01);
     const maxDischarge = numberInput(0.001, 100, 0.01);
-    const engineering = checkbox('Engineering mode');
-    const limitButton = element('button', 'btn btn-sm btn-outline-primary', 'Save limits');
+    const limitButton = element('button', 'btn btn-sm btn-primary', 'Save and continue');
     limitButton.type = 'submit';
     const limitButtonCol = element('div', 'col-auto');
     limitButtonCol.append(limitButton);
+    limitForm.append(field('Maximum charging power (kW)', maxCharge), field('Maximum discharging power (kW)', maxDischarge), limitButtonCol);
+    const putLimits = (chargeW, dischargeW, engineeringMode) => api(`dispatch/devices/${encodeURIComponent(id)}`, {
+      method: 'PUT',
+      body: JSON.stringify({ max_charge_power_w: chargeW, max_discharge_power_w: dischargeW, engineering_mode: engineeringMode }),
+    });
+    limitForm.addEventListener('submit', guarded(limitButton, async () => {
+      if ([maxCharge, maxDischarge].some((input) => input.value === '' || !input.checkValidity())) {
+        throw new Error('Enter both maximum powers in kW.');
+      }
+      const current = getDevice().limits;
+      await putLimits(Math.round(Number(maxCharge.value) * 1000), Math.round(Number(maxDischarge.value) * 1000),
+        Boolean(current && current.engineering_mode));
+      toast('Limits saved.');
+    }));
+
+    // 4b. Engineering mode (Expert only); keeps the saved power limits untouched.
+    const engineeringSection = section(expertInner, 'Engineering mode',
+      'Engineering mode releases unverified hardware for short, time-capped commands. It is not needed once the hardware is verified.');
+    const engineeringForm = element('form', 'row g-2 align-items-end');
+    const engineering = checkbox('Engineering mode');
+    const engineeringButton = element('button', 'btn btn-sm btn-outline-primary', 'Save engineering mode');
+    engineeringButton.type = 'submit';
     const engineeringCol = element('div', 'col-auto');
     engineeringCol.append(engineering.wrap);
-    limitForm.append(field('Max charge (kW)', maxCharge), field('Max discharge (kW)', maxDischarge), engineeringCol, limitButtonCol);
-    limitSection.append(limitForm);
-    limitSection.append(element('p', 'small text-secondary mb-0', 'Entered in kW; the inverter is controlled in watts.'));
-    limitForm.addEventListener('submit', guarded(limitButton, async () => {
-      await api(`dispatch/devices/${encodeURIComponent(id)}`, {
-        method: 'PUT',
-        body: JSON.stringify({
-          max_charge_power_w: Math.round(Number(maxCharge.value) * 1000),
-          max_discharge_power_w: Math.round(Number(maxDischarge.value) * 1000),
-          engineering_mode: engineering.input.checked,
-        }),
-      });
-      toast('Limits saved.');
+    const engineeringButtonCol = element('div', 'col-auto');
+    engineeringButtonCol.append(engineeringButton);
+    engineeringForm.append(engineeringCol, engineeringButtonCol);
+    engineeringSection.append(engineeringForm);
+    engineeringForm.addEventListener('submit', guarded(engineeringButton, async () => {
+      const current = getDevice().limits;
+      if (!current) throw new Error('Set the power limits first.');
+      await putLimits(current.max_charge_power_w, current.max_discharge_power_w, engineering.input.checked);
+      toast('Engineering mode saved.');
     }));
 
     // 5. SoC target policy (Expert)
@@ -1772,6 +1783,8 @@
       toast('SoC target policy saved.');
     }));
 
+    expertInner.append(diagnostics);
+
     const simpleTable = (headers, rows) => {
       const table = element('table', 'table table-sm table-borderless mb-0');
       const headRow = element('tr');
@@ -1788,6 +1801,34 @@
       table.append(bodyEl);
       return table;
     };
+
+    // Guided Setup steps. No register names here; the forms above are moved into their step.
+    const inverterLink = (text) => {
+      const link = element('a', 'btn btn-sm btn-primary', text);
+      link.href = '/ui/inverters';
+      return link;
+    };
+    const stepNode = (heading, text, ...rest) => {
+      const node = element('div', 'energy-setup-step-body');
+      node.append(element('h4', 'h6 mb-1', heading), element('p', 'small text-secondary', text), ...rest);
+      return node;
+    };
+    const limitSetupSlot = element('div');
+    const verifySetupSlot = element('div');
+    const steps = {
+      connection: stepNode('Inverter connection', 'The inverter is not connected. Check its connection settings.', inverterLink('Open inverter settings')),
+      write_access: stepNode('Write access', 'Write access is required for manual battery control.', inverterLink('Open inverter settings')),
+      limits: stepNode('Power limits', 'The most power the battery may be charged and discharged with, in kW.', limitSetupSlot),
+      hardware: stepNode('Hardware verification',
+        'These values must come from an actual hardware and firmware verification of this inverter. Do not guess them.', verifySetupSlot),
+    };
+    const place = (node, slot) => { if (node.parentNode !== slot) slot.append(node); };
+    function layout(firstUnmet) {
+      place(limitForm, firstUnmet === 'limits' ? limitSetupSlot : limitExpertSlot);
+      limitButton.textContent = firstUnmet === 'limits' ? 'Save and continue' : 'Save limits';
+      place(verifyForm, firstUnmet === 'hardware' ? verifySetupSlot : verifyExpertSlot);
+      verifySetupNote.hidden = firstUnmet !== 'hardware';
+    }
 
     let prefilled = false;
     function prefill(device) {
@@ -1816,6 +1857,7 @@
     }
 
     function update(device) {
+      revokeButton.hidden = !energyChecklist(device).hardwareVerified;
       // Inputs are filled once and never overwritten by a poll, so typing is not interrupted.
       if (!prefilled) { prefill(device); prefilled = true; }
       gateHost.replaceChildren(simpleTable(
@@ -1848,12 +1890,7 @@
     // Relocated poll timestamp (design §13): fed from pollEnergy, shown only in Diagnostics.
     function setTimestamp(text) { pollStamp.textContent = text; }
 
-    return {
-      expert, diagnostics, update, setTimestamp,
-      openExpert() { expert.open = true; },
-      focusLimits() { try { maxCharge.focus(); } catch { /* not visible yet */ } },
-      focusVerification() { try { model.focus(); } catch { /* not visible yet */ } },
-    };
+    return { expert, update, setTimestamp, layout, step: (name) => steps[name] || null };
   }
 
   async function pollEnergy() {
@@ -1895,6 +1932,15 @@
 
   // Reads the cache only (server side), so the poll rate does not load the inverter.
   function initEnergy() {
+    const expertSwitch = $('energy-expert-mode');
+    if (expertSwitch) {
+      expertSwitch.checked = energyExpertMode;
+      expertSwitch.addEventListener('change', () => {
+        energyExpertMode = expertSwitch.checked;
+        $('energy-expert-state').textContent = energyExpertMode ? 'On' : 'Off';
+        for (const panel of energyPanels.values()) panel.setExpert(energyExpertMode);
+      });
+    }
     pollEnergy();
     setInterval(() => { if (!document.hidden) pollEnergy(); }, ENERGY_POLL_MS);
     document.addEventListener('visibilitychange', () => { if (!document.hidden) pollEnergy(); });

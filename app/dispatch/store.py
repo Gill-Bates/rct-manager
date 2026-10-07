@@ -153,9 +153,9 @@ class DispatchStore:
         try:
             payload = json.loads(self._fernet.decrypt(encrypted))
         except (InvalidToken, UnicodeError, ValueError) as exc:
-            raise ValueError("dispatch database cannot be decrypted with HMAC_SECRET") from exc
+            raise DispatchRecordCorrupt("dispatch database cannot be decrypted with HMAC_SECRET") from exc
         if not isinstance(payload, dict) or payload.get("key") != key:
-            raise ValueError("dispatch database record integrity check failed")
+            raise DispatchRecordCorrupt("dispatch database record integrity check failed")
         return payload["value"]
 
     def get(self, device_id: str) -> DispatchRecord | None:
@@ -182,8 +182,8 @@ class DispatchStore:
         for row in rows:
             try:
                 record = self._decode(row["device_id"], row["encrypted"])
-            except DispatchRecordCorrupt:
-                log.error("Dispatch record for device %s is corrupt and was skipped", row["device_id"])
+            except ValueError:
+                log.error("Dispatch record for device %s is unreadable and was skipped", row["device_id"])
                 continue
             record.record_version = int(row["record_version"])
             records.append(record)

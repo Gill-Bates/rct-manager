@@ -111,3 +111,7 @@ class WriteDisabled(DeviceApiError):
 
 class NotFound(DeviceApiError):
     code = "not_found"
+
+
+class ReconfigurationBuildError(Exception):
+    """The new device graph could not be built; the old graph is still intact and running."""

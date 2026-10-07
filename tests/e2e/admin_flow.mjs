@@ -567,8 +567,7 @@ check('CSP header present', Boolean(csp && csp.includes("script-src 'self'")));
 // no manual refresh button and no stale-data banner on the page, automatic polling is the only
 // loadDashboard() trigger left in the UI; a failing poll must still toast once (with the slide-in
 // animation), and a second consecutive automatic failure must not stack another identical toast.
-const lastUpdated = (await page.locator('#dashboard-updated').innerText()).trim();
-check('a successful poll records the time of the last refresh', /^Updated \d\d:\d\d$/.test(lastUpdated), lastUpdated);
+check('no "Updated" timestamp line on the dashboard', (await page.locator('#dashboard-updated').count()) === 0);
 await page.route('**/admin/api/devices', (route) => route.fulfill({ status: 429, contentType: 'application/json', body: JSON.stringify({ detail: 'The request rate or the failed-authentication limit was exceeded.' }) }));
 await forcePoll();
 await page.waitForFunction(() => document.querySelector('#toast-region .alert-danger'), null, { timeout: 8000 });
@@ -607,6 +606,21 @@ await page.unroute('**/admin/api/devices');
 await forcePoll();
 await page.waitForFunction(() => !document.querySelector('#devices-list .text-danger'), null, { timeout: 20000 });
 scrub(/http 503: GET .*\/admin\/api\/devices|status of 503|\/admin\/api\/devices/);
+
+// 2e. connection loss: going offline opens the blocking modal (toasts cleared, page inert), and the
+// return of the connection is detected by the /health probe, which closes the modal again.
+await context.setOffline(true);
+await page.waitForSelector('#reconnect-modal.show', { timeout: 8000 });
+check('connection loss opens the reconnect modal', await page.evaluate(() => document.body.classList.contains('is-reconnecting')));
+check('reconnect modal is a labelled dialog', await page.evaluate(() => {
+  const el = document.getElementById('reconnect-modal');
+  return el.getAttribute('aria-modal') === 'true' && el.getAttribute('role') === 'dialog' && document.getElementById(el.getAttribute('aria-labelledby')).textContent.length > 0;
+}));
+await shot('02e-connection-lost');
+await context.setOffline(false);
+await page.waitForFunction(() => !document.querySelector('#reconnect-modal.show') && !document.body.classList.contains('is-reconnecting'), null, { timeout: 15000 });
+check('reconnect modal closes once the server answers again', true);
+scrub(/requestfailed:|ERR_INTERNET_DISCONNECTED|Failed to fetch|Failed to load resource/);
 
 // 3. layouts
 async function layouts(label, urls) {
@@ -1282,9 +1296,15 @@ await shot('prometheus-master-toggle-on');
     return connectedRow && /Inverter connected/.test(connectedRow.textContent);
   }, null, { timeout: 20000 }).catch(() => { });
   const setupText = await ep.locator('.energy-panel').first().innerText();
-  check('Operate shows the plain "needs setup" wording while unverified', /Manual control needs setup\./.test(setupText), setupText.slice(0, 500));
-  check('a single "Complete setup"/"Set up manual control" CTA is offered',
-    (await ep.locator('.energy-panel button:visible', { hasText: /^(Complete setup|Set up manual control)$/ }).count()) === 1);
+  check('a single guided setup block is shown, without the old duplicated "needs setup" line',
+    /Manual battery control setup/.test(setupText) && !/Manual control needs setup/.test(setupText) && !/Complete setup/.test(setupText), setupText.slice(0, 500));
+  check('Expert mode exists and is OFF on load',
+    (await ep.locator('#energy-expert-mode').isChecked()) === false && (await ep.locator('.energy-expert').count()) === 0);
+  check('Basic mode has no diagnostics, engineering mode or SoC policy',
+    (await ep.locator('.energy-diagnostics').count()) === 0 && !/Engineering mode|SoC target policy|Revoke verification/.test(setupText), setupText.slice(0, 500));
+  const shownStep = await ep.locator('.energy-setup-step').first().innerText();
+  check('only the first open setup step is shown, without engineering mode',
+    /Write access|Power limits|Hardware verification/.test(shownStep) && !/Engineering mode/.test(shownStep), shownStep.slice(0, 300));
   check('no raw capability names leak onto the Operate surface',
     !/write_path_convention|battery_power_sign_convention|grid_power_sign_convention/.test(setupText), setupText.slice(0, 500));
 
@@ -1363,15 +1383,28 @@ await shot('prometheus-master-toggle-on');
   check('Operate shows the relabelled battery actions',
     /Charge battery/.test(operate) && /Keep battery idle/.test(operate) && /Discharge battery/.test(operate), operate.slice(0, 400));
 
-  // Raw capability names must STILL be available in Diagnostics (requirement c), and power limits
-  // are shown in kW in Expert (requirement d).
+  // Normal mode stays compact: no raw capability names, reject detail or expert controls.
+  check('Normal mode shows no raw capability names, engineering mode or reject detail',
+    !/write_path_convention|reject|Engineering mode|SoC target policy|Revoke verification|Strategy code/i.test(operate)
+    && (await ep.locator('.energy-setup:visible').count()) === 0, operate.slice(0, 400));
+  // Expert mode is a pure display switch: toggling must not send any write request.
+  const writes = [];
+  ep.on('request', (r) => { if (r.method() !== 'GET') writes.push(`${r.method()} ${r.url()}`); });
+  await ep.locator('#energy-expert-mode').check();
+  await ep.locator('.energy-expert').first().waitFor();
+  check('Expert mode ON shows Revoke verification, engineering mode and SoC policy',
+    /Revoke verification/.test(await ep.locator('.energy-expert').first().innerText())
+    && /Engineering mode/.test(await ep.locator('.energy-expert').first().innerText())
+    && /SoC target policy/.test(await ep.locator('.energy-expert').first().innerText()));
   await ep.locator('.energy-diagnostics summary').first().click();
   const diagText = await ep.locator('.energy-diagnostics').first().innerText();
   check('Diagnostics still exposes raw capability names',
     /write_path_convention/.test(diagText) && /battery_power_sign_convention/.test(diagText), diagText.slice(0, 400));
-  await ep.locator('.energy-expert summary').first().click();
   const expertText = await ep.locator('.energy-expert').first().innerText();
-  check('Expert shows power limits in kW', /Max charge \(kW\)/.test(expertText) && /Max discharge \(kW\)/.test(expertText), expertText.slice(0, 400));
+  check('Expert shows power limits in kW', /Maximum charging power \(kW\)/.test(expertText) && /Maximum discharging power \(kW\)/.test(expertText), expertText.slice(0, 400));
+  await ep.locator('#energy-expert-mode').uncheck();
+  check('Expert mode OFF hides expert content again; toggling sent no write request',
+    (await ep.locator('.energy-expert').count()) === 0 && writes.length === 0, writes.join(', '));
 
   await ep.setViewportSize({ width: 390, height: 844 });
   await sleep(300);

@@ -321,10 +321,10 @@ class DispatchRecord:
     restore_required: bool = False
     plan: list[dict[str, str]] = field(default_factory=list)
     record_version: int = 0
-    # D1 (minimal slice, see design.md §6.2 for the full backoff feature): the earliest time a
-    # FAULT_RESTORE_PENDING device is eligible for an automatic retry. No backoff curve, no
-    # attempt counter yet — those belong to the deferred Arbeitspaket 3.
+    # Earliest time a FAULT_RESTORE_PENDING device is eligible for an automatic retry, and the
+    # number of consecutive failed restore attempts that drives the backoff.
     next_restore_at: datetime | None = None
+    restore_attempts: int = 0
 
     def to_dict(self) -> dict:
         data = asdict(self)
@@ -367,6 +367,7 @@ class DispatchRecord:
             next_restore_at = _tz_aware_or_none(data.get("next_restore_at"), "next_restore_at")
             stop_reason = StopReason(data["stop_reason"]) if data.get("stop_reason") else None
             record_version = _strict_number(data.get("record_version", 0), "record_version", int)
+            restore_attempts = _strict_number(data.get("restore_attempts", 0), "restore_attempts", int)
         except (KeyError, TypeError, ValueError) as exc:
             raise DispatchRecordCorrupt(f"dispatch record is malformed: {exc}") from exc
         record = cls(
@@ -382,6 +383,7 @@ class DispatchRecord:
             plan=list(data.get("plan", [])),
             record_version=record_version,
             next_restore_at=next_restore_at,
+            restore_attempts=restore_attempts,
         )
         validate_record_invariants(record)
         return record

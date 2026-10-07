@@ -23,6 +23,7 @@ from app.dispatch.models import (
     PowerDirection,
     StopReason,
 )
+from app.energy.manager import MAX_POWER_W
 from app.security.dependencies import require_write
 from app.security.tokens import Principal
 
@@ -57,7 +58,7 @@ class DispatchBody(BaseModel):
     # Both fields depend on the mode: a hold has no SoC goal and no power budget, every other mode
     # has both. The bounds that do not depend on the mode stay on the fields.
     target_soc_percent: float | None = Field(None, ge=0, le=100)
-    max_power_w: float = Field(ge=0)
+    max_power_w: float = Field(ge=0, le=MAX_POWER_W, allow_inf_nan=False)
     valid_until: datetime
     expected_operation_id: str | None = Field(None, min_length=1, max_length=64)
 

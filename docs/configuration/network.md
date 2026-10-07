@@ -27,6 +27,12 @@ FORWARDED_HEADER=X-Forwarded-For
     Without them all callers share the proxy address, and the failed logins of
     one client lock out every client.
 
+`TRUSTED_PROXIES` is the only proxy trust list: the server does not apply any
+other forwarded-header handling. The administration interface takes the browser
+scheme from `X-Forwarded-Proto` only when the request comes from one of these
+networks; behind a TLS-terminating proxy that is not listed there, saving in the
+GUI fails the same-origin check with 403.
+
 ## Interactive documentation
 
 `/docs` and `/openapi.json` are served only with `DOCS_PUBLIC=true`; otherwise

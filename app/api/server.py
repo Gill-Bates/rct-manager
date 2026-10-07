@@ -154,6 +154,9 @@ def run_server(app: FastAPI, settings: Settings, sock: socket.socket | None = No
         access_log=False,
         timeout_graceful_shutdown=5,
         server_header=False,
+        # One trust configuration only: TRUSTED_PROXIES/FORWARDED_HEADER decide who may speak for a
+        # client. Uvicorn's own forwarded-header handling would be a second, divergent list.
+        proxy_headers=False,
     )
     server = GracefulServer(config, app.state.runtime)
     asyncio.run(server.serve(sockets=[sock] if sock is not None else None))

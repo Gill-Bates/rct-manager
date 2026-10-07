@@ -23,6 +23,7 @@ from datetime import datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, StrictBool
 
 from app.admin.dispatch_api import (
@@ -228,6 +229,20 @@ async def list_devices(
     ]
 
 
+async def _status_after_action(request: Request, device_id: str) -> AdminEnergyDeviceStatus:
+    """The action already happened: a failing status projection must not turn it into a 500.
+
+    The caller could retry a hardware action that did run, so the success is reported anyway.
+    """
+    try:
+        return await _admin_status(request, device_id)
+    except Exception:
+        log.exception("Status projection failed after an executed energy action (device=%s)", device_id)
+        return JSONResponse(  # type: ignore[return-value]
+            {"executed": True, "status_available": False, "device_id": device_id}, status_code=202
+        )
+
+
 @router.post("/devices/{device_id}/command")
 async def post_command(
     request: Request,
@@ -245,7 +260,7 @@ async def post_command(
         EnergyCommand(body.action, body.target_soc_percent, body.max_power_w),
         actor=_ADMIN_ACTOR,
     )
-    return await _admin_status(request, device_id)
+    return await _status_after_action(request, device_id)
 
 
 @router.put("/devices/{device_id}/armed")
@@ -261,7 +276,7 @@ async def put_armed(
     runtime.ensure_accepting()
     energy = _energy_or_503(request)
     await energy.set_armed(device_id, armed=body.armed, actor=_ADMIN_ACTOR)
-    return await _admin_status(request, device_id)
+    return await _status_after_action(request, device_id)
 
 
 @router.put("/devices/{device_id}/hardware-verification")

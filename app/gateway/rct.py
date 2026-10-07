@@ -17,7 +17,13 @@ from app.allowlist import Allowlist
 from app.cache import CacheEntry, CacheFreshness, ValueStore, age_seconds
 from app.catalog.registry import RegistryCatalog, RegistryEntry
 from app.clock import Clock
-from app.config import DeviceEntry, DeviceKey, EndpointKey, FreshPeriodicMode
+from app.config import (
+    SYSTEM_READBACK_TIMEOUT_SECONDS,
+    DeviceEntry,
+    DeviceKey,
+    EndpointKey,
+    FreshPeriodicMode,
+)
 from app.errors import (
     ActionOutcomeUnknown,
     BudgetExhausted,
@@ -200,6 +206,9 @@ class RctGateway:
     def add_device(self, binding: DeviceBinding) -> None:
         self._devices[binding.entry.device_id] = binding
         self._by_address[(binding.entry.key.endpoint, binding.entry.network_id)] = binding.entry.device_id
+
+    def device_bindings(self) -> list[DeviceBinding]:
+        return list(self._devices.values())
 
     def replace_devices(self, bindings: list[DeviceBinding]) -> None:
         """Swap the whole device/address map for a freshly built graph (live device-list reload)."""
@@ -486,11 +495,14 @@ class RctGateway:
         key: tuple[str, str],
         origin: TransactionOrigin,
         charge: BudgetHandle | None = None,
+        *,
+        total_timeout_seconds: float | None = None,
     ) -> tuple[ScalarValue, bytes] | None:
         """One uncached read whose result alone repopulates the cache (Requirement 9.13); None on failure."""
         try:
             request = self._read_request(binding, entry, origin, None)
             request.charge = charge
+            request.read_total_timeout_seconds = total_timeout_seconds
             result = await binding.serializer.submit(request)
             if result.error is not None or result.frame is None:
                 return None
@@ -556,7 +568,12 @@ class RctGateway:
                 self._cache.invalidate(key)  # also when the outcome is unclear (Requirement 9.12)
             if not result.ok and not result.committed:
                 raise result.error or DeviceApiError()  # nothing left the send path: final and safe
-            return result, await self._read_into_cache(binding, entry, key, origin, charge)
+            # A system write's readback is bounded tightly: restore runs against the shutdown
+            # work deadline and a slow readback must not eat the budget of the remaining steps.
+            readback_timeout = SYSTEM_READBACK_TIMEOUT_SECONDS if system else None
+            return result, await self._read_into_cache(
+                binding, entry, key, origin, charge, total_timeout_seconds=readback_timeout
+            )
         finally:
             for handle in (write_charge, charge):
                 if handle is not None:

@@ -339,8 +339,11 @@ async def copy_from(
     dispatch = _dispatch_or_503(request)
     actor = _ADMIN_ACTOR
 
+    if device_id == body.source_device_id:
+        raise HTTPException(status_code=400, detail="dispatch_copy_source_equals_target")
+
     source_records = {record.name: record for record in dispatch.capabilities(body.source_device_id)}
-    copied: list[CapabilityResponse] = []
+    new_records: list[CapabilityRecord] = []
     for name, source in source_records.items():
         if source.status is not CapabilityStatus.VERIFIED:
             continue
@@ -350,26 +353,26 @@ async def copy_from(
                 device_id, name.value, body.source_device_id,
             )  # fmt: skip
             continue
-        new_record = CapabilityRecord.from_dict(
-            {**source.to_dict(), "device_id": device_id, "verified_by": f"copy:{body.source_device_id}:{actor}"}
+        new_records.append(
+            CapabilityRecord.from_dict(
+                {**source.to_dict(), "device_id": device_id, "verified_by": f"copy:{body.source_device_id}:{actor}"}
+            )
         )
-        # Abort-and-report (D3/B2 extension): a 409 on one capability stops the whole copy instead
-        # of returning a partial 200 with some capabilities silently skipped — a caller must be
-        # able to tell "copied everything" from "copied some, blocked on one" from the status
-        # code alone, not by inspecting the response body closely.
-        try:
-            await dispatch.set_capability(device_id, new_record)
-        except CapabilityConflict as exc:
-            raise _conflict(
-                exc, f"dispatch_capability_conflict: an operation of {device_id} is active"
-            ) from exc
-        copied.append(CapabilityResponse.from_domain(new_record))
+    if not new_records:
+        return []
+    # One transaction for the whole copy: a conflict or a failed commit leaves the target untouched
+    # instead of half copied.
+    try:
+        await dispatch.set_capabilities(device_id, new_records)
+    except CapabilityConflict as exc:
+        raise _conflict(exc, f"dispatch_capability_conflict: an operation of {device_id} is active") from exc
+    for record in new_records:
         log.warning(
             "Dispatch capability copied: device=%s name=%s source=%s model=%s firmware=%s admin=%s",
-            device_id, name.value, body.source_device_id, source.verified_device_model,
-            source.verified_firmware, actor,
+            device_id, record.name.value, body.source_device_id, record.verified_device_model,
+            record.verified_firmware, actor,
         )  # fmt: skip
-    return copied
+    return [CapabilityResponse.from_domain(record) for record in new_records]
 
 
 @router.put("/devices/{device_id}")

@@ -53,7 +53,7 @@ from app.dispatch.soc_policy import SocTargetPolicyRegistry
 from app.dispatch.store import DispatchStore
 from app.energy.manager import EnergyManager
 from app.energy.models import ArmedRecord
-from app.errors import ConfigError, DeviceApiError
+from app.errors import ConfigError, DeviceApiError, ReconfigurationBuildError
 from app.gateway.energy_readings import RctEnergyReadings
 from app.gateway.rct import DeviceBinding, RctGateway
 from app.gateway.rct_dispatch import RctDispatchGateway
@@ -654,6 +654,25 @@ def _lifespan(
                     if runtime.energy is not None and runtime.energy.armed(device_id):
                         await runtime.energy.set_armed(device_id, armed=False, actor=None)
 
+            selected_exposed = getattr(app.state, "active_exposed_names", None)
+            if selected_exposed is None and store is not None:
+                selected_exposed = await asyncio.to_thread(store.get, "exposed_names")
+            # Same set as at boot: this path runs on every Inverters-page save, and a narrower one
+            # would make the Energy Manager card go dark on the next settings change.
+            periodic_names = _effective_periodic_names(runtime.settings, runtime.catalog, selected_exposed)
+            # Built BEFORE any teardown: a failure here leaves the old graph fully running. The
+            # build registers its bindings in the live gateway, so the old map is put back until
+            # the old graph has actually been torn down.
+            old_bindings = gateway.device_bindings()
+            try:
+                graph = _build_device_graph(
+                    runtime.settings, runtime.clock, connector, runtime.catalog, gateway, periodic_names
+                )
+            except Exception as exc:
+                raise ReconfigurationBuildError(str(exc)) from exc
+            finally:
+                gateway.replace_devices(old_bindings)
+
             old_tasks = [
                 *connect_tasks, *startup_tasks, *heartbeat_tasks, *periodic_tasks, *refresh_tasks, *dispatch_tasks,
             ]
@@ -670,15 +689,6 @@ def _lifespan(
             await asyncio.gather(*(s.stop() for s in parts.serializers), return_exceptions=True)
             await asyncio.gather(*(e.close() for e in parts.endpoints), return_exceptions=True)
 
-            selected_exposed = getattr(app.state, "active_exposed_names", None)
-            if selected_exposed is None and store is not None:
-                selected_exposed = await asyncio.to_thread(store.get, "exposed_names")
-            # Same set as at boot: this path runs on every Inverters-page save, and a narrower one
-            # would make the Energy Manager card go dark on the next settings change.
-            periodic_names = _effective_periodic_names(runtime.settings, runtime.catalog, selected_exposed)
-            graph = _build_device_graph(
-                runtime.settings, runtime.clock, connector, runtime.catalog, gateway, periodic_names
-            )
             gateway.replace_devices(graph.bindings)
 
             parts.adopt(graph)

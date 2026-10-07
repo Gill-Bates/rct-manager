@@ -27,6 +27,7 @@ from app.config import Settings
 from app.dispatch.controller import ReconfigurationRejected
 from app.dispatch.models import DispatchState
 from app.energy.readings import EnergyReadings, absent_readings
+from app.errors import ReconfigurationBuildError
 from app.gateway.rct_dispatch import RctDispatchGateway
 from app.security.dependencies import source_address
 
@@ -97,7 +98,17 @@ _LIVE = frozenset({
     "metrics_rate_limit_window_seconds",
 }) | _EXPORT_RESTART_KEYS | _DEVICE_LIVE_KEYS
 _SECRET_EDITABLE = frozenset({"influxdb_token", "questdb_password"})
+# Authentication and proxy-trust settings: changing them with a PAT would let a leaked token
+# switch authentication off or widen who is trusted, so they need the cookie session.
+_SESSION_ONLY_SETTINGS = frozenset({
+    "auth_required", "trusted_proxies", "bind_address", "behind_reverse_proxy", "forwarded_header",
+    "metrics_require_token", "metrics_trusted_sources",
+})
 _SETTINGS_LOCK = threading.Lock()
+# Serializes live device reconfigurations without holding _SETTINGS_LOCK while they run.
+_RECONFIGURE_LOCK = threading.Lock()
+_PARAMETERS_LOCK = threading.Lock()
+_RECONFIGURE_TIMEOUT_SECONDS = 120.0
 log = logging.getLogger(__name__)
 
 
@@ -115,13 +126,23 @@ def admin_session(request: Request) -> dict | None:
     return store.session(request.cookies.get(_COOKIE))
 
 
+def _public_scheme(request: Request) -> str:
+    """The scheme the browser used: X-Forwarded-Proto counts only from a trusted proxy peer."""
+    peer = request.client.host if request.client else None
+    forwarded = request.headers.get("x-forwarded-proto", "").split(",")[0].strip().lower()
+    if forwarded in ("http", "https") and request.app.state.security.client_ip.is_trusted_peer(peer):
+        return forwarded
+    return request.url.scheme
+
+
 def _same_origin(request: Request) -> bool:
+    base = f"{_public_scheme(request)}://{request.url.netloc}"
     origin = request.headers.get("origin")
     if origin:
-        return origin == f"{request.url.scheme}://{request.url.netloc}"
+        return origin == base
     referer = request.headers.get("referer")
     if referer:
-        return referer.startswith(f"{request.url.scheme}://{request.url.netloc}/")
+        return referer.startswith(base + "/")
     return True
 
 
@@ -134,8 +155,12 @@ def _csrf(request: Request, session: dict | None = None) -> None:
         raise HTTPException(403, "Invalid CSRF token")
 
 
-def _bearer_admin(request: Request, mutation: bool) -> bool:
-    """Authorize by a read/write PAT (no cookie session); independent of the auth_required setting."""
+def _bearer_admin(request: Request) -> bool:
+    """Authorize by a read/write PAT (no cookie session); independent of the auth_required setting.
+
+    Every admin endpoint needs the read/write role, reads included: the admin surface exposes
+    settings and token metadata that a business-level read token has no use for.
+    """
     header = request.headers.get("authorization", "")
     scheme, _, secret = header.partition(" ")
     if scheme.lower() != "bearer" or not secret.strip():
@@ -152,14 +177,23 @@ def _bearer_admin(request: Request, mutation: bool) -> bool:
     # Tokens stay inert until the first-login password change completed.
     if store.password_change_pending():
         raise HTTPException(403, "Password change required")
-    if mutation and entry.role != "read/write":
+    if entry.role != "read/write":
         raise HTTPException(403, "Read/write token required")
     return True
 
 
-def require_admin(request: Request, *, mutation: bool = False, allow_password_change: bool = False) -> dict | None:
+def require_admin(
+    request: Request, *, mutation: bool = False, allow_password_change: bool = False, session_only: bool = False
+) -> dict | None:
+    """Return the cookie session, or None for a valid read/write PAT.
+
+    ``session_only`` refuses a PAT outright: security-relevant changes (tokens, trust and
+    authentication settings) must not be reachable with a leaked automation token.
+    """
     bearer = not allow_password_change and "authorization" in request.headers and not request.cookies.get(_COOKIE)
-    if bearer and _bearer_admin(request, mutation):
+    if bearer and session_only:
+        raise HTTPException(403, "Administration session required")
+    if bearer and _bearer_admin(request):
         return None
     session = admin_session(request)
     if session is None:
@@ -174,7 +208,7 @@ def require_admin(request: Request, *, mutation: bool = False, allow_password_ch
 
 
 def _secure_cookies(request: Request) -> bool:
-    return bool(request.app.state.runtime.settings.behind_reverse_proxy or request.url.scheme == "https")
+    return bool(request.app.state.runtime.settings.behind_reverse_proxy or _public_scheme(request) == "https")
 
 
 def _set_cookies(response: Response, request: Request, token: str, csrf: str) -> None:
@@ -340,6 +374,8 @@ def get_settings(request: Request) -> dict:
             "restart_required": _pending_restart(request), "live": sorted(_LIVE)}
 
 
+_DISPLAY_NAME_MAX = 64
+
 # This is a plausibility check for an address-shaped value, not DNS or full IP validation.
 _HOST = re.compile(
     r"^(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,62})(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,62}))*|\[[0-9A-Fa-f:.]+\]|[0-9A-Fa-f:.]+)$"
@@ -361,6 +397,14 @@ def _normalize_host(host: str) -> str:
     if host.startswith("[") and host.endswith("]"):
         return host[1:-1]
     return host
+
+
+def _display_name(value: Any) -> str | None:
+    if value is None or value == "":
+        return None
+    if not isinstance(value, str) or len(value) > _DISPLAY_NAME_MAX or any(not c.isprintable() for c in value):
+        raise HTTPException(400, f"The display name must be printable text of at most {_DISPLAY_NAME_MAX} characters")
+    return value
 
 
 def _normalize_devices(raw: Any) -> list[dict[str, Any]]:
@@ -385,7 +429,7 @@ def _normalize_devices(raw: Any) -> list[dict[str, Any]]:
             raise HTTPException(400, f"The inverter address {host}:{port} is listed twice")
         seen_addresses.add(address)
         entry = {"host": host, "port": port, "device_id": item.get("device_id") or None,
-                 "display_name": item.get("display_name") or None, "network_id": network_id}
+                 "display_name": _display_name(item.get("display_name")), "network_id": network_id}
         result.append(entry)
     used = {e["device_id"] for e in result if e["device_id"]}
     if len(used) != len([e for e in result if e["device_id"]]):
@@ -403,18 +447,24 @@ def _normalize_devices(raw: Any) -> list[dict[str, Any]]:
     return result
 
 
+class _ReconfigureFailed(HTTPException):
+    """A failed live reconfiguration; ``rollback`` says whether the old graph is still running."""
+
+    def __init__(self, status_code: int, detail: str, *, rollback: bool) -> None:
+        super().__init__(status_code, detail)
+        self.rollback = rollback
+
+
 def _reconfigure_devices(request: Request) -> None:
     """Rebuild the device/endpoint/scheduling graph in place from the just-saved device list.
 
     Same cross-thread scheduling as ``_restart_export``: ``put_settings`` runs in a worker thread,
     while the graph and its tasks live on the event loop.
 
-    Raises ``HTTPException(409)`` when ``reconfigure_devices()`` aborted because an affected
-    device's active battery dispatch could not be cleanly restored first (``ReconfigurationRejected``,
-    see app/dispatch/controller.py); the old device graph and dispatch state are left intact by that
-    abort, and the caller (``put_settings``) must not keep the new device list as the applied one.
-    An unrelated failure is still only logged, matching the existing behavior for this best-effort
-    live-reload path.
+    Failures are reported, never swallowed. ``rollback=True`` means the old graph is still the
+    running one (dispatch restore refused, or the new graph could not be built), so the caller
+    must revert the saved device list. Any later failure or a timeout leaves the live graph in an
+    unknown state; the saved list stays and the operator is told so.
     """
     reconfigure = getattr(request.app.state, "reconfigure_devices", None)
     loop = getattr(request.app.state, "loop", None)
@@ -422,16 +472,33 @@ def _reconfigure_devices(request: Request) -> None:
         return
     future = asyncio.run_coroutine_threadsafe(reconfigure(), loop)
     try:
-        # No timeout: giving up while the coroutine keeps running would skip the rollback below.
-        future.result()
+        # The timeout only stops waiting: cancelling mid-teardown would be worse than a slow answer.
+        future.result(timeout=_RECONFIGURE_TIMEOUT_SECONDS)
     except ReconfigurationRejected as exc:
-        raise HTTPException(
+        raise _ReconfigureFailed(
             409,
             f"Device {exc.device_id!r} has an active battery dispatch that could not be safely "
             "restored for this change; cancel or wait out that operation and try again.",
+            rollback=True,
         ) from exc
-    except Exception:
+    except ReconfigurationBuildError as exc:
+        log.error("The new device list could not be built; the previous one keeps running: %s", exc)
+        raise _ReconfigureFailed(
+            409, "The new device list could not be applied; the previous configuration is still active.",
+            rollback=True,
+        ) from exc
+    except TimeoutError as exc:
+        log.error("Reconfiguring devices did not finish within %.0f s", _RECONFIGURE_TIMEOUT_SECONDS)
+        raise _ReconfigureFailed(
+            504, "Applying the device list is still in progress; check the device status before saving again.",
+            rollback=False,
+        ) from exc
+    except Exception as exc:
         log.exception("Reconfiguring devices after a settings change failed")
+        raise _ReconfigureFailed(
+            500, "Applying the device list failed; devices may be offline until the service is restarted.",
+            rollback=False,
+        ) from exc
 
 
 def _restart_export(request: Request) -> None:
@@ -454,9 +521,11 @@ def _restart_export(request: Request) -> None:
 
 @router.put("/settings")
 def put_settings(body: dict[str, Any], request: Request) -> dict:
-    require_admin(request, mutation=True)
+    session = require_admin(request, mutation=True)
     if not body or set(body) - _EDITABLE:
         raise HTTPException(400, "Unknown or empty setting")
+    if session is None and set(body) & _SESSION_ONLY_SETTINGS:
+        raise HTTPException(403, "Administration session required")
     body = {k: v for k, v in body.items() if not (k in _SECRET_EDITABLE and v == "")}  # "" keeps the secret
     if not body:
         raise HTTPException(400, "Unknown or empty setting")
@@ -483,26 +552,38 @@ def put_settings(body: dict[str, Any], request: Request) -> dict:
             request.app.state.security.limiter.set_scrape_limit(
                 updated.metrics_rate_limit_requests, updated.metrics_rate_limit_window_seconds
             )
-        if changed_export_keys:
-            _restart_export(request)
-        if devices_changed:
+    # The slow live reloads run outside _SETTINGS_LOCK so they cannot stall other settings requests.
+    if changed_export_keys:
+        _restart_export(request)
+    if devices_changed:
+        with _RECONFIGURE_LOCK:
             try:
                 _reconfigure_devices(request)
-            except HTTPException:
-                # The live graph rejected the new device list (an active dispatch on an affected
-                # device could not be safely restored) and is still running the OLD one. Roll back
-                # only the devices field so the admin store, admin_desired_settings and
-                # runtime.settings all agree with what the gateway actually has loaded; other fields
-                # saved by this same request (e.g. an export setting) stay applied, same as a
-                # _restart_export failure already only logs rather than undoing the whole request.
-                reverted = _store(request).merge_operator_settings(
-                    updated, {"devices": [d.model_dump() for d in previous.devices]}
-                )
-                request.app.state.admin_desired_settings = reverted
-                runtime.settings = runtime.settings.model_copy(update={"devices": previous.devices})
+            except _ReconfigureFailed as exc:
+                if exc.rollback:
+                    _revert_devices(request, updated, previous)
                 raise
     return {"settings": _settings_view(updated), "restart_required": _pending_restart(request),
             "live": sorted(_LIVE)}
+
+
+def _revert_devices(request: Request, updated: Settings, previous: Settings) -> None:
+    """Put the old device list back after the live graph rejected the new one.
+
+    Only the devices field is rolled back so the admin store, admin_desired_settings and
+    runtime.settings agree with what the gateway has loaded; other fields of the same request stay
+    applied. A newer save that already replaced the list is left alone.
+    """
+    runtime = request.app.state.runtime
+    with _SETTINGS_LOCK:
+        current = request.app.state.admin_desired_settings
+        if current.devices != updated.devices:
+            return
+        reverted = _store(request).merge_operator_settings(
+            current, {"devices": [d.model_dump(mode="json") for d in previous.devices]}
+        )
+        request.app.state.admin_desired_settings = reverted
+        runtime.settings = runtime.settings.model_copy(update={"devices": previous.devices})
 
 
 def _exposed_names(runtime, store) -> list[str]:
@@ -949,15 +1030,18 @@ def put_parameters(body: ParameterSelection, request: Request) -> dict:
     if len(set(body.write_names)) != len(body.write_names) or set(body.write_names) - write_allowed:
         raise HTTPException(400, "Invalid writable metrics")
     store = _store(request)
-    revoked = set(RctDispatchGateway.REQUIRED_WRITES) & set(store.get("write_names") or []) - set(body.write_names)
-    if revoked and _dispatch_in_use(request):
-        # A restore writes these registers; revoking them now would leave it rejected forever.
-        raise HTTPException(409, "Required dispatch writes cannot be revoked while a device is armed or dispatching")
-    _parameter_view(request)  # pins the selection the running collector started with
-    store.put_many({"exposed_names": body.exposed_names, "write_names": body.write_names})
-    if runtime.exporter is not None:
-        runtime.exporter.set_exposed(body.exposed_names)
-    runtime.gateway.set_allowlist(request.app.state.build_write_allowlist(body.write_names))
+    with _PARAMETERS_LOCK:  # the in-use check and the revoke must not be separated by another save
+        revoked = set(RctDispatchGateway.REQUIRED_WRITES) & set(store.get("write_names") or []) - set(body.write_names)
+        if revoked and _dispatch_in_use(request):
+            # A restore writes these registers; revoking them now would leave it rejected forever.
+            raise HTTPException(
+                409, "Required dispatch writes cannot be revoked while a device is armed or dispatching"
+            )
+        _parameter_view(request)  # pins the selection the running collector started with
+        store.put_many({"exposed_names": body.exposed_names, "write_names": body.write_names})
+        if runtime.exporter is not None:
+            runtime.exporter.set_exposed(body.exposed_names)
+        runtime.gateway.set_allowlist(request.app.state.build_write_allowlist(body.write_names))
     return _parameter_view(request)
 
 
@@ -969,7 +1053,7 @@ def get_tokens(request: Request) -> dict:
 
 @router.post("/tokens", status_code=201)
 def post_token(body: TokenCreate, request: Request) -> dict:
-    require_admin(request, mutation=True)
+    require_admin(request, mutation=True, session_only=True)
     try:
         record, token = _store(request).create_token(body.name, body.role, body.expires_at)
     except ValueError as exc:
@@ -979,7 +1063,7 @@ def post_token(body: TokenCreate, request: Request) -> dict:
 
 @router.delete("/tokens/{token_id}")
 def delete_token(token_id: str, request: Request) -> dict:
-    require_admin(request, mutation=True)
+    require_admin(request, mutation=True, session_only=True)
     if not _store(request).delete_token(token_id):
         raise HTTPException(404, "Token not found")
     return {"deleted": True}

@@ -234,11 +234,14 @@ class AdminStore:
             return False
         with self.connect() as db:
             row = db.execute("SELECT encrypted FROM admin_user WHERE username=?", (username,)).fetchone()
-        password_hash = self._decode(username, row["encrypted"])["password_hash"] if row else _DUMMY_PASSWORD_HASH
         try:
+            password_hash = (
+                self._decode(username, row["encrypted"])["password_hash"] if row else _DUMMY_PASSWORD_HASH
+            )
             verified = _PASSWORDS.verify(password_hash, password)
             return bool(row is not None and verified)
-        except _PASSWORD_ERRORS:
+        except (*_PASSWORD_ERRORS, KeyError, TypeError):
+            # An unreadable record is a failed login (counted by the caller), never a 500.
             return False
 
     def change_password(self, current: str, new: str) -> bool:

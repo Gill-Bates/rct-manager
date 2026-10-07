@@ -44,6 +44,10 @@ from app.errors import DeviceApiError
 
 log = logging.getLogger(__name__)
 
+# Automatic restore retries back off exponentially so a persistently failing device is not hammered.
+_RESTORE_BACKOFF_BASE_SECONDS = 1.0
+_RESTORE_BACKOFF_MAX_SECONDS = 300.0
+
 # The state a successfully applied command leaves the device in. A table rather than a conditional
 # so a new mode without a state cannot silently inherit another mode's.
 _STATE_FOR_MODE = {
@@ -411,10 +415,8 @@ class DispatchController:
         async with self._lock(device_id):
             record = await self._get(device_id)
             if record.state is DispatchState.FAULT_RESTORE_PENDING:
-                # D1 (minimal slice): retry a stuck restore once its eligibility time has passed.
-                # No backoff curve/attempt counter yet (design.md §6.2 owns the full feature) —
-                # without this, a device that fails one restore attempt stays stuck forever until
-                # an operator intervenes via cancel()/submit() or a process restart's recover().
+                # Retry a stuck restore once its backoff has elapsed; without this a device that
+                # fails one attempt stays stuck until an operator or a restart intervenes.
                 if record.next_restore_at is not None and self._clock.now() >= record.next_restore_at:
                     await self._restore(record, record.stop_reason or StopReason.DEVICE_ERROR, record.fault_code)
                 return self._status(record)
@@ -484,6 +486,7 @@ class DispatchController:
             record.restore_required = False
             record.stop_reason = reason
             record.next_restore_at = None
+            record.restore_attempts = 0
             await self._put(record)
             return
         record.state = DispatchState.RESTORING
@@ -511,9 +514,18 @@ class DispatchController:
             record.state = DispatchState.FAULT_RESTORE_PENDING
             record.restore_required = True
             record.fault_code = getattr(exc, "code", fault_code or "internal_error")
-            # D1 (minimal slice): eligible for an automatic retry immediately, no backoff curve
-            # yet. See the comment at tick()'s FAULT_RESTORE_PENDING branch for the full context.
-            record.next_restore_at = self._clock.now()
+            record.restore_attempts += 1
+            delay = min(
+                _RESTORE_BACKOFF_BASE_SECONDS * 2 ** min(record.restore_attempts - 1, 20),
+                _RESTORE_BACKOFF_MAX_SECONDS,
+            )
+            record.next_restore_at = self._clock.now() + timedelta(seconds=delay)
+            log.warning(
+                "Restore of device %s failed (attempt %d), next retry in %.0f s",
+                record.device_id,
+                record.restore_attempts,
+                delay,
+            )
             await self._put(record)
             return
         record.state = DispatchState.IDLE
@@ -523,6 +535,7 @@ class DispatchController:
         record.restore_required = False
         record.plan = []
         record.next_restore_at = None
+        record.restore_attempts = 0
         await self._put(record)
 
     async def cancel(self, device_id: str) -> DispatchStatus:
@@ -620,36 +633,53 @@ class DispatchController:
                 raise ReconfigurationRejected(device_id, record.fault_code)
 
     async def recover(self) -> None:
-        # DispatchStore.all() already skips and logs an individually corrupt row, so one
-        # unreadable device cannot block the restore sweep for every other device.
-        records = await asyncio.to_thread(self._store.all)
-        for record in records:
-            if record.state is DispatchState.IDLE and not record.restore_required:
+        # DispatchStore.all() skips and logs an individually unreadable row. Records read here are
+        # only candidates: each one is re-read under its device lock, because a tick may have
+        # advanced it since, and a stale object would fail the store's CAS check.
+        candidates = await asyncio.to_thread(self._store.all)
+        for candidate in candidates:
+            if candidate.state is DispatchState.IDLE and not candidate.restore_required:
                 continue
-            async with self._lock(record.device_id):
-                # PRECHECK-with-no-snapshot is the narrow crash window right after the first
-                # durable-intent write in submit(), before read_snapshot() runs: nothing to
-                # restore from yet, so this record is reset to IDLE instead of attempting a
-                # restore that has no snapshot to restore to.
-                if record.state is DispatchState.PRECHECK and record.snapshot is None:
-                    record.state = DispatchState.IDLE
-                    record.intent = None
-                    await self._put(record)
-                else:
-                    # Covers APPLYING/REPLACING-with-snapshot (the normal post-crash case) and,
-                    # defensively, PRECHECK-with-a-snapshot — not currently reachable via
-                    # submit()'s write order (the snapshot is always written strictly after the
-                    # state leaves PRECHECK), kept in case a future code path sets it earlier.
-                    await self._restore(record, StopReason.DEVICE_ERROR, "recovery_required")
+            device_id = candidate.device_id
+            try:
+                async with self._lock(device_id):
+                    record = await self._get(device_id)
+                    if record.state is DispatchState.IDLE and not record.restore_required:
+                        continue
+                    # PRECHECK-with-no-snapshot is the narrow crash window right after the first
+                    # durable-intent write in submit(), before read_snapshot() runs: nothing to
+                    # restore from yet, so the record is reset to IDLE.
+                    if record.state is DispatchState.PRECHECK and record.snapshot is None:
+                        record.state = DispatchState.IDLE
+                        record.intent = None
+                        await self._put(record)
+                    else:
+                        # Normal post-crash case (APPLYING/REPLACING with snapshot) and, defensively,
+                        # PRECHECK with a snapshot.
+                        await self._restore(record, StopReason.DEVICE_ERROR, "recovery_required")
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # One failing device must not abort the sweep for every other device.
+                log.exception("Dispatch recovery failed for device %s", device_id)
 
     async def shutdown_restore(self) -> None:
         """Best-effort restore while serializers still accept device work."""
-        records = await asyncio.to_thread(self._store.all)
-        for record in records:
-            if record.intent is None and not record.restore_required:
+        candidates = await asyncio.to_thread(self._store.all)
+        for candidate in candidates:
+            if candidate.intent is None and not candidate.restore_required:
                 continue
-            async with self._lock(record.device_id):
-                await self._restore(record, StopReason.SHUTDOWN)
+            device_id = candidate.device_id
+            try:
+                async with self._lock(device_id):
+                    record = await self._get(device_id)
+                    if record.intent is None and not record.restore_required:
+                        continue
+                    await self._restore(record, StopReason.SHUTDOWN)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("Shutdown restore failed for device %s", device_id)
 
     async def run(self, device_id: str) -> None:
         while True:

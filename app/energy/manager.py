@@ -117,6 +117,7 @@ class EnergyManager:
         # Strictly outside the controller's per-device lock: the manager calls the port, never the
         # other way round, so the one-directional order rules a lock cycle out.
         self._locks: dict[str, asyncio.Lock] = {}
+        self._approval_lock = asyncio.Lock()  # approvals are shared by all devices
 
     # --- state ------------------------------------------------------------------------------
 
@@ -353,28 +354,30 @@ class EnergyManager:
             raise EnergyRejected(
                 "energy_write_support_required", device_id=device_id, missing=unavailable
             )
-        existing = list(self._approved_writes())  # order as stored
-        missing = [name for name in self._required_writes if name not in existing]
-        if missing:
-            # Add-only and order-preserving: the operator's own selection keeps its order, nothing
-            # is removed, nothing is reordered, and duplicates are impossible.
-            self._approve_writes(existing + missing)
-        current = self._record(device_id)
-        record = ArmedRecord(
-            device_id=device_id,
-            armed=True,
-            added_write_names=tuple(dict.fromkeys((*current.added_write_names, *missing))),
-            armed_at=current.armed_at if current.armed else self._clock.now(),
-            armed_by=current.armed_by if current.armed else _actor_name(actor),
-        )
-        if record == current:
-            return  # arming twice is idempotent: no approval, no commit, no new timestamp
-        try:
-            await asyncio.to_thread(self._store.put_energy_state, record)
-        except Exception:
+        async with self._approval_lock:
+            existing = list(self._approved_writes())  # order as stored
+            missing = [name for name in self._required_writes if name not in existing]
             if missing:
-                self._approve_writes(existing)  # a failed commit must not leave the widened approval
-            raise
+                # Add-only and order-preserving: the operator's own selection keeps its order, nothing
+                # is removed, nothing is reordered, and duplicates are impossible.
+                self._approve_writes(existing + missing)
+            current = self._record(device_id)
+            record = ArmedRecord(
+                device_id=device_id,
+                armed=True,
+                added_write_names=tuple(dict.fromkeys((*current.added_write_names, *missing))),
+                armed_at=current.armed_at if current.armed else self._clock.now(),
+                armed_by=current.armed_by if current.armed else _actor_name(actor),
+            )
+            if record == current:
+                return  # arming twice is idempotent: no approval, no commit, no new timestamp
+            try:
+                await asyncio.to_thread(self._store.put_energy_state, record)
+            except Exception:
+                if missing:
+                    # Remove only what this call added: another device may have changed the approvals.
+                    self._approve_writes([n for n in self._approved_writes() if n not in missing])
+                raise
         self._armed_states[device_id] = record  # memory only after the commit returned
         log.warning(
             "Energy Manager armed: device=%s added_writes=%s actor=%s",

@@ -60,7 +60,8 @@ async def execute_read(
     endpoint: TransportEndpoint, request: TransactionRequest, cfg: RetryConfig, clock: Clock
 ) -> TransactionResult:
     """First attempt plus READ_RETRIES; the total timeout stops further attempts."""
-    deadline = clock.monotonic() + cfg.read_total_timeout_seconds
+    total = request.read_total_timeout_seconds or cfg.read_total_timeout_seconds
+    deadline = clock.monotonic() + total
     result: TransactionResult | None = None
     for attempt in range(1, cfg.read_retries + 2):
         if attempt > 1:

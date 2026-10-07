@@ -785,3 +785,87 @@ async def test_submit_restores_after_a_non_device_error_during_apply(tmp_path: P
         )
     assert [call for call in gateway.calls if call[0] == "restore"] == [("restore", step) for step in range(4)]
     assert (await dispatch.status("main")).state is DispatchState.IDLE
+
+
+# --- recover()/shutdown_restore() must survive stale reads and unreadable rows ------------------
+
+
+async def test_recover_rereads_the_record_under_the_lock_after_a_concurrent_tick(tmp_path: Path) -> None:
+    """A tick landing between store.all() and the device lock must not turn into a stale-CAS abort."""
+    clock = ManualClock()
+    gateway = FakeDispatchGateway(clock)
+    dispatch = controller(tmp_path, clock, gateway)
+    await dispatch.submit(
+        "main",
+        DispatchCommand(DispatchMode.CHARGE_FROM_GRID, 80, 2000, clock.now() + timedelta(hours=1)),
+    )
+    real_all = dispatch._store.all
+
+    def all_then_concurrent_write():
+        records = real_all()
+        newer = dispatch._store.get("main")
+        assert newer is not None
+        dispatch._store.put(newer)  # bumps record_version behind the stale copy
+        return records
+
+    dispatch._store.all = all_then_concurrent_write
+    await dispatch.recover()
+    assert (await dispatch.status("main")).state is DispatchState.IDLE
+
+
+async def test_recover_continues_with_the_next_device_when_one_restore_raises(tmp_path: Path) -> None:
+    clock = ManualClock()
+    gateway = FakeDispatchGateway(clock)
+    dispatch = controller(
+        tmp_path, clock, gateway, limits={d: DeviceLimits(3000, 5000) for d in ("a", "b")},
+        capabilities=verified_registry("a", "b"),
+    )
+    for device_id in ("a", "b"):
+        await dispatch.submit(
+            device_id,
+            DispatchCommand(DispatchMode.CHARGE_FROM_GRID, 80, 2000, clock.now() + timedelta(hours=1)),
+        )
+    real_get = dispatch._get
+
+    async def get_failing_for_a(device_id: str):
+        if device_id == "a":
+            raise RuntimeError("boom")
+        return await real_get(device_id)
+
+    dispatch._get = get_failing_for_a
+    await dispatch.recover()
+    dispatch._get = real_get
+    assert (await dispatch.status("b")).state is DispatchState.IDLE
+
+
+def test_dispatch_store_all_skips_a_row_that_cannot_be_decrypted(tmp_path: Path) -> None:
+    store = DispatchStore(tmp_path / "dispatch.db", "s" * 48)
+    store.initialize()
+    store.put(DispatchRecord("good", state=DispatchState.PRECHECK))
+    store.put(DispatchRecord("bad", state=DispatchState.PRECHECK))
+    with store.connect() as db:
+        db.execute("UPDATE dispatch_operations SET encrypted=? WHERE device_id='bad'", (b"not-a-fernet-token",))
+    assert [record.device_id for record in store.all()] == ["good"]
+
+
+async def test_failed_restore_backs_off_exponentially_with_a_cap(tmp_path: Path) -> None:
+    clock = ManualClock()
+    gateway = FakeDispatchGateway(clock)
+    dispatch = controller(tmp_path, clock, gateway)
+    await dispatch.submit(
+        "main",
+        DispatchCommand(DispatchMode.CHARGE_FROM_GRID, 80, 2000, clock.now() + timedelta(hours=1)),
+    )
+    gateway.fail_restore = True
+    await dispatch.cancel("main")
+    delays = []
+    for _ in range(12):
+        record = await dispatch._get("main")
+        assert record.next_restore_at is not None
+        delays.append((record.next_restore_at - clock.now()).total_seconds())
+        clock.advance(delays[-1])
+        await dispatch.tick("main")
+    assert delays[:4] == [1, 2, 4, 8]
+    assert max(delays) == 300
+    record = await dispatch._get("main")
+    assert record.restore_attempts == 13

@@ -127,6 +127,18 @@ def test_frontend_has_no_german_text():
         assert not german.search(path.read_text(encoding="utf-8")), path.name
 
 
+def test_connection_monitor_probes_health_and_the_modal_is_wired_into_every_page():
+    js = (ADMIN_DIR / "static/js/connection.js").read_text(encoding="utf-8")
+    base = (TEMPLATES / "base.html").read_text(encoding="utf-8")
+    assert "pingUrl: '/health'" in js and "failThreshold: 3" in js
+    assert "response.status === 401" in js and "'/login'" in js
+    assert 'src="/admin/static/js/connection.js"' in base
+    modal = re.search(r'<div class="modal fade" id="reconnect-modal"[^>]*>', base).group(0)
+    assert 'data-bs-backdrop="static"' in modal and 'data-bs-keyboard="false"' in modal
+    assert 'aria-labelledby="reconnect-title"' in modal and 'id="reconnect-title"' in base
+    assert "window.RCTReconnect?.start()" in JS.read_text(encoding="utf-8")
+
+
 def test_header_is_sticky_above_content_and_toasts_stay_on_top():
     css = (ADMIN_DIR / "static/css/admin.css").read_text(encoding="utf-8")
     assert re.search(r"\.admin-navbar\s*\{[^}]*position:\s*sticky;\s*top:\s*0;\s*z-index:\s*1030", css)
@@ -535,17 +547,16 @@ def test_build_group_body_is_shared_so_a_group_rerender_adds_no_second_heading()
     assert "return `settings-group-${group.toLowerCase().replace(/\\s+/g, '-')}`;" in js
 
 
-def test_dashboard_has_no_stale_data_banner_and_still_records_last_update():
-    """The stale-data warning banner was removed from the Overview page per user request; the
-    independent 'last updated' timestamp line and the KPI/device polling it does not drive stay."""
+def test_dashboard_has_no_stale_data_banner_and_no_last_update_line():
+    """The stale-data warning banner and the 'Updated HH:MM' line were removed from the Overview
+    page per user request; the KPI/device polling stays."""
     js = JS.read_text(encoding="utf-8")
     html = (TEMPLATES / "dashboard.html").read_text(encoding="utf-8")
     for marker in ('id="dashboard-staleness"', 'id="dashboard-stale-text"', 'id="refresh-dashboard"',
                    'markDashboardStale', 'dataset.stale', 'dashboard-stale-text'):
         assert marker not in html and marker not in js, marker
-    assert 'id="dashboard-updated"' in html
-    load = js[js.index("async function loadDashboard("):js.index("function initDashboardPolling()")]
-    assert "updated.textContent = `Updated ${hhmm(dashboardLastSuccess)}`;" in load
+    for marker in ('dashboard-updated', 'dashboardLastSuccess'):
+        assert marker not in html and marker not in js, marker
     css = (ADMIN_DIR / "static/css/admin.css").read_text(encoding="utf-8")
     assert ".dashboard-staleness" not in css
     assert "data-stale" not in css

@@ -27,6 +27,11 @@ __all__ = ["AccessSerializer", "TransactionOrigin", "TransactionRequest"]
 
 log = logging.getLogger(__name__)
 
+# Restore and dispatch writes jump the FIFO and ignore its capacity; they wait only for the running
+# transaction, so this bound just keeps a wedged worker from blocking a caller forever.
+_PRIORITY_MAX_WAIT_SECONDS = 60.0
+_PRIORITY_ORIGINS = frozenset({TransactionOrigin.SYSTEM_WRITE, TransactionOrigin.SHUTDOWN})
+
 type Handler = Callable[[TransactionRequest], Awaitable[TransactionResult]]
 
 
@@ -42,6 +47,10 @@ class _Item:
     result: asyncio.Future[TransactionResult] = field(
         default_factory=lambda: asyncio.get_running_loop().create_future()
     )
+
+    @property
+    def priority(self) -> bool:
+        return self.request.origin in _PRIORITY_ORIGINS
 
 
 class _BoundedDeque:
@@ -70,9 +79,14 @@ class _BoundedDeque:
 
     async def put(self, item: _Item) -> None:
         async with self._condition:
-            if len(self._items) >= self._capacity:
-                raise asyncio.QueueFull
-            self._items.append(item)
+            if item.priority:
+                # Behind earlier priority items (their order matters), ahead of every ordinary one.
+                position = sum(1 for queued in self._items if queued.priority)
+                self._items.insert(position, item)
+            else:
+                if len(self._items) >= self._capacity:
+                    raise asyncio.QueueFull
+                self._items.append(item)
             self._unfinished += 1
             self._condition.notify_all()
 
@@ -95,6 +109,12 @@ class _BoundedDeque:
 
     def get_nowait(self) -> _Item:
         return self._items.popleft()
+
+    async def reset(self) -> None:
+        """Forget unfinished work whose items were taken out by stop() without a task_done()."""
+        async with self._condition:
+            self._unfinished = len(self._items)
+            self._condition.notify_all()
 
     async def task_done(self) -> None:
         async with self._condition:
@@ -183,6 +203,7 @@ class AccessSerializer:
             items.append(self._queue.get_nowait())
         for item in items:
             self._abort(item)  # a running transaction was committed, so its release is a no-op
+        await self._queue.reset()  # otherwise a later drain()/join() waits for items that never finish
         self._current = None
         return len(items)
 
@@ -197,7 +218,8 @@ class AccessSerializer:
             self._release(item)
             raise QueueFullError(retry_after=math.ceil(self._queue.qsize() * self._per_tx)) from None
         try:
-            await asyncio.wait_for(asyncio.shield(item.started), self._max_wait)
+            wait = _PRIORITY_MAX_WAIT_SECONDS if item.priority else self._max_wait
+            await asyncio.wait_for(asyncio.shield(item.started), wait)
         except TimeoutError:
             if not item.started.done():
                 request.abandoned = True

@@ -68,6 +68,8 @@ html {
 body {
     min-width: 0;
     min-height: 100dvh;
+    display: flex;
+    flex-direction: column;
     font-family: 'IBM Plex Sans', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
     background: var(--bs-tertiary-bg);
 }
@@ -147,7 +149,9 @@ body {
 
 .app-shell {
     display: flex;
-    min-height: calc(100dvh - 4.1rem);
+    /* Fills what the header leaves (body is a column): a hard-coded header height was ~5px short of
+       the real one and made short pages scroll. */
+    flex: 1 0 auto;
     padding-bottom: var(--rct-footer-height);
 }
 
@@ -1035,6 +1039,16 @@ body {
     color: var(--bs-secondary-color);
 }
 
+.energy-setup-step {
+    margin-top: .8rem;
+    padding-top: .7rem;
+    border-top: 1px solid var(--rct-line);
+}
+
+.energy-expert-switch {
+    padding-top: .3rem;
+}
+
 .energy-actions {
     display: grid;
     grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -1527,4 +1541,41 @@ samp,
 
 .device-flow-draw {
     color: var(--bs-warning-text-emphasis);
+}
+/* Connection-lost modal: the page behind it is blurred and inert until the server answers again. */
+body.is-reconnecting .main-content,
+body.is-reconnecting .sidebar {
+    opacity: .35;
+    filter: blur(8px) saturate(.8);
+    pointer-events: none;
+    transition: opacity .2s ease, filter .2s ease;
+}
+
+body.is-reconnecting .modal-backdrop.show {
+    background-color: rgb(15 23 42 / 60%);
+}
+
+#reconnect-modal .modal-dialog {
+    max-width: 460px;
+}
+
+#reconnect-modal .spinner-border {
+    width: 2.25rem;
+    height: 2.25rem;
+}
+
+@keyframes reconnect-soft-pulse {
+    0%, 100% { transform: scale(1); box-shadow: 0 0 0 rgb(var(--bs-primary-rgb), 0); }
+    50% { transform: scale(1.012); box-shadow: 0 0 .85rem rgb(var(--bs-primary-rgb), .22); }
+}
+
+body.is-reconnecting #reconnect-modal.show .reconnect-pulse {
+    animation: reconnect-soft-pulse 1.9s ease-in-out infinite;
+    transform-origin: center;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    body.is-reconnecting #reconnect-modal.show .reconnect-pulse {
+        animation: none;
+    }
 }

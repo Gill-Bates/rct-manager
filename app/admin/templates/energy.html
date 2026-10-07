@@ -8,6 +8,10 @@
             or discharge it; external tools use the same control path through the REST API. The live energy flow is on
             the dashboard.</p>
     </div>
+    <div class="form-check form-switch energy-expert-switch">
+        <input class="form-check-input" type="checkbox" role="switch" id="energy-expert-mode" autocomplete="off">
+        <label class="form-check-label" for="energy-expert-mode">Expert mode: <span id="energy-expert-state">Off</span></label>
+    </div>
 </div>
 <div id="energy-list" class="energy-grid mt-3"></div>
 {% endblock %}
