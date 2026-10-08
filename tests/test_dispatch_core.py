@@ -278,11 +278,13 @@ def test_dispatch_store_status_and_engineering_mode_stay_readable_without_the_se
     with other.connect() as db:
         assert db.execute("SELECT status FROM dispatch_capabilities").fetchone()[0] == "verified"
         assert db.execute("SELECT engineering_mode FROM dispatch_device_config").fetchone()[0] == 1
-    with pytest.raises(ValueError, match="cannot be decrypted"):
-        other.get_capabilities()
+    # An undecryptable row is skipped (reads as unverified), never released.
+    assert other.get_capabilities() == []
 
 
-def test_dispatch_store_detects_a_capability_blob_moved_to_another_row(tmp_path: Path) -> None:
+def test_dispatch_store_detects_a_capability_blob_moved_to_another_row(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
     """The payload is bound to device_id/name, so a copied blob cannot release a second device."""
     store = DispatchStore(tmp_path / "dispatch.db", "s" * 48)
     store.initialize()
@@ -295,8 +297,12 @@ def test_dispatch_store_detects_a_capability_blob_moved_to_another_row(tmp_path:
             "INSERT INTO dispatch_capabilities(device_id,name,status,encrypted) VALUES(?,?,?,?)",
             ("slave1", CapabilityName.WRITE_PATH.value, "verified", blob),
         )
-    with pytest.raises(ValueError, match="integrity check failed"):
-        store.get_capabilities()
+    # The copied blob fails its integrity check: the second device is not released and the
+    # row is reported, while the genuine row stays readable.
+    with caplog.at_level("ERROR", logger="app.dispatch.store"):
+        records = store.get_capabilities()
+    assert [r.device_id for r in records] == ["main"]
+    assert "of device slave1 is unreadable" in caplog.text
 
 
 class _NoBarrier:

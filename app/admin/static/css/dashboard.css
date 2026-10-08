@@ -59,4 +59,32 @@
     .dashboard-toolbar {
         flex-wrap: wrap;
     }
+
+    /* A 12-column grid with fixed row heights squeezes the widgets and clips the inverter cards on
+       a phone; stack them in document order instead. The saved layout is untouched. */
+    .dashboard-grid {
+        height: auto !important;
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: .5rem;
+    }
+
+    .dashboard-grid > .grid-stack-item {
+        position: static !important;
+        width: auto !important;
+        height: auto !important;
+        grid-column: span 1;
+        transform: none !important;
+    }
+
+    .dashboard-grid > .grid-stack-item[data-widget-id="devices"] {
+        grid-column: 1 / -1;
+    }
+
+    .dashboard-grid > .grid-stack-item > .grid-stack-item-content {
+        position: relative !important;
+        inset: auto;
+        margin: 0 !important;
+        overflow: visible !important;
+    }
 }

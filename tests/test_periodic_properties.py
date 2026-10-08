@@ -15,7 +15,11 @@ from app.observability.names import prometheus_name
 from app.protocol.frames import Frame
 from app.protocol.types import Command, DataType
 from app.protocol.values import encode_value
-from app.scheduling.periodic import PAS_PERIOD_OBJECT_ID, RETRY_BASE_SECONDS, PeriodicManager
+from app.scheduling.periodic import (
+    PAS_PERIOD_OBJECT_ID,
+    RETRY_BASE_SECONDS,
+    PeriodicManager,
+)
 from app.scheduling.serializer import AccessSerializer
 from app.transport.endpoint import EndpointConfig, TransportEndpoint
 from app.transport.types import TransactionOrigin, TransactionRequest, make_frame
