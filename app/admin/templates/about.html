@@ -40,7 +40,8 @@
           <div class="d-none d-lg-block">
             <hr>
             <h3 class="h6 text-secondary">Author</h3>
-            <p class="mb-0"><span class="material-icons align-middle me-1" aria-hidden="true">person</span>Gill-Bates</p>
+            <p class="mb-0"><span class="material-icons align-middle me-1" aria-hidden="true">person</span>Gill-Bates
+            </p>
           </div>
         </div>
       </section>
@@ -113,7 +114,8 @@
           <h2 id="about-dependencies-heading" class="h6 mb-0">Dependencies</h2>
         </div>
         <div class="card-body p-0 about-dependencies">
-          <div class="table-responsive about-dependencies-scroll" tabindex="0" aria-label="Installed dependencies">
+          <div class="table-responsive about-dependencies-scroll" tabindex="0" role="region"
+            aria-label="Installed dependencies">
             <table class="table table-sm table-hover mb-0">
               <thead>
                 <tr>
@@ -136,7 +138,7 @@
         aria-hidden="true">history</span>
       <h2 id="about-changelog-heading" class="h6 mb-0">Changelog</h2>
     </div>
-    <div class="card-body about-changelog" tabindex="0" aria-label="Release history">
+    <div class="card-body about-changelog" tabindex="0" role="region" aria-label="Release history">
       {% for release in changelog %}
       <h3 class="h6">{{ release.title }}</h3>
       {% for group in release.groups %}
@@ -150,5 +152,7 @@
     </div>
   </section>
 </div>
+{% endblock %}
+{% block extra_js %}
 <script src="/admin/static/js/about.js" defer></script>
 {% endblock %}

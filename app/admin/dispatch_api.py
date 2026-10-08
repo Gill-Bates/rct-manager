@@ -18,7 +18,7 @@ mode it guards; the server, not the caller, stamps who did it and when.
 
 import logging
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
@@ -53,9 +53,10 @@ log = logging.getLogger(__name__)
 # username. "admin" is the only possible actor and is recorded as such, not invented per request.
 _ADMIN_ACTOR = "admin"
 
-# Required evidence per capability before `status=verified` may be entered (4.1/4.6). WRITE_PATH's
-# V-17 (soc_target_unit) is intentionally not required here: 4.1/4.6 make it a condition only
-# while SoC-target writing is enabled, which this instance does not expose a write path for yet.
+# Required evidence per capability before `status=verified` may be entered (4.1/4.6). V-17
+# (soc_target_unit) is now required for WRITE_PATH: every non-HOLD dispatch writes a SoC target
+# (controller.py submit()/_apply()), so the register representation it is written in must be
+# attested like the other write-path evidence, not left on the dataclass's unchecked default.
 _REQUIRED_FOR_VERIFIED: dict[CapabilityName, tuple[str, ...]] = {
     CapabilityName.WRITE_PATH: (
         "soc_strategy_external_code",
@@ -63,6 +64,7 @@ _REQUIRED_FOR_VERIFIED: dict[CapabilityName, tuple[str, ...]] = {
         "bool_byte_width",
         "write_frame_layout_verified",
         "apply_sequence_verified",
+        "soc_target_unit",
         # The strategy code is a vendor-specific raw value with no project-wide meaning, so it is
         # only interpretable together with the evidence an operator writes down for it.
         "note",
@@ -73,6 +75,10 @@ _REQUIRED_FOR_VERIFIED: dict[CapabilityName, tuple[str, ...]] = {
     CapabilityName.SETPOINT_VOLATILITY: (),
 }
 _SIGN_FLAGS = ("battery_discharge_positive", "grid_import_positive")
+# soc_target_unit has the same "non-None default looks like a value" shape as the sign flags: it
+# must be explicitly sent (model_fields_set) to count as evidence, not silently taken from the
+# CapabilityRecord/CapabilityUpdate default of "ratio".
+_EXPLICIT_REQUIRED_FLAGS = (*_SIGN_FLAGS, "soc_target_unit")
 _TRUTHY_FLAGS = frozenset({"write_frame_layout_verified", "apply_sequence_verified"})
 # A value that is present but blank is no evidence: `note` carries the human-readable backing for
 # the strategy code, so an empty or whitespace-only string counts as missing.
@@ -158,6 +164,7 @@ class CapabilityUpdate(BaseModel):
     apply_sequence_verified: bool = False
     sequence_order_relevant: bool | None = None
     export_limit_zero_blocks_export: bool | None = None
+    soc_target_unit: Literal["ratio", "percent"] = "ratio"
     volatile: bool | None = None
     refresh_interval_seconds: float | None = Field(None, ge=0)
     verified_device_model: str | None = Field(None, min_length=1, max_length=128)
@@ -201,6 +208,12 @@ class CapabilityResponse(BaseModel):
         " `write_path_convention` to `verified` is refused unless a non-empty `note` is supplied."
         " `null` on every other capability, which this field does not govern.",
     )
+    soc_target_unit: Literal["ratio", "percent"] | None = Field(
+        default=None,
+        description="WRITE_PATH evidence, governed by `write_path_convention` only: the unit the"
+        " device's SoC-target register expects (V-17). `null` on every other capability, which"
+        " this field does not govern.",
+    )
     verified_device_model: str | None
     verified_firmware: str | None
     verified_at: datetime | None
@@ -216,6 +229,7 @@ class CapabilityResponse(BaseModel):
             battery_discharge_positive=_governed(record, "battery_discharge_positive"),
             grid_import_positive=_governed(record, "grid_import_positive"),
             soc_strategy_external_code=_governed(record, "soc_strategy_external_code"),
+            soc_target_unit=_governed(record, "soc_target_unit"),
             verified_device_model=record.verified_device_model,
             verified_firmware=record.verified_firmware,
             verified_at=record.verified_at,
@@ -297,10 +311,11 @@ async def put_capability(
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
         missing = _missing_evidence(name, candidate)
-        # The sign flags default to True, so only an explicitly sent value counts as evidence.
+        # These flags have a non-None default that looks like a value, so only an explicitly sent
+        # value counts as evidence.
         missing += [
             field_name
-            for field_name in _SIGN_FLAGS
+            for field_name in _EXPLICIT_REQUIRED_FLAGS
             if field_name in _REQUIRED_FOR_VERIFIED[name] and field_name not in body.model_fields_set
         ]
         if missing:

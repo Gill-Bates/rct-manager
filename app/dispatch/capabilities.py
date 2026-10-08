@@ -80,6 +80,19 @@ class CapabilityRecord:
 
     def __post_init__(self) -> None:
         check_printable_ascii(self.note, "note", NOTE_MAX_LENGTH)
+        # Mirrors app.admin.dispatch_api's own _REQUIRED_FOR_VERIFIED/_missing_evidence gate, but
+        # enforces it at the dataclass boundary too (H6): a directly constructed/copied record, or
+        # a future caller that bypasses the admin API, must not be able to carry a VERIFIED
+        # WRITE_PATH record without the evidence that status claims.
+        if self.status is CapabilityStatus.VERIFIED and self.name is CapabilityName.WRITE_PATH:
+            if (
+                self.soc_strategy_external_code is None
+                or self.enum_byte_width is None
+                or self.bool_byte_width is None
+                or not self.write_frame_layout_verified
+                or not self.apply_sequence_verified
+            ):
+                raise ValueError("WRITE_PATH cannot be verified without write-path evidence")
 
     def to_dict(self) -> dict:
         """JSON-capable projection for the encrypted part of ``dispatch_capabilities``."""
@@ -100,13 +113,13 @@ class CapabilityRecord:
             device_id=data["device_id"],
             name=CapabilityName(data["name"]),
             status=CapabilityStatus(data["status"]),
-            battery_discharge_positive=bool(data.get("battery_discharge_positive", True)),
-            grid_import_positive=bool(data.get("grid_import_positive", True)),
-            soc_strategy_external_code=_optional_int(data.get("soc_strategy_external_code")),
-            enum_byte_width=_optional_int(data.get("enum_byte_width")),
-            bool_byte_width=_optional_int(data.get("bool_byte_width")),
-            write_frame_layout_verified=bool(data.get("write_frame_layout_verified", False)),
-            apply_sequence_verified=bool(data.get("apply_sequence_verified", False)),
+            battery_discharge_positive=_strict_bool(data, "battery_discharge_positive", True),
+            grid_import_positive=_strict_bool(data, "grid_import_positive", True),
+            soc_strategy_external_code=_strict_optional_int(data.get("soc_strategy_external_code")),
+            enum_byte_width=_strict_optional_int(data.get("enum_byte_width")),
+            bool_byte_width=_strict_optional_int(data.get("bool_byte_width")),
+            write_frame_layout_verified=_strict_bool(data, "write_frame_layout_verified", False),
+            apply_sequence_verified=_strict_bool(data, "apply_sequence_verified", False),
             sequence_order_relevant=_optional_bool(data.get("sequence_order_relevant")),
             soc_target_unit=data.get("soc_target_unit", "ratio"),
             export_limit_zero_blocks_export=_optional_bool(data.get("export_limit_zero_blocks_export")),
@@ -119,6 +132,28 @@ class CapabilityRecord:
             verified_by=data.get("verified_by"),
             note=data.get("note"),
         )
+
+
+def _strict_bool(data: dict, key: str, default: bool) -> bool:
+    """Fail-closed read of a safety-relevant bool field (H6): ``bool("false")`` is ``True``, so a
+    permissive coercion would silently accept a corrupted/malformed persisted value instead of
+    letting the store's existing (ValueError, TypeError) handling treat the row as unreadable.
+    """
+    value = data.get(key, default)
+    if not isinstance(value, bool):
+        raise TypeError(f"{key} must be a bool, got {type(value).__name__}")
+    return value
+
+
+def _strict_optional_int(value: object) -> int | None:
+    """Fail-closed read of a safety-relevant optional int field (H6): ``int("4")`` would silently
+    accept a value that was never actually an int.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"expected int, got {type(value).__name__}")
+    return value
 
 
 def _optional_int(value: object) -> int | None:

@@ -208,7 +208,13 @@ class EnergyManager:
         """
         if self._approved_writes is None:
             return []
-        approved = frozenset(await self._approved_writes())  # ordered tuple in, membership set out
+        try:
+            approved = frozenset(await self._approved_writes())  # ordered tuple in, membership set out
+        except Exception:
+            # An already-applied hardware command must not turn into a 500 just because the
+            # allowlist read failed; fail closed and treat every required write as missing (H7).
+            log.exception("Reading the approved write names failed; treating all required writes as missing")
+            return list(self._required_writes)
         return [name for name in self._required_writes if name not in approved]
 
     # --- commands ---------------------------------------------------------------------------

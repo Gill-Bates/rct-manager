@@ -51,7 +51,7 @@ from app.dispatch.capabilities import (
 )
 from app.dispatch.controller import DispatchController
 from app.dispatch.models import DeviceLimits, DispatchConfig, StopReason
-from app.dispatch.soc_policy import SocTargetPolicyRegistry
+from app.dispatch.soc_policy import SocTargetPolicy, SocTargetPolicyRegistry
 from app.dispatch.store import DispatchStore
 from app.energy.manager import EnergyManager
 from app.energy.models import ArmedRecord
@@ -613,13 +613,22 @@ def _lifespan(
                 refresh_tasks.append(task)
                 tasks.append(task)
 
+        async def _recover_dispatch() -> None:
+            """Await the startup recovery sweep before any dispatch loop starts, and fold its
+            outcome into readiness: a green readiness must never precede recovery (C2).
+            """
+            await runtime.dispatch.recover()
+            runtime.dispatch_recovery_ready = not (
+                runtime.dispatch.unreadable_devices or runtime.dispatch.restore_pending_devices
+            )
+            start_dispatch_tasks(runtime.devices)
+
         def start_device_jobs() -> None:
             if runtime.shutting_down():
                 return  # a late password change must not re-register periodic reads after their teardown
             start_polling_tasks()
             if runtime.dispatch is not None:
-                tasks.append(asyncio.create_task(runtime.dispatch.recover()))
-                start_dispatch_tasks(runtime.devices)
+                tasks.append(asyncio.create_task(_recover_dispatch()))
             start_export_task()
 
         export_restart_lock = asyncio.Lock()
@@ -760,6 +769,12 @@ def _lifespan(
                         )
                     if runtime.energy is not None and runtime.energy.armed(device_id):
                         await runtime.energy.set_armed(device_id, armed=False, actor=None)
+                    # SocTargetPolicy is per-device/firmware (design doc), so it is an identity-bound
+                    # claim exactly like the capability evidence above and must not survive onto
+                    # whatever device now answers at this device_id.
+                    await runtime.dispatch.set_soc_target_policy(
+                        device_id, SocTargetPolicy(device_id=device_id)
+                    )
             except Exception as exc:
                 # The old graph is still running untouched (teardown has not started yet), so this
                 # is rollback-capable the same way a failed graph build is.
@@ -869,8 +884,7 @@ def _lifespan(
                 )
             # While the bootstrap password is pending, start_device_jobs() will start them later.
             if store is None or not await asyncio.to_thread(store.password_change_pending):
-                tasks.append(asyncio.create_task(runtime.dispatch.recover()))
-                start_dispatch_tasks(runtime.devices)
+                tasks.append(asyncio.create_task(_recover_dispatch()))
             log.info("Battery dispatch enabled at runtime")
 
         async def disable_dispatch() -> list[str]:
@@ -1132,15 +1146,25 @@ def create_app(settings: Settings, *, clock: Clock | None = None, connector: Con
         # whenever an admin store exists, so the admin surface always has an object that can answer
         # with a proper refusal instead of a missing attribute.
         async def _approve_writes(names: Iterable[str]) -> list[str]:
-            """Exactly what the Inverters page does, add-only: persist, then widen the allowlist."""
-            selected = list(names)
-            allowlist = app.state.build_write_allowlist(selected)  # build first: persist only what works
-            # Offloaded: this runs on an operator arming action, and AdminStore can block up to
-            # ~5s on a SQLite lock (timeout=5, busy_timeout=5000), which must not stall the event
-            # loop (HTTP, heartbeats, periodic reads, dispatch, shutdown) while it waits.
-            await asyncio.to_thread(admin_store.put_many, {"write_names": selected})
-            runtime.gateway.set_allowlist(allowlist)
-            return selected
+            """Exactly what the Inverters page does, add-only: persist, then widen the allowlist.
+
+            Goes through the same shared critical section (``update_write_names``, M8) as the
+            ``/parameters`` route's revoke, instead of its own unlocked write: without that, an
+            add-only widen here could interleave with a concurrent revoke there and lose an update.
+            Offloaded: this runs on an operator arming action, and AdminStore can block up to ~5s
+            on a SQLite lock (timeout=5, busy_timeout=5000), which must not stall the event loop
+            (HTTP, heartbeats, periodic reads, dispatch, shutdown) while it waits.
+            """
+            from app.admin.api import update_write_names
+
+            selected = frozenset(names)
+            return await asyncio.to_thread(
+                update_write_names,
+                admin_store,
+                runtime.gateway,
+                app.state.build_write_allowlist,
+                lambda current: current + [n for n in selected if n not in current],
+            )
 
         async def _approved_writes() -> tuple[str, ...]:
             """One small local SQLite read; offloaded for the same reason as ``_approve_writes``."""

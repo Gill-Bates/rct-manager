@@ -1,6 +1,13 @@
 {% extends "base.html" %}
 {% block title %}TSDB – RCT Administration{% endblock %}
 {% block content %}
-<div class="page-heading"><div><h1>TSDB</h1><p class="text-secondary mb-0">Push metrics to InfluxDB 2 or QuestDB.</p></div><span id="save-state" class="save-state text-secondary small" aria-live="polite"></span></div>
-<div id="settings-sections" class="settings-grid mt-4" aria-live="polite"><p class="text-secondary">Loading settings …</p></div>
+<div class="page-heading">
+    <div>
+        <h1>TSDB</h1>
+        <p class="text-secondary mb-0">Push metrics to InfluxDB 2 or QuestDB.</p>
+    </div><span id="save-state" class="save-state text-secondary small" aria-live="polite"></span>
+</div>
+<div id="settings-sections" class="settings-grid mt-4">
+    <p class="text-secondary">Loading settings …</p>
+</div>
 {% endblock %}

@@ -247,10 +247,27 @@
     const next = document.documentElement.getAttribute('data-bs-theme') === 'dark' ? 'light' : 'dark';
     document.documentElement.setAttribute('data-bs-theme', next);
     localStorage.setItem('rct-admin-theme', next);
+    syncThemeToggle();
+  }
+
+  // Reflect the active theme on #theme-toggle: aria-pressed reports the state to assistive tech,
+  // and the glyph plus the label name the action the button performs next (A11Y-05). Initialised
+  // from the data-bs-theme attribute theme.js already applied before paint.
+  function syncThemeToggle() {
+    const button = $('theme-toggle');
+    if (!button) return;
+    const dark = document.documentElement.getAttribute('data-bs-theme') === 'dark';
+    button.setAttribute('aria-pressed', String(dark));
+    const label = dark ? 'Switch to light mode' : 'Switch to dark mode';
+    button.setAttribute('aria-label', label);
+    button.title = label;
+    const icon = button.querySelector('.material-icons');
+    if (icon) icon.textContent = dark ? 'light_mode' : 'dark_mode';
   }
 
   function initShell() {
     $('theme-toggle')?.addEventListener('click', toggleTheme);
+    syncThemeToggle();
     const toggle = $('nav-toggle');
     const setNav = (open) => {
       const nav = $('mobile-nav');
@@ -580,7 +597,10 @@
     [/balancing active/i, 'The battery is balancing its cells right now; this finishes on its own.'],
   ];
 
-  // One cell of a card's key-value grid: decorative icon, small label, value.
+  // One cell of a card's key-value grid: decorative icon, then a <dl> holding only the label/value
+  // pair. The icon is a sibling of the <dl>, never inside the dt/dd group — a <dl> div-wrapper may
+  // contain only dt and dd, so the grid container is a plain <div> and each pair gets its own <dl>
+  // (A11Y-02).
   function createMetricCell({ label, icon }) {
     const node = element('div', 'device-metric-card');
     if (icon) {
@@ -588,8 +608,10 @@
       iconNode.setAttribute('aria-hidden', 'true');
       node.append(iconNode);
     }
+    const list = element('dl', 'device-metric-pair mb-0');
     const dd = element('dd', 'mb-0');
-    node.append(element('dt', 'fw-normal', label), dd);
+    list.append(element('dt', 'fw-normal', label), dd);
+    node.append(list);
     return { node, dd };
   }
 
@@ -627,7 +649,9 @@
   function createPowerCard() {
     const card = element('section', 'device-subcard device-subcard-power');
     const head = createCardHead('Inverter / Power', 'bolt');
-    const grid = element('dl', 'device-metric-grid mb-0');
+    // Plain <div>, not <dl>: each cell carries its own <dl> so the per-cell icon never sits inside
+    // a dt/dd group (A11Y-02).
+    const grid = element('div', 'device-metric-grid mb-0');
     const cells = POWER_CELLS.map((spec) => {
       const { node, dd } = createMetricCell(spec);
       grid.append(node);
@@ -651,13 +675,17 @@
     const card = element('section', 'device-subcard device-subcard-battery');
     const head = createCardHead(tower.title, 'battery_charging_full');
     const charge = element('div', 'device-charge');
+    // The dt/dd charge pair gets its own <dl> so it has a valid list ancestor; the decorative SoC
+    // bar stays a sibling of that <dl>, not a member of the dt/dd group (A11Y-02).
+    const chargeList = element('dl', 'device-charge-pair mb-0');
     const chargeValue = element('dd', 'mb-0 device-charge-value');
-    charge.append(element('dt', 'fw-normal', 'Charge level'), chargeValue);
+    chargeList.append(element('dt', 'fw-normal', 'Charge level'), chargeValue);
+    charge.append(chargeList);
     const bar = element('div', 'device-soc-bar');
     bar.setAttribute('aria-hidden', 'true');  // the percentage is printed right above it
     bar.append(element('div', 'device-soc-fill'));
     charge.append(bar);
-    const grid = element('dl', 'device-metric-grid mb-0');
+    const grid = element('div', 'device-metric-grid mb-0');
     // Only the roles this tower actually has a metric name for; a role the device reports per
     // device rather than per tower is absent from the second tower's map and gets no cell here.
     const cells = BATTERY_CELLS.filter((spec) => tower.metrics[spec.role]).map((spec) => {
@@ -1988,6 +2016,8 @@
     const gateSection = section(diagInner, 'Gate detail', 'Raw decision per action; unverified capability names are listed as the dispatch layer reports them.');
     const gateHost = element('div', 'table-responsive');
     gateHost.tabIndex = 0;
+    // role gives the aria-label a name to attach to on a focusable scroll container (A11Y-04).
+    gateHost.setAttribute('role', 'region');
     gateHost.setAttribute('aria-label', 'Gate detail');
     gateSection.append(gateHost);
 
@@ -1996,6 +2026,7 @@
       'Charge, hold and discharge need all three capabilities verified; otherwise only the time-limited engineering mode releases them.');
     const capHost = element('div', 'table-responsive');
     capHost.tabIndex = 0;
+    capHost.setAttribute('role', 'region');
     capHost.setAttribute('aria-label', 'Hardware capabilities');
     capSection.append(capHost);
 
@@ -2009,6 +2040,7 @@
     const freshSection = section(diagInner, 'Freshness', 'Per-reading age and staleness, and the last poll time.');
     const freshHost = element('div', 'table-responsive');
     freshHost.tabIndex = 0;
+    freshHost.setAttribute('role', 'region');
     freshHost.setAttribute('aria-label', 'Reading freshness');
     const pollStamp = element('p', 'small text-secondary mb-0', 'Updated –');
     freshSection.append(freshHost, pollStamp);
@@ -3458,6 +3490,20 @@
     renderPrometheusSummary();
   }
 
+  // Dashboard only: defer the sensitive settings read until the operator first opens the inverters
+  // modal, so a plain dashboard view never fetches it (SEC-06). Loads once; a failure is reported
+  // and leaves the "Loading settings …" placeholder so a later open can retry.
+  function initInvertersModalLazy() {
+    const modal = $('inverters-modal');
+    if (!modal) return;
+    let loaded = false;
+    modal.addEventListener('show.bs.modal', () => {
+      if (loaded) return;
+      loaded = true;
+      initSettings().catch((error) => { loaded = false; toast(messageFrom(error), 'danger'); });
+    });
+  }
+
   let parameterData = { available: [], exposed_names: [], write_names: [] };
   let parameterDirty = false;
   let parameterSending = false;
@@ -3752,7 +3798,11 @@
         // dashboard.js owns the GridStack layout; it is independent of the polling above and of
         // data loading, so it is started without awaiting it.
         startDashboardLayout().catch((error) => toast(messageFrom(error), 'danger'));
-        await Promise.all([loadDashboard().finally(markDashboardDataReady), loadMetricCount(), initSettings()]);
+        // The settings read (GET /admin/api/settings) is sensitive and only feeds the inverters
+        // modal, which may never open. Load it lazily on first open instead of on every dashboard
+        // load (SEC-06).
+        initInvertersModalLazy();
+        await Promise.all([loadDashboard().finally(markDashboardDataReady), loadMetricCount()]);
       }
       else if (page === 'tokens') initTokens();
       else if (page === 'energy') initEnergy();

@@ -166,6 +166,11 @@ class ControlTelemetry:
         optional = (self.household_load_w, self.household_age_seconds)
         if any(value is not None and not math.isfinite(value) for value in optional):
             raise ValueError("household telemetry values must be finite when present")
+        ages = (self.soc_age_seconds, self.grid_age_seconds, self.battery_age_seconds)
+        if any(age < 0 for age in ages):
+            raise ValueError("control telemetry ages must not be negative")
+        if self.household_age_seconds is not None and self.household_age_seconds < 0:
+            raise ValueError("household telemetry age must not be negative")
 
 
 @dataclass(frozen=True, slots=True)

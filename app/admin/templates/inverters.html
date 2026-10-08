@@ -8,7 +8,7 @@
             To add, change or remove inverters, use <a href="/ui/dashboard?manage=inverters">Manage inverters</a>.</p>
     </div><span id="save-state" class="save-state text-secondary small" aria-live="polite"></span>
 </div>
-<div id="settings-sections" class="settings-grid mt-4" aria-live="polite">
+<div id="settings-sections" class="settings-grid mt-4">
     <p class="text-secondary">Loading settings …</p>
 </div>
 <section class="card mt-4">
@@ -19,7 +19,8 @@
             Numeric limits are wire type limits, not safe operating limits.</p><label for="write-search"
             class="form-label">Search writable parameters</label><input id="write-search" class="form-control mb-3"
             type="search" autocomplete="off" placeholder="Name, description or explanation">
-        <div id="writable-list" class="parameter-list parameter-scroll" aria-label="Writable parameters" tabindex="0">
+        <div id="writable-list" class="parameter-list parameter-scroll" role="region" aria-label="Writable parameters"
+            tabindex="0">
         </div>
     </div>
 </section>

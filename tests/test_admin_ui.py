@@ -594,8 +594,10 @@ def test_accessibility_wiring_for_help_texts_field_errors_and_icon_only_buttons(
     assert "element('div', 'invalid-feedback d-block')" in invalid
     assert "control.setAttribute('aria-describedby', `${control.id}-help ${errorId}`);" in invalid
     assert "function clearInvalid(control)" in js and js.count("clearInvalid(control);") == 2
-    # Device rows reference their row-level error node and mark only the offending input.
-    assert "feedback.id = `device-${index}-feedback`;" in js
+    # Device rows reference their row-level error node and mark only the offending input. The ids
+    # derive from the stable row uid (not the loop index) so preserveFocus() restores focus to the
+    # right row after a removal (JS-01).
+    assert "feedback.id = `device-${device._uid}-feedback`;" in js
     assert "input.setAttribute('aria-invalid', 'true');" in js
     # Focus survives the two full-section rebuilds and the device rebuild.
     assert "function preserveFocus(render)" in js

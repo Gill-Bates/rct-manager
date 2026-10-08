@@ -66,7 +66,8 @@ class RegistryEntry(BaseModel):
     # Operator-facing explanation shown in the GUI; empty where the parameter's meaning is not
     # documented. ``description`` stays the vendor object path and feeds the Prometheus HELP text.
     help_text: str = ""
-    scale: float = 1.0  # multiplied onto a decoded number so the API itself reports the declared unit
+    # multiplied onto a decoded number so the API itself reports the declared unit
+    scale: float = Field(default=1.0, allow_inf_nan=False)
 
     @field_validator("object_id", mode="before")
     @classmethod

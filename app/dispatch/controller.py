@@ -121,6 +121,7 @@ class DispatchController:
         self._soc_target_policies = soc_target_policies
         self._locks: dict[str, asyncio.Lock] = {}
         self.unreadable_devices: tuple[str, ...] = ()
+        self.restore_pending_devices: tuple[str, ...] = ()
 
     def _lock(self, device_id: str) -> asyncio.Lock:
         return self._locks.setdefault(device_id, asyncio.Lock())
@@ -226,6 +227,10 @@ class DispatchController:
             ):
                 return self._status(current)
             soc = await self._gateway.read_soc(device_id)
+            if not math.isfinite(soc) or not 0.0 <= soc <= 100.0:
+                # The controller is the last validation boundary for device data (H4): a NaN or
+                # out-of-range SoC must never reach target_reached() or apply_soc_target().
+                raise DeviceApiError("protocol_error", device_id=device_id)
             if target_reached(command.mode, soc, command.target_soc_percent):
                 if current.intent is not None or current.restore_required:
                     await self._restore(current, StopReason.TARGET_REACHED)
@@ -671,6 +676,7 @@ class DispatchController:
         # only candidates: each one is re-read under its device lock, because a tick may have
         # advanced it since, and a stale object would fail the store's CAS check.
         candidates = await self._read_candidates()
+        restore_pending: list[str] = []
         for candidate in candidates:
             if candidate.state is DispatchState.IDLE and not candidate.restore_required:
                 continue
@@ -691,9 +697,15 @@ class DispatchController:
                         # Normal post-crash case (APPLYING/REPLACING with snapshot) and, defensively,
                         # PRECHECK with a snapshot.
                         await self._restore(record, StopReason.DEVICE_ERROR, "recovery_required")
+                        if record.state is DispatchState.FAULT_RESTORE_PENDING:
+                            # A failed restore leaves battery settings under external control; the
+                            # caller must not report readiness while this is unresolved (C2).
+                            restore_pending.append(device_id)
             except Exception:
                 # One failing device must not abort the sweep for every other device.
                 log.exception("Dispatch recovery failed for device %s", device_id)
+                restore_pending.append(device_id)
+        self.restore_pending_devices = tuple(restore_pending)
 
     async def shutdown_restore(self) -> None:
         """Best-effort restore while serializers still accept device work."""
@@ -714,8 +726,19 @@ class DispatchController:
     async def run(self, device_id: str) -> None:
         while True:
             await self._clock.sleep(self._config.cycle_interval_seconds)
+            # Cancellation during the sleep above takes effect immediately; a tick already under
+            # way must not be interrupted mid hardware-write (C1), so it is shielded and, on
+            # cancellation, awaited to completion before the CancelledError propagates.
+            tick_task = asyncio.create_task(self.tick(device_id))
             try:
-                await self.tick(device_id)
+                await asyncio.shield(tick_task)
+            except asyncio.CancelledError:
+                try:
+                    await tick_task
+                except Exception:
+                    # A dead loop would stop TTL/stale/target handling for good; log and keep going.
+                    log.exception("dispatch tick failed while stopping %s", device_id)
+                raise
             except Exception:
                 # A dead loop would stop TTL/stale/target handling for good; log and keep going.
                 log.exception("dispatch tick failed for %s", device_id)

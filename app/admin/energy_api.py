@@ -20,7 +20,7 @@ imported read-only through ``app.admin.dispatch_api``, which owns the shared adm
 import logging
 from dataclasses import replace
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -143,6 +143,7 @@ class HardwareVerificationBody(BaseModel):
     apply_sequence_verified: StrictBool
     battery_discharge_positive: StrictBool
     grid_import_positive: StrictBool
+    soc_target_unit: Literal["ratio", "percent"]
 
 
 _VERIFIED_CAPABILITIES = (
@@ -354,6 +355,7 @@ async def put_hardware_verification(
                 bool_byte_width=body.bool_byte_width,
                 write_frame_layout_verified=body.write_frame_layout_verified,
                 apply_sequence_verified=body.apply_sequence_verified,
+                soc_target_unit=body.soc_target_unit,
                 note=body.note,
                 **stamp,
             ),

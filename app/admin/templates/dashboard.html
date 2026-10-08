@@ -11,8 +11,10 @@
     <p class="text-secondary mb-0">Connected inverters and server status</p>
   </div>
   <div class="dashboard-toolbar d-flex align-items-center gap-2">
+    {# No aria-pressed: this is not a toggle button that stays in place. Entering edit mode hides it
+    and shows #dashboard-edit-done instead, so the visible button pair carries the state (A11Y-06). #}
     <button id="dashboard-edit-toggle" class="btn btn-outline-secondary d-inline-flex align-items-center gap-1"
-      type="button" aria-pressed="false"><span class="material-icons" aria-hidden="true">tune</span>Edit
+      type="button"><span class="material-icons" aria-hidden="true">tune</span>Edit
       dashboard</button>
     <button id="dashboard-add-widget" class="btn btn-outline-secondary d-inline-flex align-items-center gap-1 d-none"
       type="button" data-bs-toggle="modal" data-bs-target="#add-widget-modal"><span class="material-icons"

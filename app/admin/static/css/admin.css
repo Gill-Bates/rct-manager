@@ -917,6 +917,13 @@ body {
     background: var(--bs-success);
 }
 
+/* Each metric cell and the charge value wrap their dt/dd in their own <dl> for valid list
+   semantics (A11Y-02); the <dl> is a pure grouping element and must add no spacing of its own. */
+.device-metric-pair,
+.device-charge-pair {
+    margin: 0;
+}
+
 /* The key-value grid: 2 columns, so the power card reads as 2x3 and a battery card as 2x2. */
 .device-metric-grid {
     min-width: 0;

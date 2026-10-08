@@ -284,8 +284,11 @@
   }
 
   function onPageShow(event) {
+    // onPageHide() always stops the heartbeat (bfcache or not), so any pageshow that leaves the
+    // document visible must resume it — not only a bfcache restore (event.persisted). Guarding on
+    // persisted alone left the heartbeat dead after a plain pagehide/pageshow pair (JS-05).
+    if (document.visibilityState === 'hidden') return;
     pageHidden = false;
-    if (!event?.persisted) return;
     if (reconnectState.active) {
       void probeReconnect();
       return;
@@ -323,14 +326,25 @@
     window.removeEventListener('offline', onOffline);
     window.removeEventListener('pageshow', onPageShow);
     window.removeEventListener('pagehide', onPageHide);
+    // The modal action buttons are long-lived DOM; drop their handlers too so destroy() leaves no
+    // listener behind (JS-05).
+    retryButton?.removeEventListener('click', onReconnectRetry);
+    reloadButton?.removeEventListener('click', onReconnectReload);
   }
 
-  document.getElementById('reconnect-retry')?.addEventListener('click', () => {
+  function onReconnectRetry() {
     if (!reconnectState.active) return;
     clearReconnectTimer();
     void probeReconnect();
-  });
-  document.getElementById('reconnect-reload')?.addEventListener('click', () => window.location.reload());
+  }
+  function onReconnectReload() {
+    window.location.reload();
+  }
+
+  const retryButton = document.getElementById('reconnect-retry');
+  const reloadButton = document.getElementById('reconnect-reload');
+  retryButton?.addEventListener('click', onReconnectRetry);
+  reloadButton?.addEventListener('click', onReconnectReload);
 
   document.addEventListener('visibilitychange', onVisibilityChange);
   window.addEventListener('online', onOnline);

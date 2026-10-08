@@ -1,9 +1,81 @@
 {% extends "base.html" %}
 {% block title %}Prometheus – RCT Administration{% endblock %}
 {% block content %}
-<div class="page-heading"><div><h1>Prometheus</h1><p class="text-secondary mb-0">Manage the metrics exposed at /metrics.</p></div><span id="save-state" class="save-state text-secondary small" aria-live="polite"></span></div>
-<section class="card mt-4" aria-label="Prometheus status"><div class="card-body prometheus-summary"><div><span class="text-secondary small d-block">Status</span><strong id="prometheus-status">Loading …</strong></div><div><span class="text-secondary small d-block">Endpoint</span><code>/metrics</code> <button id="copy-metrics-endpoint" type="button" class="btn btn-link btn-sm p-0 ms-1" aria-label="Copy metrics endpoint">Copy</button></div><div><span class="text-secondary small d-block">Exposed</span><strong id="prometheus-count">–</strong></div><div><span class="text-secondary small d-block">Last saved here</span><span id="prometheus-last-saved">Not yet</span></div></div></section>
-<details class="card mt-3 prometheus-settings"><summary class="card-header bg-transparent py-3">Scrape settings</summary><div id="settings-sections" class="card-body" aria-live="polite"><p class="text-secondary">Loading settings …</p></div></details>
-<section class="card mt-4" aria-labelledby="exposed-title"><div class="card-body"><div class="d-flex flex-wrap align-items-center justify-content-between gap-3 mb-3"><div><h2 id="exposed-title" class="h5 mb-1">Exposed metrics</h2><p class="text-secondary small mb-0">Drag the handle to reorder; use the row menu for keyboard controls.</p></div><button id="open-add-metrics" class="btn btn-primary d-inline-flex align-items-center gap-1" type="button" data-bs-toggle="modal" data-bs-target="#add-metrics-modal"><span class="material-icons" aria-hidden="true">add</span>Add metrics</button></div><label for="exposed-search" class="visually-hidden">Search exposed metrics</label><input id="exposed-search" class="form-control mb-3" type="search" autocomplete="off" placeholder="Search exposed metrics"><div class="prometheus-table-wrap"><table class="table table-hover align-middle mb-0 prometheus-table"><thead><tr><th scope="col"><span class="visually-hidden">Reorder</span></th><th scope="col">Metric</th><th scope="col">Description</th><th scope="col"><span class="visually-hidden">Actions</span></th></tr></thead><tbody id="exposed-list"></tbody></table></div><div class="d-flex align-items-center justify-content-between gap-2 mt-3"><span id="exposed-range" class="text-secondary small" aria-live="polite"></span><div class="btn-group btn-group-sm" role="group" aria-label="Metric pages"><button id="exposed-prev" type="button" class="btn btn-outline-secondary">Previous</button><button id="exposed-next" type="button" class="btn btn-outline-secondary">Next</button></div></div></div></section>
-<div id="add-metrics-modal" class="modal fade" tabindex="-1" aria-labelledby="add-metrics-title" aria-hidden="true"><div class="modal-dialog modal-lg modal-dialog-scrollable"><div class="modal-content"><div class="modal-header"><h2 id="add-metrics-title" class="modal-title h5">Add metrics</h2><button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button></div><div class="modal-body"><label for="parameter-search" class="form-label">Search by name or description</label><input id="parameter-search" class="form-control mb-3" type="search" autocomplete="off" placeholder="Search metrics"><div id="available-list" class="parameter-list parameter-scroll" aria-label="Available metrics"></div></div><div class="modal-footer"><span id="add-metrics-count" class="text-secondary small me-auto" aria-live="polite">0 selected</span><button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button><button id="confirm-add-metrics" type="button" class="btn btn-primary" disabled>Add metrics</button></div></div></div></div>
+<div class="page-heading">
+    <div>
+        <h1>Prometheus</h1>
+        <p class="text-secondary mb-0">Manage the metrics exposed at /metrics.</p>
+    </div><span id="save-state" class="save-state text-secondary small" aria-live="polite"></span>
+</div>
+<section class="card mt-4" aria-label="Prometheus status">
+    <div class="card-body prometheus-summary">
+        <div><span class="text-secondary small d-block">Status</span><strong id="prometheus-status">Loading …</strong>
+        </div>
+        <div><span class="text-secondary small d-block">Endpoint</span><code>/metrics</code> <button
+                id="copy-metrics-endpoint" type="button" class="btn btn-link btn-sm p-0 ms-1"
+                aria-label="Copy metrics endpoint">Copy</button></div>
+        <div><span class="text-secondary small d-block">Exposed</span><strong id="prometheus-count">–</strong></div>
+        <div><span class="text-secondary small d-block">Last saved here</span><span id="prometheus-last-saved">Not
+                yet</span></div>
+    </div>
+</section>
+<details class="card mt-3 prometheus-settings">
+    <summary class="card-header bg-transparent py-3">Scrape settings</summary>
+    <div id="settings-sections" class="card-body">
+        <p class="text-secondary">Loading settings …</p>
+    </div>
+</details>
+<section class="card mt-4" aria-labelledby="exposed-title">
+    <div class="card-body">
+        <div class="d-flex flex-wrap align-items-center justify-content-between gap-3 mb-3">
+            <div>
+                <h2 id="exposed-title" class="h5 mb-1">Exposed metrics</h2>
+                <p class="text-secondary small mb-0">Drag the handle to reorder; use the row menu for keyboard controls.
+                </p>
+            </div><button id="open-add-metrics" class="btn btn-primary d-inline-flex align-items-center gap-1"
+                type="button" data-bs-toggle="modal" data-bs-target="#add-metrics-modal"><span class="material-icons"
+                    aria-hidden="true">add</span>Add metrics</button>
+        </div><label for="exposed-search" class="visually-hidden">Search exposed metrics</label><input
+            id="exposed-search" class="form-control mb-3" type="search" autocomplete="off"
+            placeholder="Search exposed metrics">
+        <div class="prometheus-table-wrap">
+            <table class="table table-hover align-middle mb-0 prometheus-table">
+                <thead>
+                    <tr>
+                        <th scope="col"><span class="visually-hidden">Reorder</span></th>
+                        <th scope="col">Metric</th>
+                        <th scope="col">Description</th>
+                        <th scope="col"><span class="visually-hidden">Actions</span></th>
+                    </tr>
+                </thead>
+                <tbody id="exposed-list"></tbody>
+            </table>
+        </div>
+        <div class="d-flex align-items-center justify-content-between gap-2 mt-3"><span id="exposed-range"
+                class="text-secondary small" aria-live="polite"></span>
+            <div class="btn-group btn-group-sm" role="group" aria-label="Metric pages"><button id="exposed-prev"
+                    type="button" class="btn btn-outline-secondary">Previous</button><button id="exposed-next"
+                    type="button" class="btn btn-outline-secondary">Next</button></div>
+        </div>
+    </div>
+</section>
+<div id="add-metrics-modal" class="modal fade" tabindex="-1" aria-labelledby="add-metrics-title" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-scrollable">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2 id="add-metrics-title" class="modal-title h5">Add metrics</h2><button type="button"
+                    class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body"><label for="parameter-search" class="form-label">Search by name or
+                    description</label><input id="parameter-search" class="form-control mb-3" type="search"
+                    autocomplete="off" placeholder="Search metrics">
+                <div id="available-list" class="parameter-list parameter-scroll" aria-label="Available metrics"></div>
+            </div>
+            <div class="modal-footer"><span id="add-metrics-count" class="text-secondary small me-auto"
+                    aria-live="polite">0 selected</span><button type="button" class="btn btn-outline-secondary"
+                    data-bs-dismiss="modal">Cancel</button><button id="confirm-add-metrics" type="button"
+                    class="btn btn-primary" disabled>Add metrics</button></div>
+        </div>
+    </div>
+</div>
 {% endblock %}

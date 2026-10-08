@@ -125,6 +125,39 @@ _RECONFIGURE_TIMEOUT_SECONDS = 120.0
 log = logging.getLogger(__name__)
 
 
+def update_write_names(
+    store,
+    gateway,
+    build_write_allowlist,
+    mutator: Any,
+    *,
+    extra: dict[str, Any] | None = None,
+    after_persist: Any = None,
+) -> list[str]:
+    """The one shared critical section for every write-names allowlist mutation (M8).
+
+    Serializes read-check-write-allowlist-update between the ``/parameters`` route's revoke and the
+    Energy Manager's add-only arming widen, which used to run under two independent locks
+    (``_PARAMETERS_LOCK`` here, ``EnergyManager._arm()``'s own ``asyncio.Lock`` there) and could
+    interleave. ``mutator`` receives the currently persisted write_names and returns the new list
+    (or raises to refuse); it runs under the lock, so its read of ``current`` is never stale by the
+    time the new value is persisted. The energy manager side invokes this via
+    ``asyncio.to_thread()`` so it shares this same (synchronous) lock instead of its own.
+    """
+    with _PARAMETERS_LOCK:
+        current = list(store.get("write_names") or [])
+        new = mutator(current)
+        allowlist = build_write_allowlist(new)  # build first: persist only what works
+        payload = {"write_names": new}
+        if extra:
+            payload.update(extra)
+        store.put_many(payload)
+        gateway.set_allowlist(allowlist)
+        if after_persist is not None:
+            after_persist(new)
+        return new
+
+
 def _store(request: Request):
     store = getattr(request.app.state, "admin_store", None)
     if store is None:
@@ -1203,21 +1236,34 @@ def put_parameters(body: ParameterSelection, request: Request) -> dict:
     if len(set(body.write_names)) != len(body.write_names) or set(body.write_names) - write_allowed:
         raise HTTPException(400, "Invalid writable metrics")
     store = _store(request)
-    with _PARAMETERS_LOCK:  # the in-use check and the revoke must not be separated by another save
-        if session is None and set(body.write_names) - set(store.get("write_names") or []):
+
+    def _mutate(current: list[str]) -> list[str]:
+        # The in-use check and the revoke must not be separated by another save: both run inside
+        # the shared lock update_write_names() holds, same as before this was factored out (M8).
+        if session is None and set(body.write_names) - set(current):
             # Widening the write allowlist is a privilege change: cookie session only.
             raise HTTPException(403, "Administration session required")
-        revoked = set(RctDispatchGateway.REQUIRED_WRITES) & set(store.get("write_names") or []) - set(body.write_names)
+        revoked = set(RctDispatchGateway.REQUIRED_WRITES) & set(current) - set(body.write_names)
         if revoked and _dispatch_in_use(request):
             # A restore writes these registers; revoking them now would leave it rejected forever.
             raise HTTPException(
                 409, "Required dispatch writes cannot be revoked while a device is armed or dispatching"
             )
         _parameter_view(request)  # pins the selection the running collector started with
-        store.put_many({"exposed_names": body.exposed_names, "write_names": body.write_names})
+        return body.write_names
+
+    def _after(new_write_names: list[str]) -> None:
         if runtime.exporter is not None:
             runtime.exporter.set_exposed(body.exposed_names)
-        runtime.gateway.set_allowlist(request.app.state.build_write_allowlist(body.write_names))
+
+    update_write_names(
+        store,
+        runtime.gateway,
+        request.app.state.build_write_allowlist,
+        _mutate,
+        extra={"exposed_names": body.exposed_names},
+        after_persist=_after,
+    )
     return _parameter_view(request)
 
 

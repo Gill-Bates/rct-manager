@@ -41,6 +41,9 @@
   const AUTO_HEIGHT_ID = 'devices'; // height follows content, is never a user layout value
   const CELL_HEIGHT = 72;
   const GRID_MARGIN = 10;
+  // The server's upper bound for a widget's y (see the dashboard-layout validation in
+  // app/admin/api.py); the stored-layout check and separateOverlaps() both clamp to it.
+  const MAX_Y = 1000;
   const MOBILE_QUERY = '(max-width: 767.98px)'; // keep in sync with the stacked block in dashboard.css
   let fitFrame = 0;
   const fitRows = new Map(); // id -> rows the last fit set; such a height is content-driven, not stored
@@ -64,7 +67,7 @@
       const saved = byId.get(def.id);
       if (!saved) return defaultEntry(def);
       const inRange = (value, max) => Number.isInteger(value) && value >= 0 && value <= max;
-      const valid = inRange(saved.x, 11) && inRange(saved.y, 1000) &&
+      const valid = inRange(saved.x, 11) && inRange(saved.y, MAX_Y) &&
         Number.isInteger(saved.w) && saved.w >= 1 && saved.w <= 12 &&
         Number.isInteger(saved.h) && saved.h >= 1 && saved.h <= 100 && saved.x + saved.w <= 12;
       if (!valid) return defaultEntry(def);
@@ -81,7 +84,11 @@
     const byPosition = layout.filter((entry) => entry.visible).sort((a, b) => a.y - b.y || a.x - b.x);
     for (const entry of byPosition) {
       let blocker;
-      while ((blocker = placed.find((other) => overlaps(entry, other)))) entry.y = blocker.y + blocker.h;
+      // Clamp to the server's y maximum (MAX_Y, matching the layout validation above) so stacking
+      // many overlapping boxes cannot push a widget past the bound the server would reject (JS-03).
+      while ((blocker = placed.find((other) => overlaps(entry, other)))) {
+        entry.y = Math.min(blocker.y + blocker.h, MAX_Y);
+      }
       placed.push(entry);
     }
     return layout;
@@ -236,7 +243,8 @@
     $('dashboard-add-widget').classList.toggle('d-none', !editing);
     $('dashboard-reset-layout').classList.toggle('d-none', !editing);
     $('dashboard-edit-done').classList.toggle('d-none', !editing);
-    $('dashboard-edit-toggle').setAttribute('aria-pressed', String(editing));
+    // No aria-pressed: the visible button pair (Edit dashboard / Done) carries the edit state;
+    // the toggle is hidden exactly when it would be "pressed" (A11Y-06).
     grid.enableMove(editing);
     grid.enableResize(editing);
     if (editing) savedToastShownThisSession = false; // one save-toast per editing session (req. 15)
