@@ -12,10 +12,11 @@
   </div>
   <div class="dashboard-toolbar d-flex align-items-center gap-2">
     <button id="dashboard-edit-toggle" class="btn btn-outline-secondary d-inline-flex align-items-center gap-1"
-      type="button" aria-pressed="false"><span class="material-icons" aria-hidden="true">tune</span>Edit dashboard</button>
+      type="button" aria-pressed="false"><span class="material-icons" aria-hidden="true">tune</span>Edit
+      dashboard</button>
     <button id="dashboard-add-widget" class="btn btn-outline-secondary d-inline-flex align-items-center gap-1 d-none"
       type="button" data-bs-toggle="modal" data-bs-target="#add-widget-modal"><span class="material-icons"
-        aria-hidden="true">add_box</span>Add widget</button>
+        aria-hidden="true">edit</span>Edit Widgets</button>
     <button id="dashboard-reset-layout" class="btn btn-outline-secondary d-inline-flex align-items-center gap-1 d-none"
       type="button"><span class="material-icons" aria-hidden="true">restart_alt</span>Reset layout</button>
     <button id="dashboard-edit-done" class="btn btn-primary d-inline-flex align-items-center gap-1 d-none"
@@ -121,7 +122,8 @@
       </section>
     </div>
   </div>
-  <div class="grid-stack-item d-none" gs-id="device-count" gs-x="0" gs-y="0" gs-w="2" gs-h="2" data-widget-id="device-count">
+  <div class="grid-stack-item d-none" gs-id="device-count" gs-x="0" gs-y="0" gs-w="2" gs-h="2"
+    data-widget-id="device-count">
     <div class="grid-stack-item-content">
       <div class="card kpi-card h-100">
         <div class="dashboard-widget-header d-none"><span class="dashboard-drag-handle material-icons"
@@ -143,6 +145,20 @@
         <div class="card-body"><span class="material-icons text-success" aria-hidden="true">check_circle</span>
           <div>
             <div class="text-secondary small">Connected</div><strong id="connected-count">–</strong>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="grid-stack-item d-none" gs-id="days-to-calibration" gs-x="4" gs-y="0" gs-w="2" gs-h="2"
+    data-widget-id="days-to-calibration">
+    <div class="grid-stack-item-content">
+      <div class="card kpi-card h-100">
+        <div class="dashboard-widget-header d-none"><span class="dashboard-drag-handle material-icons"
+            aria-hidden="true">drag_indicator</span></div>
+        <div class="card-body"><span class="material-icons text-info" aria-hidden="true">event_repeat</span>
+          <div>
+            <div class="text-secondary small">Days to calibration</div><strong id="days-to-calibration">–</strong>
           </div>
         </div>
       </div>

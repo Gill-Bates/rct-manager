@@ -28,6 +28,7 @@
     { id: 'devices', x: 0, y: 2, w: 12, h: 8, visible: true, label: 'Inverter overview' },
     { id: 'device-count', x: 0, y: 0, w: 2, h: 2, visible: false, label: 'Inverters' },
     { id: 'connected-count', x: 2, y: 0, w: 2, h: 2, visible: false, label: 'Connected' },
+    { id: 'days-to-calibration', x: 4, y: 0, w: 2, h: 2, visible: false, label: 'Days to calibration' },
   ];
   const defaultEntry = (def) => ({ id: def.id, x: def.x, y: def.y, w: def.w, h: def.h, visible: def.visible });
   const SAVE_DEBOUNCE_MS = 400;

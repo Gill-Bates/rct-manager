@@ -1234,7 +1234,7 @@ def delete_token(token_id: str, request: Request) -> dict:
 # config (not device configuration), so it is stored under its own key, never through PUT /settings.
 _DASHBOARD_WIDGETS = frozenset({
     "device-count", "connected-count", "metric-count", "pv-power", "house-power",
-    "grid-power", "battery-soc", "tsdb-status", "devices",
+    "grid-power", "battery-soc", "days-to-calibration", "tsdb-status", "devices",
 })
 _DASHBOARD_LAYOUT_KEY = "dashboard_layout"
 

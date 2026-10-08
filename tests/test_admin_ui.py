@@ -677,18 +677,21 @@ async def test_about_requires_session_and_renders_project_details(tmp_path):
 def test_dashboard_grid_has_the_gridstack_structure_and_stable_widget_ids():
     html = (TEMPLATES / "dashboard.html").read_text(encoding="utf-8")
     assert 'id="dashboard-grid"' in html and "grid-stack" in html
-    assert "Edit dashboard" in html
-    assert 'id="dashboard-add-widget"' in html and "Add widget" in html
+    # Whitespace-collapsed so an auto-formatter that line-wraps a long button is tolerated: the
+    # label text matters, not where the markup happens to break across lines.
+    assert "Edit dashboard" in re.sub(r"\s+", " ", html)
+    assert 'id="dashboard-add-widget"' in html and "Edit Widgets" in html
     assert 'id="dashboard-reset-layout"' in html and "Reset layout" in html
     assert 'id="dashboard-edit-done"' in html and ">Done<" in html
     for widget_id in ("device-count", "connected-count", "metric-count", "tsdb-status",
-                      "pv-power", "house-power", "grid-power", "battery-soc", "devices"):
+                      "pv-power", "house-power", "grid-power", "battery-soc",
+                      "days-to-calibration", "devices"):
         assert f'data-widget-id="{widget_id}"' in html
         assert f'gs-id="{widget_id}"' in html
     # The business-data DOM ids the polling code reads/writes stay intact inside the wrappers.
     for inner_id in ("device-count", "connected-count", "metric-count", "pv-power", "house-power",
-                     "grid-power", "battery-soc", "tsdb-status-icon", "tsdb-status-label",
-                     "tsdb-status-time", "devices-list"):
+                     "grid-power", "battery-soc", "days-to-calibration", "tsdb-status-icon",
+                     "tsdb-status-label", "tsdb-status-time", "devices-list"):
         assert f'id="{inner_id}"' in html
 
 
@@ -706,7 +709,9 @@ def test_dashboard_template_positions_equal_the_factory_default_layout():
             r'<div class="grid-stack-item( d-none)?" gs-id="([\w-]+)"\s+gs-x="(\d+)" gs-y="(\d+)" gs-w="(\d+)" gs-h="(\d+)"',
             html):
         template[m[2]] = (*map(int, m.group(3, 4, 5, 6)), not m[1])
-    assert template == default and len(default) == 9
+    assert template == default and len(default) == 10
+    # Off-by-default (visible:false) but still addable through the "Add widget" library.
+    assert not default["days-to-calibration"][4]
     # Factory default: one row of six 2-column tiles, the inverter overview directly below it.
     tiles = ["pv-power", "grid-power", "house-power", "battery-soc", "tsdb-status", "metric-count"]
     assert [default[t][:4] for t in tiles] == [(x, 0, 2, 2) for x in range(0, 12, 2)]

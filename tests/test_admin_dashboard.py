@@ -61,6 +61,20 @@ async def test_put_then_get_returns_the_stored_layout(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_days_to_calibration_widget_is_in_the_allowlist(tmp_path):
+    # The "x days to next calibration" tile is a real, addable widget: a layout that places it must
+    # pass _validate_dashboard_layout, exactly like the other hero/KPI tiles.
+    from app.admin.api import _DASHBOARD_WIDGETS
+
+    assert "days-to-calibration" in _DASHBOARD_WIDGETS
+    async with _logged_in(tmp_path) as (client, csrf):
+        body = _layout({**_VALID_WIDGET, "id": "days-to-calibration"})
+        response = await client.put("/admin/api/dashboard-layout", headers={"X-CSRF-Token": csrf}, json=body)
+        assert response.status_code == 200
+        assert response.json() == {"layout": body}
+
+
+@pytest.mark.asyncio
 async def test_delete_removes_the_stored_layout(tmp_path):
     async with _logged_in(tmp_path) as (client, csrf):
         body = _layout(_VALID_WIDGET)

@@ -385,6 +385,21 @@
     }
     $('house-power').textContent = formatMetric(house, all.find((item) => item.name === 'household_load_power')?.unit || 'W');
     $('battery-soc').textContent = formatMetric(soc, all.find((item) => item.name === 'battery_soc')?.unit || 'ratio');
+    // Whole days until the next battery calibration. power_mng_bat_next_calib_date is a UNIX
+    // timestamp in SECONDS that belongs to the power manager, not a tower, so it is only mapped for
+    // the first/primary tower - take it from the first device that actually reports it. Same
+    // availability guard as the battery card's "Next calibration" cell: finite and > 0, and the
+    // resulting Date must parse. Rounding: ceil, so a date later today still reads "1 day" rather
+    // than "0 days" and only a date already in the past (clamped to 0) shows "0".
+    const calibItem = all.find((item) => item.name === 'power_mng_bat_next_calib_date' &&
+      Number.isFinite(Number(item.value)) && Number(item.value) > 0);
+    const calibDate = calibItem ? new Date(Number(calibItem.value) * 1000) : null;
+    const calibValid = Boolean(calibDate && !Number.isNaN(calibDate.getTime()));
+    const daysToCalibration = calibValid
+      ? Math.max(0, Math.ceil((calibDate.getTime() - Date.now()) / 86400000))
+      : null;
+    if (calibValid) setReading($('days-to-calibration'), String(daysToCalibration), daysToCalibration === 1 ? 'day' : 'days');
+    else setReading($('days-to-calibration'), 'n/a');
   }
 
   // { name, label, icon, kind } per cell of the power card's grid, in reading order. The inverter
