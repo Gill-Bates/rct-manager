@@ -25,8 +25,8 @@ purpose.
 !!! note "Vendor diagnostics are off"
     The vendor routes answer 404 because the internal switch
     `ENABLE_VENDOR_DIAGNOSTICS` defaults to off and is not an operator
-    setting. Likewise the write routes only exist with write access enabled in the GUI
-    (404 `write_disabled` otherwise).
+    setting. Likewise the write, dispatch and Energy Manager routes answer 404 `write_disabled`
+    while write access is off in the GUI; switching it takes effect at once.
 
 ## Reading values
 

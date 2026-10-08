@@ -66,9 +66,6 @@ def _fetch() -> dict:
         with urlopen(request, timeout=10) as response:
             data = json.load(response)
         if not isinstance(data, dict) or not isinstance(data.get("tag_name"), str):
-            # TypeError, not ValueError: this is a shape mismatch, and the handler below catches
-            # both into the same "Invalid release response: ..." result, so nothing observable
-            # changes. The version check further down keeps ValueError, which is a value problem.
             raise TypeError("GitHub returned an invalid release")
         latest = data["tag_name"].removeprefix("v")
         if not latest or _version_parts(latest) == (0, 0, 0):

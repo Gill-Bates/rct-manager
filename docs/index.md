@@ -23,7 +23,7 @@ the process.
 | Language | Python 3.13+, FastAPI, Uvicorn |
 | Devices | 1 to 32 inverter endpoints, configured in the GUI |
 | Authentication | Personal access tokens (`pat_...`) as bearer tokens, fail-closed by default |
-| Administration | Web GUI: Overview, Inverters, TSDB, Prometheus, API tokens, Settings, About |
+| Administration | Web GUI: Overview, Inverters, Energy Manager, TSDB, Prometheus, API tokens, Settings, About |
 | Writes | Opt-in (enabled in the GUI) and limited to the approved parameters |
 | Errors | RFC 9457 problem details |
 | Monitoring | Prometheus text format at `GET /metrics`; optional push export to InfluxDB 2 or QuestDB |

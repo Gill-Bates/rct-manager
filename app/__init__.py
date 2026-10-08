@@ -11,10 +11,10 @@ __all__ = ["__version__"]
 import tomllib
 from pathlib import Path
 
-# No installed package metadata to rely on: the app runs from source (no
-# [build-system]/pip install, see docker/Dockerfile), so the version is read
-# directly from pyproject.toml, which sits one level up from this package both
-# in the repo and in the image (WORKDIR /app, COPY pyproject.toml ./).
+# No installed package metadata to rely on: the image runs the app from source (only the
+# dependencies are pip-installed, see docker/Dockerfile), so the version is read directly
+# from pyproject.toml, which sits one level up from this package both in the repo and in
+# the image (WORKDIR /app, COPY pyproject.toml ./).
 _PYPROJECT_PATH = Path(__file__).resolve().parent.parent / "pyproject.toml"
 
 

@@ -692,6 +692,25 @@ def test_dashboard_grid_has_the_gridstack_structure_and_stable_widget_ids():
         assert f'id="{inner_id}"' in html
 
 
+def test_dashboard_grid_is_hidden_until_the_layout_is_final_with_a_css_failsafe():
+    html = (TEMPLATES / "dashboard.html").read_text(encoding="utf-8")
+    css = (ADMIN_DIR / "static/css/dashboard.css").read_text(encoding="utf-8")
+    js = (ADMIN_DIR / "static/js/dashboard.js").read_text(encoding="utf-8")
+    assert "dashboard-grid--loading" in html
+    # Hidden by default, and revealed by CSS alone if the script never does it.
+    assert "visibility: hidden" in css and "@keyframes dashboard-grid-failsafe" in css
+    # Revealed in a finally so a failed layout step never leaves the page blank; no initial animation.
+    assert "} finally {\n      await revealGrid();" in js
+    assert "classList.remove('dashboard-grid--loading')" in js
+    assert "animate: false" in js and "setAnimation(true)" in js
+
+
+def test_dashboard_grid_has_no_gravity_so_tiles_stay_where_they_are_dropped():
+    js = (ADMIN_DIR / "static/js/dashboard.js").read_text(encoding="utf-8")
+    # float:false compacts every tile to the top and makes free cells below/beside unreachable.
+    assert "float: true" in js and "float: false" not in js
+
+
 def test_gridstack_assets_load_only_on_the_dashboard_page():
     dashboard = (TEMPLATES / "dashboard.html").read_text(encoding="utf-8")
     base = (TEMPLATES / "base.html").read_text(encoding="utf-8")

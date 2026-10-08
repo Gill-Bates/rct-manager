@@ -32,6 +32,11 @@ _BODY_LIMIT = 300
 _RESPONSE_LIMIT = 1_048_576  # bounded read of QuestDB /exec JSON replies
 
 
+def _backoff(interval: float, failures: int) -> float:
+    """Delay after ``failures`` consecutive failures: doubling from ``interval``, capped."""
+    return min(interval * 2 ** min(failures, 8), max(interval, MAX_BACKOFF_SECONDS))
+
+
 class PushError(Exception):
     def __init__(self, message: str, *, retryable: bool = True) -> None:
         super().__init__(message)
@@ -169,7 +174,7 @@ class PushExporter:
             self._stats.export_last_success_unix = time.time()
             await self._provision(frozenset(name for name, _, _ in samples) | {k for _, t, _ in samples for k in t})
             return interval
-        return min(interval * 2 ** min(self._failures, 8), max(interval, MAX_BACKOFF_SECONDS))
+        return _backoff(interval, self._failures)
 
     async def _provision(self, columns: frozenset[str]) -> None:
         """Retention and rollup DDL after a stored write; its failures never taint the export.
@@ -187,9 +192,7 @@ class PushExporter:
         except Exception as exc:  # noqa: BLE001 - provisioning must never fail the export
             self._provision_failures += 1
             interval = float(self._settings.metrics_export_interval_seconds)
-            self._provision_retry_at = now + min(
-                interval * 2 ** min(self._provision_failures, 8), max(interval, MAX_BACKOFF_SECONDS)
-            )
+            self._provision_retry_at = now + _backoff(interval, self._provision_failures)
             if self._provision_failures & (self._provision_failures - 1) == 0:
                 log.warning("QuestDB provisioning failed (attempt %d): %s", self._provision_failures, exc)
             return

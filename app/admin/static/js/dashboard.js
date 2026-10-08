@@ -28,6 +28,7 @@
     { id: 'devices', x: 0, y: 4, w: 12, h: 8, label: 'Inverter overview' },
   ];
   const SAVE_DEBOUNCE_MS = 400;
+  const REVEAL_TIMEOUT_MS = 2500; // below the CSS failsafe (4s) so a slow load still reveals via JS
 
   let grid = null;
   const widgetState = new Map(); // id -> { id, x, y, w, h, visible }
@@ -296,13 +297,39 @@
     toast('Dashboard layout restored.');
   }
 
+  // The grid starts hidden (template class) so tiles never visibly travel from their template
+  // positions to the stored layout; it is revealed in one step once positions and heights are final.
+  async function revealGrid() {
+    try {
+      // Icon-font metrics and the first live data change tile heights, so wait for both (bounded).
+      const dataReady = document.body.dataset.dashboardData === 'ready'
+        ? Promise.resolve()
+        : new Promise((resolve) => document.addEventListener('rct:dashboard-data-ready', resolve, { once: true }));
+      await Promise.race([Promise.all([document.fonts?.ready, dataReady]), new Promise((resolve) => setTimeout(resolve, REVEAL_TIMEOUT_MS))]);
+      if (fitFrame) { cancelAnimationFrame(fitFrame); fitFrame = 0; }
+      fitLayout();
+    } finally {
+      $('dashboard-grid').classList.remove('dashboard-grid--loading');
+      // Animation is only wanted for user drags and later content changes, not for the first paint.
+      requestAnimationFrame(() => grid?.setAnimation(true));
+    }
+  }
+
   async function initLayout() {
+    try {
+      await buildLayout();
+    } finally {
+      await revealGrid();
+    }
+  }
+
+  async function buildLayout() {
     grid = window.GridStack.init({
       column: 12,
       cellHeight: CELL_HEIGHT,
       margin: GRID_MARGIN,
-      float: false,
-      animate: true,
+      float: true, // no gravity: a tile stays in the free cell it is dropped on, in any row and column
+      animate: false,
       disableDrag: true,
       disableResize: true,
       handle: '.dashboard-widget-header', // grab a tile by its header strip, like a Grafana panel

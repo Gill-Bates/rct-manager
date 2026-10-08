@@ -253,7 +253,7 @@ class TransportEndpoint:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
 
     async def _receive(
-        self, receiver: Receiver, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, ledger: "ArrivalLedger"
+        self, receiver: Receiver, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, ledger: ArrivalLedger
     ) -> None:
         error: DeviceApiError = DeviceUnreachable("connection_lost")
         try:

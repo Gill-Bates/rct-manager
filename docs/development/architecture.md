@@ -29,6 +29,9 @@ flowchart LR
 | `app/scheduling` | Access serializer (one worker and bounded FIFO queue per endpoint), work budget, retry, single-flight, periodic reads, heartbeat, shutdown |
 | `app/cache.py` | Value store with freshness handling |
 | `app/observability` | Prometheus exporter, names and statistics |
+| `app/dispatch` | Battery dispatch: state machine and recovery (`controller.py`), per-device capabilities and gate, SoC-target policy, encrypted crash-durable store |
+| `app/energy` | Energy Manager: business actions in front of battery dispatch, arming, readings port |
+| `app/export` | Optional push export to InfluxDB 2 / QuestDB, QuestDB provisioning |
 
 ## Request path
 

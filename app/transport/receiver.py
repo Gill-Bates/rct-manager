@@ -107,7 +107,7 @@ class Receiver:
         # arrival time. Reset to None once the buffer fully drains.
         self._pending_since: float | None = None
 
-    async def run(self, reader: asyncio.StreamReader, ledger: "ArrivalLedger") -> ReceiverExit:
+    async def run(self, reader: asyncio.StreamReader, ledger: ArrivalLedger) -> ReceiverExit:
         """Read until the connection ends or must be rebuilt. Never drains the buffer wholesale.
 
         ``ledger`` must already be wrapping ``reader.feed_data`` before this call starts, so no

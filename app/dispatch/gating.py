@@ -18,11 +18,8 @@ def should_write(
     now: datetime,
     last_write_at: datetime | None,
     config: DispatchConfig,
-    safety_stop: bool = False,
     export_cut: bool = False,
 ) -> bool:
-    if safety_stop:
-        return current.watts != 0 or current.direction != desired.direction
     if desired.direction != current.direction:
         return True
     # Grid export is a safety boundary: a reduction must not wait for deadband or interval.

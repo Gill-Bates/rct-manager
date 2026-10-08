@@ -558,7 +558,7 @@ const narrow = { overflow: await overflow(), cardHeight: await page.evaluate(() 
 await shot('02b-dashboard-390');
 check('no horizontal overflow at 390px', narrow.overflow === 0, JSON.stringify(narrow));
 // Mobile layout of a subcard, measured in the browser rather than read off the stylesheet: below the
-// 22rem container width .device-subcard-body collapses to a single track, so the illustration moves
+// 19rem container width (@container on .device-subcard) .device-subcard-body collapses to a single track, so the illustration moves
 // above the readings, stays centred and never widens the card. Both the inverter image and the
 // battery tower are checked, since they are sized by different rules now.
 const measureMobileImages = () => page.evaluate(() => {
@@ -573,6 +573,8 @@ const measureMobileImages = () => page.evaluate(() => {
       kind: card.classList.contains('device-subcard-power') ? 'power' : 'battery',
       tracks: columns(body),
       width: Math.round(visual.width), height: Math.round(visual.height),
+      // The stacked layout is keyed to the subcard's own content width (@container, 19rem).
+      stacked: card.clientWidth - parseFloat(getComputedStyle(card).paddingLeft) - parseFloat(getComputedStyle(card).paddingRight) <= 19 * 16,
       inside: visual.left >= cardBox.left - 1 && visual.right <= cardBox.right + 1,
       aboveReadings: visual.bottom <= readings.getBoundingClientRect().top + 1,
       centred: Math.abs((visual.left - cardBox.left) - (cardBox.right - visual.right)) <= 2,
@@ -583,9 +585,10 @@ for (const width of [390, 320]) {
   await page.setViewportSize({ width, height: 844 });
   await page.waitForTimeout(400);
   const images = await measureMobileImages();
-  check(`subcard illustrations sit above their readings and inside the card at ${width}px`,
-    images.length === 3 && images.every((image) => image.tracks === 1 && image.width > 0 && image.height > 0
-      && image.inside && image.aboveReadings && image.centred), JSON.stringify(images));
+  check(`subcard illustrations follow the container layout and stay inside the card at ${width}px`,
+    images.length === 3 && images.every((image) => image.tracks === (image.stacked ? 1 : 2) && image.width > 0 && image.height > 0
+      && image.inside && (!image.stacked || (image.aboveReadings && image.centred))), JSON.stringify(images));
+  if (width === 320) check('subcards are stacked (illustration above readings) at 320px', images.every((image) => image.stacked), JSON.stringify(images));
 }
 // The footer is fixed to the viewport bottom while .app-shell reserves --rct-footer-height (2.75rem)
 // there, so the last card must not merely touch the footer edge but keep a visible gap. Measured
@@ -704,12 +707,14 @@ await forcePoll();
 await page.waitForTimeout(300);
 scrub(/\/admin\/api\/devices|429 \(Too Many Requests\)/);
 
-// 2d. a failed load keeps the last known KPI values (they are the last truth we had); there is no
-// staleness UI to assert on anymore, just that the values survive the outage unblanked.
+// 2d. a failed load keeps the last known KPI values (they are the last truth we had) and shows the
+// inline offline banner with the time of the last good snapshot.
 const kpiBefore = await page.locator('#pv-power').innerText();
 await page.route('**/admin/api/devices', (route) => route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ detail: 'Administration is unavailable' }) }));
 await forcePoll();
-await page.waitForFunction(() => document.querySelector('#devices-list .text-danger'), null, { timeout: 20000 });
+await page.waitForFunction(() => document.querySelector('.dashboard-offline-banner:not([hidden])'), null, { timeout: 20000 });
+check('the offline banner is inline, names the last good data time and the server error',
+  await page.evaluate(() => { const b = document.querySelector('.dashboard-offline-banner'); return getComputedStyle(b).position !== 'fixed' && /Server error \(503\).*\d\d:\d\d/.test(b.textContent); }));
 const pvAfter = await page.locator('#pv-power').innerText();
 check('the last known KPI values are kept, not blanked', pvAfter === kpiBefore, `${pvAfter} vs ${kpiBefore}`);
 await shot('02d-dashboard-failed-poll');
@@ -841,6 +846,8 @@ await page.waitForSelector('.modal-backdrop', { state: 'detached' });
 check('closing the modal removes the PAT from the DOM', await page.evaluate((t) => !document.documentElement.outerHTML.includes(t) && !document.body.innerText.includes(t), token));
 await page.locator('#tokens-list tr', { hasText: 'e2e-monitor' }).locator('button[data-bs-toggle=dropdown]').click();
 await page.click('button[aria-label="Revoke token e2e-monitor"]');
+await page.waitForSelector('#confirm-modal.show');
+await page.click('#confirm-accept');
 await page.waitForFunction(() => !document.getElementById('tokens-list').textContent.includes('e2e-monitor'));
 check('revoked PAT is rejected', (await call()) === 401);
 check('empty state returns after the last token is revoked', (await page.locator('#tokens-list td[colspan="6"]').count()) === 1);
@@ -869,8 +876,11 @@ await page.waitForFunction(() => document.getElementById('toast-region').textCon
 check('docs toggle autosaves live', true, await toastText());
 check('docs toggle active immediately', ((await fetch(`${base}/docs`)).status === 200) === !before);
 await shot('settings-saved');
+// Trust settings ask for confirmation before they autosave.
 await page.locator('#setting-trusted_proxies').fill('not-an-ip');
 await page.locator('#setting-trusted_proxies').dispatchEvent('change');
+await page.waitForSelector('#confirm-modal.show');
+await page.click('#confirm-accept');
 await page.waitForFunction(() => document.querySelector('#toast-region .alert-danger'), null, { timeout: 8000 });
 // fill() already fires a change event, so two saves may be in flight; wait for the final revert
 await page.waitForFunction(() => document.querySelector('#setting-trusted_proxies')?.value === '', null, { timeout: 8000 }).catch(() => { });
@@ -908,7 +918,7 @@ await sleep(300);
 check('a valid value clears aria-invalid again', (await page.getAttribute('#setting-bind_port', 'aria-invalid')) === null);
 await page.locator('#setting-log_level').selectOption('DEBUG');
 await page.waitForSelector('#restart-notice:not([hidden])', { timeout: 8000 });
-check('restart-required setting is reported', (await page.locator('#restart-notice').innerText()).includes('log_level'));
+check('restart-required setting is reported', (await page.locator('#restart-notice').innerText()).includes('Log level'));
 await shot('settings-restart-notice');
 // 6. Prometheus page: remove, add, keyboard sort, drag and drop, persistence
 await page.goto(base + '/ui/prometheus');
@@ -1065,7 +1075,7 @@ await page.click('#device-apply');
 await page.waitForSelector('#confirm-modal.show', { timeout: 5000 });
 const confirmText = await page.locator('#confirm-modal .modal-body').innerText();
 check('re-addressing asks for confirmation that names the reset', confirmText.includes('Verification evidence, Engineering Mode and arming') && confirmText.includes('192.0.2.10:18899'), confirmText);
-check('the confirmation focuses the safe button', await page.evaluate(() => document.activeElement?.id === 'confirm-cancel'));
+check('the confirmation focuses the safe button', await page.waitForFunction(() => document.activeElement?.id === 'confirm-cancel', null, { timeout: 3000 }).then(() => true).catch(() => false));
 await page.click('#confirm-cancel');
 await page.waitForSelector('#confirm-modal.show', { state: 'detached', timeout: 5000 }).catch(() => { });
 await sleep(300);
@@ -1077,6 +1087,8 @@ await page.route('**/admin/api/settings', (route) => route.request().method() ==
   : route.continue());
 await clearToasts();
 await page.click('#device-apply');
+await page.waitForSelector('#confirm-modal.show', { timeout: 5000 });
+await page.click('#confirm-accept');
 await page.waitForFunction(() => document.getElementById('device-apply-error') && !document.getElementById('device-apply-error').hidden, null, { timeout: 8000 });
 bar = await barState();
 check('a failed apply shows the error with the reason and keeps the draft', bar.error.includes('Injected failure') && bar.error.includes('kept') && bar.apply && bar.count === '1 unsaved change', JSON.stringify(bar));
@@ -1090,6 +1102,8 @@ await page.route('**/admin/api/settings', (route) => route.request().method() ==
   : route.continue());
 await clearToasts();
 await page.click('#device-apply');
+await page.waitForSelector('#confirm-modal.show', { timeout: 5000 });
+await page.click('#confirm-accept');
 await page.waitForFunction(() => document.getElementById('device-apply-error').textContent.includes('rolled back'), null, { timeout: 8000 });
 check('a 409 reports the rollback and keeps the draft', (await barState()).error.includes('Device graph build failed') && (await barState()).apply);
 await page.unroute('**/admin/api/settings');
@@ -1098,6 +1112,8 @@ await page.route('**/admin/api/settings', (route) => route.request().method() ==
   : route.continue());
 await clearToasts();
 await page.click('#device-apply');
+await page.waitForSelector('#confirm-modal.show', { timeout: 5000 });
+await page.click('#confirm-accept');
 await page.waitForFunction(() => document.getElementById('device-apply-error').textContent.includes('timed out'), null, { timeout: 8000 });
 check('a 504 reports the timeout and keeps the draft', (await barState()).apply);
 await page.unroute('**/admin/api/settings');
@@ -1111,6 +1127,9 @@ await page.route('**/admin/api/settings', async (route) => {
 });
 await clearToasts();
 await page.click('#device-apply');
+await page.waitForSelector('#confirm-modal.show', { timeout: 5000 });
+await page.click('#confirm-accept');
+await page.waitForFunction(() => document.getElementById('device-apply').disabled, null, { timeout: 3000 });
 const lockedWhileSending = await page.evaluate(() => document.getElementById('device-apply').disabled && document.getElementById('device-apply').getAttribute('aria-busy') === 'true');
 await page.locator('#device-apply').click({ force: true, timeout: 500 }).catch(() => { });
 await page.waitForFunction(() => document.getElementById('toast-region').textContent.includes('Inverters applied'), null, { timeout: 8000 });
@@ -1126,6 +1145,8 @@ check('a pending removal is counted and warns about the reset', bar.count === '1
 const putsAtRemove = devicePuts.length;
 await clearToasts();
 await page.click('#device-apply');
+await page.waitForSelector('#confirm-modal.show', { timeout: 5000 });
+await page.click('#confirm-accept');
 await page.waitForFunction(() => document.getElementById('toast-region').textContent.includes('Inverters applied'), null, { timeout: 8000 });
 check('Apply removes the inverter with exactly one PUT', devicePuts.length === putsAtRemove + 1 && devicePuts.at(-1).devices.length === 1
   && !(await serverDevices()).some((d) => d.host === '192.0.2.10'));
@@ -1282,7 +1303,8 @@ await page.locator('#setting-influxdb_bucket').dispatchEvent('change');
 // without this the token PUT came back 400 "Invalid setting" (measured), the draft fell back to the
 // previous backend, and the clear-on-confirm behaviour the two checks below assert never ran at all.
 await page.locator('#setting-influxdb_allow_plaintext_credentials').check();
-await page.locator('#setting-influxdb_allow_plaintext_credentials').dispatchEvent('change');
+await page.waitForSelector('#confirm-modal.show');
+await page.click('#confirm-accept');
 await sleep(600);                          // let that toggle's own autosave settle before holding PUTs
 // Only the FIRST PUT is held. Holding every PUT meant the follow-up save was still inside the route
 // handler when the old `page.unroute()` below ran, so that request was dropped and the field it was

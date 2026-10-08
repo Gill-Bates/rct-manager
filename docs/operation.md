@@ -39,7 +39,15 @@ read succeeds.
 ## Admin dashboard
 
 - **Edit dashboard** opens the edit mode of the **Overview** page (move and resize widgets, **Add
-  widget**, **Reset layout**, **Done**). Changes autosave.
+  widget**, **Reset layout**, **Done**). Changes autosave. On a phone the widgets are stacked and the
+  layout cannot be edited; the saved layout stays untouched.
+- Each inverter card shows the energy-flow graphic (from the cached readings, also with write
+  support off), a power card and one card per battery tower. The module count of a tower is derived
+  from its populated module serial slots; until all slots were read the card shows "Detecting
+  modules…", and a slot pattern that cannot describe a documented tower shows "Module layout
+  unclear" instead of a drawing.
+- If the server cannot be reached, the dashboard keeps showing the last data (up to one hour old,
+  dimmed, with a banner) and a "Connection lost" dialog retries in the background.
 - The layout is stored in `data/rct.db`, separate from the device settings, through
   `GET`/`PUT`/`DELETE /admin/api/dashboard-layout` (admin API, not part of the public contract). The
   server accepts only known widget ids, at most 32 widgets and a 12-column grid.
@@ -145,10 +153,10 @@ the admin dispatch API (`/admin/api/dispatch/...`, not part of the public, docum
   the middle of an apply/control cycle. Stop or let the operation finish first.
 
 A device stuck in `fault_restore_pending` (the restore to the original inverter settings itself
-failed) is retried automatically on the next dispatch cycle once eligible, instead of staying
-stuck until an operator calls cancel/submit again. This is a minimal, immediate-retry mechanism
-with no backoff curve or attempt limit yet; a full backoff schedule is a separate, not yet
-implemented work package.
+failed) is retried automatically by the dispatch cycle, instead of staying stuck until an operator
+calls cancel/submit again. The delay between attempts doubles from 1 s up to 30 s; there is no
+attempt limit. The Energy Manager admin status carries the failed attempts (`restore_attempts`) and
+the next retry time (`next_restore_at`).
 
 ## Protocol catalog
 

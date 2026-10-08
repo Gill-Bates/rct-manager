@@ -12,6 +12,17 @@
     padding: 0 .25rem;
 }
 
+/* Hidden until dashboard.js has applied the stored layout. The delayed keyframe is the failsafe
+   (no JS, failed script, stalled request): the grid shows itself after 4s regardless. */
+.dashboard-grid--loading {
+    visibility: hidden;
+    animation: dashboard-grid-failsafe 0s 4s forwards;
+}
+
+@keyframes dashboard-grid-failsafe {
+    to { visibility: visible; }
+}
+
 .dashboard-grid .grid-stack-item-content {
     display: flex;
     /* inset/margins come from GridStack's margin option; overriding them removes the tile gutters. */

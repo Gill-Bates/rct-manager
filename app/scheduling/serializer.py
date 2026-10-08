@@ -24,7 +24,7 @@ from app.transport.types import (
     TransactionResult,
 )
 
-__all__ = ["AccessSerializer", "TransactionOrigin", "TransactionRequest"]
+__all__ = ["AccessSerializer"]
 
 log = logging.getLogger(__name__)
 
@@ -197,11 +197,11 @@ class AccessSerializer:
             item.request.charge.release()
 
     @classmethod
-    def _abort(cls, item: _Item) -> None:
+    def _abort(cls, item: _Item, code: str = "shutdown") -> None:
         cls._release(item)
         for future in (item.started, item.result):
             if not future.done():
-                future.set_exception(DeviceApiError("shutdown"))
+                future.set_exception(DeviceApiError(code))
                 future.add_done_callback(_consume)
 
     async def drain(self) -> None:
@@ -241,11 +241,7 @@ class AccessSerializer:
         )
         for item in queued:
             item.request.abandoned = True
-            self._release(item)
-            for future in (item.started, item.result):
-                if not future.done():
-                    future.set_exception(DeviceApiError("restore_in_progress"))
-                    future.add_done_callback(_consume)
+            self._abort(item, "restore_in_progress")
 
     def lower_barrier(self, device_key: DeviceKey) -> None:
         count = self._barriers.get(device_key, 0) - 1

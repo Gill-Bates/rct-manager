@@ -1,7 +1,10 @@
 ## [1.0.1] - 2026-xx-xx
 
-- Energy Manager admin page rebuilt as "Live Flow + Battery Control": animated flow graphic, manual
-  charge/hold/discharge/automatic control, Advanced / Diagnostics section (hardware verification, limits).
+- Energy Manager admin page: manual charge/hold/discharge/automatic control per inverter, a setup
+  checklist that leads to the first missing step, and an **Expert mode** switch for hardware
+  verification, power limits, engineering mode, SoC target policy and diagnostics.
+- Admin dashboard: every inverter card shows an animated energy-flow graphic (PV, grid, battery, house)
+  with state badges, a power card and one card per battery tower with its module count.
 - `readings.battery_power_w` (measured, discharge-positive) added to the Energy Manager status.
 - Removed `PUT /api/v1/devices/{id}/energy/armed`; arming is possible in the admin GUI only.
 - Upgrade note: the server no longer applies Uvicorn's own forwarded-header handling; `TRUSTED_PROXIES` is the only
@@ -29,6 +32,12 @@
   under **Writable parameters** (add-only, once; later off/on toggles never re-approve a register an
   operator cleared). The Energy status carries `required_write_names`.
 - Removing a device resets its dispatch capabilities, engineering mode and arming.
+- Inverter list in the dashboard dialog: edits stay a draft until **Apply changes**; re-addressing or
+  removing an inverter asks for confirmation, and a rejected list is rolled back.
+- Admin GUI: risky settings (listen address, proxy trust, plaintext export credentials) ask for
+  confirmation; a "Connection lost" dialog appears while the server is unreachable, and the dashboard
+  keeps showing its last data with a banner.
+- A failed automatic battery restore is retried with an exponential backoff (1 s doubling up to 30 s).
 
 <details markdown="1">
 <summary>Previous versions...</summary>

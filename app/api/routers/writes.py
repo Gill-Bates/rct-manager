@@ -4,7 +4,7 @@
 # Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
 #
 
-"""Write and action endpoints; registered only when write support is enabled (Requirement 19).
+"""Write and action endpoints; always registered, refused per request while write support is off (Requirement 19).
 
 Allowlist and value range are checked inside the gateway before the access serializer is touched,
 so every 403, 404, 409 and 422 leaves the device without a transaction.

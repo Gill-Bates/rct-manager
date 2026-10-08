@@ -480,8 +480,6 @@ class DispatchController:
                     record.last_commanded = desired
                     record.last_write_at = self._clock.now()
                     await self._put(record)
-            except asyncio.CancelledError:
-                raise
             except Exception as exc:  # noqa: BLE001
                 await self._restore(record, StopReason.DEVICE_ERROR, getattr(exc, "code", "internal_error"))
             return self._status(record)
@@ -526,8 +524,6 @@ class DispatchController:
                     step + 1,
                     lambda step=step: self._gateway.restore(record.device_id, record.snapshot, step),
                 )
-        except asyncio.CancelledError:
-            raise
         except Exception as exc:  # noqa: BLE001
             record.state = DispatchState.FAULT_RESTORE_PENDING
             record.restore_required = True
@@ -671,7 +667,7 @@ class DispatchController:
         return record.restore_attempts, record.next_restore_at
 
     async def recover(self) -> None:
-        # DispatchStore.all() skips and logs an individually unreadable row. Records read here are
+        # DispatchStore.all_with_skipped() skips an individually unreadable row. Records read here are
         # only candidates: each one is re-read under its device lock, because a tick may have
         # advanced it since, and a stale object would fail the store's CAS check.
         candidates = await self._read_candidates()
@@ -695,8 +691,6 @@ class DispatchController:
                         # Normal post-crash case (APPLYING/REPLACING with snapshot) and, defensively,
                         # PRECHECK with a snapshot.
                         await self._restore(record, StopReason.DEVICE_ERROR, "recovery_required")
-            except asyncio.CancelledError:
-                raise
             except Exception:
                 # One failing device must not abort the sweep for every other device.
                 log.exception("Dispatch recovery failed for device %s", device_id)
@@ -714,8 +708,6 @@ class DispatchController:
                     if record.intent is None and not record.restore_required:
                         continue
                     await self._restore(record, StopReason.SHUTDOWN)
-            except asyncio.CancelledError:
-                raise
             except Exception:
                 log.exception("Shutdown restore failed for device %s", device_id)
 
@@ -724,8 +716,6 @@ class DispatchController:
             await self._clock.sleep(self._config.cycle_interval_seconds)
             try:
                 await self.tick(device_id)
-            except asyncio.CancelledError:
-                raise
             except Exception:
                 # A dead loop would stop TTL/stale/target handling for good; log and keep going.
                 log.exception("dispatch tick failed for %s", device_id)

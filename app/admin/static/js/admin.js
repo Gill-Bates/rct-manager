@@ -3709,6 +3709,13 @@
     });
   }
 
+  // Lets dashboard.js hold the grid back until the first tile contents exist, so nothing resizes
+  // after the first paint. Set as a flag too: the layout may finish before or after this runs.
+  function markDashboardDataReady() {
+    document.body.dataset.dashboardData = 'ready';
+    document.dispatchEvent(new CustomEvent('rct:dashboard-data-ready'));
+  }
+
   async function bootstrap() {
     if (['login', 'change-password'].includes(page)) {
       // The handler is already registered; the session only fetches the CSRF token up front.
@@ -3723,7 +3730,7 @@
         // dashboard.js owns the GridStack layout; it is independent of the polling above and of
         // data loading, so it is started without awaiting it.
         startDashboardLayout().catch((error) => toast(messageFrom(error), 'danger'));
-        await Promise.all([loadDashboard(), loadMetricCount(), initSettings()]);
+        await Promise.all([loadDashboard().finally(markDashboardDataReady), loadMetricCount(), initSettings()]);
       }
       else if (page === 'tokens') initTokens();
       else if (page === 'energy') initEnergy();

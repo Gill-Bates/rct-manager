@@ -23,7 +23,7 @@ from app.admin.store import SESSION_SECONDS
 from app.admin.updates import check_for_updates
 from app.cache import CacheFreshness
 from app.catalog.base import is_numeric
-from app.config import Settings
+from app.config import DISPLAY_NAME_MAX, Settings
 from app.dispatch.controller import ReconfigurationRejected
 from app.dispatch.models import DispatchState
 from app.energy.readings import EnergyReadings, absent_readings
@@ -403,8 +403,6 @@ def get_settings(request: Request) -> dict:
             "restart_required": _pending_restart(request, session), "live": sorted(_LIVE)}
 
 
-_DISPLAY_NAME_MAX = 64
-
 # This is a plausibility check for an address-shaped value, not DNS or full IP validation.
 _HOST = re.compile(
     r"^(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,62})(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,62}))*|\[[0-9A-Fa-f:.]+\]|[0-9A-Fa-f:.]+)$"
@@ -431,8 +429,8 @@ def _normalize_host(host: str) -> str:
 def _display_name(value: Any) -> str | None:
     if value is None or value == "":
         return None
-    if not isinstance(value, str) or len(value) > _DISPLAY_NAME_MAX or any(not c.isprintable() for c in value):
-        raise HTTPException(400, f"The display name must be printable text of at most {_DISPLAY_NAME_MAX} characters")
+    if not isinstance(value, str) or len(value) > DISPLAY_NAME_MAX or any(not c.isprintable() for c in value):
+        raise HTTPException(400, f"The display name must be printable text of at most {DISPLAY_NAME_MAX} characters")
     return value
 
 
@@ -498,14 +496,9 @@ def _reconfigure_devices(request: Request) -> None:
     must revert the saved device list. Any later failure or a timeout leaves the live graph in an
     unknown state; the saved list stays and the operator is told so.
     """
-    reconfigure = getattr(request.app.state, "reconfigure_devices", None)
-    loop = getattr(request.app.state, "loop", None)
-    if reconfigure is None or loop is None:
-        return
-    future = asyncio.run_coroutine_threadsafe(reconfigure(), loop)
     try:
         # The timeout only stops waiting: cancelling mid-teardown would be worse than a slow answer.
-        future.result(timeout=_RECONFIGURE_TIMEOUT_SECONDS)
+        _run_on_loop(request, "reconfigure_devices", _RECONFIGURE_TIMEOUT_SECONDS)
     except ReconfigurationRejected as exc:
         raise _ReconfigureFailed(
             409,
@@ -540,13 +533,9 @@ def _restart_export(request: Request) -> None:
     and its cancellation live on the event loop, so the restart coroutine is scheduled onto that
     loop and awaited from here instead of being run in-thread.
     """
-    restart = getattr(request.app.state, "restart_export", None)
-    loop = getattr(request.app.state, "loop", None)
-    if restart is None or loop is None:
-        return  # export was never started (e.g. password change still pending): nothing to restart
-    future = asyncio.run_coroutine_threadsafe(restart(), loop)
     try:
-        future.result(timeout=5.0)
+        # A no-op until the lifespan has installed the hook on app.state.
+        _run_on_loop(request, "restart_export", 5.0)
     except Exception:
         log.exception("Restarting the metrics export after a settings change failed")
 

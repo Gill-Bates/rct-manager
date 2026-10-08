@@ -32,7 +32,7 @@ curl -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/jso
   (`power_limit_clamped: true`).
 - The target must lie inside `target_soc_window` (7 % to 95 % with the defaults, narrowed by
   `DISPATCH_MIN_SOC` / `DISPATCH_MAX_SOC`); otherwise 422 `value_out_of_range`. It is never clamped.
-- Switching "Write access" in Settings is live (no restart): off refuses writes, disarms every device and hands the
+- Switching "Write access" on the **Inverters** page is live (no restart): off refuses writes, disarms every device and hands the
   inverters back to automatic operation; on requires arming again. If a hand-back fails, the response lists
   `write_restore_pending` and the automatic restore retry continues.
 - A command lives one hour and is not renewed; the status publishes `until`. A service restart hands
@@ -87,8 +87,9 @@ The page is layered by in-page progressive disclosure:
   automatic**. When the battery data is healthy nothing is shown about polling; a stale reading shows
   "Measurements are N seconds old." and a transient failure "Live data unavailable."
 - **Setup** (shown only when a prerequisite is missing) — a state-independent readiness checklist
-  (Inverter connected / Write access / Power limits configured / Hardware control verified)
-  with a single call-to-action that routes to the first unmet step. "Write access" is met only when
+  (Inverter connected / Write access / Power limits / Hardware verification) that opens the editor
+  of the first unmet step right below it: a link to the inverter dialog or the **Inverters** page,
+  the power-limit form, or the hardware verification form. "Write access" is met only when
   the four required registers (`power_mng_soc_strategy`, `power_mng_soc_target_set`,
   `power_mng_battery_power_extern`, `power_mng_use_grid_power_enable`) are approved under
   **Writable parameters** on the **Inverters** page; the global write switch alone is not enough.
@@ -98,12 +99,14 @@ The page is layered by in-page progressive disclosure:
   device is armed or dispatching, clearing a required register is refused (HTTP 409), because the
   handback writes it.
   Power limits are shown in **kW**.
-- **Expert** (collapsed) — the hardware verification form, engineering mode and the kW power limits
-  behind a warning, and the SoC target policy. Verification is entered by an operator with measured
-  evidence; nothing is verified by default.
-- **Diagnostics** (collapsed) — the gate table (the only place raw `reject_detail` and capability
-  register names appear), the capability table, the approved/added write names, per-reading age and
-  staleness, and the poll timestamp.
+- **Expert** (the page-wide **Expert mode** switch next to the heading; off on every page load and
+  never stored) — behind a warning: the hardware verification form (re-verify and **Revoke
+  verification**), the kW power limits, engineering mode and the SoC target policy. While the Setup
+  block shows the power-limit or verification step, that form sits in the Setup block instead.
+  Verification is entered by an operator with measured evidence; nothing is verified by default.
+- **Diagnostics** (collapsed, inside the Expert section) — the gate table (the only place raw
+  `reject_detail` and capability names appear), the capability table, the approved/added write
+  names, per-reading age and staleness, and the poll timestamp.
 
 The action **relabels are presentation-only**: the REST action names on the wire are unchanged
 (`charge`, `discharge`, `hold`, `auto`); only the GUI strings differ.

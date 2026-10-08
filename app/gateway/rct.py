@@ -52,7 +52,7 @@ from app.gateway.base import (
 from app.gateway.vendor import SlaveDiscovery, TransportInfo
 from app.observability.stats import Histogram
 from app.protocol.frames import Frame
-from app.protocol.slave_data import decode_slave_data
+from app.protocol.slave_data import SlaveData, decode_slave_data
 from app.protocol.types import Command, DataType, FrameKind
 from app.protocol.values import ScalarValue, decode_string, decode_value, encode_value
 from app.scheduling.budget import BudgetHandle
@@ -814,7 +814,7 @@ class RctGateway:
         entry = next((e for e in self._catalog.entries() if e.struct is not None), None)
         if entry is None:  # rejected at startup already; a mapped error beats a bare StopIteration
             raise ConfigError("invalid_object_registry", detail="the slave_data registry object is missing")
-        found: dict[int, object] = {}
+        found: dict[int, SlaveData] = {}
         stable = 0
         for _ in range(self._slave_max):
             try:
@@ -834,7 +834,7 @@ class RctGateway:
                     raise DeviceApiError()
                 data = decode_slave_data(result.frame.payload, encoding=self._encoding)
             except DeviceApiError as exc:
-                return SlaveDiscovery(tuple(found.values()), False, exc.code)  # type: ignore[arg-type]
+                return SlaveDiscovery(tuple(found.values()), False, exc.code)
             stable = 0 if data.network_id not in found else stable + 1
             found.setdefault(data.network_id, data)
             if stable >= self._slave_stable or len(found) >= MAX_SLAVES:
@@ -842,4 +842,4 @@ class RctGateway:
         # Requirement 18.10 ends the reads at the latest after the configured maximum, and 18.12
         # reserves complete=false for a read that *failed*; reaching the limit is an error-free end
         # and therefore complete=true per Requirement 18.13.
-        return SlaveDiscovery(tuple(found.values()), True)  # type: ignore[arg-type]
+        return SlaveDiscovery(tuple(found.values()), True)

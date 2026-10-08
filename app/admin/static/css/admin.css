@@ -69,11 +69,11 @@
     color: var(--bs-secondary-color) !important;
 }
 
+/* sticky header (4.1rem) plus the .75rem .admin-navbar::after gap and a safety margin for targets/focus */
 html {
     scroll-padding-top: 6.5rem;
 }
 
-/* sticky header (4.1rem) plus the .75rem .admin-navbar::after gap and a safety margin for targets/focus */
 body {
     min-width: 0;
     min-height: 100dvh;
@@ -354,12 +354,6 @@ body {
 /* The moon glyph fills less of its box than the other icons; one step larger evens the optical size. */
 #theme-toggle .material-icons {
     font-size: 1.45rem;
-}
-
-.kpi-grid {
-    display: grid;
-    grid-template-columns: repeat(4, 1fr);
-    gap: 1rem;
 }
 
 .kpi-card .card-body {
@@ -832,10 +826,6 @@ body {
     grid-template-columns: 8rem minmax(0, 1fr);
 }
 
-.device-subcard-battery .device-subcard-body {
-    grid-template-columns: 5rem minmax(0, 1fr);
-}
-
 .device-subcard-image {
     display: block;
     width: 100%;
@@ -975,11 +965,10 @@ body {
    the full row. Keyed to the subcard's own width: it differs from the card's in every layout. */
 @container (max-width: 19rem) {
 
-    /* Matches the specificity of the per-subcard image-column rules above, otherwise those would
-       keep their two-track grid here and the stacked layout would never apply. */
+    /* Matches the specificity of the power card's image-column rule above, otherwise it would keep
+       its two-track grid here and the stacked layout would never apply. */
     .device-subcard-body,
-    .device-subcard-power .device-subcard-body,
-    .device-subcard-battery .device-subcard-body {
+    .device-subcard-power .device-subcard-body {
         grid-template-columns: minmax(0, 1fr);
     }
 
@@ -1014,8 +1003,8 @@ body {
 }
 
 /* Cards in one grid row share the row height (stretch), and the body fills that height so the
-   card border ends where the row ends. Scoped to .settings-grid: .export-grid is a multi-column
-   masonry layout and .device-item cards on the dashboard must keep their natural height. */
+   card border ends where the row ends. Scoped to .settings-grid: .export-grid has its own rules
+   below and .device-item cards on the dashboard must keep their natural height. */
 .settings-grid {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(min(19rem, 100%), 1fr));
@@ -1167,8 +1156,7 @@ body {
     animation-direction: reverse;
 }
 
-/* Final flow-color semantics (supersedes the earlier discharge=red/charge=green grouping):
-   green marks energy reaching the house or the grid, whether generated (PV), exported, or drawn
+/* Flow colours: green marks energy reaching the house or the grid, whether generated (PV), exported, or drawn
    from storage (battery discharge); orange/red marks energy drawn from the grid (import); blue/
    neutral marks energy going into storage (battery charge) rather than being spent, so storing is
    visually distinct from both generation and consumption. */
@@ -1200,7 +1188,7 @@ body {
     --flow-color: #60a5fa;
 }
 
-/* One dash period (14 user units) per cycle; the duration is set per line from the measured power. */
+/* One dash period (14 user units) per cycle; every line runs at the same constant speed. */
 @keyframes energy-flow-dash {
     to {
         stroke-dashoffset: -14.1; /* one full dash period (0.1 + 14) */
@@ -1503,10 +1491,6 @@ body {
 }
 
 @media (max-width: 767.98px) {
-    .kpi-grid {
-        grid-template-columns: repeat(2, 1fr);
-    }
-
     .prometheus-summary {
         grid-template-columns: repeat(2, minmax(0, 1fr));
     }
@@ -1726,9 +1710,6 @@ samp,
     }
 }
 
-/* Covered by the blanket reduce-motion rule above (animation-duration: .01ms), listed separately
-   only so the new keyframe's intent - a travelling arrow, not a decorative pulse - is documented. */
-
 .export-layout {
     grid-column: 1 / -1;
     min-width: 0;
@@ -1743,10 +1724,8 @@ samp,
 }
 
 /* Row-based grid like .settings-grid: cards sharing a row stretch to the tallest card in that
-   row, so the right column's top/bottom edges line up with the left column's (reported as
-   misaligned "Username"/"Retention" cards). A CSS multi-column masonry was tried earlier to avoid
-   dead space under shorter cards, but multi-column only balances total column height, not
-   per-row alignment, which is the misalignment the user reported; equal row heights wins here. */
+   row, so the edges of both columns line up. A multi-column masonry would only balance the total
+   column height, not the per-row alignment. */
 .export-grid {
     display: grid;
     gap: 1.25rem;

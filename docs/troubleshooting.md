@@ -35,7 +35,8 @@ Both `/docs` and `/openapi.json` need `DOCS_PUBLIC=true`.
 
 ## Write endpoints answer 404
 
-Write routes exist only with write support enabled in the GUI (`write_disabled`).
+While write access is off (GUI **Inverters** page), the write, dispatch and Energy Manager routes
+answer 404 `write_disabled`. Switching it on takes effect at once, without a restart.
 
 ## 429 from many clients behind a proxy
 

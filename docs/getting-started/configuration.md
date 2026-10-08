@@ -5,7 +5,8 @@ Copy `settings.env.example` to `settings.env`. It only holds the start parameter
 Other settings are managed in the administration GUI and persisted in `data/rct.db`; the
 [optional environment variables](../configuration/environment.md) only seed the very first start
 (for example in automated deployments).
-Changes autosave and show a toast. Settings requiring a server restart are marked in the GUI.
+Changes autosave and show a toast; only the inverter list is applied explicitly (see
+[Devices](#devices)). Settings requiring a server restart are marked in the GUI.
 Internal tuning (timeouts, retries, cache, limits and intervals) remains fixed in code.
 
 ## Administration storage
@@ -47,7 +48,7 @@ are folded back into `rct.db` on a clean shutdown. Rules:
 ## Device and Network
 
 ### Devices
-Configure inverter endpoints from the **Overview** dashboard with the plus button in the Inverters card; the editor opens in a modal and stores the devices encrypted in `data/rct.db`. A device consists of an IP address or host name and a port; the service assigns the device id (`main` for the first one, then `inverter-2`, `inverter-3`, ...) and keeps it while the device exists, so API paths and exports stay stable. A saved display name takes precedence; otherwise, the dashboard uses the inverter-reported name, then the device id. Editing the host keeps the id; duplicate addresses are rejected. Devices saved earlier keep their ids and custom names. A `DEVICES` environment variable is ignored; the service notes it at startup on INFO level.
+Configure inverter endpoints from the **Overview** dashboard with **Add inverter** in the Inverters card; the editor opens in a modal and stores the devices encrypted in `data/rct.db`. Edits stay a draft until **Apply changes**, which rebuilds the inverter connections without a restart; **Discard** drops them. Re-addressing or removing an inverter resets its verification evidence, engineering mode and arming and therefore asks for confirmation. A list the server rejects is rolled back and the previous configuration stays active. A device consists of an IP address or host name and a port; the service assigns the device id (`main` for the first one, then `inverter-2`, `inverter-3`, ...) and keeps it while the device exists, so API paths and exports stay stable. A saved display name takes precedence; otherwise, the dashboard uses the inverter-reported name, then the device id. Editing the host keeps the id; duplicate addresses are rejected. Devices saved earlier keep their ids and custom names. A `DEVICES` environment variable is ignored; the service notes it at startup on INFO level.
 
 ### BIND_ADDRESS
 Default: `127.0.0.1`
@@ -105,7 +106,7 @@ Serve the Prometheus endpoint `GET /metrics`. Set to `false` to answer 404.
 ## Push export (optional)
 
 Pushes the metrics of `/metrics` to InfluxDB 2 or QuestDB OSS at a fixed interval. Configure it on
-the GUI **TSDB** page; a change takes effect after a restart. It does not affect the Prometheus
+the GUI **TSDB** page; a saved change restarts the export at once, without a server restart. It does not affect the Prometheus
 endpoint. Details: [Push export](../configuration/export.md). The `DB_TYPE`, `INFLUXDB_*` and
 `QUESTDB_*` variables only seed the very first start and are listed in
 [Environment Variables](../configuration/environment.md).
