@@ -46,6 +46,15 @@ router = APIRouter(prefix="/admin/api/energy", include_in_schema=False)
 log = logging.getLogger(__name__)
 
 
+def _require_admin_sensitive_read(request: Request) -> dict | None:
+    # The energy device listing exposes the write allowlist (approved/required_write_names), the
+    # raw CapabilityName values, reject_detail and verification evidence. That is sensitive like
+    # the settings read, so it needs read/write and is denied to a read-only PAT (SEC-04).
+    from app.admin.api import require_admin
+
+    return require_admin(request, sensitive=True)
+
+
 def _energy_or_503(request: Request) -> EnergyAdminPort:
     """The manager. Present whenever an admin store exists, so it can answer a command with a
     proper refusal instead of a missing attribute — the refusal codes come from the manager.
@@ -219,7 +228,7 @@ async def _admin_status(request: Request, device_id: str) -> AdminEnergyDeviceSt
             for record in dispatch.capabilities(device_id)
         ],
         added_write_names=list(record.added_write_names),
-        approved_write_names=list(energy.approved_write_names()),
+        approved_write_names=list(await energy.approved_write_names()),
         required_write_names=list(energy.required_write_names()),
         armed_at=record.armed_at,
         armed_by=record.armed_by,
@@ -230,7 +239,7 @@ async def _admin_status(request: Request, device_id: str) -> AdminEnergyDeviceSt
 
 @router.get("/devices")
 async def list_devices(
-    request: Request, admin: Annotated[dict | None, Depends(_require_admin_read)]
+    request: Request, admin: Annotated[dict | None, Depends(_require_admin_sensitive_read)]
 ) -> list[AdminEnergyDeviceStatus]:
     """One entry per configured device, readings included, so the GUI needs one poll per cycle."""
     del admin

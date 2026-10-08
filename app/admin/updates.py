@@ -12,6 +12,7 @@ import re
 import threading
 import time
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
 from app import __version__
@@ -21,6 +22,11 @@ _RELEASE_API = "https://api.github.com/repos/Gill-Bates/rct-manager/releases/lat
 _CACHE_TTL = 3600
 _ERROR_TTL = 60  # failures are retried soon instead of being cached for the full hour
 _FORCE_MIN_INTERVAL = 30  # a forced refresh may not hit GitHub more often than this
+# Same scheme/host/path allowlist the GUI applies in about.js releaseUrl(): the release link is
+# attacker-influenced (it comes verbatim from the GitHub response), so a mismatching html_url is
+# dropped server-side instead of being served to the browser (SEC-05).
+_RELEASE_URL_HOST = "github.com"
+_RELEASE_URL_PATH_PREFIX = "/Gill-Bates/rct-manager/releases/tag/"
 _cache: dict | None = None
 _cache_time = 0.0
 _lock = threading.Lock()  # guards the cache state only
@@ -49,6 +55,21 @@ def _cached(force: bool) -> dict | None:
     return None
 
 
+def _release_url(value: object) -> str | None:
+    """Return the release URL only if it matches the GitHub release-tag allowlist, else None."""
+    if not isinstance(value, str):
+        return None
+    try:
+        parts = urlsplit(value)
+    except ValueError:
+        return None
+    if parts.scheme == "https" and parts.hostname == _RELEASE_URL_HOST and parts.path.startswith(
+        _RELEASE_URL_PATH_PREFIX
+    ):
+        return value
+    return None
+
+
 def _fetch() -> dict:
     result = {
         "update_available": False,
@@ -71,7 +92,7 @@ def _fetch() -> dict:
         if not latest or _version_parts(latest) == (0, 0, 0):
             raise ValueError("GitHub returned an invalid release version")
         result["latest_version"] = latest
-        result["release_url"] = data.get("html_url")
+        result["release_url"] = _release_url(data.get("html_url"))
         result["published_at"] = data.get("published_at")
         result["update_available"] = _version_parts(latest) > _version_parts(__version__)
     except HTTPError as exc:

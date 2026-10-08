@@ -49,6 +49,11 @@ testpaths = ["tests"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 
+[tool.ruff]
+# The code targets ~120 columns; without this Ruff assumes 88 and `ruff format --check` wants to
+# reflow the whole tree (PY-02).
+line-length = 120
+
 [tool.ruff.lint]
 # Modules carry a shebang in their file header but are run via `python -m app`.
 extend-ignore = ["EXE001"]

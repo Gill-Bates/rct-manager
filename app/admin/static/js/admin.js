@@ -3205,7 +3205,10 @@
       const grid = element('div', 'row g-2 align-items-start');
       const hostCol = element('div', 'col-12 col-sm');
       const hostInput = element('input', 'form-control');
-      hostInput.id = `device-${index}-host`;
+      // Ids derive from the stable row uid, not the loop index: preserveFocus() restores focus by
+      // id after rebuildDeviceSection(), so an index-derived id would move focus to a different row
+      // once a row above is removed (JS-01).
+      hostInput.id = `device-${device._uid}-host`;
       hostInput.dataset.field = 'host';
       hostInput.setAttribute('aria-label', 'IP address or host name');
       hostInput.placeholder = 'IP address or host name';
@@ -3214,7 +3217,7 @@
       hostCol.append(hostInput);
       const portCol = element('div', 'col-6 col-sm-3');
       const portInput = element('input', 'form-control');
-      portInput.id = `device-${index}-port`;
+      portInput.id = `device-${device._uid}-port`;
       portInput.dataset.field = 'port';
       portInput.type = 'number';
       portInput.min = '1'; portInput.max = '65535'; portInput.inputMode = 'numeric';
@@ -3224,9 +3227,9 @@
       const networkCol = element('div', 'col-6 col-sm-3');
       // Visually hidden keeps the row aligned with the unlabelled host and port inputs.
       const networkLabel = element('label', 'visually-hidden', 'Network ID (optional, empty means directly attached)');
-      networkLabel.htmlFor = `device-${index}-network-id`;
+      networkLabel.htmlFor = `device-${device._uid}-network-id`;
       const networkInput = element('input', 'form-control');
-      networkInput.id = `device-${index}-network-id`;
+      networkInput.id = `device-${device._uid}-network-id`;
       networkInput.dataset.field = 'network_id';
       networkInput.type = 'number';
       networkInput.min = '0'; networkInput.max = String(MAX_NETWORK_ID); networkInput.inputMode = 'numeric';
@@ -3250,7 +3253,7 @@
       const flag = element('span', 'device-row-flag badge text-bg-warning mt-1');
       flag.hidden = true;
       const feedback = element('div', 'invalid-feedback');
-      feedback.id = `device-${index}-feedback`;
+      feedback.id = `device-${device._uid}-feedback`;
       row.append(grid, flag, feedback);
       host.append(row);
       // Draft only: no request is sent until Apply, so a spinner step cannot reconfigure anything.

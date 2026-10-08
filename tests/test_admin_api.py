@@ -33,7 +33,7 @@ async def test_admin_first_login_change_and_pat(tmp_path):
     settings = Settings(_env_file=None, hmac_secret="s" * 48, admin_db_path=tmp_path / "rct.db")
     app = create_app(settings)
     password = app.state.first_start_password
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver") as client:
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver", headers={"Origin": "http://testserver"}) as client:
         before = await client.get("/admin/api/session")
         assert before.json()["authenticated"] is False
         csrf = before.json()["csrf_token"]
@@ -121,10 +121,9 @@ async def test_first_start_issues_no_token(tmp_path, capsys):
     settings = Settings(_env_file=None, hmac_secret="s" * 48, admin_db_path=tmp_path / "rct.db")
     app = create_app(settings)
     assert capsys.readouterr().out == ""  # the banner is printed by the server after startup
-    banner = first_start_banner(
-        app.state.runtime.settings, app.state.first_start_password, tmp_path / "initial-admin-password"
-    )
+    banner = first_start_banner(app.state.runtime.settings, tmp_path / "initial-admin-password")
     assert app.state.first_start_password and "token" not in banner.lower()
+    assert app.state.first_start_password not in banner  # the password itself must never reach stdout
     assert app.state.admin_store.list_tokens() == []
 
 
@@ -137,7 +136,7 @@ async def test_admin_writes_need_admin_session_or_read_write_pat(tmp_path, auth_
     password = app.state.first_start_password
     store = app.state.admin_store
     change = {"metrics_rate_limit_requests": 120}
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver") as client:
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver", headers={"Origin": "http://testserver"}) as client:
         def bearer(token):
             return {"Authorization": "Bearer " + token}
 
@@ -206,16 +205,16 @@ def test_admin_password_minimum_is_eight_characters():
         PasswordChange(current_password="x", new_password="1234567")
 
 
-def test_first_start_banner_carries_the_password_and_names_the_fallback_file(tmp_path):
+def test_first_start_banner_names_the_password_file_and_never_the_password(tmp_path):
     from app.api.server import first_start_banner
     from app.config import Settings
 
     password_file = tmp_path / "initial-admin-password"
-    text = first_start_banner(Settings(_env_file=None, bind_port=8123), "XnQ3!4wk", password_file)
-    assert "XnQ3!4wk" in text  # deliberate product choice: copy-pasteable from the console
+    text = first_start_banner(Settings(_env_file=None, bind_port=8123), password_file)
+    assert "XnQ3!4wk" not in text  # the password itself must never be printed to stdout
     assert str(password_file) in text and "http://127.0.0.1:8123/" in text
     assert text.startswith("\n=") and text.endswith("=\n")
-    assert re.search(r"Password:\s+(\S+)", text).group(1) == "XnQ3!4wk"
+    assert re.search(r"Password file:\s+(\S+)", text).group(1) == str(password_file)
 
 
 @pytest.mark.asyncio
@@ -261,7 +260,7 @@ async def test_server_prints_the_banner_after_startup_only_on_first_start(tmp_pa
 async def test_admin_api_errors_keep_their_own_detail(tmp_path):
     settings = Settings(_env_file=None, hmac_secret="s" * 48, admin_db_path=tmp_path / "rct.db")
     app = create_app(settings)
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver") as client:
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver", headers={"Origin": "http://testserver"}) as client:
         csrf = (await client.get("/admin/api/session")).json()["csrf_token"]
         bad = await client.post("/admin/api/login", headers={"X-CSRF-Token": csrf},
                                 json={"username": "admin", "password": "wrong-password"})
@@ -279,7 +278,7 @@ async def test_resaving_an_unchanged_export_field_does_not_restart_the_exporter(
     settings = Settings(_env_file=None, hmac_secret="s" * 48, admin_db_path=tmp_path / "rct.db")
     app = create_app(settings)
     password = app.state.first_start_password
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver") as client:
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver", headers={"Origin": "http://testserver"}) as client:
         csrf = (await client.get("/admin/api/session")).json()["csrf_token"]
         login = await client.post("/admin/api/login", headers={"X-CSRF-Token": csrf},
                                   json={"username": "admin", "password": password})
@@ -310,7 +309,7 @@ async def test_switching_db_type_still_restarts_the_exporter(tmp_path):
     settings = Settings(_env_file=None, hmac_secret="s" * 48, admin_db_path=tmp_path / "rct.db")
     app = create_app(settings)
     password = app.state.first_start_password
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver") as client:
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver", headers={"Origin": "http://testserver"}) as client:
         csrf = (await client.get("/admin/api/session")).json()["csrf_token"]
         login = await client.post("/admin/api/login", headers={"X-CSRF-Token": csrf},
                                   json={"username": "admin", "password": password})

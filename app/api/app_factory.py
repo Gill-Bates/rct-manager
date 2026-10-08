@@ -18,6 +18,7 @@ from fastapi import Depends, FastAPI, Request
 from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.security import HTTPBearer
+from fastapi.staticfiles import StaticFiles
 
 from app import __version__
 from app.admin.api import (
@@ -91,6 +92,14 @@ _RECONFIGURE_DRAIN_SECONDS = 10.0  # shutdown waits this long for an in-flight r
 _REFRESH_CYCLE_SECONDS = 10.0  # 8 reads per cycle cover 40 values within the 2 x pas.period threshold
 _bearer = HTTPBearer(auto_error=False, description="Bearer token")
 _FAVICON_BYTES = (Path(__file__).resolve().parent.parent / "admin" / "static" / "img" / "favicon.ico").read_bytes()
+_DOCS_HEADERS = {
+    # Public, token-free page (DOCS_PUBLIC): restrictive by default since it ships "Try it out".
+    "Content-Security-Policy": (
+        "default-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+    ),
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "same-origin",
+}
 
 
 @dataclass(slots=True)
@@ -513,6 +522,8 @@ async def _export_loop(runtime: Runtime, parts: _Parts) -> None:
         await PushExporter(runtime.settings, parts.exporter, parts.service, runtime.clock).run()
     except Exception:
         log.exception("Metrics export stopped")
+    finally:
+        parts.service.export_enabled = False
 
 
 async def _await_password_change(store: AdminStore, start_jobs: Callable[[], None]) -> None:
@@ -611,25 +622,34 @@ def _lifespan(
                 start_dispatch_tasks(runtime.devices)
             start_export_task()
 
+        export_restart_lock = asyncio.Lock()
+
         async def restart_export() -> None:
             """Cancel the running export task, if any, and start a fresh one off the current
             ``runtime.settings``. Lets a saved TSDB setting (target, connection, retention) take
             effect without an application restart, same intent as the metrics live-reload path.
+
+            Serialized: the admin API triggers this outside _SETTINGS_LOCK, so concurrent settings
+            saves can call it at the same time. Without the lock, two concurrent calls could both
+            see the same ``export_task`` across the ``await`` below and race on it (duplicate or
+            orphan the task); the lock plus a stable local reference rule that out.
             """
             nonlocal export_task
             if runtime.shutting_down():
                 return
-            if export_task is not None:
-                export_task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await export_task
-                tasks[:] = [t for t in tasks if t is not export_task]  # drop the dead reference
-                export_task = None
-                runtime.export_task = None
-                parts.service.export_enabled = False
-            elif store is not None and await asyncio.to_thread(store.password_change_pending):
-                return  # device jobs (export among them) are still held back by _await_password_change
-            start_export_task()
+            async with export_restart_lock:
+                old_task = export_task
+                if old_task is not None:
+                    old_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await old_task
+                    tasks[:] = [t for t in tasks if t is not old_task]  # drop the dead reference
+                    export_task = None
+                    runtime.export_task = None
+                    parts.service.export_enabled = False
+                elif store is not None and await asyncio.to_thread(store.password_change_pending):
+                    return  # device jobs (export among them) are still held back by _await_password_change
+                start_export_task()
 
         async def _reconfigure_devices_unlocked() -> None:
             """Rebuild the whole device/endpoint graph from the current ``runtime.settings.devices``
@@ -657,10 +677,14 @@ def _lifespan(
             """
             if is_closing():
                 return
+            # Captured once: every step below reads only this snapshot, never runtime.settings
+            # again, so a concurrent put_settings() publishing a newer one mid-reconfiguration
+            # cannot mix values from two different device configurations.
+            target = runtime.settings
             reset_ids: set[str] = set()
             if runtime.dispatch is not None:
                 old_ids = set(runtime.devices)
-                new_devices = {d.device_id: d for d in runtime.settings.devices}
+                new_devices = {d.device_id: d for d in target.devices}
                 # Affected: removed outright, or re-addressed under the same device_id (host/port/
                 # network_id changed) — either way the record a running dispatch holds would no
                 # longer describe the physical device the gateway resolves that id to afterward.
@@ -690,14 +714,14 @@ def _lifespan(
                 return  # nothing has been built or torn down yet
             # Same set as at boot: this path runs on every Inverters-page save, and a narrower one
             # would make the Energy Manager card go dark on the next settings change.
-            periodic_names = _effective_periodic_names(runtime.settings, runtime.catalog, selected_exposed)
+            periodic_names = _effective_periodic_names(target, runtime.catalog, selected_exposed)
             # Built BEFORE any teardown: a failure here leaves the old graph fully running. The
             # build registers its bindings in the live gateway, so the old map is put back until
             # the old graph has actually been torn down.
             old_bindings = gateway.device_bindings()
             try:
                 graph = _build_device_graph(
-                    runtime.settings, runtime.clock, connector, runtime.catalog, gateway, periodic_names
+                    target, runtime.clock, connector, runtime.catalog, gateway, periodic_names
                 )
             except Exception as exc:
                 raise ReconfigurationBuildError(str(exc)) from exc
@@ -706,31 +730,43 @@ def _lifespan(
 
             # Identity-bound resets run only now that the new graph built: a failed build above must
             # leave evidence, engineering mode and arming exactly as they were.
-            for device_id in reset_ids:
-                # Evidence and arming were given for the old physical device, not the new one.
-                # Every capability is reset, not only the VERIFIED ones: a revoke keeps its
-                # evidence (strategy code, byte widths, sign assumptions, ...) on an UNVERIFIED
-                # record, and that evidence must not survive onto whatever device now answers
-                # at this device_id — only a VERIFIED->default reset here would let it.
-                for capability in runtime.dispatch.capabilities(device_id):
-                    await runtime.dispatch.set_capability(
-                        device_id, CapabilityRecord(device_id=device_id, name=capability.name)
-                    )
-                # Engineering mode is the per-device switch that lets dispatch run on unverified
-                # hardware; it is a decision about the old physical device and must not carry
-                # over either. The power limits themselves (max_charge/discharge_power_w) are
-                # a site/installation property, not a hardware-identity claim, so they are left
-                # as the operator configured them.
-                old_limits = runtime.dispatch.device_limits(device_id)
-                if old_limits is not None and old_limits.engineering_mode:
-                    await runtime.dispatch.set_device_limits(
-                        device_id, replace(old_limits, engineering_mode=False)
-                    )
-                if runtime.energy is not None and runtime.energy.armed(device_id):
-                    await runtime.energy.set_armed(device_id, armed=False, actor=None)
+            #
+            # These resets themselves are not yet one atomic store transaction (that would need
+            # reset_device_identity() to group capability reset, engineering mode and arming into a
+            # single DB write) — a durable fix left as a follow-up. For now, a failure partway
+            # through is at least classified as rollback-capable like the _swap_graph() build
+            # failure below, instead of being treated as a non-rollback (devices-already-persisted)
+            # error by the admin API's generic exception path.
+            try:
+                for device_id in reset_ids:
+                    # Evidence and arming were given for the old physical device, not the new one.
+                    # Every capability is reset, not only the VERIFIED ones: a revoke keeps its
+                    # evidence (strategy code, byte widths, sign assumptions, ...) on an UNVERIFIED
+                    # record, and that evidence must not survive onto whatever device now answers
+                    # at this device_id — only a VERIFIED->default reset here would let it.
+                    for capability in runtime.dispatch.capabilities(device_id):
+                        await runtime.dispatch.set_capability(
+                            device_id, CapabilityRecord(device_id=device_id, name=capability.name)
+                        )
+                    # Engineering mode is the per-device switch that lets dispatch run on unverified
+                    # hardware; it is a decision about the old physical device and must not carry
+                    # over either. The power limits themselves (max_charge/discharge_power_w) are
+                    # a site/installation property, not a hardware-identity claim, so they are left
+                    # as the operator configured them.
+                    old_limits = runtime.dispatch.device_limits(device_id)
+                    if old_limits is not None and old_limits.engineering_mode:
+                        await runtime.dispatch.set_device_limits(
+                            device_id, replace(old_limits, engineering_mode=False)
+                        )
+                    if runtime.energy is not None and runtime.energy.armed(device_id):
+                        await runtime.energy.set_armed(device_id, armed=False, actor=None)
+            except Exception as exc:
+                # The old graph is still running untouched (teardown has not started yet), so this
+                # is rollback-capable the same way a failed graph build is.
+                raise ReconfigurationBuildError(str(exc)) from exc
 
             try:
-                await _swap_graph(graph)
+                await _swap_graph(graph, target)
             except Exception:
                 # The old graph is already torn down, so what runs now is a partial one. Say so
                 # loudly and keep readiness red until the operator restarts or saves again.
@@ -738,7 +774,7 @@ def _lifespan(
                 log.exception("Device reconfiguration failed after the old graph was torn down; service marked not ready")
                 raise
 
-        async def _swap_graph(graph: _DeviceGraph) -> None:
+        async def _swap_graph(graph: _DeviceGraph, target: Settings) -> None:
             old_tasks = [
                 *connect_tasks, *startup_tasks, *heartbeat_tasks, *periodic_tasks, *refresh_tasks, *dispatch_tasks,
             ]
@@ -752,8 +788,14 @@ def _lifespan(
                 group.clear()
             connects.clear()
 
-            await asyncio.gather(*(s.stop() for s in parts.serializers), return_exceptions=True)
-            await asyncio.gather(*(e.close() for e in parts.endpoints), return_exceptions=True)
+            stop_results = await asyncio.gather(*(s.stop() for s in parts.serializers), return_exceptions=True)
+            close_results = await asyncio.gather(*(e.close() for e in parts.endpoints), return_exceptions=True)
+            errors = [r for r in (*stop_results, *close_results) if isinstance(r, BaseException)]
+            if errors:
+                # The new graph must never start while an old connection or worker might still be
+                # running: that violates the swap's own invariant. Raising here routes into the
+                # caller's except-block, which already marks the service not ready.
+                raise RuntimeError("Old device graph could not be stopped cleanly") from errors[0]
 
             # Read off the event loop; fetched after the teardown so the window to the set_limits()
             # below stays as short as it was with the synchronous read.
@@ -774,14 +816,14 @@ def _lifespan(
                 parts.exporter.set_endpoints(parts.endpoint_views)
 
             # Swapped as whole objects: sync handlers in the thread pool iterate these dicts.
-            runtime.devices = {d.device_id: d for d in runtime.settings.devices}
-            runtime.roles = _roles(runtime.settings)
+            runtime.devices = {d.device_id: d for d in target.devices}
+            runtime.roles = _roles(target)
 
             if runtime.dispatch is not None:
                 # Rebuilt the same way as at boot: stored operator values win, the environment only
                 # seeds a device that has no record, so a device-list change cannot silently drop a
                 # limit or an engineering switch an operator set.
-                runtime.dispatch.set_limits(_seed_limits(runtime.settings, stored))
+                runtime.dispatch.set_limits(_seed_limits(target, stored))
 
             for serializer in parts.serializers:
                 serializer.start()
@@ -814,7 +856,12 @@ def _lifespan(
             """
             if runtime.dispatch is not None or is_closing() or not _dispatch_enabled(runtime.settings):
                 return
-            dispatch_store_new, armed = _create_dispatch(runtime, app.state.dispatch_config)
+            # _create_dispatch() does several synchronous DB inits/reads (DispatchStore.initialize(),
+            # get_capabilities(), get_soc_target_policies(), get_energy_states(), get_device_configs());
+            # called directly here it would block the event loop on a live write-support enable.
+            dispatch_store_new, armed = await asyncio.to_thread(
+                _create_dispatch, runtime, app.state.dispatch_config
+            )
             app.state.dispatch_store = dispatch_store_new
             if runtime.energy is not None:
                 runtime.energy.attach_dispatch(
@@ -884,6 +931,9 @@ def _lifespan(
     return lifespan
 
 
+_SWAGGER_UI_ROOT = Path(__file__).resolve().parent.parent / "admin" / "static" / "vendor" / "swagger-ui"
+
+
 def _add_docs(app: FastAPI, settings: Settings) -> None:
     """Token-free documentation, available only when DOCS_PUBLIC is enabled."""
 
@@ -894,15 +944,24 @@ def _add_docs(app: FastAPI, settings: Settings) -> None:
         ctx: SecurityContext = request.app.state.security
         ctx.limiter.check_request(source_address(request, ctx))  # docs count against the request rate
 
+    # Self-hosted, pinned swagger-ui-dist build: the FastAPI default loads swagger-ui-bundle.js and
+    # swagger-ui.css from cdn.jsdelivr.net, which would need a CSP exception for a third-party
+    # origin and risks bearer-token theft through "Try it out" if that CDN asset is ever compromised.
+    app.mount(
+        "/docs-static", StaticFiles(directory=str(_SWAGGER_UI_ROOT)), name="docs-static"
+    )
+
     @app.get("/openapi.json", include_in_schema=False, dependencies=[Depends(guard)])
     async def openapi_document() -> JSONResponse:
-        return JSONResponse(app.openapi())
+        return JSONResponse(app.openapi(), headers=_DOCS_HEADERS)
 
     @app.get("/docs", include_in_schema=False, dependencies=[Depends(guard)])
     async def swagger_ui() -> HTMLResponse:
         page = get_swagger_ui_html(
             openapi_url="/openapi.json",
             title="RCT Manager",
+            swagger_js_url="/docs-static/swagger-ui-bundle.js",
+            swagger_css_url="/docs-static/swagger-ui.css",
             swagger_favicon_url="/favicon.ico",
             swagger_ui_parameters={
                 "tryItOutEnabled": True,
@@ -916,7 +975,7 @@ def _add_docs(app: FastAPI, settings: Settings) -> None:
             },
         )
         body = bytes(page.body).decode().replace("</body>", SIDEBAR_HTML + "</body>", 1)
-        return HTMLResponse(body)
+        return HTMLResponse(body, headers=_DOCS_HEADERS)
 
     if settings.docs_public:
         log.info("API documentation: http://%s:%d/docs (OpenAPI: /openapi.json)",
@@ -1072,15 +1131,20 @@ def create_app(settings: Settings, *, clock: Clock | None = None, connector: Con
         # Inverters page at any time, so a snapshot taken here would go stale. The manager is built
         # whenever an admin store exists, so the admin surface always has an object that can answer
         # with a proper refusal instead of a missing attribute.
-        def _approve_writes(names: Iterable[str]) -> list[str]:
+        async def _approve_writes(names: Iterable[str]) -> list[str]:
             """Exactly what the Inverters page does, add-only: persist, then widen the allowlist."""
             selected = list(names)
             allowlist = app.state.build_write_allowlist(selected)  # build first: persist only what works
-            # Sync SQLite write on the loop: EnergyManager's callback contract is synchronous, and
-            # this runs only on an operator arming action against a local WAL database.
-            admin_store.put_many({"write_names": selected})
+            # Offloaded: this runs on an operator arming action, and AdminStore can block up to
+            # ~5s on a SQLite lock (timeout=5, busy_timeout=5000), which must not stall the event
+            # loop (HTTP, heartbeats, periodic reads, dispatch, shutdown) while it waits.
+            await asyncio.to_thread(admin_store.put_many, {"write_names": selected})
             runtime.gateway.set_allowlist(allowlist)
             return selected
+
+        async def _approved_writes() -> tuple[str, ...]:
+            """One small local SQLite read; offloaded for the same reason as ``_approve_writes``."""
+            return tuple(await asyncio.to_thread(admin_store.get, "write_names") or ())
 
         runtime.energy = EnergyManager(
             port=runtime.dispatch,
@@ -1091,8 +1155,7 @@ def create_app(settings: Settings, *, clock: Clock | None = None, connector: Con
             devices=_LiveDevices(runtime),
             write_support_enabled=lambda: runtime.settings.enable_write_support,
             approve_writes=_approve_writes,
-            # Synchronous by contract; one small local SQLite read that never waits on the device.
-            approved_writes=lambda: tuple(admin_store.get("write_names") or ()),
+            approved_writes=_approved_writes,
             allowlist_candidates=lambda: frozenset(app.state.default_write_entries),
             required_writes=RctDispatchGateway.REQUIRED_WRITES,
             armed=energy_armed,

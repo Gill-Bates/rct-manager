@@ -122,7 +122,12 @@ async def running_app(
         try:
             async with app.router.lifespan_context(app):
                 transport = httpx.ASGITransport(app=app, client=("127.0.0.1", 50000))
-                default = {"Authorization": f"Bearer {READ_TOKEN}"} if authorize else {}  # explicit headers override it
+                # A browser sends Origin on every state-changing request; model it so the
+                # same-origin CSRF guard (fails closed on a header-less mutation, SEC-02) is
+                # satisfied for the session-cookie flows. A per-request Origin header overrides it.
+                default = {"Origin": "http://test"}
+                if authorize:
+                    default["Authorization"] = f"Bearer {READ_TOKEN}"  # explicit headers override it
                 async with httpx.AsyncClient(transport=transport, base_url="http://test", headers=default) as client:
                     if settle:
                         await wait_settled(app)

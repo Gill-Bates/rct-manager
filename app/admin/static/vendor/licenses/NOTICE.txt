@@ -15,3 +15,7 @@ WireBuddy is Copyright 2026 Gill-Bates and licensed under MIT.
 GridStack.js 14.0.0 (gridstack-all.js, gridstack.min.css): Copyright (c) 2021-2025 Alain Dumesny;
 v0.4.0 and older (c) 2014-2018 Pavel Reznikov, Dylan Weiss.
 Licensed under MIT; see gridstack.txt.
+
+Swagger UI 5.33.1 (swagger-ui/swagger-ui-bundle.js, swagger-ui/swagger-ui.css): Copyright
+SmartBear Software. Licensed under Apache License 2.0; see Apache-2.0 and swagger-ui/LICENSE.
+Self-hosted to serve the public /docs page without a third-party CDN dependency.

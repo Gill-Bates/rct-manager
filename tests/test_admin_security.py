@@ -27,7 +27,14 @@ def _settings(tmp_path, **extra):
 
 
 def _client(app):
-    return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver")
+    # A browser sends Origin on every state-changing request; model that by default so the
+    # same-origin CSRF guard (which fails closed on a header-less mutation, SEC-02) is satisfied
+    # for the login/change-password flows. Tests of a hostile Origin/Referer override it per call.
+    return httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://testserver",
+        headers={"Origin": "http://testserver"},
+    )
 
 
 async def _login(client, password, csrf=None, **headers):
@@ -110,7 +117,9 @@ async def test_csrf_and_origin_are_enforced(booted):
         assert (await client.put("/admin/api/settings", headers={"X-CSRF-Token": "wrong"}, json=body)).status_code == 403
         evil = {"X-CSRF-Token": csrf, "Origin": "http://evil.example"}
         assert (await client.put("/admin/api/settings", headers=evil, json=body)).status_code == 403
-        referer = {"X-CSRF-Token": csrf, "Referer": "http://evil.example/page"}
+        # Models a crafted request with no Origin and a hostile Referer (empty Origin overrides
+        # the client default so the Referer branch is exercised).
+        referer = {"X-CSRF-Token": csrf, "Origin": "", "Referer": "http://evil.example/page"}
         assert (await client.put("/admin/api/settings", headers=referer, json=body)).status_code == 403
         good = {"X-CSRF-Token": csrf, "Origin": "http://testserver"}
         assert (await client.put("/admin/api/settings", headers=good, json=body)).status_code == 200

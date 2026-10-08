@@ -51,7 +51,7 @@ async def _logged_in(tmp_path) -> AsyncIterator[httpx.AsyncClient]:
     password = app.state.first_start_password
     async with (
         app.router.lifespan_context(app),
-        httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver") as client,
+        httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver", headers={"Origin": "http://testserver"}) as client,
     ):
         csrf = (await client.get("/admin/api/session")).json()["csrf_token"]
         login = await client.post("/admin/api/login", headers={"X-CSRF-Token": csrf},
@@ -92,7 +92,7 @@ async def test_about_update_check_requires_login_and_renders_release_controls(tm
     # The route binds the imported function when the module loads.
     monkeypatch.setattr("app.admin.api.check_for_updates", fake_check)
     app = create_app(Settings(_env_file=None, hmac_secret="s" * 48, admin_db_path=tmp_path / "anonymous.db"))
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver") as anonymous:
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver", headers={"Origin": "http://testserver"}) as anonymous:
         assert (await anonymous.get("/admin/api/check-updates")).status_code == 401
     assert calls == []
 
@@ -639,7 +639,7 @@ def test_dates_follow_the_browser_locale():
 async def test_about_requires_session_and_renders_project_details(tmp_path):
     app = create_app(Settings(_env_file=None, hmac_secret="s" * 48, admin_db_path=tmp_path / "rct.db"))
     password = app.state.first_start_password
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver") as client:
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver", headers={"Origin": "http://testserver"}) as client:
         unauthenticated = await client.get("/ui/about", follow_redirects=False)
         assert unauthenticated.status_code == 303
         assert unauthenticated.headers["location"] == "/login"

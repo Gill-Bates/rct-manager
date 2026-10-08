@@ -784,7 +784,10 @@ async def test_hardware_verification_drops_a_sign_note_recorded_under_different_
 
 async def test_hardware_verification_needs_a_session_and_validates_the_body(tmp_path: Path) -> None:
     async with running_app(energy_settings(tmp_path)) as harness:
-        assert (await harness.client.put(VERIFICATION_URL, json=VERIFICATION)).status_code == 401
+        # The default client carries a bearer PAT and no session cookie. This privileged route is
+        # session-only (SEC-01), so a PAT is refused outright with 403 before the token is even
+        # checked, rather than falling through to the generic 401 login prompt.
+        assert (await harness.client.put(VERIFICATION_URL, json=VERIFICATION)).status_code == 403
         headers = await admin_session(harness)
         for bad in ({"enum_byte_width": 9}, {"note": ""}, {"battery_discharge_positive": "yes"}):
             response = await harness.client.put(VERIFICATION_URL, headers=headers, json={**VERIFICATION, **bad})

@@ -156,7 +156,11 @@ def _same_origin(request: Request) -> bool:
     referer = request.headers.get("referer")
     if referer:
         return referer.startswith(base + "/")
-    return True
+    # No Origin and no Referer: fail open only for same-origin GETs (safe methods carry no CSRF
+    # risk and some same-origin navigations send neither header). State-changing methods must
+    # fail closed (SEC-02): _csrf() is only ever called on mutations, so a missing-header request
+    # there is treated as cross-origin.
+    return request.method in ("GET", "HEAD", "OPTIONS")
 
 
 def _csrf(request: Request, session: dict | None = None) -> None:
@@ -403,6 +407,11 @@ def get_settings(request: Request) -> dict:
             "restart_required": _pending_restart(request, session), "live": sorted(_LIVE)}
 
 
+# Mirrors app.config._DEVICE_ID (DeviceEntry._check_id): validated here too so a bad device_id
+# gets a field-specific 400 instead of surfacing as the generic "Invalid setting" from the
+# downstream model validation (PY-01). Keep this pattern in step with app.config._DEVICE_ID.
+_DEVICE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+
 # This is a plausibility check for an address-shaped value, not DNS or full IP validation.
 _HOST = re.compile(
     r"^(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,62})(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,62}))*|\[[0-9A-Fa-f:.]+\]|[0-9A-Fa-f:.]+)$"
@@ -458,6 +467,12 @@ def _normalize_devices(raw: Any) -> list[dict[str, Any]]:
         device_id = item.get("device_id") or None
         if device_id is not None and not isinstance(device_id, str):
             raise HTTPException(400, "The device id must be text")
+        if device_id is not None and not _DEVICE_ID.fullmatch(device_id):
+            raise HTTPException(
+                400,
+                "The device id must start with a letter or digit and use only letters, digits, "
+                "'_', '.' or '-' (at most 64 characters)",
+            )
         entry = {"host": host, "port": port, "device_id": device_id,
                  "display_name": _display_name(item.get("display_name")), "network_id": network_id}
         result.append(entry)

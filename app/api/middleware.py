@@ -43,6 +43,11 @@ def access_log_level(method: str, path: str, status: int) -> int:
     return logging.DEBUG
 
 
+def _escape_for_log(value: str) -> str:
+    """Make a request-controlled string safe for a single log line: no raw control characters."""
+    return value.encode("unicode_escape", errors="backslashreplace").decode("ascii")
+
+
 def resolve_correlation_id(supplied: str | None) -> str:
     """Take the client value only when it is short and uses safe characters."""
     if supplied is not None and _VALID_ID.fullmatch(supplied):
@@ -95,17 +100,21 @@ class RequestContextMiddleware:
                 await response(scope, receive, wrapped)
         finally:
             duration_ms = round((time.perf_counter() - started) * 1000, 1)
+            # uvicorn's h11 unquotes the raw URL into scope["path"], so e.g. %0A becomes a literal
+            # newline: an unauthenticated request could otherwise inject fake multi-line log entries.
+            method = _escape_for_log(scope["method"])
+            path = _escape_for_log(scope["path"])
             log.log(
                 access_log_level(scope["method"], scope["path"], status),
                 "%s %s -> %d in %.1f ms (token %s)",
-                scope["method"],
-                scope["path"],
+                method,
+                path,
                 status,
                 duration_ms,
                 scope.get("token_id") or "-",
                 extra={
-                    "method": scope["method"],
-                    "path": scope["path"],
+                    "method": method,
+                    "path": path,
                     "status": status,
                     "duration_ms": duration_ms,
                     "token_id": scope.get("token_id"),

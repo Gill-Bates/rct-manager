@@ -73,7 +73,7 @@ class GracefulServer(uvicorn.Server):
         if password and self.started:  # after uvicorn's own log lines so the notice stays visible
             settings = app.state.runtime.settings
             path = write_first_start_password(settings, password)
-            print(first_start_banner(settings, password, path), flush=True)
+            print(first_start_banner(settings, path), flush=True)
 
     async def serve(self, sockets=None) -> None:
         self._loop = asyncio.get_running_loop()
@@ -101,20 +101,20 @@ def write_first_start_password(settings: Settings, password: str) -> Path:
     return path
 
 
-def first_start_banner(settings: Settings, password: str, password_file: Path) -> str:
-    """Boxed first-login notice carrying the one-time password in clear text.
+def first_start_banner(settings: Settings, password_file: Path) -> str:
+    """Boxed first-login notice naming where the one-time password was saved.
 
-    Deliberate product choice: the operator wants the password copy-pasteable straight from the
-    console on first start, not only a path to go read separately. It is also still saved to
-    `password_file` (0600) as a fallback for services run without a visible console (systemd/Docker).
+    The password itself is never printed: stdout is persisted and centrally collected in
+    systemd/Docker/Kubernetes, where it would remain as a permanent secret history. The password
+    file (0600, next to the admin DB) is the only place the operator reads it from.
     """
     host = url_host(settings.bind_address)
     rule = "=" * 61
     return "\n".join((
-        "", rule, " FIRST START - admin login", " User:     admin",
-        f" Password: {password}",
-        f"           (one-time; change it at first login; also saved to {password_file})",
-        f" Open:     http://{host}:{settings.bind_port}/", rule, "",
+        "", rule, " FIRST START - admin login", " User:          admin",
+        f" Password file: {password_file} (0600)",
+        "                (one-time; change it at first login)",
+        f" Open:          http://{host}:{settings.bind_port}/", rule, "",
     ))
 
 

@@ -18,7 +18,7 @@ guarantee below holds for both.
 import asyncio
 import logging
 import math
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from datetime import timedelta
 
 from app.clock import Clock
@@ -93,8 +93,8 @@ class EnergyManager:
         config: DispatchConfig,
         devices: Mapping[str, DeviceEntry],
         write_support_enabled: bool | Callable[[], bool],
-        approve_writes: Callable[[Iterable[str]], Sequence[str]] | None,
-        approved_writes: Callable[[], tuple[str, ...]] | None,
+        approve_writes: Callable[[Iterable[str]], Awaitable[Sequence[str]]] | None,
+        approved_writes: Callable[[], Awaitable[tuple[str, ...]]] | None,
         allowlist_candidates: Callable[[], frozenset[str]] | None,
         required_writes: tuple[str, ...],
         armed: Mapping[str, ArmedRecord] | None = None,
@@ -157,7 +157,7 @@ class EnergyManager:
         """The armed row of one device, for the admin surface's display-only fields."""
         return self._record(device_id)
 
-    def approved_write_names(self) -> tuple[str, ...]:
+    async def approved_write_names(self) -> tuple[str, ...]:
         """The live write allowlist, state-independent, for the admin Setup checklist.
 
         This is the same reader ``_missing_write_names`` consults, so it is authoritative in every
@@ -165,7 +165,7 @@ class EnergyManager:
         contributed. A never-armed or disarmed device whose required writes were approved on the
         Inverters page still reports them here.
         """
-        return tuple(self._approved_writes()) if self._approved_writes is not None else ()
+        return tuple(await self._approved_writes()) if self._approved_writes is not None else ()
 
     def required_write_names(self) -> tuple[str, ...]:
         """The register names every manual command needs, so the GUI need not repeat the list."""
@@ -200,7 +200,7 @@ class EnergyManager:
             for action in EnergyAction
         )
 
-    def _missing_write_names(self) -> list[str]:
+    async def _missing_write_names(self) -> list[str]:
         """Required register names that are no longer approved.
 
         With no reader injected there is no allowlist to consult, and the write layer refuses on its
@@ -208,7 +208,7 @@ class EnergyManager:
         """
         if self._approved_writes is None:
             return []
-        approved = frozenset(self._approved_writes())  # ordered tuple in, membership set out
+        approved = frozenset(await self._approved_writes())  # ordered tuple in, membership set out
         return [name for name in self._required_writes if name not in approved]
 
     # --- commands ---------------------------------------------------------------------------
@@ -239,7 +239,7 @@ class EnergyManager:
             if command.action is not EnergyAction.AUTO and not self._write_support_enabled():
                 log.warning("Energy command refused: write support is disabled (device=%s)", device_id)
                 raise EnergyRejected("energy_write_support_required", device_id=device_id)
-            missing = self._missing_write_names() if command.action is not EnergyAction.AUTO else []
+            missing = await self._missing_write_names() if command.action is not EnergyAction.AUTO else []
             if missing:
                 log.warning(
                     "Energy command refused: write approval for %s was revoked (device=%s)",
@@ -256,7 +256,7 @@ class EnergyManager:
                 device_id, command.action.value, command.target_soc_percent, status.state.value,
                 _actor_name(actor),
             )  # fmt: skip
-            return self._project(device_id, status)
+            return await self._project(device_id, status)
 
     def _validate(self, command: EnergyCommand) -> None:
         """The field rules of design 2.10.1, repeated here so an in-process caller (the future
@@ -343,7 +343,7 @@ class EnergyManager:
             else:
                 await self._disarm(device_id)
             status = None if self._port is None else await self._port.status(device_id)
-            return self._project(device_id, status)
+            return await self._project(device_id, status)
 
     async def _arm(self, device_id: str, actor: str | None) -> None:
         """Design 2.6.1: read-only preflight, then the add-only approval, then the commit."""
@@ -378,12 +378,12 @@ class EnergyManager:
                 "energy_write_support_required", device_id=device_id, missing=unavailable
             )
         async with self._approval_lock:
-            existing = list(self._approved_writes())  # order as stored
+            existing = list(await self._approved_writes())  # order as stored
             missing = [name for name in self._required_writes if name not in existing]
             if missing:
                 # Add-only and order-preserving: the operator's own selection keeps its order, nothing
                 # is removed, nothing is reordered, and duplicates are impossible.
-                self._approve_writes(existing + missing)
+                await self._approve_writes(existing + missing)
             current = self._record(device_id)
             record = ArmedRecord(
                 device_id=device_id,
@@ -399,7 +399,8 @@ class EnergyManager:
             except Exception:
                 if missing:
                     # Remove only what this call added: another device may have changed the approvals.
-                    self._approve_writes([n for n in self._approved_writes() if n not in missing])
+                    still_approved = await self._approved_writes()
+                    await self._approve_writes([n for n in still_approved if n not in missing])
                 raise
         self._armed_states[device_id] = record  # memory only after the commit returned
         log.warning(
@@ -437,7 +438,7 @@ class EnergyManager:
     async def status(self, device_id: str) -> EnergyDeviceStatus:
         self._entry(device_id)
         status = None if self._port is None else await self._port.status(device_id)
-        return self._project(device_id, status)
+        return await self._project(device_id, status)
 
     def _window(self) -> TargetSocWindow:
         return TargetSocWindow(
@@ -459,7 +460,7 @@ class EnergyManager:
             limit_export=self._config.limit_export_during_discharge,
         )
 
-    def _project(self, device_id: str, status: DispatchStatus | None) -> EnergyDeviceStatus:
+    async def _project(self, device_id: str, status: DispatchStatus | None) -> EnergyDeviceStatus:
         action = _ACTION_FOR_MODE.get(status.mode) if status is not None and status.mode else None
         state = (
             _STATE_FOR_DISPATCH_STATE[status.state] if status is not None else EnergyState.AUTOMATIC
@@ -501,7 +502,7 @@ class EnergyManager:
             time_limited=self._time_limited(device_id, status),
             target_soc_window=self._window(),
             readings=readings,
-            actions=self.action_availability(device_id, status),
+            actions=await self.action_availability(device_id, status),
         )
 
     def _time_limited(self, device_id: str, status: DispatchStatus | None) -> bool:
@@ -516,7 +517,7 @@ class EnergyManager:
             return False
         return self._gate(device_id, status.mode, limits).engineering_mode
 
-    def action_availability(
+    async def action_availability(
         self, device_id: str, status: DispatchStatus | None
     ) -> tuple[ActionAvailability, ...]:
         """One read-only preflight per action, with the five business reasons of design 2.3.3.
@@ -526,7 +527,7 @@ class EnergyManager:
         Its availability is exactly ``armed``, which is what keeps a GUI from offering a button that
         answers 409.
         """
-        reason = self._blocking_reason(device_id)
+        reason = await self._blocking_reason(device_id)
         return tuple(
             ActionAvailability(action, available=False, reason=reason)
             if reason is not None
@@ -535,11 +536,11 @@ class EnergyManager:
             for action in EnergyAction
         )
 
-    def _blocking_reason(self, device_id: str) -> ActionReason | None:
+    async def _blocking_reason(self, device_id: str) -> ActionReason | None:
         """The reason that blocks every action of this device, ``None`` when none does."""
         if not self.armed(device_id) or self._port is None:
             return ActionReason.NOT_ARMED
-        if self._missing_write_names():
+        if await self._missing_write_names():
             return ActionReason.WRITE_NOT_PERMITTED
         return None
 

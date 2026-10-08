@@ -362,12 +362,12 @@ async def test_later_start_with_changed_password_runs_jobs_immediately(tmp_path,
 BOOTSTRAP_PASSWORD = "Xk7-pw29"
 
 
-async def test_first_start_password_goes_to_stdout_and_is_also_saved_to_a_0600_file(
+async def test_first_start_password_is_never_printed_but_is_saved_to_a_0600_file(
     tmp_path, capsys, monkeypatch
 ) -> None:
-    """Deliberate product choice (reverses the former P2-3 restriction): the console banner must
-    carry the password in clear text so it can be copy-pasted directly; the 0600 file remains as a
-    fallback for runs without a visible console."""
+    """stdout is persisted and centrally collected in systemd/Docker/Kubernetes, so the one-time
+    password must never appear there; only the 0600 file path is printed, the password itself is
+    read from that file."""
     settings = make_settings(admin_db_path=tmp_path / "data" / "rct.db")
     app = SimpleNamespace(
         state=SimpleNamespace(first_start_password=BOOTSTRAP_PASSWORD, runtime=SimpleNamespace(settings=settings))
@@ -383,7 +383,7 @@ async def test_first_start_password_goes_to_stdout_and_is_also_saved_to_a_0600_f
 
     path = settings.admin_db_path.parent / FIRST_START_PASSWORD_FILE
     printed = capsys.readouterr().out
-    assert BOOTSTRAP_PASSWORD in printed and str(path.resolve()) in printed
+    assert BOOTSTRAP_PASSWORD not in printed and str(path.resolve()) in printed
     assert path.read_text(encoding="utf-8").strip() == BOOTSTRAP_PASSWORD
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
 

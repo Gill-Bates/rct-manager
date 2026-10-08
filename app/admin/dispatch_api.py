@@ -6,8 +6,10 @@
 
 """Admin API for the per-device dispatch capabilities and the engineering-mode switch (4.6).
 
-Not part of the public, documented REST contract: the router is excluded from the OpenAPI schema
-and sits behind the same admin session/CSRF guard as the rest of the admin API. ``app.admin.api``
+Not part of the public, documented REST contract: the router is excluded from the OpenAPI schema.
+Reads sit behind the admin session or a read PAT (``_require_admin_read``); every mutation here is
+a privilege/capability control and is session-only (``_require_admin_write`` passes
+``session_only=True``), so a read/write PAT without a session cookie cannot reach it. ``app.admin.api``
 is only imported from here (``require_admin``), never changed.
 
 Entering a capability as ``verified`` is the only way to lift the per-device dispatch gate for the
@@ -37,7 +39,11 @@ def _require_admin_read(request: Request) -> dict | None:
 
 
 def _require_admin_write(request: Request) -> dict | None:
-    return require_admin(request, mutation=True)
+    # session_only: these are privilege/capability controls (hardware verification, engineering
+    # mode, arming, energy commands, device limits, SoC-target policy). A leaked read/write PAT
+    # must not reach them, matching the session-only treatment of enable_write_support and the
+    # write-allowlist widening in app.admin.api (SEC-01).
+    return require_admin(request, mutation=True, session_only=True)
 
 
 router = APIRouter(prefix="/admin/api/dispatch", include_in_schema=False)

@@ -267,12 +267,12 @@ class ApprovalSpy:
         self.names = list(existing)
         self.calls: list[list[str]] = []
 
-    def approve(self, names) -> list[str]:
+    async def approve(self, names) -> list[str]:
         self.calls.append(list(names))
         self.names = list(names)
         return self.names
 
-    def read(self) -> tuple[str, ...]:
+    async def read(self) -> tuple[str, ...]:
         return tuple(self.names)
 
 

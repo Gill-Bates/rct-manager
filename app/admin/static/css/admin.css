@@ -151,6 +151,7 @@ body {
 }
 
 @media (max-width: 767.98px) {
+
     /* The content is zoomed, so a 44px touch target needs 44 / zoom CSS pixels. */
     #main-content .btn,
     #main-content .device-toggle {
@@ -462,7 +463,8 @@ body {
 }
 
 .energy-panel.is-collapsed .energy-head {
-    margin-bottom: 0 !important; /* beats Bootstrap's mb-3 on the header */
+    margin-bottom: 0 !important;
+    /* beats Bootstrap's mb-3 on the header */
 }
 
 .energy-content[hidden],
@@ -586,7 +588,7 @@ body {
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    gap: .75rem;
+    gap: 1.5rem;
     padding: .75rem;
     border: 1px solid var(--rct-line);
     border-radius: .6rem;
@@ -597,7 +599,9 @@ body {
     max-width: 34rem;
 }
 
-/* State badges below the graphic: same pill look as .device-status-badge, green or red only. */
+/* State badges below the graphic: same pill look as .device-status-badge, green or red only.
+   A hairline separates them from the graphic above; the parent's gap keeps the line clear of the
+   SVG, and the top padding keeps it clear of the badges. */
 .flow-badges {
     display: flex;
     flex-wrap: wrap;
@@ -605,6 +609,8 @@ body {
     gap: .5rem .75rem;
     width: 100%;
     max-width: 34rem;
+    padding-top: 1.5rem;
+    border-top: 1px solid var(--rct-line);
 }
 
 .flow-badge {
@@ -1184,7 +1190,8 @@ body {
 /* One dash period (14 user units) per cycle; every line runs at the same constant speed. */
 @keyframes energy-flow-dash {
     to {
-        stroke-dashoffset: -14.1; /* one full dash period (0.1 + 14) */
+        stroke-dashoffset: -14.1;
+        /* one full dash period (0.1 + 14) */
     }
 }
 
@@ -1835,11 +1842,20 @@ body.is-reconnecting #reconnect-modal.show .reconnect-pulse {
         animation: none;
     }
 }
-/* Last-known-good dashboard: dimmed (still readable) content under an inline banner above the grid. */
-.is-offline { opacity: .8; transition: opacity .2s; }
-.dashboard-offline-banner[hidden] { display: none; }
 
-.confirm-message { white-space: pre-line; }
+/* Last-known-good dashboard: dimmed (still readable) content under an inline banner above the grid. */
+.is-offline {
+    opacity: .8;
+    transition: opacity .2s;
+}
+
+.dashboard-offline-banner[hidden] {
+    display: none;
+}
+
+.confirm-message {
+    white-space: pre-line;
+}
 
 /* The Energy Manager's navigation buttons: a 44px target, zoom-compensated like the rest of #main-content. */
 .energy-step-link {
@@ -1849,10 +1865,13 @@ body.is-reconnecting #reconnect-modal.show .reconnect-pulse {
 }
 
 /* Above the inverter dialog it can be opened from. */
-#confirm-modal { z-index: 1075; }
+#confirm-modal {
+    z-index: 1075;
+}
 
 /* Touch targets: 44px minimum on phones (the lint rule's threshold); desktop sizes stay untouched. */
 @media (max-width: 767.98px) {
+
     .btn,
     .icon-button,
     .device-toggle,
@@ -1903,7 +1922,7 @@ body.is-reconnecting #reconnect-modal.show .reconnect-pulse {
 /* Three 44px header buttons no longer fit beside the brand text on a phone: keep the text for
    screen readers only, so the header stays on one row. */
 @media (max-width: 420px) {
-    .admin-navbar .navbar-brand > span {
+    .admin-navbar .navbar-brand>span {
         position: absolute;
         width: 1px;
         height: 1px;
