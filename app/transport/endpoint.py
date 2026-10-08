@@ -353,6 +353,7 @@ class TransportEndpoint:
             if isinstance(outcome.error, DeviceApiError):  # refused before the Commit_Point
                 return self._fail(request, outcome.error, outcome)
             if outcome.error is not None:
+                log.info("Connection to %s dropped: send failed (%s)", self.endpoint_id, type(outcome.error).__name__)
                 await self._drop_connection(DeviceUnreachable("send_failed"))
                 return self._fail(request, DeviceUnreachable("send_failed"), outcome)
             is_write = frame.command in WRITE_COMMANDS
@@ -372,6 +373,10 @@ class TransportEndpoint:
                     return TransactionResult(outcome)
                 # The response is still in flight and carries no transaction id, so only a new
                 # connection keeps it from answering the next transaction.
+                log.info(
+                    "Connection to %s dropped: no response to object 0x%08x within %.1f s; reconnecting",
+                    self.endpoint_id, frame.object_id, timeout,
+                )
                 await self._drop_connection(error)
                 return self._fail(request, error, outcome)
             except DeviceApiError as exc:

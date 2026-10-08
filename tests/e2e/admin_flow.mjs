@@ -158,6 +158,41 @@ const flowInfo = await page.evaluate(() => {
 check('dashboard device card shows the flow graphic above the inverter/battery subcards',
   flowInfo.present && !flowInfo.hidden && flowInfo.aboveCards, JSON.stringify(flowInfo));
 check('the dashboard flow graphic animates from non-zero energy_flow data', flowInfo.activeLines > 0, JSON.stringify(flowInfo));
+// Label and animation must agree: a Charging/Discharging/Import/Export label means an active line.
+const flowConsistency = await page.evaluate(() => {
+  const svg = document.querySelector('.device-item .energy-flow-svg');
+  const nodes = [...svg.querySelectorAll('.flow-node')];
+  const lines = [...svg.querySelectorAll('.flow-line')];
+  const moving = (index) => !lines[index].classList.contains('is-idle');
+  const sub = (index) => nodes[index].querySelector('.flow-node-sub').textContent;
+  const batteryWord = sub(3).split(' · ')[0];
+  const gridWord = sub(1);
+  return {
+    battery: { word: batteryWord, moving: moving(2), charge: lines[2].classList.contains('flow-charge'), discharge: lines[2].classList.contains('flow-discharge') },
+    grid: { word: gridWord, moving: moving(1) },
+  };
+});
+const batteryActive = ['Charging', 'Discharging'].includes(flowConsistency.battery.word);
+check('battery line animates exactly when the battery label says Charging/Discharging, with matching direction',
+  flowConsistency.battery.moving === batteryActive
+  && (flowConsistency.battery.word !== 'Charging' || flowConsistency.battery.charge)
+  && (flowConsistency.battery.word !== 'Discharging' || flowConsistency.battery.discharge), JSON.stringify(flowConsistency));
+check('grid line animates exactly when the grid label says Import/Export',
+  flowConsistency.grid.moving === ['Import', 'Export'].includes(flowConsistency.grid.word), JSON.stringify(flowConsistency));
+// Status badges under the graphic must agree with the node labels (same readings and threshold).
+const statusBadges = await page.evaluate(() => {
+  const badges = [...document.querySelectorAll('.device-item .device-flow-graphic .flow-badge:not([hidden])')];
+  const gridSub = document.querySelectorAll('.device-item .energy-flow-svg .flow-node-sub')[1]?.textContent;
+  return {
+    count: badges.length,
+    states: badges.map((b) => b.querySelector('.flow-badge-state').textContent),
+    colored: badges.every((b) => b.querySelector('.flow-badge-state').matches('.is-ok, .is-bad')),
+    gridWord: gridSub,
+  };
+});
+check('dashboard flow graphic shows status badges, each green or red', statusBadges.count > 0 && statusBadges.colored, JSON.stringify(statusBadges));
+check('grid badge agrees with the grid node label',
+  statusBadges.gridWord !== 'Import' || statusBadges.states.includes('Import'), JSON.stringify(statusBadges));
 // Final colour semantics: PV/export/discharge green, import red/orange, charge blue/neutral.
 // Probed on disposable elements, not the live graphic — the simulator's battery leg can be idle,
 // so flow-charge/flow-discharge may not be applied to any current DOM node.
@@ -386,7 +421,7 @@ check('inverter state is shown exactly once per card', stateMentions.length === 
 // pattern that cannot describe a documented tower (7 populated slots, or a gap) must not render a
 // tower at all. Both are driven through the admin payload, because the simulated inverter reports
 // one fixed pair of towers.
-const TOWER_HEIGHT_CAP = 190;
+const TOWER_HEIGHT_CAP = 207;
 const patchBatteries = (mutate) => page.route('**/admin/api/devices', async (route) => {
   const response = await route.fetch();
   const data = await response.json();
@@ -586,6 +621,39 @@ page.off('request', onRequest);
 check('forced refresh patches the inverter card in place', (await page.locator('.device-item[data-probe="kept"]').count()) === 1);
 check('periodic refresh does not request /admin/api/parameters', !polledPaths.includes('/admin/api/parameters'), polledPaths.join(','));
 check('no manual refresh button remains on the dashboard', (await page.locator('#refresh-devices').count()) === 0);
+
+// 2b-2. collapsible device card: header stays, body hides, state survives poll and reload.
+const toggleState = () => page.evaluate(() => {
+  const card = document.querySelector('.device-item');
+  const button = card.querySelector('.device-toggle');
+  const body = document.getElementById(button.getAttribute('aria-controls'));
+  const visible = (node) => node.getBoundingClientRect().height > 0;
+  return {
+    expanded: button.getAttribute('aria-expanded'), bodyVisible: visible(body),
+    headVisible: visible(card.querySelector('.device-head')), titleVisible: visible(card.querySelector('.device-head h3')),
+    stored: localStorage.getItem('rct-admin.collapsedDevices'),
+  };
+});
+const expandedState = await toggleState();
+check('device card is expanded by default', expandedState.expanded === 'true' && expandedState.bodyVisible, JSON.stringify(expandedState));
+await page.locator('.device-item .device-toggle').first().focus();
+await page.keyboard.press('Enter');
+const collapsedState = await toggleState();
+check('collapsing hides the body but keeps the header, and flips aria-expanded',
+  collapsedState.expanded === 'false' && !collapsedState.bodyVisible && collapsedState.headVisible && collapsedState.titleVisible, JSON.stringify(collapsedState));
+check('collapsed state is persisted in localStorage', /\[".+"\]/.test(collapsedState.stored || ''), String(collapsedState.stored));
+await forcePoll();
+await page.waitForResponse((response) => response.url().endsWith('/admin/api/devices'), { timeout: 20000 }).catch(() => { });
+await page.waitForTimeout(300);
+check('a poll cycle does not reset the collapse', (await toggleState()).expanded === 'false');
+await page.reload();
+await page.waitForSelector('.device-item .device-toggle');
+const reloadedState = await toggleState();
+check('collapsed state survives a page reload', reloadedState.expanded === 'false' && !reloadedState.bodyVisible && reloadedState.headVisible, JSON.stringify(reloadedState));
+await page.locator('.device-item .device-toggle').first().click();
+const restoredState = await toggleState();
+check('expanding restores the body and clears the stored id',
+  restoredState.expanded === 'true' && restoredState.bodyVisible && restoredState.stored === '[]', JSON.stringify(restoredState));
 const csp = (await (await context.request.get(base + '/ui/dashboard')).headers())['content-security-policy'];
 check('CSP header present', Boolean(csp && csp.includes("script-src 'self'")));
 

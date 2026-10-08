@@ -26,6 +26,7 @@ SYSTEM_WRITABLE_OBJECT_IDS: frozenset[int] = frozenset({PAS_PERIOD_OBJECT_ID})
 MAX_PERIODIC_PER_DEVICE = 64
 RETRY_BASE_SECONDS = 10.0  # after a failed setup: 10, 20, 40 ... seconds up to the cap
 RETRY_MAX_SECONDS = 300.0
+WARN_AFTER_FAILURES = 3  # consecutive failed setups before the retry log escalates from INFO to WARNING
 FRESH_WINDOW_FACTOR = 3  # a registered value counts as fresh for this many pas.period (Requirement 17.29)
 REFRESH_AFTER_FACTOR = 2  # a registered value not updated for this many pas.period is read once (17.27)
 READBACK_TIMEOUT_SECONDS = 1.0  # shutdown readback: bounded, the shutdown deadline still applies
@@ -59,6 +60,7 @@ class PeriodicManager:
         self.period_enabled = False
         self._retry_delay = RETRY_BASE_SECONDS
         self._retry_at = 0.0  # monotonic; no new setup before this point after a failure
+        self._consecutive_failures = 0
         self.last_failure: str | None = None  # reason of the latest failed setup, for the retry log
         self._registered: set[int] = set()
         self._registered_epoch = -1
@@ -99,16 +101,36 @@ class PeriodicManager:
         async with self._setup_lock:
             ok = await self.setup()
         if ok:
+            if self._consecutive_failures:
+                log.info(
+                    "Periodic reads set up successfully after %d failed attempt(s)", self._consecutive_failures
+                )
+            self._consecutive_failures = 0
             self._retry_delay = RETRY_BASE_SECONDS
         else:
+            self._consecutive_failures += 1
             self._retry_at = self._clock.monotonic() + self._retry_delay
-            log.warning(
-                "Periodic setup failed (%s); next attempt in %.0f s",
-                self.last_failure or "unknown reason",
+            # A single failure is usually a transient connection hiccup that the retry resolves
+            # by itself; only a persistent failure is worth a WARNING.
+            persistent = self._consecutive_failures >= WARN_AFTER_FAILURES
+            log.log(
+                logging.WARNING if persistent else logging.INFO,
+                "Setup of periodic reads failed (attempt %d%s): %s. Next attempt in %.0f s.",
+                self._consecutive_failures,
+                ", device still not reachable or unstable" if persistent else "",
+                self._describe_failure(),
                 self._retry_delay,
             )
             self._retry_delay = min(self._retry_delay * 2, RETRY_MAX_SECONDS)
         return ok
+
+    def _describe_failure(self) -> str:
+        if self.last_failure == "connection replaced during registration":
+            return (
+                "the connection to the device was interrupted and re-established while the "
+                "measurements were being registered, so the registration restarts from scratch"
+            )
+        return self.last_failure or "unknown reason"
 
     def _pas_read(self, origin: TransactionOrigin) -> TransactionRequest:
         frame = make_frame(self._key.network_id, Command.READ, PAS_PERIOD_OBJECT_ID)

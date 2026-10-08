@@ -907,7 +907,7 @@ def _log_pending_slots(device_id: str, prefix: str, states: list[str]) -> None:
         if now - _pending_log_last.get(key, -_PENDING_LOG_INTERVAL_SECONDS) < _PENDING_LOG_INTERVAL_SECONDS:
             return
         _pending_log_last[key] = now
-    log.info("%s on %s: module serial slots %s never read yet (states: %s)", prefix, device_id, unknown, states)
+    log.debug("%s on %s: module serial slots %s never read yet (states: %s)", prefix, device_id, unknown, states)
 
 
 def _battery_module_report(runtime, device_id: str, prefix: str) -> dict:

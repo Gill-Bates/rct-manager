@@ -292,7 +292,8 @@
     $('battery-soc').textContent = formatMetric(soc, all.find((item) => item.name === 'battery_soc')?.unit || 'ratio');
   }
 
-  // { name, label, icon, kind } per cell of the power card's 2x3 grid, in reading order. 'label'
+  // { name, label, icon, kind } per cell of the power card's grid, in reading order. The inverter
+  // state is deliberately not a cell: the card header chip already shows it. 'label'
   // takes the server-decoded enum text instead of a number; the icon is decorative (aria-hidden).
   const POWER_CELLS = [
     { name: 'solar_a_power', label: 'PV A', icon: 'wb_sunny' },
@@ -300,7 +301,6 @@
     { name: 'grid_power', label: 'Grid power', icon: 'electric_meter' },
     { name: 'ac_power', label: 'AC power', icon: 'bolt' },
     { name: 'heat_sink_temperature', label: 'Heat sink', icon: 'device_thermostat', optional: true },
-    { name: 'inverter_state', label: 'Status', icon: 'tune', kind: 'label', optional: true },
   ];
   // The battery card's fact grid below the charge level and its bar. Cells name a *role*, not a
   // metric: the server maps each role to the catalog name that belongs to this particular tower
@@ -368,12 +368,13 @@
     middle: { file: 'battery_middle.svg', viewBoxHeight: 109 },
     bottom: { file: 'battery_bottom.svg', viewBoxHeight: 132 },
   };
-  // Upper bound for the rendered tower. In viewBox units an assembled tower is
+  // Upper bound for the rendered tower, sized so a full 5-module tower is flush with the readings
+  // column (charge bar plus two metric rows) beside it. In viewBox units an assembled tower is
   // 70 + N*109 + 132, i.e. 420 units at N=2 and 856 at N=6, so a fixed width makes a six-module
   // tower more than twice as tall as a two-module one and drags the whole card down. The width is
   // therefore derived from the cap for the given module count: a tall tower gets *narrower*, never
   // shorter and never fewer modules, so the module count stays visually apparent.
-  const BATTERY_TOWER_MAX_HEIGHT = 190;
+  const BATTERY_TOWER_MAX_HEIGHT = 207;
   // Width a short tower is allowed to reach; also the battery card's image column (5rem in admin.css).
   const BATTERY_SLICE_MAX_WIDTH = 80;
 
@@ -578,7 +579,7 @@
     const flow = energyFlowGraphic();
     const flowBox = element('div', 'device-flow-graphic device-flow-panel');
     flowBox.hidden = true;
-    flowBox.append(flow.svg);
+    flowBox.append(flow.svg, flow.badges);
     const cards = element('div', 'device-visual-cards device-detail-panel');
     const inverterCard = createPowerCard();
     const batteryGrid = element('div', 'device-battery-grid');
@@ -744,8 +745,40 @@
     if (hasReading) visual.flow.update(readings);
   }
 
-  function createDeviceCard() {
+  // Collapsed device ids live in localStorage (survives logins); read once, then kept in memory
+  // so blocked storage or malformed JSON only costs persistence, never the dashboard.
+  const COLLAPSED_KEY = 'rct-admin.collapsedDevices';
+  let collapsedDevices = null;
+  let deviceCardCount = 0;
+
+  function collapsedSet() {
+    if (collapsedDevices) return collapsedDevices;
+    collapsedDevices = new Set();
+    try {
+      const stored = JSON.parse(localStorage.getItem(COLLAPSED_KEY));
+      if (Array.isArray(stored)) stored.forEach((id) => { if (typeof id === 'string') collapsedDevices.add(id); });
+    } catch { /* storage blocked or JSON malformed: start expanded */ }
+    return collapsedDevices;
+  }
+
+  function saveCollapsed() {
+    try { localStorage.setItem(COLLAPSED_KEY, JSON.stringify([...collapsedSet()])); } catch { /* keep in-memory state */ }
+  }
+
+  function setCardCollapsed(ref, collapsed) {
+    ref.visual.node.hidden = collapsed;
+    setClass(ref.card, 'is-collapsed', collapsed);
+    ref.toggle.setAttribute('aria-expanded', String(!collapsed));
+  }
+
+  function createDeviceCard(key) {
+    const toggle = element('button', 'device-toggle');
+    toggle.type = 'button';
+    const icon = element('span', 'material-icons', 'expand_more');
+    icon.setAttribute('aria-hidden', 'true');
+    toggle.append(icon);
     const ref = {
+      toggle,
       card: element('article', 'device-item'),
       head: element('div', 'device-head'),
       statusBadge: element('span', 'device-status-badge device-status-badge-online'),
@@ -758,6 +791,15 @@
       last: element('small', 'text-secondary'),
       visual: createDeviceVisual(),
     };
+    ref.visual.node.id = `device-body-${++deviceCardCount}`;
+    toggle.setAttribute('aria-controls', ref.visual.node.id);
+    setCardCollapsed(ref, collapsedSet().has(key));
+    toggle.addEventListener('click', () => {
+      const collapsed = !collapsedSet().has(key);
+      if (collapsed) collapsedSet().add(key); else collapsedSet().delete(key);
+      saveCollapsed();
+      setCardCollapsed(ref, collapsed);
+    });
     return ref;
   }
 
@@ -768,9 +810,10 @@
     setText(ref.statusBadge, status);
     ref.dot.className = `status-dot ${statusClass}`;
     setText(ref.title, device.name || device.id || 'Inverter');
+    ref.toggle.setAttribute('aria-label', `Show or hide details of ${ref.title.textContent}`);
     setText(ref.statusText, status);
     // Name, address, last connection and the connection state share two compact header lines.
-    syncChildren(ref.top, connected ? [ref.title, ref.statusBadge] : [ref.dot, ref.title, ref.statusText]);
+    syncChildren(ref.top, connected ? [ref.toggle, ref.title, ref.statusBadge] : [ref.toggle, ref.dot, ref.title, ref.statusText]);
     setText(ref.address, `${device.host || '–'}${device.port ? `:${device.port}` : ''}`);
     if (device.last_success_at) setText(ref.last, `Last connection: ${formatDate(device.last_success_at, { time: true })}`);
     syncChildren(ref.meta, device.last_success_at ? [ref.address, ref.last] : [ref.address]);
@@ -851,7 +894,7 @@
       while (seen.has(key)) key += '+';
       seen.add(key);
       let ref = dashboardCards.get(key);
-      if (!ref) { ref = createDeviceCard(); dashboardCards.set(key, ref); }
+      if (!ref) { ref = createDeviceCard(key); dashboardCards.set(key, ref); }
       patchDeviceCard(ref, device);
       return ref.card;
     });
@@ -1037,7 +1080,6 @@
   const ENERGY_POLICY_MODES = [['business_target', 'Business target'], ['below_current_soc', 'Below current SoC']];
   const ENERGY_POLL_MS = 3000;
   const ENERGY_IDLE_WATTS = 20; // below this a flow counts as standing still
-  const ENERGY_DASH_PERIOD = 14; // user units; must match the dasharray in admin.css
   const SVG_NS = 'http://www.w3.org/2000/svg';
   const energyPanels = new Map();
   let energyPolling = false;
@@ -1055,7 +1097,7 @@
       ? Number(reading.value) : null;
   }
 
-  // A stale or absent figure is never animated: the flow only shows what was measured recently.
+  // A stale or absent figure is treated as unknown (used by the Energy Manager panel).
   function liveValue(reading) {
     return reading && !reading.stale ? readingValue(reading) : null;
   }
@@ -1099,7 +1141,7 @@
     const nodes = {};
     const nodeDefs = [
       ['pv', 210, 78, 'wb_sunny', 'PV', 'top'],
-      ['grid', 56, 190, 'electrical_services', 'Grid', 'bottom'],
+      ['grid', 56, 190, 'factory', 'Grid', 'bottom'],
       ['house', 210, 190, 'home', 'House', 'bottom'],
       ['battery', 364, 190, 'battery_charging_full', 'Battery', 'bottom'],
     ];
@@ -1116,7 +1158,39 @@
       nodes[key] = { group, value, sub };
     }
 
-    // Duration is derived from the power so the dot speed is proportional to it, within a readable range.
+    // Four state badges under the graphic; derived in update() from the same readings and idle threshold.
+    const badges = element('div', 'flow-badges');
+    badges.setAttribute('role', 'group');
+    badges.setAttribute('aria-label', 'Energy status');
+    const badgeNodes = {};
+    for (const [key, icon, caption] of [
+      ['generation', 'wb_sunny', 'Generation'], ['consumption', 'home', 'Consumption'],
+      ['grid', 'factory', 'Grid'], ['battery', 'battery_charging_full', 'Battery'],
+    ]) {
+      const node = element('div', 'flow-badge');
+      node.hidden = true;
+      const iconNode = element('span', 'material-icons flow-badge-icon', icon);
+      iconNode.setAttribute('aria-hidden', 'true');
+      const state = element('span', 'flow-badge-state');
+      node.append(iconNode, element('span', 'flow-badge-caption', caption), state);
+      badges.append(node);
+      badgeNodes[key] = { node, state, caption };
+    }
+
+    // state is [text, ok] or null when the reading is unknown (badge hidden, no invented state).
+    function setBadge(key, state, stale) {
+      const badge = badgeNodes[key];
+      if (badge.node.hidden !== !state) badge.node.hidden = !state;
+      if (!state) return;
+      setText(badge.state, state[0]);
+      setClass(badge.state, 'is-ok', state[1]);
+      setClass(badge.state, 'is-bad', !state[1]);
+      setClass(badge.node, 'is-stale', stale);
+      const label = `${badge.caption}: ${state[0]}`;
+      if (badge.node.getAttribute('aria-label') !== label) badge.node.setAttribute('aria-label', label);
+    }
+
+    // Dot speed is the same constant on every line (the energy-flow-dash animation in admin.css); only direction and colour follow the power.
     function setLine(key, watts, positiveKind, negativeKind) {
       const line = lines[key];
       const active = Number.isFinite(watts) && Math.abs(watts) >= ENERGY_IDLE_WATTS;
@@ -1125,12 +1199,6 @@
       const reverse = watts < 0;
       setClass(line.group, 'is-reverse', reverse);
       for (const kind of new Set([positiveKind, negativeKind])) setClass(line.group, kind, kind === (reverse ? negativeKind : positiveKind));
-      const speed = Math.min(Math.max(Math.abs(watts) / 1000 * 15, 4), 80);
-      const duration = (ENERGY_DASH_PERIOD / speed).toFixed(2);
-      if (line.duration !== duration) {
-        line.dots.style.setProperty('--flow-dur', `${duration}s`);
-        line.duration = duration;
-      }
       line.arrow.setAttribute('transform', `translate(${line.mx} ${line.my}) rotate(${line.angle + (reverse ? 180 : 0)})`);
     }
 
@@ -1149,9 +1217,11 @@
       const house = readingValue(r.house_load_w);
       const soc = readingValue(r.battery_soc_percent);
 
-      setLine('pv', liveValue(r.pv_power_w), 'flow-pv', 'flow-pv');
-      setLine('grid', liveValue(r.grid_power_w), 'flow-import', 'flow-export');
-      setLine('battery', liveValue(r.battery_power_w), 'flow-discharge', 'flow-charge');
+      // Same value and threshold as the node labels below; a stale reading is only dimmed, never
+      // dropped, so the animation cannot disagree with a "Charging" or "Import" label.
+      setLine('pv', pv, 'flow-pv', 'flow-pv');
+      setLine('grid', grid, 'flow-import', 'flow-export');
+      setLine('battery', battery, 'flow-discharge', 'flow-charge');
 
       const gridWord = grid === null ? '' : Math.abs(grid) < ENERGY_IDLE_WATTS ? 'Idle' : grid > 0 ? 'Import' : 'Export';
       const batteryWord = battery === null ? '' : Math.abs(battery) < ENERGY_IDLE_WATTS ? 'Idle' : battery > 0 ? 'Discharging' : 'Charging';
@@ -1160,6 +1230,11 @@
       setNode('house', house === null ? '–' : formatPower(house), '', !!r.house_load_w.stale);
       setNode('battery', battery === null ? '–' : formatPower(battery),
         [batteryWord, soc === null ? '' : formatPercent(soc)].filter(Boolean).join(' · '), !!r.battery_power_w.stale);
+      const idle = ENERGY_IDLE_WATTS;
+      setBadge('generation', pv === null ? null : pv >= idle ? ['Generating', true] : ['No generation', false], !!r.pv_power_w.stale);
+      setBadge('consumption', grid === null ? null : grid < idle ? ['Independent', true] : ['Grid supplied', false], !!r.grid_power_w.stale);
+      setBadge('grid', grid === null ? null : grid <= -idle ? ['Feed-in', true] : grid < idle ? ['Idle', true] : ['Import', false], !!r.grid_power_w.stale);
+      setBadge('battery', battery === null ? null : battery <= -idle ? ['Charging', true] : battery >= idle ? ['Discharging', false] : ['Idle', false], !!r.battery_power_w.stale);
       svg.setAttribute('aria-label', [
         `PV ${pv === null ? 'unknown' : formatPower(pv)}`,
         `grid ${grid === null ? 'unknown' : `${formatPower(grid)} ${gridWord.toLowerCase()}`}`,
@@ -1168,7 +1243,7 @@
       ].join(', '));
     }
 
-    return { svg, update };
+    return { svg, badges, update };
   }
 
   function energyAvailability(device, action) {
