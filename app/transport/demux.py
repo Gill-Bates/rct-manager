@@ -55,6 +55,9 @@ class Demultiplexer:
     def periodic_count(self) -> int:
         return len(self._periodic)
 
+    def clear_periodic(self) -> None:
+        self._periodic.clear()
+
     def _matches_pending(self, frame: Frame, received_monotonic: float) -> bool:
         p = self.pending
         return (

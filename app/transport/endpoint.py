@@ -293,6 +293,7 @@ class TransportEndpoint:
 
     async def _drop_connection(self, error: DeviceApiError) -> None:
         writer, self._writer, self._reader = self._writer, None, None
+        self._demux.clear_periodic()
         self._fail_pending(error)
         task = self._receiver_task
         if task is not None and task is not asyncio.current_task():

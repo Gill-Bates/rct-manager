@@ -271,7 +271,16 @@ def test_dispatch_store_status_and_engineering_mode_stay_readable_without_the_se
     store = DispatchStore(path, "s" * 48)
     store.initialize()
     store.put_capability(
-        CapabilityRecord("main", CapabilityName.WRITE_PATH, status=CapabilityStatus.VERIFIED)
+        CapabilityRecord(
+            "main",
+            CapabilityName.WRITE_PATH,
+            status=CapabilityStatus.VERIFIED,
+            soc_strategy_external_code=1,
+            enum_byte_width=1,
+            bool_byte_width=1,
+            write_frame_layout_verified=True,
+            apply_sequence_verified=True,
+        )
     )
     store.put_device_config("main", DeviceLimits(3000, 5000, engineering_mode=True))
     other = DispatchStore(path, "r" * 48)
@@ -289,7 +298,16 @@ def test_dispatch_store_detects_a_capability_blob_moved_to_another_row(
     store = DispatchStore(tmp_path / "dispatch.db", "s" * 48)
     store.initialize()
     store.put_capability(
-        CapabilityRecord("main", CapabilityName.WRITE_PATH, status=CapabilityStatus.VERIFIED)
+        CapabilityRecord(
+            "main",
+            CapabilityName.WRITE_PATH,
+            status=CapabilityStatus.VERIFIED,
+            soc_strategy_external_code=1,
+            enum_byte_width=1,
+            bool_byte_width=1,
+            write_frame_layout_verified=True,
+            apply_sequence_verified=True,
+        )
     )
     with store.connect() as db:
         blob = db.execute("SELECT encrypted FROM dispatch_capabilities").fetchone()[0]

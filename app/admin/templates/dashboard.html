@@ -193,7 +193,10 @@
         </div><button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
       </div>
       <div class="modal-body">
-        <div id="settings-sections" aria-live="polite">
+        {# No aria-live: renderSettings() rebuilds this subtree wholesale, which would re-announce
+        the whole form. Outcomes are announced via #save-state and the toast region instead, the
+        same fix as the standalone settings pages (A11Y-03). #}
+        <div id="settings-sections">
           <p class="text-secondary">Loading settings …</p>
         </div>
       </div>

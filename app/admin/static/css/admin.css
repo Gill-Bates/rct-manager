@@ -1938,3 +1938,45 @@ body.is-reconnecting #reconnect-modal.show .reconnect-pulse {
         white-space: nowrap;
     }
 }
+
+/* Forced-colors (Windows high contrast and similar): the status indicators above convey state
+   through foreground/background color only, which forced-colors strips. Restore a border and
+   SystemColor keywords so online/ok/bad/warning stay distinguishable, and give the SoC bar a
+   border plus a Highlight fill since its coloured fill level is otherwise invisible (CSS-02). */
+@media (forced-colors: active) {
+
+    /* Status chips: a border and a system foreground keep the chip readable once the custom
+       background and text colours are overridden. The dot inside falls back to the text colour. */
+    .device-status-badge-online,
+    .flow-badge-state.is-ok,
+    .flow-badge-state.is-bad,
+    .device-chip,
+    .device-chip-warning {
+        border: 1px solid currentColor;
+        color: CanvasText;
+    }
+
+    .device-status-badge-online::before,
+    .device-chip-dot,
+    .device-chip-warning .device-chip-dot,
+    .status-dot,
+    .status-dot.online,
+    .status-dot.offline {
+        background: CanvasText;
+    }
+
+    /* "ok"/"online" versus "bad"/"offline" must not rely on colour alone here: the accompanying
+       text label (rendered beside each chip/dot) carries the distinction, and the border makes the
+       chip visible. The feed/draw/charge flow lines keep their own arrowhead and text labels. */
+
+    /* SoC bar: outline the track and paint the fill with the system Highlight so the charge level
+       stays visible when the custom green fill is dropped. */
+    .device-soc-bar {
+        border: 1px solid CanvasText;
+    }
+
+    .device-soc-fill {
+        background: Highlight;
+        forced-color-adjust: none;
+    }
+}

@@ -16,7 +16,7 @@ from app.errors import ConfigError
 from app.protocol.types import Command, DataType
 from app.protocol.values import decode_value, encode_value
 from app.scheduling.serializer import AccessSerializer
-from app.transport.endpoint import TransportEndpoint
+from app.transport.endpoint import EndpointState, TransportEndpoint
 from app.transport.types import TransactionOrigin, TransactionRequest, make_frame
 
 log = logging.getLogger(__name__)
@@ -70,7 +70,11 @@ class PeriodicManager:
 
     def is_registered(self, object_id: int) -> bool:
         """True while the registration holds on the connection it was made on."""
-        return object_id in self._registered and self._endpoint.connection_epoch == self._registered_epoch
+        return (
+            self._endpoint.state is EndpointState.CONNECTED
+            and self._endpoint.connection_epoch == self._registered_epoch
+            and object_id in self._registered
+        )
 
     @property
     def interval_seconds(self) -> int:
@@ -94,7 +98,11 @@ class PeriodicManager:
 
     async def ensure(self) -> bool:
         """(Re-)register when the connection changed since the last setup."""
-        if self.available and self._endpoint.connection_epoch == self._epoch:
+        if (
+            self.available
+            and self._endpoint.state is EndpointState.CONNECTED
+            and self._endpoint.connection_epoch == self._epoch
+        ):
             return True
         now = self._clock.monotonic()
         if not self.available and now < self._retry_at:
@@ -166,7 +174,7 @@ class PeriodicManager:
         try:
             result = await self._serializer.submit(self._pas_write(self._interval, TransactionOrigin.SYSTEM_WRITE))
             if not result.ok:
-                self.period_enabled = result.committed
+                self.period_enabled = self.period_enabled or result.committed
                 if not (result.committed and await self._confirmed_by_readback(self._interval)):
                     self.last_failure = f"pas.period not confirmed (write error: {result.error!r})"
                     log.warning("Periodic reads unavailable for device (pas.period not confirmed)")
@@ -238,5 +246,6 @@ class PeriodicManager:
         self._registered.clear()
         self.registrations = 0
         self.available = False
-        self.period_enabled = False
+        if sent:
+            self.period_enabled = False
         return sent

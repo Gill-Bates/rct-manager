@@ -11,9 +11,10 @@ from datetime import timedelta
 
 from app.catalog.registry import RegistryCatalog
 from app.config import DeviceKey, EndpointKey
+from app.errors import DeviceUnreachable
 from app.observability.names import prometheus_name
 from app.protocol.frames import Frame
-from app.protocol.types import Command, DataType
+from app.protocol.types import Command, DataType, FrameKind
 from app.protocol.values import encode_value
 from app.scheduling.periodic import (
     PAS_PERIOD_OBJECT_ID,
@@ -124,6 +125,51 @@ def _manager(clock, net, ids, interval=30):
 
 def _pas_writes(net) -> int:
     return sum(1 for _, f in net.frames if f.command is Command.WRITE and f.object_id == PAS_PERIOD_OBJECT_ID)
+
+
+async def test_dropped_connection_invalidates_periodic_registrations() -> None:
+    clock = AutoClock()
+    net = FakeNetwork(clock)
+    manager = _manager(clock, net, [0x1111])
+    endpoint = manager._endpoint
+    assert await manager.setup()
+    assert manager.is_registered(0x1111)
+    assert endpoint._demux.periodic_count() == 1
+
+    await endpoint._drop_connection(DeviceUnreachable())
+    assert endpoint._demux.periodic_count() == 0
+    assert not manager.is_registered(0x1111)
+    assert manager.registered_object_ids == ()
+    net.fail_connects = 1
+    assert not await manager.ensure()
+    net.fail_connects = 0
+    request = TransactionRequest(
+        manager._key, make_frame(None, Command.READ, 0x1111), TransactionOrigin.CALLER, "read", clock.now()
+    )
+    assert (await endpoint.execute(request)).ok
+    response = Frame(Command.RESPONSE, 0x1111, b"\x00")
+    assert endpoint._demux.classify(response, clock.monotonic()) is FrameKind.UNEXPECTED
+    assert not manager.is_registered(0x1111)
+    assert await manager.setup()
+    assert manager.is_registered(0x1111)
+
+
+async def test_failed_reconnect_setup_preserves_required_period_reset() -> None:
+    clock = AutoClock()
+    net = FakeNetwork(clock)
+    manager = _manager(clock, net, [0x1111])
+    assert await manager.setup()
+    await manager._endpoint._drop_connection(DeviceUnreachable())
+    net.fail_connects = 2
+    assert not await manager.ensure()
+    assert manager.period_enabled
+    assert not await manager.teardown()
+    assert manager.period_enabled
+    net.fail_connects = 0
+    assert await manager.teardown()
+    assert not manager.period_enabled
+    assert net.payloads[PAS_PERIOD_OBJECT_ID] == encode_value(DataType.UINT32, 0)
+    assert _pas_writes(net) == 2
 
 
 def test_silent_write_is_confirmed_by_readback_and_registers() -> None:
