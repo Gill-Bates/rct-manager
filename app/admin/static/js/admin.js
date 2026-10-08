@@ -3018,8 +3018,11 @@
     render();
   }
 
+  // Mirrors the server-side host plausibility check `_HOST` in app/admin/api.py; keep the two in
+  // step. This is the client-side pre-check only — the server validates again on save (JS-02).
   const HOST_PATTERN = /^(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,62})(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,62}))*|\[[0-9A-Fa-f:.]+\]|[0-9A-Fa-f:.]+)$/;
 
+  // Mirrors the server network-id upper bound in app/admin/api.py (`_network_id`, 2**32 - 1).
   const MAX_NETWORK_ID = 2 ** 32 - 1;
 
   // Empty means "directly attached", exactly as the server reads a missing network id.
@@ -3034,6 +3037,8 @@
     if (!host) return { field: 'host', message: 'Enter an IP address or host name.' };
     if (!HOST_PATTERN.test(host)) return { field: 'host', message: 'Enter a plain IP address or host name, without scheme or path.' };
     const port = Number(device.port);
+    // Port and network-id bounds mirror app/admin/api.py (`_normalize_devices`: 1..65535, and
+    // `_network_id`: 0..MAX_NETWORK_ID); keep the two in step (JS-02).
     if (!Number.isInteger(port) || port < 1 || port > 65535) return { field: 'port', message: 'The port must be between 1 and 65535.' };
     const network = networkId(device.network_id);
     if (network !== null && (!Number.isInteger(network) || network < 0 || network > MAX_NETWORK_ID)) {
