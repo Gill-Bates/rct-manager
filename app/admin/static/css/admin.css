@@ -1111,13 +1111,6 @@ body {
     font-variant-numeric: tabular-nums;
 }
 
-.flow-node-sub {
-    font-size: 12px;
-    fill: var(--bs-secondary-color);
-    text-anchor: middle;
-    font-variant-numeric: tabular-nums;
-}
-
 .flow-node.is-stale .flow-node-value {
     fill: var(--bs-secondary-color);
 }
@@ -1372,8 +1365,14 @@ body {
     border-left-width: .3rem;
 }
 
+/* Saving is reported by the toast only; the status text stays for screen readers (aria-live). */
 .save-state {
-    min-height: 1.5rem;
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
 }
 
 .parameter-list {

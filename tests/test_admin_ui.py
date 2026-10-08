@@ -692,6 +692,28 @@ def test_dashboard_grid_has_the_gridstack_structure_and_stable_widget_ids():
         assert f'id="{inner_id}"' in html
 
 
+def test_dashboard_template_positions_equal_the_factory_default_layout():
+    # First paint without a saved layout shows the template, so it must equal DEFAULT_LAYOUT.
+    js = (ADMIN_DIR / "static/js/dashboard.js").read_text(encoding="utf-8")
+    html = (TEMPLATES / "dashboard.html").read_text(encoding="utf-8")
+    default = {
+        m[0]: (*map(int, m[1:5]), m[5] == "true")
+        for m in re.findall(
+            r"\{ id: '([\w-]+)', x: (\d+), y: (\d+), w: (\d+), h: (\d+), visible: (true|false)", js)
+    }
+    template = {}
+    for m in re.finditer(
+            r'<div class="grid-stack-item( d-none)?" gs-id="([\w-]+)"\s+gs-x="(\d+)" gs-y="(\d+)" gs-w="(\d+)" gs-h="(\d+)"',
+            html):
+        template[m[2]] = (*map(int, m.group(3, 4, 5, 6)), not m[1])
+    assert template == default and len(default) == 9
+    # Factory default: one row of six 2-column tiles, the inverter overview directly below it.
+    tiles = ["pv-power", "grid-power", "house-power", "battery-soc", "tsdb-status", "metric-count"]
+    assert [default[t][:4] for t in tiles] == [(x, 0, 2, 2) for x in range(0, 12, 2)]
+    assert default["devices"][:4] == (0, 2, 12, 8)
+    assert not default["device-count"][4] and not default["connected-count"][4]
+
+
 def test_dashboard_grid_is_hidden_until_the_layout_is_final_with_a_css_failsafe():
     html = (TEMPLATES / "dashboard.html").read_text(encoding="utf-8")
     css = (ADMIN_DIR / "static/css/dashboard.css").read_text(encoding="utf-8")

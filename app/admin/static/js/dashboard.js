@@ -14,19 +14,22 @@
   const { api, toast, messageFrom, confirmAction } = window.RCTAdmin;
   const $ = (id) => document.getElementById(id);
 
-  // Mirrors app/admin/api.py's _DASHBOARD_WIDGETS allowlist and its default layout (order is the
-  // "Add widget" list order and the fallback position for a widget newly added by an upgrade).
+  // Factory default: six KPI tiles in one row, the inverter overview directly below. Mirrors
+  // app/admin/api.py's _DASHBOARD_WIDGETS allowlist and the template's gs-* attributes; array order
+  // is the "Add widget" list order. A widget with visible:false is off by default but stays
+  // available through "Add widget" (it is also what an upgrade adds for a widget missing from a saved layout).
   const DEFAULT_LAYOUT = [
-    { id: 'device-count', x: 0, y: 0, w: 3, h: 2, label: 'Inverters' },
-    { id: 'connected-count', x: 3, y: 0, w: 3, h: 2, label: 'Connected' },
-    { id: 'metric-count', x: 6, y: 0, w: 3, h: 2, label: 'Exposed metrics' },
-    { id: 'tsdb-status', x: 9, y: 0, w: 3, h: 2, label: 'TSDB export' },
-    { id: 'pv-power', x: 0, y: 2, w: 3, h: 2, label: 'PV power' },
-    { id: 'house-power', x: 3, y: 2, w: 3, h: 2, label: 'House consumption' },
-    { id: 'grid-power', x: 6, y: 2, w: 3, h: 2, label: 'Grid power' },
-    { id: 'battery-soc', x: 9, y: 2, w: 3, h: 2, label: 'Battery level' },
-    { id: 'devices', x: 0, y: 4, w: 12, h: 8, label: 'Inverter overview' },
+    { id: 'pv-power', x: 0, y: 0, w: 2, h: 2, visible: true, label: 'PV power' },
+    { id: 'grid-power', x: 2, y: 0, w: 2, h: 2, visible: true, label: 'Grid power' },
+    { id: 'house-power', x: 4, y: 0, w: 2, h: 2, visible: true, label: 'House consumption' },
+    { id: 'battery-soc', x: 6, y: 0, w: 2, h: 2, visible: true, label: 'Battery level' },
+    { id: 'tsdb-status', x: 8, y: 0, w: 2, h: 2, visible: true, label: 'TSDB export' },
+    { id: 'metric-count', x: 10, y: 0, w: 2, h: 2, visible: true, label: 'Exposed metrics' },
+    { id: 'devices', x: 0, y: 2, w: 12, h: 8, visible: true, label: 'Inverter overview' },
+    { id: 'device-count', x: 0, y: 0, w: 2, h: 2, visible: false, label: 'Inverters' },
+    { id: 'connected-count', x: 2, y: 0, w: 2, h: 2, visible: false, label: 'Connected' },
   ];
+  const defaultEntry = (def) => ({ id: def.id, x: def.x, y: def.y, w: def.w, h: def.h, visible: def.visible });
   const SAVE_DEBOUNCE_MS = 400;
   const REVEAL_TIMEOUT_MS = 2500; // below the CSS failsafe (4s) so a slow load still reveals via JS
 
@@ -58,12 +61,12 @@
     }
     return separateOverlaps(DEFAULT_LAYOUT.map((def) => {
       const saved = byId.get(def.id);
-      if (!saved) return { id: def.id, x: def.x, y: def.y, w: def.w, h: def.h, visible: true };
+      if (!saved) return defaultEntry(def);
       const inRange = (value, max) => Number.isInteger(value) && value >= 0 && value <= max;
       const valid = inRange(saved.x, 11) && inRange(saved.y, 1000) &&
         Number.isInteger(saved.w) && saved.w >= 1 && saved.w <= 12 &&
         Number.isInteger(saved.h) && saved.h >= 1 && saved.h <= 100 && saved.x + saved.w <= 12;
-      if (!valid) return { id: def.id, x: def.x, y: def.y, w: def.w, h: def.h, visible: true };
+      if (!valid) return defaultEntry(def);
       return { id: def.id, x: saved.x, y: saved.y, w: saved.w, h: saved.h, visible: saved.visible !== false };
     }));
   }
@@ -83,9 +86,15 @@
     return layout;
   }
 
+  // Two passes: every widget first goes to its final cell shifted far down, then up to its row. A
+  // widget moved straight into place would otherwise collide with neighbours still at the template
+  // position and shove them (and the final layout) around.
+  const PARK_ROWS = 10000;
+
   function applyLayout(layout) {
     grid.batchUpdate();
     try {
+      const shown = [];
       for (const entry of layout) {
         widgetState.set(entry.id, { ...entry });
         const el = widgetElement(entry.id);
@@ -93,12 +102,14 @@
         if (entry.visible) {
           el.classList.remove('d-none');
           if (!el.gridstackNode) grid.makeWidget(el);
-          grid.update(el, { x: entry.x, y: entry.y, w: entry.w, h: entry.h });
+          grid.update(el, { x: entry.x, y: entry.y + PARK_ROWS, w: entry.w, h: entry.h });
+          shown.push([el, entry]);
         } else {
           if (el.gridstackNode) grid.removeWidget(el, false);
           el.classList.add('d-none');
         }
       }
+      for (const [el, entry] of shown) grid.update(el, { y: entry.y });
     } finally {
       grid.batchUpdate(false); // commits the batch (GridStack has no separate commit() call)
     }
@@ -290,7 +301,7 @@
       toast(messageFrom(error), 'danger');
       return;
     }
-    applyLayout(DEFAULT_LAYOUT.map((def) => ({ id: def.id, x: def.x, y: def.y, w: def.w, h: def.h, visible: true })));
+    applyLayout(DEFAULT_LAYOUT.map(defaultEntry));
     scheduleFit();
     renderAddWidgetList();
     savedToastShownThisSession = true; // explicit action: show exactly this one toast, not a second autosave toast

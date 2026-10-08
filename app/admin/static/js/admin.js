@@ -393,7 +393,7 @@
   const POWER_CELLS = [
     { name: 'solar_a_power', label: 'PV A', icon: 'wb_sunny' },
     { name: 'solar_b_power', label: 'PV B', icon: 'wb_sunny' },
-    { name: 'grid_power', label: 'Grid power', icon: 'electric_meter' },
+    { name: 'grid_power', label: 'Grid power', icon: 'factory' },
     { name: 'ac_power', label: 'AC power', icon: 'bolt' },
     { name: 'heat_sink_temperature', label: 'Heat sink', icon: 'device_thermostat', optional: true },
   ];
@@ -1306,7 +1306,7 @@
   }
 
   function energyFlowGraphic() {
-    const svg = svgEl('svg', { viewBox: '0 0 420 290', class: 'energy-flow-svg', role: 'img' });
+    const svg = svgEl('svg', { viewBox: '0 0 420 270', class: 'energy-flow-svg', role: 'img' });
     const lines = {};
     // Each path runs in the direction of the "positive" flow; a negative value reverses the animation.
     const lineDefs = [
@@ -1337,10 +1337,9 @@
       const top = place === 'top';
       group.append(svgEl('text', { class: 'flow-node-label', x: cx, y: top ? 16 : cy + 50 }, label));
       const value = svgEl('text', { class: 'flow-node-value', x: cx, y: top ? 34 : cy + 68 }, '–');
-      const sub = svgEl('text', { class: 'flow-node-sub', x: cx, y: cy + 84 }, '');
-      group.append(value, sub);
+      group.append(value);
       svg.append(group);
-      nodes[key] = { group, value, sub };
+      nodes[key] = { group, label: group.querySelector('.flow-node-label'), baseLabel: label, value };
     }
 
     // Four state badges under the graphic; derived in update() from the same readings and idle threshold.
@@ -1387,10 +1386,10 @@
       line.arrow.setAttribute('transform', `translate(${line.mx} ${line.my}) rotate(${line.angle + (reverse ? 180 : 0)})`);
     }
 
-    function setNode(key, text, sub, stale) {
+    function setNode(key, text, stale, labelSuffix = '') {
       const node = nodes[key];
       node.value.textContent = text;
-      node.sub.textContent = sub;
+      node.label.textContent = labelSuffix ? `${node.baseLabel} · ${labelSuffix}` : node.baseLabel;
       setClass(node.group, 'is-stale', stale);
     }
 
@@ -1410,11 +1409,11 @@
 
       const gridWord = grid === null ? '' : Math.abs(grid) < ENERGY_IDLE_WATTS ? 'Idle' : grid > 0 ? 'Import' : 'Export';
       const batteryWord = battery === null ? '' : Math.abs(battery) < ENERGY_IDLE_WATTS ? 'Idle' : battery > 0 ? 'Discharging' : 'Charging';
-      setNode('pv', pv === null ? '–' : formatPower(pv), '', !!r.pv_power_w.stale);
-      setNode('grid', grid === null ? '–' : formatPower(grid), gridWord, !!r.grid_power_w.stale);
-      setNode('house', house === null ? '–' : formatPower(house), '', !!r.house_load_w.stale);
-      setNode('battery', battery === null ? '–' : formatPower(battery),
-        [batteryWord, soc === null ? '' : formatPercent(soc)].filter(Boolean).join(' · '), !!r.battery_power_w.stale);
+      setNode('pv', pv === null ? '–' : formatPower(pv), !!r.pv_power_w.stale);
+      setNode('grid', grid === null ? '–' : formatPower(grid), !!r.grid_power_w.stale);
+      setNode('house', house === null ? '–' : formatPower(house), !!r.house_load_w.stale);
+      setNode('battery', battery === null ? '–' : formatPower(battery), !!r.battery_power_w.stale,
+        soc === null ? '' : formatPercent(soc));
       const idle = ENERGY_IDLE_WATTS;
       setBadge('generation', pv === null ? null : pv >= idle ? ['Generating', true] : ['No generation', false], !!r.pv_power_w.stale);
       setBadge('consumption', grid === null ? null : grid < idle ? ['Independent', true] : ['Grid supplied', false], !!r.grid_power_w.stale);
@@ -1440,7 +1439,7 @@
   // (unlike device.actions[].reason, which collapses to not_armed while disarmed). Shared by the
   // Operate "needs setup" banner (§9) and the Setup block renderer (§12).
   function energyChecklist(device) {
-    const writeAccess = missingRequiredWrites(device).length === 0;
+    const writeAccess = device.write_support_enabled !== false && missingRequiredWrites(device).length === 0;
     const verified = ENERGY_REQUIRED_CAPABILITIES.every((name) => {
       const cap = (device.capabilities || []).find((item) => item.name === name);
       return cap && cap.status === 'verified';
@@ -2197,10 +2196,10 @@
     function renderWriteAccessText(device, writeSupportOff) {
       const missing = missingRequiredWrites(device);
       const parts = [];
-      if (writeSupportOff) parts.push('Write access is switched off. Turn on "Write access" on the Inverters page.');
+      if (writeSupportOff || device.write_support_enabled === false) parts.push('Write access is switched off. Turn on "Write access" on the Inverters page.');
       if (missing.length) {
         parts.push('Manual battery control needs the battery power control registers approved on the Inverters page (under "Writable parameters").');
-      } else if (!writeSupportOff) {
+      } else if (!writeSupportOff && device.write_support_enabled !== false) {
         parts.push('Write access is required for manual battery control.');
       }
       writeAccessText.textContent = parts.join(' ');

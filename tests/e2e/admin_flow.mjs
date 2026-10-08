@@ -161,12 +161,12 @@ check('the dashboard flow graphic animates from non-zero energy_flow data', flow
 // Label and animation must agree: a Charging/Discharging/Import/Export label means an active line.
 const flowConsistency = await page.evaluate(() => {
   const svg = document.querySelector('.device-item .energy-flow-svg');
-  const nodes = [...svg.querySelectorAll('.flow-node')];
   const lines = [...svg.querySelectorAll('.flow-line')];
   const moving = (index) => !lines[index].classList.contains('is-idle');
-  const sub = (index) => nodes[index].querySelector('.flow-node-sub').textContent;
-  const batteryWord = sub(3).split(' · ')[0];
-  const gridWord = sub(1);
+  const badge = (name) => [...document.querySelectorAll('.device-item .device-flow-graphic .flow-badge')]
+    .find((b) => b.querySelector('.flow-badge-caption').textContent === name)?.querySelector('.flow-badge-state').textContent;
+  const batteryWord = badge('Battery');
+  const gridWord = badge('Grid');
   return {
     battery: { word: batteryWord, moving: moving(2), charge: lines[2].classList.contains('flow-charge'), discharge: lines[2].classList.contains('flow-discharge') },
     grid: { word: gridWord, moving: moving(1) },
@@ -178,21 +178,17 @@ check('battery line animates exactly when the battery label says Charging/Discha
   && (flowConsistency.battery.word !== 'Charging' || flowConsistency.battery.charge)
   && (flowConsistency.battery.word !== 'Discharging' || flowConsistency.battery.discharge), JSON.stringify(flowConsistency));
 check('grid line animates exactly when the grid label says Import/Export',
-  flowConsistency.grid.moving === ['Import', 'Export'].includes(flowConsistency.grid.word), JSON.stringify(flowConsistency));
+  flowConsistency.grid.moving === ['Import', 'Feed-in'].includes(flowConsistency.grid.word), JSON.stringify(flowConsistency));
 // Status badges under the graphic must agree with the node labels (same readings and threshold).
 const statusBadges = await page.evaluate(() => {
   const badges = [...document.querySelectorAll('.device-item .device-flow-graphic .flow-badge:not([hidden])')];
-  const gridSub = document.querySelectorAll('.device-item .energy-flow-svg .flow-node-sub')[1]?.textContent;
   return {
     count: badges.length,
     states: badges.map((b) => b.querySelector('.flow-badge-state').textContent),
     colored: badges.every((b) => b.querySelector('.flow-badge-state').matches('.is-ok, .is-bad')),
-    gridWord: gridSub,
   };
 });
 check('dashboard flow graphic shows status badges, each green or red', statusBadges.count > 0 && statusBadges.colored, JSON.stringify(statusBadges));
-check('grid badge agrees with the grid node label',
-  statusBadges.gridWord !== 'Import' || statusBadges.states.includes('Import'), JSON.stringify(statusBadges));
 // Final colour semantics: PV/export/discharge green, import red/orange, charge blue/neutral.
 // Probed on disposable elements, not the live graphic — the simulator's battery leg can be idle,
 // so flow-charge/flow-discharge may not be applied to any current DOM node.

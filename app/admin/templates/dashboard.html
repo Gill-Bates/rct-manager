@@ -24,47 +24,59 @@
   </div>
 </div>
 <div class="grid-stack dashboard-grid dashboard-grid--loading my-4" id="dashboard-grid">
-  <div class="grid-stack-item" gs-id="device-count" gs-x="0" gs-y="0" gs-w="3" gs-h="2" data-widget-id="device-count">
+  <div class="grid-stack-item" gs-id="pv-power" gs-x="0" gs-y="0" gs-w="2" gs-h="2" data-widget-id="pv-power">
     <div class="grid-stack-item-content">
       <div class="card kpi-card h-100">
         <div class="dashboard-widget-header d-none"><span class="dashboard-drag-handle material-icons"
             aria-hidden="true">drag_indicator</span></div>
-        <div class="card-body"><span class="material-icons text-primary" aria-hidden="true">devices</span>
+        <div class="card-body"><span class="material-icons text-warning" aria-hidden="true">wb_sunny</span>
           <div>
-            <div class="text-secondary small">Inverters</div><strong id="device-count">–</strong>
+            <div class="text-secondary small">PV power</div><strong id="pv-power">–</strong>
           </div>
         </div>
       </div>
     </div>
   </div>
-  <div class="grid-stack-item" gs-id="connected-count" gs-x="3" gs-y="0" gs-w="3" gs-h="2"
-    data-widget-id="connected-count">
+  <div class="grid-stack-item" gs-id="grid-power" gs-x="2" gs-y="0" gs-w="2" gs-h="2" data-widget-id="grid-power">
     <div class="grid-stack-item-content">
       <div class="card kpi-card h-100">
         <div class="dashboard-widget-header d-none"><span class="dashboard-drag-handle material-icons"
             aria-hidden="true">drag_indicator</span></div>
-        <div class="card-body"><span class="material-icons text-success" aria-hidden="true">check_circle</span>
+        <div class="card-body"><span class="material-icons text-primary" aria-hidden="true">factory</span>
           <div>
-            <div class="text-secondary small">Connected</div><strong id="connected-count">–</strong>
+            <div class="text-secondary small">Grid power</div><strong id="grid-power">–</strong>
           </div>
         </div>
       </div>
     </div>
   </div>
-  <div class="grid-stack-item" gs-id="metric-count" gs-x="6" gs-y="0" gs-w="3" gs-h="2" data-widget-id="metric-count">
+  <div class="grid-stack-item" gs-id="house-power" gs-x="4" gs-y="0" gs-w="2" gs-h="2" data-widget-id="house-power">
     <div class="grid-stack-item-content">
       <div class="card kpi-card h-100">
         <div class="dashboard-widget-header d-none"><span class="dashboard-drag-handle material-icons"
             aria-hidden="true">drag_indicator</span></div>
-        <div class="card-body"><span class="material-icons text-primary" aria-hidden="true">monitoring</span>
+        <div class="card-body"><span class="material-icons text-primary" aria-hidden="true">home</span>
           <div>
-            <div class="text-secondary small">Exposed metrics</div><strong id="metric-count">–</strong>
+            <div class="text-secondary small">House consumption</div><strong id="house-power">–</strong>
           </div>
         </div>
       </div>
     </div>
   </div>
-  <div class="grid-stack-item" gs-id="tsdb-status" gs-x="9" gs-y="0" gs-w="3" gs-h="2" data-widget-id="tsdb-status">
+  <div class="grid-stack-item" gs-id="battery-soc" gs-x="6" gs-y="0" gs-w="2" gs-h="2" data-widget-id="battery-soc">
+    <div class="grid-stack-item-content">
+      <div class="card kpi-card h-100">
+        <div class="dashboard-widget-header d-none"><span class="dashboard-drag-handle material-icons"
+            aria-hidden="true">drag_indicator</span></div>
+        <div class="card-body"><span class="material-icons text-success" aria-hidden="true">battery_charging_full</span>
+          <div>
+            <div class="text-secondary small">Battery level</div><strong id="battery-soc">–</strong>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="grid-stack-item" gs-id="tsdb-status" gs-x="8" gs-y="0" gs-w="2" gs-h="2" data-widget-id="tsdb-status">
     <div class="grid-stack-item-content">
       <div class="card kpi-card h-100">
         <div class="dashboard-widget-header d-none"><span class="dashboard-drag-handle material-icons"
@@ -79,59 +91,20 @@
       </div>
     </div>
   </div>
-  <div class="grid-stack-item" gs-id="pv-power" gs-x="0" gs-y="2" gs-w="3" gs-h="2" data-widget-id="pv-power">
+  <div class="grid-stack-item" gs-id="metric-count" gs-x="10" gs-y="0" gs-w="2" gs-h="2" data-widget-id="metric-count">
     <div class="grid-stack-item-content">
       <div class="card kpi-card h-100">
         <div class="dashboard-widget-header d-none"><span class="dashboard-drag-handle material-icons"
             aria-hidden="true">drag_indicator</span></div>
-        <div class="card-body"><span class="material-icons text-warning" aria-hidden="true">wb_sunny</span>
+        <div class="card-body"><span class="material-icons text-primary" aria-hidden="true">monitoring</span>
           <div>
-            <div class="text-secondary small">PV power</div><strong id="pv-power">–</strong>
+            <div class="text-secondary small">Exposed metrics</div><strong id="metric-count">–</strong>
           </div>
         </div>
       </div>
     </div>
   </div>
-  <div class="grid-stack-item" gs-id="house-power" gs-x="3" gs-y="2" gs-w="3" gs-h="2" data-widget-id="house-power">
-    <div class="grid-stack-item-content">
-      <div class="card kpi-card h-100">
-        <div class="dashboard-widget-header d-none"><span class="dashboard-drag-handle material-icons"
-            aria-hidden="true">drag_indicator</span></div>
-        <div class="card-body"><span class="material-icons text-primary" aria-hidden="true">home</span>
-          <div>
-            <div class="text-secondary small">House consumption</div><strong id="house-power">–</strong>
-          </div>
-        </div>
-      </div>
-    </div>
-  </div>
-  <div class="grid-stack-item" gs-id="grid-power" gs-x="6" gs-y="2" gs-w="3" gs-h="2" data-widget-id="grid-power">
-    <div class="grid-stack-item-content">
-      <div class="card kpi-card h-100">
-        <div class="dashboard-widget-header d-none"><span class="dashboard-drag-handle material-icons"
-            aria-hidden="true">drag_indicator</span></div>
-        <div class="card-body"><span class="material-icons text-primary" aria-hidden="true">electric_meter</span>
-          <div>
-            <div class="text-secondary small">Grid power</div><strong id="grid-power">–</strong>
-          </div>
-        </div>
-      </div>
-    </div>
-  </div>
-  <div class="grid-stack-item" gs-id="battery-soc" gs-x="9" gs-y="2" gs-w="3" gs-h="2" data-widget-id="battery-soc">
-    <div class="grid-stack-item-content">
-      <div class="card kpi-card h-100">
-        <div class="dashboard-widget-header d-none"><span class="dashboard-drag-handle material-icons"
-            aria-hidden="true">drag_indicator</span></div>
-        <div class="card-body"><span class="material-icons text-success" aria-hidden="true">battery_charging_full</span>
-          <div>
-            <div class="text-secondary small">Battery level</div><strong id="battery-soc">–</strong>
-          </div>
-        </div>
-      </div>
-    </div>
-  </div>
-  <div class="grid-stack-item" gs-id="devices" gs-x="0" gs-y="4" gs-w="12" gs-h="8" data-widget-id="devices">
+  <div class="grid-stack-item" gs-id="devices" gs-x="0" gs-y="2" gs-w="12" gs-h="8" data-widget-id="devices">
     <div class="grid-stack-item-content">
       <section class="dashboard-widget-section">
         <div class="dashboard-widget-header d-none"><span class="dashboard-drag-handle material-icons"
@@ -146,6 +119,33 @@
           <p class="text-secondary mb-0">Loading inverters …</p>
         </div>
       </section>
+    </div>
+  </div>
+  <div class="grid-stack-item d-none" gs-id="device-count" gs-x="0" gs-y="0" gs-w="2" gs-h="2" data-widget-id="device-count">
+    <div class="grid-stack-item-content">
+      <div class="card kpi-card h-100">
+        <div class="dashboard-widget-header d-none"><span class="dashboard-drag-handle material-icons"
+            aria-hidden="true">drag_indicator</span></div>
+        <div class="card-body"><span class="material-icons text-primary" aria-hidden="true">devices</span>
+          <div>
+            <div class="text-secondary small">Inverters</div><strong id="device-count">–</strong>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="grid-stack-item d-none" gs-id="connected-count" gs-x="2" gs-y="0" gs-w="2" gs-h="2"
+    data-widget-id="connected-count">
+    <div class="grid-stack-item-content">
+      <div class="card kpi-card h-100">
+        <div class="dashboard-widget-header d-none"><span class="dashboard-drag-handle material-icons"
+            aria-hidden="true">drag_indicator</span></div>
+        <div class="card-body"><span class="material-icons text-success" aria-hidden="true">check_circle</span>
+          <div>
+            <div class="text-secondary small">Connected</div><strong id="connected-count">–</strong>
+          </div>
+        </div>
+      </div>
     </div>
   </div>
 </div>

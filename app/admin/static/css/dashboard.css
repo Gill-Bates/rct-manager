@@ -8,8 +8,9 @@
 
 .dashboard-grid {
     min-height: 4rem;
-    /* Keeps the edit outline of edge tiles inside the page; GridStack margin only spaces tiles. */
-    padding: 0 .25rem;
+    /* GridStack insets every tile by its item margin on all sides. Pulling the grid out by that
+       margin puts the outer tile edges flush with the page heading; the gutters between tiles stay. */
+    margin-inline: calc(-1 * var(--gs-item-margin-left, 10px)) calc(-1 * var(--gs-item-margin-right, 10px));
 }
 
 /* Hidden until dashboard.js has applied the stored layout. The delayed keyframe is the failsafe
@@ -139,6 +140,8 @@
        a phone; stack them in document order instead. The saved layout is untouched. */
     .dashboard-grid {
         height: auto !important;
+        /* The stacked tiles carry no GridStack inset, so the grid keeps the page edges. */
+        margin-inline: 0;
         display: grid;
         grid-template-columns: repeat(2, minmax(0, 1fr));
         gap: .5rem;

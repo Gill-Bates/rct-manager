@@ -147,6 +147,7 @@ class AdminEnergyDeviceStatus(EnergyStatusResponse):
     """The public status plus the admin-only blocks the GUI needs (design 2.8)."""
 
     device_name: str
+    write_support_enabled: bool  # the global write switch; the checklist's write access needs it
     host: str
     connected: bool  # the inverter answers (state ok or degraded)
     connection_state: str
@@ -177,6 +178,7 @@ async def _admin_status(request: Request, device_id: str) -> AdminEnergyDeviceSt
     state = runtime.gateway.device_status(device_id).state
     return AdminEnergyDeviceStatus(
         **public.model_dump(),
+        write_support_enabled=runtime.settings.enable_write_support,
         device_name=device.display_name or runtime.gateway.reported_name(device_id) or device_id,
         host=device.host,
         connected=state in (DeviceState.OK, DeviceState.DEGRADED),
