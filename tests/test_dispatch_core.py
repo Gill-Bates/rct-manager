@@ -73,6 +73,24 @@ def test_discharge_strategy_tracks_grid_import_without_export() -> None:
         last=PowerSetpoint(),
     )
     assert setpoint == PowerSetpoint(PowerDirection.DISCHARGE, 1100)
+    within_deadband = calculate_setpoint(
+        DispatchMode.DISCHARGE_TO_LOAD,
+        telemetry(grid=150),
+        target_soc_percent=20,
+        max_power_w=5000,
+        config=config,
+        last=setpoint,
+    )
+    assert within_deadband == setpoint
+    at_zero_import = calculate_setpoint(
+        DispatchMode.DISCHARGE_TO_LOAD,
+        telemetry(grid=0),
+        target_soc_percent=20,
+        max_power_w=5000,
+        config=config,
+        last=setpoint,
+    )
+    assert at_zero_import == PowerSetpoint(PowerDirection.DISCHARGE, 1000)
     no_export = calculate_setpoint(
         DispatchMode.DISCHARGE_TO_LOAD,
         telemetry(grid=-50),

@@ -457,7 +457,7 @@ class RctGateway:
     @staticmethod
     def _is_periodic(binding: DeviceBinding, entry: RegistryEntry) -> bool:
         periodic = binding.periodic
-        return periodic is not None and periodic.available and entry.object_id in periodic.object_ids
+        return periodic is not None and periodic.is_registered(entry.object_id)
 
     def _read_request(
         self, binding: DeviceBinding, entry: RegistryEntry, origin: TransactionOrigin, key: tuple[str, str] | None

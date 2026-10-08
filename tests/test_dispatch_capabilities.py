@@ -755,6 +755,7 @@ def _verified_write_path_body() -> dict:
         "bool_byte_width": 1,
         "write_frame_layout_verified": True,
         "apply_sequence_verified": True,
+        "soc_target_unit": "ratio",
         # A non-empty note is required for a verified write_path_convention. Fixture text only: it
         # claims no hardware verification of the strategy code.
         "note": "fixture value; no hardware verification claimed",

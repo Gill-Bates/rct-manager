@@ -333,7 +333,11 @@ class AdminStore:
 
     def delete_token(self, token_id: str) -> bool:
         with self.connect() as db:
-            return bool(db.execute("DELETE FROM pats WHERE id=?", (token_id,)).rowcount)
+            deleted = bool(db.execute("DELETE FROM pats WHERE id=?", (token_id,)).rowcount)
+        if deleted:
+            with self._touch_lock:
+                self._last_touch.pop(token_id, None)
+        return deleted
 
     def authenticate_token(self, token: str) -> FileToken | None:
         if len(token) > 512 or not pat_well_formed(token):

@@ -52,10 +52,8 @@ def calculate_setpoint(
     # Positive grid_import_w means import. Increase discharge by the excess over the reserve.
     base = last.watts if last.direction is PowerDirection.DISCHARGE else 0.0
     error = telemetry.grid_import_w - config.grid_import_reserve_w
-    if telemetry.grid_import_w <= 0:
-        # Export is a safety boundary, not a comfort deadband: reduce immediately.
-        desired = base + error
-    elif abs(error) <= config.grid_control_deadband_w:
+    # Export bypasses the comfort deadband so discharge decreases immediately.
+    if telemetry.grid_import_w > 0 and abs(error) <= config.grid_control_deadband_w:
         desired = base
     else:
         desired = base + error

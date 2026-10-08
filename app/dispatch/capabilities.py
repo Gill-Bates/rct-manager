@@ -84,15 +84,18 @@ class CapabilityRecord:
         # enforces it at the dataclass boundary too (H6): a directly constructed/copied record, or
         # a future caller that bypasses the admin API, must not be able to carry a VERIFIED
         # WRITE_PATH record without the evidence that status claims.
-        if self.status is CapabilityStatus.VERIFIED and self.name is CapabilityName.WRITE_PATH:
-            if (
+        if (
+            self.status is CapabilityStatus.VERIFIED
+            and self.name is CapabilityName.WRITE_PATH
+            and (
                 self.soc_strategy_external_code is None
                 or self.enum_byte_width is None
                 or self.bool_byte_width is None
                 or not self.write_frame_layout_verified
                 or not self.apply_sequence_verified
-            ):
-                raise ValueError("WRITE_PATH cannot be verified without write-path evidence")
+            )
+        ):
+            raise ValueError("WRITE_PATH cannot be verified without write-path evidence")
 
     def to_dict(self) -> dict:
         """JSON-capable projection for the encrypted part of ``dispatch_capabilities``."""

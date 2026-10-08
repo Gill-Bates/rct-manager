@@ -9,9 +9,11 @@
 import asyncio
 from datetime import timedelta
 
+import pytest
+
 from app.catalog.registry import RegistryCatalog
-from app.config import DeviceKey, EndpointKey
-from app.errors import DeviceUnreachable
+from app.config import DeviceKey, EndpointKey, FreshPeriodicMode
+from app.errors import DeviceUnreachable, FreshNotAvailable, QueueFullError
 from app.observability.names import prometheus_name
 from app.protocol.frames import Frame
 from app.protocol.types import Command, DataType, FrameKind
@@ -23,7 +25,7 @@ from app.scheduling.periodic import (
 )
 from app.scheduling.serializer import AccessSerializer
 from app.transport.endpoint import EndpointConfig, TransportEndpoint
-from app.transport.types import TransactionOrigin, TransactionRequest, make_frame
+from app.transport.types import SendOutcome, TransactionOrigin, TransactionRequest, TransactionResult, make_frame
 from tests.api_helpers import make_settings, running_app
 from tests.conftest import AutoClock
 from tests.fakes import FakeNetwork
@@ -152,6 +154,43 @@ async def test_dropped_connection_invalidates_periodic_registrations() -> None:
     assert not manager.is_registered(0x1111)
     assert await manager.setup()
     assert manager.is_registered(0x1111)
+
+
+async def test_fresh_reject_uses_live_partial_registrations(monkeypatch) -> None:
+    settings = make_settings(enable_periodic_reads=False, fresh_periodic_mode=FreshPeriodicMode.REJECT)
+    entries = [
+        entry for entry in RegistryCatalog.from_file(settings.object_registry_path).entries()
+        if entry.preselected and entry.data_type is DataType.FLOAT
+    ][:2]
+    registered, failed = entries
+    async with running_app(settings) as harness:
+        gateway = harness.runtime.gateway
+        binding = gateway._device("main")
+        manager = PeriodicManager(
+            binding.endpoint, binding.serializer,
+            DeviceKey(EndpointKey(binding.entry.host, binding.entry.port)),
+            [entry.object_id for entry in entries], 30, gateway._clock,
+        )
+        binding.periodic = manager
+        submit = binding.serializer.submit
+
+        async def partial_submit(request):
+            if request.frame.command is Command.READ_PERIODICALLY and request.frame.object_id == failed.object_id:
+                return TransactionResult(SendOutcome(False, None), error=QueueFullError())
+            return await submit(request)
+
+        monkeypatch.setattr(binding.serializer, "submit", partial_submit)
+        assert not await manager.setup()
+        assert manager.registrations == 1
+        assert manager.is_registered(registered.object_id)
+        assert not manager.is_registered(failed.object_id)
+        with pytest.raises(FreshNotAvailable):
+            await gateway.read_metric("main", registered.name, fresh=True)
+        assert (await gateway.read_metric("main", failed.name, fresh=True)).source == "device"
+        await binding.endpoint._drop_connection(DeviceUnreachable())
+        assert not gateway._is_periodic(binding, registered)
+        assert (await gateway.read_metric("main", registered.name, fresh=True)).source == "device"
+        assert not gateway._is_periodic(binding, registered)
 
 
 async def test_failed_reconnect_setup_preserves_required_period_reset() -> None:

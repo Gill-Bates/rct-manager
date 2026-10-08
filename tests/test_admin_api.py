@@ -7,6 +7,9 @@
 """Admin bootstrap, browser session, PAT and encrypted persistence behavior."""
 
 import re
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from ipaddress import ip_network
 from unittest.mock import patch
 
@@ -101,10 +104,61 @@ def test_database_pat_revocation_persists_across_restart(tmp_path):
     _, token = store.create_token("test", "read/write", None)
     entry = store.authenticate_token(token)
     assert entry is not None and entry.role == "read/write"
+    assert entry.id in store._last_touch
     assert store.delete_token(entry.id)
+    assert entry.id not in store._last_touch
     restarted = AdminStore(path, "x" * 48)
     restarted.initialize()
     assert restarted.authenticate_token(token) is None
+
+
+@pytest.mark.parametrize("writer_has_transaction", [False, True])
+def test_pat_revocation_with_pending_last_used_writer(tmp_path, monkeypatch, writer_has_transaction):
+    store = AdminStore(tmp_path / "rct.db", "x" * 48)
+    store.initialize()
+    record, token = store.create_token("test", "read", None)
+    writer_paused = threading.Event()
+    release_writer = threading.Event()
+    delete_started = threading.Event()
+    connect = store.connect
+
+    def pause_writer():
+        writer_paused.set()
+        if not release_writer.wait(5):
+            raise TimeoutError("Test did not release the token writer")
+
+    @contextmanager
+    def controlled_connect():
+        is_writer = threading.current_thread().name.startswith("pat-last-used")
+        with connect() as database:
+            if is_writer and not writer_has_transaction:
+                pause_writer()
+            if not is_writer:
+                database.set_trace_callback(lambda sql: delete_started.set() if sql.startswith("DELETE") else None)
+            yield database
+            if is_writer and writer_has_transaction:
+                pause_writer()
+
+    monkeypatch.setattr(store, "connect", controlled_connect)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        try:
+            assert store.authenticate_token(token) is not None
+            assert writer_paused.wait(5)
+            assert record["id"] in store._last_touch
+            deletion = pool.submit(store.delete_token, record["id"])
+            assert delete_started.wait(5)
+            if writer_has_transaction:
+                assert not deletion.done()
+                release_writer.set()
+            assert deletion.result(timeout=5)
+            assert record["id"] not in store._last_touch
+        finally:
+            release_writer.set()
+            store.close()
+    assert record["id"] not in store._last_touch
+    assert store.authenticate_token(token) is None
+    assert not store.delete_token(record["id"])
+    assert store.list_tokens() == []
 
 
 def test_bootstrap_password_is_eight_chars_with_one_special() -> None:

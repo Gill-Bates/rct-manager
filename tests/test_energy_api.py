@@ -673,6 +673,7 @@ VERIFICATION = {
     "apply_sequence_verified": True,
     "battery_discharge_positive": False,
     "grid_import_positive": False,
+    "soc_target_unit": "ratio",
 }
 _VERIFICATION_NAMES = ("write_path_convention", "battery_power_sign_convention", "grid_power_sign_convention")
 VERIFICATION_URL = "/admin/api/energy/devices/main/hardware-verification"
