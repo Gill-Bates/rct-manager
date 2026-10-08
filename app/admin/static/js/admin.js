@@ -20,29 +20,87 @@
     return node;
   }
 
+  // Auto-dismiss delays: a warning or error is something the operator must be able to read and act on.
+  const TOAST_TIMEOUT_MS = { success: 3500, info: 3500, warning: 12000, danger: 30000 };
+  const NETWORK_ERROR_TEXT = 'The server did not respond. Check the connection and try again.';
+
   function toast(message, kind = 'success') {
     const region = $('toast-region');
     // An identical message already showing (or still sliding out) is suppressed instead of
     // stacking a visual duplicate, e.g. two call sites reporting the same failed request.
     const duplicate = [...region.children].some((node) => node.dataset.message === message && node.dataset.kind === kind);
     if (duplicate) return;
-    const box = element('div', `alert alert-${kind}`, message);
+    const box = element('div', `alert alert-${kind} d-flex align-items-start gap-2`);
     box.dataset.message = message;
     box.dataset.kind = kind;
+    const close = element('button', 'btn-close');
+    close.type = 'button';
+    close.setAttribute('aria-label', 'Dismiss notification');
+    box.append(element('span', 'flex-grow-1', message), close);
     region.append(box);
     requestAnimationFrame(() => box.classList.add('is-visible'));
     const remove = () => box.remove();
+    let timer = null;
+    let started = 0;
+    let remaining = TOAST_TIMEOUT_MS[kind] ?? TOAST_TIMEOUT_MS.success;
     const leave = () => {
+      clearTimeout(timer);
+      if (box.classList.contains('is-leaving')) return;
       box.classList.remove('is-visible');
       box.classList.add('is-leaving');
       box.addEventListener('transitionend', remove, { once: true });
       setTimeout(remove, 400); // fallback if the transition does not fire (e.g. display: none ancestor)
     };
-    setTimeout(leave, kind === 'danger' ? 8500 : 3500);
+    const arm = () => { started = Date.now(); timer = setTimeout(leave, remaining); };
+    // Hover or keyboard focus pauses the countdown so a message can be read without racing it.
+    const pause = () => {
+      if (timer === null) return;
+      clearTimeout(timer);
+      timer = null;
+      remaining = Math.max(2000, remaining - (Date.now() - started));
+    };
+    const resume = () => { if (timer === null && !box.matches(':hover, :focus-within')) arm(); };
+    box.addEventListener('mouseenter', pause);
+    box.addEventListener('focusin', pause);
+    box.addEventListener('mouseleave', resume);
+    box.addEventListener('focusout', resume);
+    close.addEventListener('click', leave);
+    arm();
   }
 
   function messageFrom(error) {
+    // fetch() rejects with a bare TypeError ("Failed to fetch" / "Load failed" / "NetworkError ...").
+    if (error instanceof TypeError) return NETWORK_ERROR_TEXT;
     return error instanceof Error ? error.message : 'An unknown error occurred.';
+  }
+
+  // Themed replacement for window.confirm(): resolves true only through the explicit accept button;
+  // focus starts on the safe (cancel) button.
+  let confirmOpen = false;
+  function confirmAction({ title, message, confirmLabel, danger = false }) {
+    if (confirmOpen) return Promise.resolve(false);
+    confirmOpen = true;
+    const modalElement = $('confirm-modal');
+    const modal = window.bootstrap.Modal.getOrCreateInstance(modalElement);
+    const accept = $('confirm-accept');
+    $('confirm-title').textContent = title;
+    $('confirm-message').textContent = message;
+    accept.textContent = confirmLabel;
+    accept.className = `btn ${danger ? 'btn-danger' : 'btn-primary'}`;
+    return new Promise((resolve) => {
+      let accepted = false;
+      const onAccept = () => { accepted = true; modal.hide(); };
+      accept.addEventListener('click', onAccept, { once: true });
+      modalElement.addEventListener('shown.bs.modal', () => $('confirm-cancel').focus(), { once: true });
+      modalElement.addEventListener('hidden.bs.modal', () => {
+        accept.removeEventListener('click', onAccept);
+        confirmOpen = false;
+        // Hiding this modal clears Bootstrap's body lock even when another modal (e.g. the inverter dialog) is still open.
+        if (document.querySelector('.modal.show')) document.body.classList.add('modal-open');
+        resolve(accepted);
+      }, { once: true });
+      modal.show();
+    });
   }
 
   // navigator.clipboard requires a secure context (HTTPS or localhost) and is undefined on a
@@ -136,11 +194,26 @@
     form.querySelector('button[type="submit"]').disabled = busy;
   }
 
-  function formError(message) {
+  const AUTH_FIELD_IDS = ['username', 'password', 'current-password', 'new-password', 'confirm-password'];
+
+  function clearFormError() {
+    $('form-error').hidden = true;
+    for (const id of AUTH_FIELD_IDS) { $(id)?.removeAttribute('aria-invalid'); $(id)?.removeAttribute('aria-describedby'); }
+  }
+
+  // Focus goes to the offending field (the alert itself is announced by role="alert"); without one
+  // the alert box takes focus.
+  function formError(message, fieldId) {
+    clearFormError();
     const box = $('form-error');
     box.textContent = message;
     box.hidden = false;
-    box.focus();
+    const field = fieldId ? $(fieldId) : null;
+    if (field) {
+      field.setAttribute('aria-invalid', 'true');
+      field.setAttribute('aria-describedby', 'form-error');
+      field.focus();
+    } else box.focus();
   }
 
   // The status line of both auth pages. Only JS writes into it, and only to report a problem.
@@ -179,11 +252,21 @@
   function initShell() {
     $('theme-toggle')?.addEventListener('click', toggleTheme);
     const toggle = $('nav-toggle');
-    toggle?.addEventListener('click', () => {
+    const setNav = (open) => {
       const nav = $('mobile-nav');
-      nav.hidden = !nav.hidden;
-      toggle.setAttribute('aria-expanded', String(!nav.hidden));
-      toggle.setAttribute('aria-label', nav.hidden ? 'Open menu' : 'Close menu');
+      nav.hidden = !open;
+      toggle.setAttribute('aria-expanded', String(open));
+      toggle.setAttribute('aria-label', open ? 'Close menu' : 'Open menu');
+    };
+    toggle?.addEventListener('click', () => setNav($('mobile-nav').hidden));
+    document.addEventListener('keydown', (event) => {
+      if (event.key !== 'Escape' || !toggle || $('mobile-nav').hidden) return;
+      setNav(false);
+      toggle.focus();
+    });
+    document.addEventListener('click', (event) => {
+      if (!toggle || $('mobile-nav').hidden || event.target.closest('#mobile-nav, #nav-toggle')) return;
+      setNav(false);
     });
     $('logout-button')?.addEventListener('click', async () => {
       try {
@@ -215,23 +298,27 @@
   }
 
   async function submitLogin(form) {
-    $('form-error').hidden = true;
+    clearFormError();
     submitState(form, true);
     try {
       const result = await api('login', { method: 'POST', body: JSON.stringify({ username: $('username').value.trim(), password: $('password').value }) });
       location.assign(result.must_change_password ? '/change-password' : '/ui/dashboard');
-    } catch (error) { formError(messageFrom(error)); submitState(form, false); }
+    } catch (error) { formError(messageFrom(error), 'password'); submitState(form, false); }
   }
 
   async function submitPasswordChange(form) {
-    $('form-error').hidden = true;
+    clearFormError();
     const next = $('new-password').value;
-    if (next !== $('confirm-password').value) { formError('The new passwords do not match.'); return; }
+    if (next !== $('confirm-password').value) { formError('The new passwords do not match.', 'confirm-password'); return; }
     submitState(form, true);
     try {
       await api('change-password', { method: 'POST', body: JSON.stringify({ current_password: $('current-password').value, new_password: next }) });
       location.assign('/ui/dashboard');
-    } catch (error) { formError(messageFrom(error)); submitState(form, false); }
+    } catch (error) {
+      const message = messageFrom(error);
+      formError(message, /current/i.test(message) ? 'current-password' : 'new-password');
+      submitState(form, false);
+    }
   }
 
   function displayStatus(status) {
@@ -875,13 +962,16 @@
   function setDashboardStale(error) {
     const grid = $('dashboard-grid') || $('devices-list');
     if (!dashboardBanner) {
-      dashboardBanner = element('div', 'dashboard-offline-banner');
+      // Inline above the grid (not fixed), so it never covers the footer or the last tile row.
+      dashboardBanner = element('div', 'alert alert-warning dashboard-offline-banner mt-3 mb-0');
       dashboardBanner.setAttribute('role', 'status');
-      document.body.append(dashboardBanner);
+      grid.before(dashboardBanner);
     }
-    const when = new Date(dashboardSnapshot.at).toLocaleTimeString('en-GB');
+    const at = new Date(dashboardSnapshot.at);
+    const minutes = Math.floor((Date.now() - at.getTime()) / 60000);
+    const age = minutes < 1 ? 'less than a minute ago' : `${minutes} min ago`;
     const reason = error?.status >= 500 ? `Server error (${error.status})` : 'Connection to server lost';
-    dashboardBanner.textContent = `${reason} \u2013 showing data from ${when}`;
+    dashboardBanner.textContent = `${reason} \u2013 showing data from ${hhmm(at)} (${age})`;
     dashboardBanner.hidden = false;
     grid.classList.add('is-offline');
   }
@@ -1053,7 +1143,12 @@
       revoke.type = 'button';
       revoke.setAttribute('aria-label', `Revoke token ${token.name}`);
       revoke.addEventListener('click', async () => {
-        if (!confirm(`Really revoke token "${token.name}"?`)) return;
+        if (!await confirmAction({
+          title: 'Revoke token?',
+          message: `Applications using "${token.name}" lose access immediately. This cannot be undone.`,
+          confirmLabel: 'Revoke token',
+          danger: true,
+        })) return;
         revoke.disabled = true;
         try { await api(`tokens/${encodeURIComponent(token.id)}`, { method: 'DELETE' }); row.remove(); toast('Token revoked.'); if (!host.childElementCount) host.append(tokenEmptyRow()); }
         catch (error) { revoke.disabled = false; toast(messageFrom(error), 'danger'); }
@@ -1095,8 +1190,22 @@
       modal.setAttribute('aria-labelledby', shown ? 'token-created-title' : 'add-token-title');
     };
     modal.addEventListener('shown.bs.modal', () => { if (!$('token-form-state').hidden) $('token-name').focus(); });
+    // The token is shown once: a stray backdrop click or Escape must not discard it. Only the
+    // Done and close buttons (explicit actions) dismiss the result step.
+    let explicitClose = false;
+    // These two buttons close through our own handler, so the flag is set before Bootstrap's hide() runs.
+    for (const button of modal.querySelectorAll('#new-token-result [data-bs-dismiss="modal"]')) {
+      button.removeAttribute('data-bs-dismiss');
+      button.addEventListener('click', () => { explicitClose = true; window.bootstrap.Modal.getInstance(modal)?.hide(); });
+    }
+    modal.addEventListener('hide.bs.modal', (event) => {
+      if ($('new-token-result').hidden || explicitClose) return;
+      event.preventDefault();
+      toast('Copy the token first, then choose Done. It will not be shown again.', 'warning');
+    });
     // Closing by any path wipes the plaintext secret from the DOM and restores the form state.
     modal.addEventListener('hidden.bs.modal', () => {
+      explicitClose = false;
       $('new-token-value').textContent = '';
       showResult(false);
       form.reset();
@@ -1112,6 +1221,7 @@
         const result = await api('tokens', { method: 'POST', body: JSON.stringify(body) });
         $('new-token-value').textContent = result.token || '';
         showResult(true);
+        $('copy-token').focus();
         await loadTokens();
         toast('Token created. Please copy it now.');
       } catch (error) { toast(messageFrom(error), 'danger'); }
@@ -1769,7 +1879,7 @@
 
     const expert = element('section', 'energy-expert mt-3');
     expert.append(element('h3', 'h5 mb-1', 'Expert settings'));
-    expert.append(element('p', 'small text-warning energy-expert-warning',
+    expert.append(element('p', 'small text-warning-emphasis energy-expert-warning',
       'Advanced hardware settings. Incorrect values can prevent battery control from working correctly.'));
     const expertInner = element('div', 'energy-advanced-inner');
     expert.append(expertInner);
@@ -2058,9 +2168,9 @@
     };
 
     // Guided Setup steps. No register names here; the forms above are moved into their step.
-    const inverterLink = (text) => {
-      const link = element('a', 'btn btn-sm btn-primary', text);
-      link.href = '/ui/inverters';
+    const inverterLink = (text, href) => {
+      const link = element('a', 'btn btn-sm btn-primary energy-step-link', text);
+      link.href = href;
       return link;
     };
     const stepNode = (heading, text, ...rest) => {
@@ -2071,8 +2181,8 @@
     const limitSetupSlot = element('div');
     const verifySetupSlot = element('div');
     const steps = {
-      connection: stepNode('Inverter connection', 'The inverter is not connected. Check its connection settings.', inverterLink('Open inverter settings')),
-      write_access: stepNode('Write access', '', inverterLink('Open inverter settings')),
+      connection: stepNode('Inverter connection', 'The inverter is not connected. Check its connection settings.', inverterLink('Manage inverters', '/ui/dashboard?manage=inverters')),
+      write_access: stepNode('Write access', '', inverterLink('Open Inverters page', '/ui/inverters')),
       limits: stepNode('Power limits', 'The most power the battery may be charged and discharged with, in kW.', limitSetupSlot),
       hardware: stepNode('Hardware verification',
         'These values must come from an actual hardware and firmware verification of this inverter. Do not guess them.', verifySetupSlot),
@@ -2080,16 +2190,22 @@
     // Names what is missing; the global write switch is not part of the device payload, so it is
     // only reported when the poll answered 503 (write support disabled).
     const writeAccessText = steps.write_access.querySelector('p');
+    // Plain wording first; the raw register names stay one click away for people who need them.
+    const technicalNames = element('details', 'small mb-2');
+    technicalNames.append(element('summary', null, 'Show technical names'), element('code', 'd-block text-break'));
+    writeAccessText.after(technicalNames);
     function renderWriteAccessText(device, writeSupportOff) {
       const missing = missingRequiredWrites(device);
       const parts = [];
       if (writeSupportOff) parts.push('Write access is switched off. Turn on "Write access" on the Inverters page.');
       if (missing.length) {
-        parts.push(`Manual battery control needs these writable parameters approved on the Inverters page (under "Writable parameters"): ${missing.join(', ')}.`);
+        parts.push('Manual battery control needs the battery power control registers approved on the Inverters page (under "Writable parameters").');
       } else if (!writeSupportOff) {
         parts.push('Write access is required for manual battery control.');
       }
       writeAccessText.textContent = parts.join(' ');
+      technicalNames.hidden = !missing.length;
+      technicalNames.querySelector('code').textContent = missing.join(', ');
     }
     const place = (node, slot) => { if (node.parentNode !== slot) slot.append(node); };
     function layout(firstUnmet) {
@@ -2178,7 +2294,7 @@
     energyNote.setAttribute('role', 'status');
     const label = element('span', null, text);
     if (action) {
-      const link = element('a', 'btn btn-sm btn-primary', action.label);
+      const link = element('a', 'btn btn-sm btn-primary energy-step-link', action.label);
       link.href = action.href;
       energyNote.replaceChildren(label, link);
     } else energyNote.replaceChildren(label);
@@ -2229,7 +2345,7 @@
       // transient note (§13).
       const poll503 = error && error.status === 503;
       for (const panel of energyPanels.values()) panel.setPollState({ poll503, pollFailed: !poll503 });
-      if (poll503 && !energyPanels.size) setEnergyNote(host, 'Manual battery control requires write support to be enabled.', { kind: 'warning', action: { label: 'Open inverter settings', href: '/ui/inverters' } });
+      if (poll503 && !energyPanels.size) setEnergyNote(host, 'Manual battery control requires write support to be enabled.', { kind: 'warning', action: { label: 'Open Inverters page', href: '/ui/inverters' } });
     } finally { clearTimeout(timer); energyPolling = false; }
   }
 
@@ -2266,6 +2382,47 @@
     { key: 'forwarded_header', label: 'Forwarded header', help: 'HTTP header carrying the original client address.', group: 'Network', type: 'text' },
   ];
 
+  // Field label for a settings key (the raw key is an implementation detail); unknown keys pass through.
+  function settingLabel(key) {
+    return [...settingFields, ...exportFields].find((field) => field.key === key)?.label || key;
+  }
+
+  // Changes that can lock the operator out of this UI or widen trust: confirmed before they autosave.
+  // Returns the confirmation text, or null when the field is harmless or the value did not change.
+  function riskyChange(key, next) {
+    if (JSON.stringify(next) === JSON.stringify(settingsDraft[key])) return null;
+    const target = () => `${key === 'bind_address' ? next : settingsDraft.bind_address}:${key === 'bind_port' ? next : settingsDraft.bind_port}`;
+    if (key === 'bind_address' || key === 'bind_port') {
+      return {
+        title: 'Change listen address?',
+        message: `After the next restart the service listens on ${target()}. If that address is not reachable from your network, you can no longer open this admin interface.`,
+        confirmLabel: 'Save listen address',
+      };
+    }
+    if (key === 'behind_reverse_proxy' || key === 'trusted_proxies') {
+      return {
+        title: 'Change proxy trust?',
+        message: 'Client addresses are taken from the forwarded header of trusted proxies. A wrong value can lock you out or let clients spoof their address.',
+        confirmLabel: 'Save proxy setting',
+      };
+    }
+    if (key.endsWith('_allow_plaintext_credentials') && next === true) {
+      return {
+        title: 'Allow plaintext credentials?',
+        message: 'The export credentials are sent over unencrypted HTTP to a remote host, where anyone on the network path can read them.',
+        confirmLabel: 'Allow plaintext',
+        danger: true,
+      };
+    }
+    return null;
+  }
+
+  // Puts a control back to the draft value after a declined confirmation (no change event fires).
+  function restoreControl(control, value) {
+    if (control.type === 'checkbox') control.checked = Boolean(value);
+    else control.value = Array.isArray(value) ? value.join(', ') : String(value ?? '');
+  }
+
   let settingsCommitted = {};
   let settingsDraft = {};
   const pendingKeys = new Set();          // scalar keys
@@ -2281,17 +2438,18 @@
   // drops it from the payload when off and blanks the checkbox when on.
   const SECRET_KEYS = new Set(['influxdb_token', 'questdb_password']);
   function isSecretKey(key) { return SECRET_KEYS.has(key); }
+  const SECRET_PLACEHOLDER = '•••••••• (stored)';
 
   const SAVE_STATES = { idle: 0, saved: 1, incomplete: 2, unsaved: 3, saving: 4, failed: 5 };
   const SAVE_STATE_TEXT = {
     failed: ['Save failed', 'text-danger'],
     saving: ['Saving …', 'text-secondary'],
-    unsaved: ['Unsaved changes', 'text-warning'],
-    incomplete: ['Incomplete — not saved yet', 'text-warning'],
+    unsaved: ['Unsaved changes', 'text-warning-emphasis'],
+    incomplete: ['Incomplete — not saved yet', 'text-warning-emphasis'],
     saved: ['', 'text-secondary'], // success is announced by the toast, not by a second label
     idle: ['', 'text-secondary'],
   };
-  const SAVE_STATE_CLASSES = ['text-danger', 'text-secondary', 'text-warning', 'text-success'];
+  const SAVE_STATE_CLASSES = ['text-danger', 'text-secondary', 'text-warning-emphasis', 'text-success'];
   const saveSections = new Map();         // id -> { state, message, failure }
   const anySection = (states) => [...saveSections.values()].some((entry) => states.includes(entry.state));
 
@@ -2517,14 +2675,15 @@
         if (secretRevision.get(key) !== sendRevisions.get(key)) continue; // a newer value was typed meanwhile
         settingsDraft[key] = '';
         const control = $(`setting-${key}`);
-        if (control) { control.value = ''; control.placeholder = 'set'; }
+        if (control) { control.value = ''; control.placeholder = SECRET_PLACEHOLDER; }
       }
       showRestartNotice(result.restart_required);
       // Switching write access on makes the server approve the registers manual control needs.
       if (keys.includes('enable_write_support') && payload.enable_write_support) refreshWriteApprovals();
       if (page === 'prometheus') markPrometheusSaved();
       for (const id of sentSections) setSectionState(id, 'saved');
-      if (keys.some((key) => result.restart_required?.includes(key))) toast('Saved. A restart is required for this setting.', 'warning');
+      const restartKeys = keys.filter((key) => result.restart_required?.includes(key));
+      if (restartKeys.length) toast(`Saved, but not active yet. The service must be restarted to apply: ${restartKeys.map(settingLabel).join(', ')}.`, 'warning');
       else toast('Settings saved and active.');
       return true;
     } catch (error) {
@@ -2579,7 +2738,7 @@
       if (field.type === 'toggle') control.checked = Boolean(value);
       else if (field.type === 'list') control.value = Array.isArray(value) ? value.join(', ') : '';
       else if (field.type !== 'secret') control.value = String(value ?? '');
-      if (field.type === 'secret') { control.autocomplete = 'new-password'; control.placeholder = settingsDraft[`${field.key}_configured`] ? 'set' : ''; }
+      if (field.type === 'secret') { control.autocomplete = 'new-password'; control.placeholder = settingsDraft[`${field.key}_configured`] ? SECRET_PLACEHOLDER : ''; }
       // The bounds come from the field definition so the browser signals what the server accepts.
       if (field.type === 'number') { control.min = String(field.min); control.max = String(field.max); control.inputMode = 'numeric'; }
     }
@@ -2597,15 +2756,19 @@
 
   function settingControl(field) {
     const { wrap, control } = buildFieldControl(field, settingsDraft[field.key]);
-    const onChange = () => {
+    const onChange = async () => {
+      let next;
       if (field.type === 'number') {
         const invalid = numberFieldInvalid(control, field);
         if (invalid) { reportInvalid(control, invalid); return; }
         clearInvalid(control);
-        settingsDraft[field.key] = control.value === '' ? null : Number(control.value);
-      } else if (field.type === 'toggle') settingsDraft[field.key] = control.checked;
-      else if (field.type === 'list') settingsDraft[field.key] = control.value.split(',').map((item) => item.trim()).filter(Boolean);
-      else settingsDraft[field.key] = control.value;
+        next = control.value === '' ? null : Number(control.value);
+      } else if (field.type === 'toggle') next = control.checked;
+      else if (field.type === 'list') next = control.value.split(',').map((item) => item.trim()).filter(Boolean);
+      else next = control.value;
+      const risk = riskyChange(field.key, next);
+      if (risk && !(await confirmAction(risk))) { restoreControl(control, settingsDraft[field.key]); return; }
+      settingsDraft[field.key] = next;
       queueSettings(field.key);
       if (page === 'prometheus') renderPrometheusSummary();
       // A master toggle decides which dependent fields exist, so only its own group is rebuilt
@@ -2692,7 +2855,7 @@
     const { wrap, control } = buildFieldControl(field, settingsDraft[field.key]);
     // A secret left empty keeps its current value server-side (the PUT handler drops ""), so an
     // empty box must not overwrite settingsDraft and must not autosave on every blur.
-    control.addEventListener('change', () => {
+    control.addEventListener('change', async () => {
       if (field.type === 'secret') {
         if (control.value === '') return;          // an empty box keeps the stored secret; no queueing
         settingsDraft[field.key] = control.value;
@@ -2702,8 +2865,11 @@
         if (invalid) { reportInvalid(control, invalid); return; }
         clearInvalid(control);
         settingsDraft[field.key] = control.value === '' ? null : Number(control.value);
-      } else if (field.type === 'toggle') settingsDraft[field.key] = control.checked;
-      else settingsDraft[field.key] = control.value;
+      } else if (field.type === 'toggle') {
+        const risk = riskyChange(field.key, control.checked);
+        if (risk && !(await confirmAction(risk))) { restoreControl(control, settingsDraft[field.key]); return; }
+        settingsDraft[field.key] = control.checked;
+      } else settingsDraft[field.key] = control.value;
       if (field.key === 'db_type' || field.key === 'questdb_downsampling') onChange();
       queueExportSettings();
     });
@@ -3167,7 +3333,12 @@
     }
     const changes = deviceChanges();
     if (!changes.count) return;
-    if (changes.risky.length && !confirm(`${RESET_NOTE}: ${changes.risky.map(deviceLabel).join(', ')}.\n\nApply the change?`)) return;
+    if (changes.risky.length && !await confirmAction({
+      title: 'Apply inverter change?',
+      message: `${RESET_NOTE}: ${changes.risky.map(deviceLabel).join(', ')}.`,
+      confirmLabel: 'Apply change',
+      danger: true,
+    })) return;
     deviceUi.applying = true;
     deviceUi.error = '';
     deviceUi.notice = '';
@@ -3251,7 +3422,7 @@
       $('settings-sections').before(notice);
     }
     notice.hidden = !keys?.length;
-    notice.textContent = keys?.length ? `Saved, but active only after a restart: ${keys.join(', ')}` : '';
+    notice.textContent = keys?.length ? `Saved, but not active yet. The service must be restarted to apply: ${keys.map(settingLabel).join(', ')}.` : '';
   }
 
   async function initSettings() {
@@ -3310,7 +3481,7 @@
       const result = await api('parameters', { method: 'PUT', body: JSON.stringify(payload) });
       markPrometheusSaved();
       setSectionState('parameters', 'saved');
-      toast(result.restart_required?.length ? 'Parameters saved. A restart is required.' : 'Parameters saved.', result.restart_required?.length ? 'warning' : 'success');
+      toast(result.restart_required?.length ? 'Parameters saved, but not active yet. The service must be restarted to apply them.' : 'Parameters saved.', result.restart_required?.length ? 'warning' : 'success');
     } catch (error) {
       // The reload re-establishes server truth, and it is exactly why this section gets no Retry:
       // by then parameterData holds the server's list, so a retry would re-PUT the server's own
@@ -3565,7 +3736,7 @@
 
   // dashboard.js loads after this file and needs the shared request/toast helpers; admin.js stays
   // the single owner of the CSRF token and the fetch wrapper (abort/401/toast handling included).
-  window.RCTAdmin = Object.freeze({ api, toast, messageFrom, element });
+  window.RCTAdmin = Object.freeze({ api, toast, messageFrom, element, confirmAction });
 
   function start() {
     initShell();

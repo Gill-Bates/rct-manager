@@ -53,11 +53,20 @@
     --rct-line: #e5e7eb;
     --bs-primary: #88171a;
     --bs-primary-rgb: 136, 23, 26;
+    /* Focus ring: at least 3:1 against the page and card backgrounds of its theme. */
+    --rct-focus-ring: #88171a;
 }
 
 [data-bs-theme="dark"] {
     --rct-sidebar: #171a20;
     --rct-line: #363b45;
+    --rct-focus-ring: #f2878a;
+}
+
+/* Bootstrap's #6c757d is 4.4:1 on the light page and 2.9:1 on the dark cards; the theme's own
+   secondary text colour clears 4.5:1 in both. */
+.text-secondary {
+    color: var(--bs-secondary-color) !important;
 }
 
 html {
@@ -147,6 +156,14 @@ body {
     #main-content .device-toggle {
         min-height: calc(44px / var(--content-zoom));
         min-width: calc(44px / var(--content-zoom));
+    }
+
+    #main-content .form-control,
+    #main-content .form-select,
+    #main-content summary,
+    #main-content .form-check,
+    #main-content .form-check-label {
+        min-height: calc(44px / var(--content-zoom));
     }
 }
 
@@ -357,16 +374,35 @@ body {
 }
 
 /* The label/value column of a KPI tile is a flex item, so its default min-width:auto refuses to
-   shrink below the longest word ("consumption", "Prometheus"). In the two-column phone grid that
-   pushed the tile past its track and gave the whole page a horizontal ghost scroll. */
+   shrink below the longest word ("consumption", "Prometheus"). Words never break mid-word; the
+   tile shrinks its padding and value size on phones instead (see the 420px block). */
 .kpi-card .card-body>div {
     min-width: 0;
-    overflow-wrap: anywhere;
+    overflow-wrap: normal;
+    word-break: normal;
 }
 
+/* Value and unit stay on one line ("2,035 W"); the font scales down with the viewport. */
 .kpi-card strong {
-    font-size: 1.6rem;
+    font-size: clamp(1rem, 4.6vw, 1.6rem);
     line-height: 1.1;
+    white-space: nowrap;
+}
+
+/* A text status ("Not configured") may wrap between words, unlike a number with its unit. */
+.kpi-card #tsdb-status-label {
+    white-space: normal;
+}
+
+@media (max-width: 420px) {
+    .kpi-card .card-body {
+        padding: .75rem;
+        gap: .5rem;
+    }
+
+    .kpi-card .material-icons {
+        font-size: 1.6rem;
+    }
 }
 
 /* One inverter per row over the full content width: each card already holds its own card grid
@@ -1612,7 +1648,8 @@ samp,
 .toast-region {
     position: fixed;
     z-index: 1100;
-    top: max(1rem, env(safe-area-inset-top));
+    /* Below the sticky header (4.1rem), so Log out, the theme toggle and the menu stay reachable. */
+    top: calc(4.1rem + 1rem + env(safe-area-inset-top));
     right: max(1rem, env(safe-area-inset-right));
     max-width: min(23rem, calc(100vw - 2rem));
     display: grid;
@@ -1629,6 +1666,11 @@ samp,
     transition: opacity .25s ease, transform .25s ease;
 }
 
+.toast-region .btn-close {
+    flex: 0 0 auto;
+    margin: -.25rem -.5rem -.25rem 0;
+}
+
 .toast-region .alert.is-visible {
     opacity: 1;
     transform: translateX(0);
@@ -1639,9 +1681,22 @@ samp,
     transform: translateX(2rem);
 }
 
-:focus-visible {
-    outline: 3px solid #b83d41;
+:focus-visible,
+.btn:focus-visible,
+.btn-close:focus-visible,
+.form-control:focus-visible,
+.form-select:focus-visible,
+.form-check-input:focus-visible,
+.dropdown-item:focus-visible,
+.btn-check:focus-visible+.btn {
+    outline: 3px solid var(--rct-focus-ring);
     outline-offset: 2px;
+    box-shadow: none;
+}
+
+/* The header is brand red in both themes, so the ring there is white. */
+.admin-navbar :focus-visible {
+    outline-color: #fff;
 }
 
 @media (max-width: 575.98px) {
@@ -1802,15 +1857,21 @@ body.is-reconnecting #reconnect-modal.show .reconnect-pulse {
         animation: none;
     }
 }
-/* Last-known-good dashboard: dimmed content plus a fixed pill, so no layout height changes. */
-.is-offline { opacity: .6; transition: opacity .2s; }
-.dashboard-offline-banner {
-  position: fixed; left: 50%; bottom: 1rem; transform: translateX(-50%); z-index: 1080;
-  padding: .4rem .9rem; border-radius: 999px; font-size: .85rem;
-  background: var(--bs-warning-bg-subtle, #fff3cd); color: var(--bs-warning-text-emphasis, #664d03);
-  border: 1px solid var(--bs-warning-border-subtle, #ffe69c); box-shadow: 0 2px 8px rgba(0,0,0,.2);
-}
+/* Last-known-good dashboard: dimmed (still readable) content under an inline banner above the grid. */
+.is-offline { opacity: .8; transition: opacity .2s; }
 .dashboard-offline-banner[hidden] { display: none; }
+
+.confirm-message { white-space: pre-line; }
+
+/* The Energy Manager's navigation buttons: a 44px target, zoom-compensated like the rest of #main-content. */
+.energy-step-link {
+    display: inline-flex;
+    align-items: center;
+    min-height: calc(44px / var(--content-zoom));
+}
+
+/* Above the inverter dialog it can be opened from. */
+#confirm-modal { z-index: 1075; }
 
 /* Touch targets: 44px minimum on phones (the lint rule's threshold); desktop sizes stay untouched. */
 @media (max-width: 767.98px) {

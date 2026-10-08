@@ -25,6 +25,8 @@
     pingUrl: '/health',
     failCount: 0,
     failThreshold: 3,
+    attempts: 0,
+    lastCheck: null,
   };
 
   const heartbeatState = {
@@ -140,6 +142,14 @@
     scheduleHeartbeat(Math.max(1000, heartbeatState.delayMs - elapsed));
   }
 
+  function updateReconnectHint() {
+    const hint = document.getElementById('reconnect-hint');
+    if (!hint) return;
+    hint.textContent = reconnectState.lastCheck
+      ? `Attempt ${reconnectState.attempts}, last check ${reconnectState.lastCheck.toLocaleTimeString('en-GB')}.`
+      : 'Waiting for the first attempt …';
+  }
+
   function stopReconnectMode() {
     clearReconnectTimer();
     reconnectState.active = false;
@@ -172,6 +182,9 @@
       debugError('probe error', error);
     } finally {
       reconnectState.inFlight = false;
+      reconnectState.attempts++;
+      reconnectState.lastCheck = new Date();
+      updateReconnectHint();
     }
 
     if (reconnectState.active && !pageHidden) {
@@ -228,6 +241,9 @@
   function enterReconnectMode() {
     reconnectState.active = true;
     reconnectState.inFlight = false;
+    reconnectState.attempts = 0;
+    reconnectState.lastCheck = null;
+    updateReconnectHint();
     clearHeartbeatTimer();
     document.body?.classList.add('is-reconnecting');
 
@@ -308,6 +324,13 @@
     window.removeEventListener('pageshow', onPageShow);
     window.removeEventListener('pagehide', onPageHide);
   }
+
+  document.getElementById('reconnect-retry')?.addEventListener('click', () => {
+    if (!reconnectState.active) return;
+    clearReconnectTimer();
+    void probeReconnect();
+  });
+  document.getElementById('reconnect-reload')?.addEventListener('click', () => window.location.reload());
 
   document.addEventListener('visibilitychange', onVisibilityChange);
   window.addEventListener('online', onOnline);

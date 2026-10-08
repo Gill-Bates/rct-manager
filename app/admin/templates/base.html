@@ -82,6 +82,28 @@
           <div class="spinner-border text-primary mb-3" role="status" aria-hidden="true"></div>
           <h2 id="reconnect-title" class="h5 mb-2">Connection to RCT Manager lost</h2>
           <p aria-live="assertive" aria-atomic="true" class="text-secondary small mb-0">Trying to reconnect to the server. This page resumes automatically once it is back.</p>
+          <p id="reconnect-hint" class="text-secondary small mt-2 mb-3">Waiting for the first attempt …</p>
+          <div class="d-flex justify-content-center gap-2 flex-wrap">
+            <button id="reconnect-retry" type="button" class="btn btn-primary">Retry now</button>
+            <button id="reconnect-reload" type="button" class="btn btn-outline-secondary">Reload page</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="modal fade" id="confirm-modal" tabindex="-1" aria-labelledby="confirm-title" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h2 id="confirm-title" class="modal-title h5"></h2>
+        </div>
+        <div class="modal-body">
+          <p id="confirm-message" class="mb-0 confirm-message"></p>
+        </div>
+        <div class="modal-footer">
+          <button id="confirm-cancel" type="button" class="btn btn-outline-secondary"
+            data-bs-dismiss="modal">Cancel</button>
+          <button id="confirm-accept" type="button" class="btn btn-primary"></button>
         </div>
       </div>
     </div>

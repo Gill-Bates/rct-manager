@@ -20,9 +20,10 @@
       type="button"><span class="material-icons" aria-hidden="true">restart_alt</span>Reset layout</button>
     <button id="dashboard-edit-done" class="btn btn-primary d-inline-flex align-items-center gap-1 d-none"
       type="button"><span class="material-icons" aria-hidden="true">check</span>Done</button>
+    <p class="dashboard-edit-hint small text-secondary mb-0">Layout editing is available on larger screens.</p>
   </div>
 </div>
-<div class="grid-stack dashboard-grid my-4" id="dashboard-grid" aria-live="polite">
+<div class="grid-stack dashboard-grid my-4" id="dashboard-grid">
   <div class="grid-stack-item" gs-id="device-count" gs-x="0" gs-y="0" gs-w="3" gs-h="2" data-widget-id="device-count">
     <div class="grid-stack-item-content">
       <div class="card kpi-card h-100">
@@ -141,7 +142,7 @@
             data-bs-target="#inverters-modal" title="Manage inverters"><span class="material-icons"
               aria-hidden="true">add</span>Add inverter</button>
         </div>
-        <div id="devices-list" class="device-grid" aria-live="polite">
+        <div id="devices-list" class="device-grid">
           <p class="text-secondary mb-0">Loading inverters …</p>
         </div>
       </section>

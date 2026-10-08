@@ -1044,14 +1044,15 @@ check('Discard restores the server state and sends nothing', (await page.inputVa
 const extraRow = 1;
 await page.fill(`#device-${extraRow}-port`, '18898');
 await clearToasts();
-dialogAnswer = false;
-const dialogsBefore = dialogs.length;
 await page.click('#device-apply');
+await page.waitForSelector('#confirm-modal.show', { timeout: 5000 });
+const confirmText = await page.locator('#confirm-modal .modal-body').innerText();
+check('re-addressing asks for confirmation that names the reset', confirmText.includes('Verification evidence, Engineering Mode and arming') && confirmText.includes('192.0.2.10:18899'), confirmText);
+check('the confirmation focuses the safe button', await page.evaluate(() => document.activeElement?.id === 'confirm-cancel'));
+await page.click('#confirm-cancel');
+await page.waitForSelector('#confirm-modal.show', { state: 'detached', timeout: 5000 }).catch(() => { });
 await sleep(300);
-check('re-addressing asks for confirmation that names the reset', dialogs.length === dialogsBefore + 1
-  && dialogs.at(-1).includes('Verification evidence, Engineering Mode and arming') && dialogs.at(-1).includes('192.0.2.10:18899'), dialogs.at(-1));
 check('cancelling the confirmation sends nothing and keeps the draft', devicePuts.length === putsAtDiscard && (await barState()).apply);
-dialogAnswer = true;
 
 // (h) a rejected apply keeps the draft, toasts once, shows the error and moves focus to it
 await page.route('**/admin/api/settings', (route) => route.request().method() === 'PUT'
@@ -1307,10 +1308,10 @@ check('a token typed during the save is not cleared by the older response', seco
 // to the "set" placeholder. The expectation is unchanged, only the moment it is measured at.
 const tokenCleared = await page.waitForFunction(() => {
   const field = document.getElementById('setting-influxdb_token');
-  return field.value === '' && field.placeholder === 'set';
+  return field.value === '' && field.placeholder.endsWith('(stored)');
 }, null, { timeout: 8000 }).then(() => true).catch(() => false);
 check('the newer token is sent by the follow-up save and then cleared', tokenCleared
-  && (await page.inputValue('#setting-influxdb_token')) === '' && (await page.getAttribute('#setting-influxdb_token', 'placeholder')) === 'set', await page.inputValue('#setting-influxdb_token'));
+  && (await page.inputValue('#setting-influxdb_token')) === '' && (await page.getAttribute('#setting-influxdb_token', 'placeholder')).endsWith('(stored)'), await page.inputValue('#setting-influxdb_token'));
 await page.unroute('**/admin/api/settings');
 
 // Measured geometry, not a computed-style string: below the 992px breakpoint .export-grid declares
@@ -1649,10 +1650,11 @@ check('the moved/resized position persists after a browser reload',
 
 await editToggle.click();
 await page.waitForSelector('.dashboard-editing');
-dialogAnswer = true; // "Restore default layout?" confirm()
 await page.locator('#dashboard-reset-layout').click();
+await page.waitForSelector('#confirm-modal.show', { timeout: 5000 });
+check('"Restore default layout?" confirmation was shown', (await page.locator('#confirm-title').innerText()) === 'Restore default layout?');
+await page.click('#confirm-accept');
 await sleep(400);
-check('"Restore default layout?" confirmation was shown', dialogs.includes('Restore default layout?'));
 const afterReset = await page.evaluate(() => {
   const node = document.querySelector('.grid-stack-item[data-widget-id="pv-power"]').gridstackNode;
   return { x: node.x, y: node.y, w: node.w, h: node.h };

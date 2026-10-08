@@ -368,7 +368,7 @@ def test_device_apply_bar_is_explicit_accessible_and_guards_reset_and_unload():
     assert "apply.disabled = deviceUi.applying || invalid || changes.count === 0;" in state
     run = js[js.index("async function applyDevices(card)"):js.index("function buildGroupBody(")]
     assert "if (deviceUi.applying) return;" in run
-    assert "confirm(`${RESET_NOTE}" in run and "changes.risky.length" in run
+    assert "confirmAction({" in run and "message: `${RESET_NOTE}" in run and "changes.risky.length" in run
     assert "document.getElementById('device-apply-error')?.focus()" in run
     assert "error?.status === 409" in js and "error?.status === 504" in js
     # The unload guard only fires while the draft differs from the server state.
@@ -705,8 +705,11 @@ def test_gridstack_assets_load_only_on_the_dashboard_page():
 def test_dashboard_js_reuses_the_shared_api_helper_and_does_not_touch_polling():
     js = (ADMIN_DIR / "static/js/dashboard.js").read_text(encoding="utf-8")
     admin_js = JS.read_text(encoding="utf-8")
-    assert "const { api, toast, messageFrom } = window.RCTAdmin;" in js
-    assert "window.RCTAdmin = Object.freeze({ api, toast, messageFrom, element });" in admin_js
+    assert "const { api, toast, messageFrom, confirmAction } = window.RCTAdmin;" in js
+    # Tiles are moved by mouse drag on the header strip; the old Move/Resize context menu is gone.
+    assert "handle: '.dashboard-widget-header'" in js
+    assert "Move up" not in js and "dashboard-layout-menu" not in js
+    assert "window.RCTAdmin = Object.freeze({ api, toast, messageFrom, element, confirmAction });" in admin_js
     assert "startDashboardLayout()" in admin_js and "rct:dashboard-ready" in js
     assert "initDashboardPolling()" in admin_js
     # dashboard.js never reimplements the polling helpers it must leave alone.
@@ -726,3 +729,25 @@ def test_energy_poll_is_bounded_keeps_panels_and_never_overwrites_a_running_acti
     assert "pendingArmed ?? device.armed" in js
     # The Setup step names the required writes that are not approved yet.
     assert "(device.required_write_names || []).filter((name) => !approved.has(name))" in js
+
+
+def test_destructive_actions_use_the_themed_confirm_modal_not_native_confirm():
+    base = (TEMPLATES / "base.html").read_text(encoding="utf-8")
+    assert 'id="confirm-modal"' in base and 'id="confirm-accept"' in base
+    for name in ("admin.js", "dashboard.js"):
+        js = (ADMIN_DIR / "static/js" / name).read_text(encoding="utf-8")
+        assert not re.search(r"(?<![\w.])confirm\(", js)
+
+
+def test_toasts_are_dismissible_and_errors_do_not_vanish_quickly():
+    js = JS.read_text(encoding="utf-8")
+    toast = js[js.index("function toast("):js.index("function messageFrom(")]
+    assert "'Dismiss notification'" in toast and "'mouseenter'" in toast and "'focusin'" in toast
+    assert "danger: 30000" in js and "warning: 12000" in js
+
+
+def test_one_time_token_cannot_be_dismissed_by_backdrop_or_escape():
+    js = JS.read_text(encoding="utf-8")
+    tokens = js[js.index("function initTokens()"):js.index("// Business labels for the Energy Manager")]
+    assert "'hide.bs.modal'" in tokens and "event.preventDefault()" in tokens
+    assert "$('copy-token').focus()" in tokens

@@ -11,16 +11,16 @@
 
   if (document.body.dataset.page !== 'dashboard') return;
 
-  const { api, toast, messageFrom } = window.RCTAdmin;
+  const { api, toast, messageFrom, confirmAction, element } = window.RCTAdmin;
   const $ = (id) => document.getElementById(id);
 
   // Mirrors app/admin/api.py's _DASHBOARD_WIDGETS allowlist and its default layout (order is the
   // "Add widget" list order and the fallback position for a widget newly added by an upgrade).
   const DEFAULT_LAYOUT = [
     { id: 'device-count', x: 0, y: 0, w: 3, h: 2, label: 'Inverters' },
-    { id: 'connected-count', x: 3, y: 0, w: 3, h: 2, label: 'Connected inverters' },
+    { id: 'connected-count', x: 3, y: 0, w: 3, h: 2, label: 'Connected' },
     { id: 'metric-count', x: 6, y: 0, w: 3, h: 2, label: 'Exposed metrics' },
-    { id: 'tsdb-status', x: 9, y: 0, w: 3, h: 2, label: 'TSDB status' },
+    { id: 'tsdb-status', x: 9, y: 0, w: 3, h: 2, label: 'TSDB export' },
     { id: 'pv-power', x: 0, y: 2, w: 3, h: 2, label: 'PV power' },
     { id: 'house-power', x: 3, y: 2, w: 3, h: 2, label: 'House consumption' },
     { id: 'grid-power', x: 6, y: 2, w: 3, h: 2, label: 'Grid power' },
@@ -35,7 +35,7 @@
   let savedToastShownThisSession = false;
   const AUTO_HEIGHT_ID = 'devices'; // height follows content, is never a user layout value
   const CELL_HEIGHT = 72;
-  const GRID_MARGIN = 8;
+  const GRID_MARGIN = 10;
   const MOBILE_QUERY = '(max-width: 767.98px)'; // keep in sync with the stacked block in dashboard.css
   let fitFrame = 0;
   const fitRows = new Map(); // id -> rows the last fit set; such a height is content-driven, not stored
@@ -185,7 +185,61 @@
     scheduleSave();
   }
 
+  let editingNow = false;
+
+  // Keyboard alternative to dragging: one menu per widget, moving and resizing through the GridStack API.
+  const LAYOUT_ACTIONS = [
+    { label: 'Move up', change: (n) => ({ y: n.y - 1 }) },
+    { label: 'Move down', change: (n) => ({ y: n.y + 1 }) },
+    { label: 'Move left', change: (n) => ({ x: n.x - 1 }) },
+    { label: 'Move right', change: (n) => ({ x: n.x + 1 }) },
+    { label: 'Make narrower', change: (n) => ({ w: n.w - 1 }) },
+    { label: 'Make wider', change: (n) => ({ w: n.w + 1 }) },
+    { label: 'Make shorter', change: (n) => ({ h: n.h - 1 }), fixedHeightOnly: true },
+    { label: 'Make taller', change: (n) => ({ h: n.h + 1 }), fixedHeightOnly: true },
+  ];
+
+  function applyLayoutAction(el, action) {
+    const node = el.gridstackNode;
+    if (!node) return;
+    const next = { x: node.x, y: node.y, w: node.w, h: node.h, ...action.change(node) };
+    // Out-of-range requests (left edge, width 12, ...) are ignored instead of clamped silently.
+    if (next.x < 0 || next.y < 0 || next.w < 1 || next.h < 1 || next.x + next.w > 12) return;
+    grid.update(el, next);
+  }
+
+  function buildLayoutMenus() {
+    for (const def of DEFAULT_LAYOUT) {
+      const header = widgetElement(def.id)?.querySelector('.dashboard-widget-header');
+      if (!header) continue;
+      const menu = element('div', 'dropdown dashboard-layout-menu');
+      const toggle = element('button', 'btn btn-sm btn-outline-secondary');
+      toggle.type = 'button';
+      toggle.dataset.bsToggle = 'dropdown';
+      toggle.dataset.bsStrategy = 'fixed';
+      toggle.setAttribute('aria-expanded', 'false');
+      toggle.setAttribute('aria-label', `Layout actions: ${def.label}`);
+      const icon = element('span', 'material-icons', 'open_with');
+      icon.setAttribute('aria-hidden', 'true');
+      toggle.append(icon);
+      const list = element('ul', 'dropdown-menu dropdown-menu-end');
+      for (const action of LAYOUT_ACTIONS) {
+        if (action.fixedHeightOnly && def.id === AUTO_HEIGHT_ID) continue; // its height follows the content
+        const button = element('button', 'dropdown-item', action.label);
+        button.type = 'button';
+        button.setAttribute('aria-label', `${action.label}: ${def.label}`);
+        button.addEventListener('click', () => applyLayoutAction(widgetElement(def.id), action));
+        const item = element('li');
+        item.append(button);
+        list.append(item);
+      }
+      menu.append(toggle, list);
+      header.prepend(menu);
+    }
+  }
+
   function setEditing(editing) {
+    editingNow = editing;
     document.getElementById('dashboard-grid').classList.toggle('dashboard-editing', editing);
     document.querySelectorAll('.dashboard-widget-header').forEach((header) => header.classList.toggle('d-none', !editing));
     $('dashboard-edit-toggle').classList.toggle('d-none', editing);
@@ -196,6 +250,9 @@
     grid.enableMove(editing);
     grid.enableResize(editing);
     if (editing) savedToastShownThisSession = false; // one save-toast per editing session (req. 15)
+    // The button that held focus is hidden now; hand focus to its counterpart (not when a viewport change hid both).
+    const next = $(editing ? 'dashboard-edit-done' : 'dashboard-edit-toggle');
+    if (next.offsetParent) next.focus();
   }
 
   function toggleWidgetVisibility(id, visible) {
@@ -243,7 +300,12 @@
   }
 
   async function resetLayout() {
-    if (!confirm('Restore default layout?')) return;
+    if (!await confirmAction({
+      title: 'Restore default layout?',
+      message: 'All widgets return to their default position and size. Your current arrangement is replaced.',
+      confirmLabel: 'Restore default layout',
+      danger: true,
+    })) return;
     try {
       await api('dashboard-layout', { method: 'DELETE' });
     } catch (error) {
@@ -254,7 +316,7 @@
     scheduleFit();
     renderAddWidgetList();
     savedToastShownThisSession = true; // explicit action: show exactly this one toast, not a second autosave toast
-    toast('Dashboard layout saved.');
+    toast('Dashboard layout restored.');
   }
 
   async function initLayout() {
@@ -266,7 +328,7 @@
       animate: true,
       disableDrag: true,
       disableResize: true,
-      handle: '.dashboard-drag-handle',
+      handle: '.dashboard-widget-header', // grab a tile by its header strip, like a Grafana panel
     }, '#dashboard-grid');
 
     let stored = null;
@@ -279,6 +341,7 @@
     }
     applyLayout(mergeWithDefault(stored));
     renderAddWidgetList();
+    buildLayoutMenus();
 
     fitLayout();
     observeContent();
@@ -287,6 +350,12 @@
     grid.on('dragstop resizestop', scheduleFit);
     $('dashboard-edit-toggle').addEventListener('click', () => setEditing(true));
     $('dashboard-edit-done').addEventListener('click', () => setEditing(false));
+    // Positions are ignored by the stacked phone layout, so editing ends when the viewport shrinks to it.
+    window.matchMedia(MOBILE_QUERY).addEventListener('change', (event) => { if (event.matches && editingNow) setEditing(false); });
+    // Deep link from the Inverters page.
+    if (new URLSearchParams(location.search).get('manage') === 'inverters') {
+      window.bootstrap.Modal.getOrCreateInstance($('inverters-modal')).show();
+    }
     $('dashboard-reset-layout').addEventListener('click', () => { resetLayout().catch((error) => toast(messageFrom(error), 'danger')); });
   }
 

@@ -8,11 +8,14 @@
 
 .dashboard-grid {
     min-height: 4rem;
+    /* Keeps the edit outline of edge tiles inside the page; GridStack margin only spaces tiles. */
+    padding: 0 .25rem;
 }
 
 .dashboard-grid .grid-stack-item-content {
     display: flex;
-    inset: 0 .4rem .4rem 0;
+    /* inset/margins come from GridStack's margin option; overriding them removes the tile gutters. */
+    border-radius: var(--bs-border-radius-lg, .5rem);
 }
 
 .dashboard-grid .card,
@@ -21,6 +24,7 @@
 }
 
 .dashboard-widget-section {
+    position: relative;
     display: flex;
     flex-direction: column;
 }
@@ -32,9 +36,28 @@
 }
 
 .dashboard-widget-header {
+    /* Overlay strip: out of flow so toggling edit mode never shifts the tile content. */
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    z-index: 2;
+    height: 1.1rem;
     display: flex;
-    justify-content: flex-end;
-    padding: .2rem .3rem 0 0;
+    align-items: center;
+    justify-content: center;
+    cursor: grab;
+    touch-action: none;
+}
+
+.dashboard-widget-header .dashboard-drag-handle {
+    font-size: 1rem;
+    line-height: 1;
+    opacity: .6;
+}
+
+.dashboard-widget-header:active {
+    cursor: grabbing;
 }
 
 .dashboard-grid:not(.dashboard-editing) .ui-resizable-handle {
@@ -44,7 +67,23 @@
 /* Edit mode: a subtle outline marks a movable/resizable widget without looking like a separate app. */
 .dashboard-editing .grid-stack-item-content {
     outline: 1px dashed var(--bs-border-color);
-    border-radius: .8rem;
+    outline-offset: 2px;
+    border-radius: var(--bs-border-radius-lg, .5rem);
+}
+
+/* Dragging/resizing must not select text or icons inside tiles. */
+.dashboard-editing .grid-stack-item,
+.dashboard-editing .grid-stack-item * {
+    user-select: none;
+    -webkit-user-select: none;
+}
+
+.dashboard-editing .ui-resizable-handle {
+    opacity: .45;
+}
+
+.dashboard-editing .ui-resizable-handle:hover {
+    opacity: 1;
 }
 
 .dashboard-editing .dashboard-widget-header {
@@ -55,9 +94,25 @@
     outline-color: var(--bs-primary);
 }
 
+.dashboard-edit-hint {
+    display: none;
+}
+
 @media (max-width: 767.98px) {
     .dashboard-toolbar {
         flex-wrap: wrap;
+    }
+
+    /* Layout editing needs the 12-column grid; the stacked phone layout ignores positions. */
+    #dashboard-edit-toggle,
+    #dashboard-add-widget,
+    #dashboard-reset-layout,
+    #dashboard-edit-done {
+        display: none !important;
+    }
+
+    .dashboard-edit-hint {
+        display: block;
     }
 
     /* A 12-column grid with fixed row heights squeezes the widgets and clips the inverter cards on
