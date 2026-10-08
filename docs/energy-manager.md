@@ -32,6 +32,9 @@ curl -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/jso
   (`power_limit_clamped: true`).
 - The target must lie inside `target_soc_window` (7 % to 95 % with the defaults, narrowed by
   `DISPATCH_MIN_SOC` / `DISPATCH_MAX_SOC`); otherwise 422 `value_out_of_range`. It is never clamped.
+- Switching "Write access" in Settings is live (no restart): off refuses writes, disarms every device and hands the
+  inverters back to automatic operation; on requires arming again. If a hand-back fails, the response lists
+  `write_restore_pending` and the automatic restore retry continues.
 - A command lives one hour and is not renewed; the status publishes `until`. A service restart hands
   every running command back to the inverter.
 - `auto` replays the captured pre-dispatch registers. If that cannot be confirmed, the answer is 409

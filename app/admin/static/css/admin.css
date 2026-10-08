@@ -1844,3 +1844,16 @@ body.is-reconnecting #reconnect-modal.show .reconnect-pulse {
         min-height: 44px;
     }
 }
+
+/* Three 44px header buttons no longer fit beside the brand text on a phone: keep the text for
+   screen readers only, so the header stays on one row. */
+@media (max-width: 420px) {
+    .admin-navbar .navbar-brand > span {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        overflow: hidden;
+        clip-path: inset(50%);
+        white-space: nowrap;
+    }
+}

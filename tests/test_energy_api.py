@@ -296,7 +296,7 @@ async def test_a_read_only_token_cannot_reach_the_energy_manager(tmp_path: Path)
 async def test_without_write_support_the_public_router_is_absent_and_the_admin_surface_refuses(
     tmp_path: Path,
 ) -> None:
-    """AC-10: the public endpoints do not exist at all, while the admin surface explains why."""
+    """AC-10: the public endpoints answer write_disabled, while the admin surface explains why."""
     settings = energy_settings(tmp_path, enable_write_support=False)
     async with running_app(settings) as harness:
         for response in (
@@ -976,3 +976,50 @@ async def test_clearing_a_required_register_closes_the_gate_and_the_checklist(tm
         status = await harness.client.get("/api/v1/devices/main/energy", headers=WRITER)
         reasons = {i["reason"] for i in status.json()["actions"] if i["action"] != "auto"}
         assert reasons <= {"write_not_permitted", "not_armed"}
+
+
+async def _put_write_support(harness, headers: dict[str, str], value: bool):
+    return await harness.client.put(
+        "/admin/api/settings", headers=headers, json={"enable_write_support": value}
+    )
+
+
+async def test_write_support_switches_on_and_off_live_without_a_restart(tmp_path: Path) -> None:
+    """Boot with writes off, enable through Settings, use dispatch, disable: no restart notice, the
+    routers follow the switch, disabling disarms and hands the inverter back to automatic."""
+    async with running_app(energy_settings(tmp_path, enable_write_support=False)) as harness:
+        seed_payloads(harness)
+        headers = await admin_session(harness)
+        assert harness.runtime.dispatch is None
+        assert (await command(harness, {"action": "auto"})).json()["code"] == "write_disabled"
+
+        on = await _put_write_support(harness, headers, True)
+        assert on.status_code == 200, on.text
+        assert on.json()["restart_required"] == []
+        assert "enable_write_support" in on.json()["live"]
+        assert harness.runtime.dispatch is not None
+
+        await arm(harness)
+        charging = await command(harness, {"action": "charge", "target_soc_percent": 80})
+        assert charging.status_code == 200, charging.text
+        assert charging.json()["state"] == "charging"
+        panel = (await harness.client.get("/admin/api/energy/devices")).json()[0]
+        assert panel["armed"] is True and panel["state"] == "charging"
+
+        headers = await admin_session(harness)  # arm() logged in again and rotated the CSRF token
+        off = await _put_write_support(harness, headers, False)
+        assert off.status_code == 200, off.text
+        assert off.json()["restart_required"] == []
+        assert "write_restore_pending" not in off.json()
+        refused = await command(harness, {"action": "auto"})
+        assert refused.status_code == 404 and refused.json()["code"] == "write_disabled"
+        panel = (await harness.client.get("/admin/api/energy/devices")).json()[0]
+        assert panel["armed"] is False and panel["state"] == "automatic"
+        rearm = await harness.client.put(
+            "/admin/api/energy/devices/main/armed", headers=headers, json={"armed": True}
+        )
+        assert rearm.status_code == 409 and rearm.json()["code"] == "energy_write_support_required"
+
+        # Back on: dispatch is reused, a fresh arming is needed.
+        assert (await _put_write_support(harness, headers, True)).status_code == 200
+        assert (await command(harness, {"action": "auto"})).json()["code"] == "energy_manager_disarmed"
