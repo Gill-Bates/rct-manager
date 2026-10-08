@@ -132,6 +132,22 @@ body {
 
 :root {
     --rct-footer-height: 2.75rem;
+    /* The one knob for the content scale of every admin page (0.9 = the look of a 90% browser zoom).
+       Navbar, sidebar and footer stay at 100%; login and password pages have no #main-content. */
+    --content-zoom: .9;
+}
+
+#main-content {
+    zoom: var(--content-zoom);
+}
+
+@media (max-width: 767.98px) {
+    /* The content is zoomed, so a 44px touch target needs 44 / zoom CSS pixels. */
+    #main-content .btn,
+    #main-content .device-toggle {
+        min-height: calc(44px / var(--content-zoom));
+        min-width: calc(44px / var(--content-zoom));
+    }
 }
 
 /* Narrow viewports wrap the footer text to two lines, which grows .admin-footer past 2.75rem while

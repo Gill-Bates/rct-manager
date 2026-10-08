@@ -6,12 +6,6 @@
  * nothing here sets a hardcoded light background, so dark mode (data-bs-theme) is unaffected.
  */
 
-/* The overview renders at the size of a 90% browser zoom; navbar, footer and the other pages stay
-   at 100%. Only the page content is scaled (this stylesheet loads on the overview only). */
-body[data-page="dashboard"] #main-content {
-    zoom: .9;
-}
-
 .dashboard-grid {
     min-height: 4rem;
 }
@@ -62,13 +56,6 @@ body[data-page="dashboard"] #main-content {
 }
 
 @media (max-width: 767.98px) {
-    /* The page content is zoomed to .9 above, so a 44px target needs 44/.9 CSS pixels. */
-    body[data-page="dashboard"] #main-content .btn,
-    body[data-page="dashboard"] #main-content .device-toggle {
-        min-height: calc(44px / .9);
-        min-width: calc(44px / .9);
-    }
-
     .dashboard-toolbar {
         flex-wrap: wrap;
     }

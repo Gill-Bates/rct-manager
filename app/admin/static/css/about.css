@@ -1,7 +1,14 @@
 .about-page .card-header .material-icons { color: var(--rct-brand); }
 .about-page .card { min-width: 0; }
 .about-page code { color: var(--bs-body-color); background: var(--bs-secondary-bg); border-radius: .25rem; padding: .15rem .35rem; overflow-wrap: anywhere; }
-.about-dependencies { max-height: 19rem; overflow-y: auto; }
+.about-dependencies { max-height: 18.75rem; overflow-y: auto; }
+/* Desktop: deps card stretches to the row height set by the other columns (wirebuddy layout). */
+@media (min-width: 992px) {
+  .about-top-row > .col-lg-4 > .card { display: flex; flex-direction: column; }
+  .about-updates-column > .about-doc-card { flex: 1 1 auto; }
+  .about-deps-col .about-dependencies { flex: 1 1 0; min-height: 0; max-height: none; overflow: hidden; display: flex; flex-direction: column; }
+  .about-deps-col .about-dependencies-scroll { flex: 1 1 0; min-height: 0; overflow-y: auto; }
+}
 .about-dependencies th, .about-dependencies td { padding: .55rem .75rem; }
 .about-dependencies thead th { position: sticky; top: 0; z-index: 1; background: var(--bs-tertiary-bg); }
 .about-update-card .card-header .material-icons { font-size: 1.25rem; }
@@ -9,5 +16,5 @@
 .about-update-card table th, .about-update-card table td { width: 50%; }
 .about-update-card table td { overflow-wrap: anywhere; }
 .about-doc-card .card-body { padding-top: .5rem; padding-bottom: .5rem; }
-.about-changelog { max-height: 28rem; overflow-y: auto; }
+.about-changelog { max-height: min(34rem, 60vh); overflow-y: auto; }
 .about-changelog ul { padding-left: 1.2rem; }

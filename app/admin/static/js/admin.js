@@ -2170,10 +2170,18 @@
   }
 
   // Shows one status paragraph in the list while there are no panels; null removes it.
-  function setEnergyNote(host, text) {
+  // `action` adds a link button to the banner; `kind` is the Bootstrap alert colour.
+  function setEnergyNote(host, text, { kind = 'secondary', action = null } = {}) {
     if (!text) { energyNote?.remove(); energyNote = null; return; }
-    if (!energyNote) energyNote = element('p', 'text-secondary mb-0');
-    energyNote.textContent = text;
+    if (!energyNote) energyNote = element('div', 'alert mb-0 d-flex flex-wrap align-items-center justify-content-between gap-2');
+    energyNote.className = `alert alert-${kind} mb-0 d-flex flex-wrap align-items-center justify-content-between gap-2`;
+    energyNote.setAttribute('role', 'status');
+    const label = element('span', null, text);
+    if (action) {
+      const link = element('a', 'btn btn-sm btn-primary', action.label);
+      link.href = action.href;
+      energyNote.replaceChildren(label, link);
+    } else energyNote.replaceChildren(label);
     if (energyNote.parentNode !== host) host.append(energyNote);
   }
 
@@ -2221,7 +2229,7 @@
       // transient note (§13).
       const poll503 = error && error.status === 503;
       for (const panel of energyPanels.values()) panel.setPollState({ poll503, pollFailed: !poll503 });
-      if (poll503 && !energyPanels.size) setEnergyNote(host, 'Manual battery control requires write support to be enabled.');
+      if (poll503 && !energyPanels.size) setEnergyNote(host, 'Manual battery control requires write support to be enabled.', { kind: 'warning', action: { label: 'Open inverter settings', href: '/ui/inverters' } });
     } finally { clearTimeout(timer); energyPolling = false; }
   }
 

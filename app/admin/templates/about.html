@@ -7,9 +7,9 @@
   <header class="page-heading">
     <h1><span class="material-icons me-2" aria-hidden="true">info</span>About</h1>
   </header>
-  <div class="row g-3 mt-1 align-items-start about-top-row">
-    <div class="col-12 col-lg-4">
-      <section class="card" aria-labelledby="about-details-heading">
+  <div class="row g-3 mt-1 about-top-row">
+    <div class="col-12 col-lg-4 d-lg-flex">
+      <section class="card flex-grow-1" aria-labelledby="about-details-heading">
         <div class="card-header d-flex align-items-center"><span class="material-icons me-2"
             aria-hidden="true">code</span>
           <h2 id="about-details-heading" class="h6 mb-0">Application Details</h2>
@@ -37,9 +37,11 @@
               </tr>
             </tbody>
           </table>
-          <hr>
-          <h3 class="h6 text-secondary">Author</h3>
-          <p class="mb-0"><span class="material-icons align-middle me-1" aria-hidden="true">person</span>Gill-Bates</p>
+          <div class="d-none d-lg-block">
+            <hr>
+            <h3 class="h6 text-secondary">Author</h3>
+            <p class="mb-0"><span class="material-icons align-middle me-1" aria-hidden="true">person</span>Gill-Bates</p>
+          </div>
         </div>
       </section>
     </div>
@@ -104,14 +106,14 @@
         </div>
       </section>
     </div>
-    <div class="col-12 col-lg-4">
-      <section class="card" aria-labelledby="about-dependencies-heading">
+    <div class="col-12 col-lg-4 d-lg-flex about-deps-col">
+      <section class="card flex-grow-1" aria-labelledby="about-dependencies-heading">
         <div class="card-header d-flex align-items-center"><span class="material-icons me-2"
             aria-hidden="true">inventory_2</span>
           <h2 id="about-dependencies-heading" class="h6 mb-0">Dependencies</h2>
         </div>
         <div class="card-body p-0 about-dependencies">
-          <div class="table-responsive" tabindex="0" aria-label="Installed dependencies">
+          <div class="table-responsive about-dependencies-scroll" tabindex="0" aria-label="Installed dependencies">
             <table class="table table-sm table-hover mb-0">
               <thead>
                 <tr>
