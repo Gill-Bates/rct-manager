@@ -11,3 +11,7 @@ Licensed under Apache License 2.0; see Apache-2.0.
 
 The copied Bootstrap bundle retains a WireBuddy source-file header.
 WireBuddy is Copyright 2026 Gill-Bates and licensed under MIT.
+
+GridStack.js 14.0.0 (gridstack-all.js, gridstack.min.css): Copyright (c) 2021-2025 Alain Dumesny;
+v0.4.0 and older (c) 2014-2018 Pavel Reznikov, Dylan Weiss.
+Licensed under MIT; see gridstack.txt.

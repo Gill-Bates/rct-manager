@@ -219,6 +219,11 @@ class AdminStore:
             for key, value in values.items():
                 db.execute(_UPSERT_SETTING, (key, self._encode(key, value)))
 
+    def delete(self, key: str) -> None:
+        """Remove a stored value; a missing key is not an error (idempotent reset-to-default)."""
+        with self.connect() as db:
+            db.execute("DELETE FROM settings WHERE key=?", (key,))
+
     def merge_operator_settings(self, current, changes: dict):
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")

@@ -670,3 +670,43 @@ async def test_about_requires_session_and_renders_project_details(tmp_path):
         assert "https://gill-bates.github.io/rct-manager/" in response.text
         assert "https://github.com/Gill-Bates/rct-manager/releases" in response.text
         assert (await client.get("/admin/static/css/about.css")).status_code == 200
+
+
+def test_dashboard_grid_has_the_gridstack_structure_and_stable_widget_ids():
+    html = (TEMPLATES / "dashboard.html").read_text(encoding="utf-8")
+    assert 'id="dashboard-grid"' in html and "grid-stack" in html
+    assert "Edit dashboard" in html
+    assert 'id="dashboard-add-widget"' in html and "Add widget" in html
+    assert 'id="dashboard-reset-layout"' in html and "Reset layout" in html
+    assert 'id="dashboard-edit-done"' in html and ">Done<" in html
+    for widget_id in ("device-count", "connected-count", "metric-count", "tsdb-status",
+                      "pv-power", "house-power", "grid-power", "battery-soc", "devices"):
+        assert f'data-widget-id="{widget_id}"' in html
+        assert f'gs-id="{widget_id}"' in html
+    # The business-data DOM ids the polling code reads/writes stay intact inside the wrappers.
+    for inner_id in ("device-count", "connected-count", "metric-count", "pv-power", "house-power",
+                     "grid-power", "battery-soc", "tsdb-status-icon", "tsdb-status-label",
+                     "tsdb-status-time", "devices-list"):
+        assert f'id="{inner_id}"' in html
+
+
+def test_gridstack_assets_load_only_on_the_dashboard_page():
+    dashboard = (TEMPLATES / "dashboard.html").read_text(encoding="utf-8")
+    base = (TEMPLATES / "base.html").read_text(encoding="utf-8")
+    assert "gridstack.min.css" in dashboard and "gridstack-all.js" in dashboard
+    assert "{% block extra_js %}{% endblock %}" in base
+    for other_page in ("inverters", "energy", "tsdb", "prometheus", "tokens", "settings", "about"):
+        other = (TEMPLATES / f"{other_page}.html").read_text(encoding="utf-8")
+        assert "gridstack" not in other.lower(), other_page
+
+
+def test_dashboard_js_reuses_the_shared_api_helper_and_does_not_touch_polling():
+    js = (ADMIN_DIR / "static/js/dashboard.js").read_text(encoding="utf-8")
+    admin_js = JS.read_text(encoding="utf-8")
+    assert "const { api, toast, messageFrom } = window.RCTAdmin;" in js
+    assert "window.RCTAdmin = Object.freeze({ api, toast, messageFrom, element });" in admin_js
+    assert "window.RCTDashboard?.initLayout()" in admin_js
+    assert "initDashboardPolling()" in admin_js
+    # dashboard.js never reimplements the polling helpers it must leave alone.
+    for forbidden in ("function loadDashboard", "function initDashboardPolling", "setInterval"):
+        assert forbidden not in js

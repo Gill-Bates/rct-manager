@@ -1,0 +1,62 @@
+/*
+ * app/admin/static/css/dashboard.css
+ * Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
+ *
+ * GridStack layer for the overview page: positioning only. Widget appearance stays Bootstrap's;
+ * nothing here sets a hardcoded light background, so dark mode (data-bs-theme) is unaffected.
+ */
+
+.dashboard-grid {
+    min-height: 4rem;
+}
+
+.dashboard-grid .grid-stack-item-content {
+    display: flex;
+    inset: 0 .4rem .4rem 0;
+}
+
+.dashboard-grid .card,
+.dashboard-grid .dashboard-widget-section {
+    width: 100%;
+}
+
+.dashboard-widget-section {
+    display: flex;
+    flex-direction: column;
+}
+
+/* View mode: no drag handles, no resize affordance, no hint that this is a grid at all. */
+.dashboard-drag-handle {
+    cursor: grab;
+    color: var(--bs-secondary-color);
+}
+
+.dashboard-widget-header {
+    display: flex;
+    justify-content: flex-end;
+    padding: .2rem .3rem 0 0;
+}
+
+.dashboard-grid:not(.dashboard-editing) .ui-resizable-handle {
+    display: none !important;
+}
+
+/* Edit mode: a subtle outline marks a movable/resizable widget without looking like a separate app. */
+.dashboard-editing .grid-stack-item-content {
+    outline: 1px dashed var(--bs-border-color);
+    border-radius: .8rem;
+}
+
+.dashboard-editing .dashboard-widget-header {
+    display: flex !important;
+}
+
+.dashboard-editing .grid-stack-item.ui-draggable-dragging .grid-stack-item-content {
+    outline-color: var(--bs-primary);
+}
+
+@media (max-width: 767.98px) {
+    .dashboard-toolbar {
+        flex-wrap: wrap;
+    }
+}

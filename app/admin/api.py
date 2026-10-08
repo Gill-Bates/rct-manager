@@ -17,7 +17,7 @@ from secrets import token_urlsafe
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request, Response
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from app.admin.store import SESSION_SECONDS
 from app.admin.updates import check_for_updates
@@ -1129,3 +1129,65 @@ def delete_token(token_id: str, request: Request) -> dict:
     if not _store(request).delete_token(token_id):
         raise HTTPException(404, "Token not found")
     return {"deleted": True}
+
+
+# Server-side allowlist of widget ids the browser may place on the dashboard; the layout is admin-UI
+# config (not device configuration), so it is stored under its own key, never through PUT /settings.
+_DASHBOARD_WIDGETS = frozenset({
+    "device-count", "connected-count", "metric-count", "pv-power", "house-power",
+    "grid-power", "battery-soc", "tsdb-status", "devices",
+})
+_DASHBOARD_LAYOUT_KEY = "dashboard_layout"
+
+
+class DashboardWidgetLayout(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(min_length=1, max_length=64)
+    x: int = Field(ge=0, le=11)
+    y: int = Field(ge=0, le=1000)
+    w: int = Field(ge=1, le=12)
+    h: int = Field(ge=1, le=100)
+    visible: bool = True
+
+
+class DashboardLayout(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    version: int = Field(ge=1, le=1)
+    widgets: list[DashboardWidgetLayout] = Field(max_length=32)
+
+
+def _validate_dashboard_layout(body: DashboardLayout) -> None:
+    ids = [widget.id for widget in body.widgets]
+    unknown = sorted(set(ids) - _DASHBOARD_WIDGETS)
+    if unknown:
+        raise HTTPException(422, f"Unknown widget id(s): {', '.join(unknown)}")
+    if len(set(ids)) != len(ids):
+        raise HTTPException(422, "Duplicate widget id")
+    for widget in body.widgets:
+        if widget.x + widget.w > 12:
+            raise HTTPException(422, f"Widget {widget.id} extends past the 12-column grid")
+
+
+@router.get("/dashboard-layout")
+def get_dashboard_layout(request: Request) -> dict:
+    require_admin(request)
+    stored = _store(request).get(_DASHBOARD_LAYOUT_KEY)
+    return {"layout": stored}
+
+
+@router.put("/dashboard-layout")
+def put_dashboard_layout(body: DashboardLayout, request: Request) -> dict:
+    require_admin(request, mutation=True)
+    _validate_dashboard_layout(body)
+    layout = body.model_dump()
+    _store(request).put(_DASHBOARD_LAYOUT_KEY, layout)
+    return {"layout": layout}
+
+
+@router.delete("/dashboard-layout")
+def delete_dashboard_layout(request: Request) -> dict:
+    require_admin(request, mutation=True)
+    _store(request).delete(_DASHBOARD_LAYOUT_KEY)
+    return {"layout": None}

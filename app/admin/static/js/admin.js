@@ -3378,7 +3378,13 @@
     }
     try {
       await session();
-      if (page === 'dashboard') { initDashboardPolling(); await Promise.all([loadDashboard(), loadMetricCount(), initSettings()]); }
+      if (page === 'dashboard') {
+        initDashboardPolling();
+        // dashboard.js (loaded after this file) owns the GridStack layout; it is independent of
+        // the polling above and must not delay or alter it.
+        await window.RCTDashboard?.initLayout();
+        await Promise.all([loadDashboard(), loadMetricCount(), initSettings()]);
+      }
       else if (page === 'tokens') initTokens();
       else if (page === 'energy') initEnergy();
       else if (['settings', 'inverters', 'prometheus', 'tsdb'].includes(page)) {
@@ -3387,6 +3393,10 @@
       }
     } catch (error) { toast(messageFrom(error), 'danger'); }
   }
+
+  // dashboard.js loads after this file and needs the shared request/toast helpers; admin.js stays
+  // the single owner of the CSRF token and the fetch wrapper (abort/401/toast handling included).
+  window.RCTAdmin = Object.freeze({ api, toast, messageFrom, element });
 
   function start() {
     initShell();
