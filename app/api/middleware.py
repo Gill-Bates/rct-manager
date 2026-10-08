@@ -22,6 +22,7 @@ log = logging.getLogger("app.access")
 _VALID_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
 _MUTATING = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 _API_PREFIXES = ("/api/", "/metrics", "/health")
+_BROWSER_PROBES = frozenset({"/.well-known/appspecific/com.chrome.devtools.json"})  # Chrome DevTools asks on its own
 
 
 def access_log_level(method: str, path: str, status: int) -> int:
@@ -29,6 +30,8 @@ def access_log_level(method: str, path: str, status: int) -> int:
     are INFO; plain browser traffic of the admin GUI (pages, assets, session polls) is DEBUG."""
     if status >= 500:
         return logging.ERROR
+    if status == 404 and path in _BROWSER_PROBES:
+        return logging.DEBUG
     if status >= 400:
         return logging.WARNING
     if path.startswith("/admin/api/") and method in _MUTATING:

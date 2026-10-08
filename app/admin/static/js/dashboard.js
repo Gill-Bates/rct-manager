@@ -33,6 +33,13 @@
   const widgetState = new Map(); // id -> { id, x, y, w, h, visible }
   let saveTimer = null;
   let savedToastShownThisSession = false;
+  const AUTO_HEIGHT_ID = 'devices'; // height follows content, is never a user layout value
+  const CELL_HEIGHT = 72;
+  const GRID_MARGIN = 8;
+  const MOBILE_QUERY = '(max-width: 767.98px)'; // keep in sync with the stacked block in dashboard.css
+  let fitFrame = 0;
+  const fitRows = new Map(); // id -> rows the last fit set; such a height is content-driven, not stored
+  let fitting = false; // true while fit-driven updates run: they are not user layout changes
 
   function widgetElement(id) {
     return document.querySelector(`.grid-stack-item[data-widget-id="${id}"]`);
@@ -81,6 +88,69 @@
     }
   }
 
+  // Content height without the tile's stretch (cards use h-100), so the measure can shrink again.
+  function naturalHeight(inner) {
+    const { height, alignSelf } = inner.style;
+    inner.style.setProperty('height', 'auto', 'important'); // Bootstrap's h-100 is !important
+    inner.style.alignSelf = 'flex-start';
+    // offsetHeight, not getBoundingClientRect: the overview uses CSS zoom, which scales rects but not rows.
+    const natural = inner.offsetHeight + 1; // +1 covers the rounding of offsetHeight
+    inner.style.height = height;
+    inner.style.alignSelf = alignSelf;
+    return natural;
+  }
+
+  // Rows so the content fits without a scrollbar: the stored height is the minimum, the content
+  // only ever grows a tile. The item is rows * cell tall; the content box is smaller by the frame.
+  function fitWidget(el) {
+    const node = el.gridstackNode;
+    const content = el.querySelector('.grid-stack-item-content');
+    const inner = content?.firstElementChild;
+    if (!node || !inner || el.classList.contains('d-none')) return;
+    const id = el.dataset.widgetId;
+    const frame = el.offsetHeight - content.offsetHeight; // GridStack's margin/inset around the content box
+    const needed = Math.ceil((naturalHeight(inner) + frame) / CELL_HEIGHT);
+    const minimum = id === AUTO_HEIGHT_ID ? 1 : (widgetState.get(id)?.h ?? 1);
+    const rows = Math.max(minimum, needed);
+    fitRows.set(id, rows);
+    if (node.h !== rows) grid.update(el, { h: rows });
+  }
+
+  function fitLayout() {
+    fitFrame = 0;
+    // Below the breakpoint the tiles are stacked with natural height; rows are irrelevant there.
+    if (!grid || window.matchMedia(MOBILE_QUERY).matches) return;
+    // A fit batch during a drag or resize would swallow the user's own change event.
+    if (document.querySelector('.ui-draggable-dragging, .ui-resizable-resizing')) return;
+    fitting = true;
+    try {
+      grid.batchUpdate();
+      document.querySelectorAll('.grid-stack-item[data-widget-id]').forEach(fitWidget);
+    } finally {
+      grid.batchUpdate(false);
+      fitting = false;
+    }
+  }
+
+  function scheduleFit() {
+    if (!fitFrame) fitFrame = requestAnimationFrame(fitLayout);
+  }
+
+  // Anything that changes a tile's content size re-runs the fit: window and sidebar width (grid
+  // observer), text and card collapse (mutations), and the icon font arriving late.
+  function observeContent() {
+    const root = $('dashboard-grid');
+    window.addEventListener('resize', scheduleFit);
+    document.fonts?.ready.then(scheduleFit);
+    new MutationObserver(scheduleFit).observe(root, {
+      subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ['class', 'hidden'],
+    });
+    if (!('ResizeObserver' in window)) return;
+    const observer = new ResizeObserver(scheduleFit);
+    observer.observe(root);
+    root.querySelectorAll('.grid-stack-item-content > *').forEach((inner) => observer.observe(inner));
+  }
+
   function scheduleSave() {
     clearTimeout(saveTimer);
     saveTimer = setTimeout(saveLayout, SAVE_DEBOUNCE_MS);
@@ -104,10 +174,13 @@
   }
 
   function onGridChange(_event, items) {
+    if (fitting) return; // content-driven rows and the pushes they cause are not the user's layout
     for (const item of items || []) {
       const id = item.el?.dataset?.widgetId;
       if (!id) continue;
-      widgetState.set(id, { id, x: item.x, y: item.y, w: item.w, h: item.h, visible: true });
+      const prev = widgetState.get(id);
+      const h = prev && fitRows.get(id) === item.h ? prev.h : item.h;
+      widgetState.set(id, { id, x: item.x, y: item.y, w: item.w, h, visible: true });
     }
     scheduleSave();
   }
@@ -143,6 +216,7 @@
       grid.batchUpdate(false);
     }
     widgetState.set(id, { ...state, visible });
+    scheduleFit();
     renderAddWidgetList();
     scheduleSave();
   }
@@ -177,6 +251,7 @@
       return;
     }
     applyLayout(DEFAULT_LAYOUT.map((def) => ({ id: def.id, x: def.x, y: def.y, w: def.w, h: def.h, visible: true })));
+    scheduleFit();
     renderAddWidgetList();
     savedToastShownThisSession = true; // explicit action: show exactly this one toast, not a second autosave toast
     toast('Dashboard layout saved.');
@@ -185,8 +260,8 @@
   async function initLayout() {
     grid = window.GridStack.init({
       column: 12,
-      cellHeight: 72,
-      margin: 8,
+      cellHeight: CELL_HEIGHT,
+      margin: GRID_MARGIN,
       float: false,
       animate: true,
       disableDrag: true,
@@ -205,7 +280,11 @@
     applyLayout(mergeWithDefault(stored));
     renderAddWidgetList();
 
+    fitLayout();
+    observeContent();
+
     grid.on('change', onGridChange);
+    grid.on('dragstop resizestop', scheduleFit);
     $('dashboard-edit-toggle').addEventListener('click', () => setEditing(true));
     $('dashboard-edit-done').addEventListener('click', () => setEditing(false));
     $('dashboard-reset-layout').addEventListener('click', () => { resetLayout().catch((error) => toast(messageFrom(error), 'danger')); });

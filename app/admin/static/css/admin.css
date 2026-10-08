@@ -406,7 +406,8 @@ body {
     transition: transform .2s ease;
 }
 
-.device-item.is-collapsed .device-toggle .material-icons {
+.device-item.is-collapsed .device-toggle .material-icons,
+.energy-panel.is-collapsed .device-toggle .material-icons {
     transform: rotate(-90deg);
 }
 
@@ -414,6 +415,11 @@ body {
     margin-bottom: 0;
 }
 
+.energy-panel.is-collapsed .energy-head {
+    margin-bottom: 0 !important; /* beats Bootstrap's mb-3 on the header */
+}
+
+.energy-content[hidden],
 .device-item-main[hidden] {
     display: none;
 }
@@ -1778,5 +1784,63 @@ body.is-reconnecting #reconnect-modal.show .reconnect-pulse {
 @media (prefers-reduced-motion: reduce) {
     body.is-reconnecting #reconnect-modal.show .reconnect-pulse {
         animation: none;
+    }
+}
+/* Last-known-good dashboard: dimmed content plus a fixed pill, so no layout height changes. */
+.is-offline { opacity: .6; transition: opacity .2s; }
+.dashboard-offline-banner {
+  position: fixed; left: 50%; bottom: 1rem; transform: translateX(-50%); z-index: 1080;
+  padding: .4rem .9rem; border-radius: 999px; font-size: .85rem;
+  background: var(--bs-warning-bg-subtle, #fff3cd); color: var(--bs-warning-text-emphasis, #664d03);
+  border: 1px solid var(--bs-warning-border-subtle, #ffe69c); box-shadow: 0 2px 8px rgba(0,0,0,.2);
+}
+.dashboard-offline-banner[hidden] { display: none; }
+
+/* Touch targets: 44px minimum on phones (the lint rule's threshold); desktop sizes stay untouched. */
+@media (max-width: 767.98px) {
+    .btn,
+    .icon-button,
+    .device-toggle,
+    .form-control,
+    .form-select {
+        min-height: 44px;
+    }
+
+    .btn,
+    .icon-button,
+    .device-toggle {
+        min-width: 44px;
+    }
+
+    /* Beats the fixed 2.3rem header height and the .icon-button box above. */
+    .navbar .btn,
+    .icon-button {
+        height: auto;
+        min-height: 44px;
+    }
+
+    summary {
+        display: flex;
+        align-items: center;
+        min-height: 44px;
+    }
+
+    .form-check {
+        display: flex;
+        align-items: center;
+        gap: .5rem;
+        min-height: 44px;
+        padding-left: 0;
+    }
+
+    .form-check .form-check-input {
+        float: none;
+        margin: 0;
+        flex: 0 0 auto;
+    }
+
+    .form-check-label,
+    .parameter-item {
+        min-height: 44px;
     }
 }

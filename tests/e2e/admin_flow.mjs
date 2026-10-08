@@ -933,10 +933,9 @@ check('drag and drop reorders', afterDrag[0] === list.at(-1), afterDrag.slice(0,
 await page.waitForFunction(() => document.getElementById('toast-region').textContent.includes('Parameters saved'), null, { timeout: 8000 });
 check('parameter change reports restart need', (await toastText()).includes('restart'), await toastText());
 await shot('prometheus-saved');
-// #save-state keeps "Saved HH:MM" after a successful save (measured: still "Saved 21:01" eleven
-// seconds later), it never returns to the empty idle text, so wait for the saved state like the
-// other save paths in this file do.
-await page.waitForFunction(() => /^Saved\b/.test(document.getElementById('save-state').textContent), null, { timeout: 8000 });
+// #save-state keeps data-state="saved" after a successful save (it shows no text, the toast does),
+// so wait for that state like the other save paths in this file do.
+await page.waitForFunction(() => document.getElementById('save-state').dataset.state === 'saved', null, { timeout: 8000 });
 check('added metric is persisted', (await page.evaluate(async () => (await (await fetch('/admin/api/parameters', { cache: 'no-store' })).json()).exposed_names)).includes(removed));
 await page.reload();
 await page.waitForSelector('#exposed-list .metric-row');
@@ -1234,7 +1233,7 @@ check('the export group names what is missing', /Hostname or URL/.test(await pag
 // The pairing branch: every required key is present, so the message has to name the pair instead.
 await page.locator('#setting-questdb_hostname').fill('questdb.example.org');
 await page.locator('#setting-questdb_hostname').dispatchEvent('change');
-await page.waitForFunction(() => /^Saved\b/.test(document.getElementById('save-state').textContent), null, { timeout: 8000 });
+await page.waitForFunction(() => document.getElementById('save-state').dataset.state === 'saved', null, { timeout: 8000 });
 await page.locator('#setting-questdb_username').fill('metrics');
 await page.locator('#setting-questdb_username').dispatchEvent('change');
 await sleep(900);
@@ -1301,7 +1300,7 @@ check('a token typed during the save is not cleared by the older response', seco
 // No extra `change` is dispatched here: typing token-two already queued the follow-up save while the
 // first request was outstanding, and that is the save this check is about. Re-dispatching `change`
 // only bumped the secret revision again and masked whether the queued save ever landed.
-// #save-state already reads "Saved HH:MM" from the save that just confirmed, so waiting for that
+// #save-state already has data-state="saved" from the save that just confirmed, so waiting for that
 // label again returns immediately and a fixed sleep then samples the field before the follow-up save
 // (450ms debounce + round trip) has confirmed. Wait for the end state this check is about instead:
 // the revision the follow-up save confirmed is the one in the box, so the box empties and falls back

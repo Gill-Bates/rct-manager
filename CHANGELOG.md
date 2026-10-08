@@ -22,6 +22,9 @@
   Inverters page; `discharge` cuts immediately on grid export.
 - QuestDB export: provisioning failures no longer mark the export as failed; DDL runs only when the
   column set changes.
+- Switching "Write access" on for the first time approves the four registers Manual battery control needs
+  under **Writable parameters** (add-only, once; later off/on toggles never re-approve a register an
+  operator cleared). The Energy status carries `required_write_names`.
 - Removing a device resets its dispatch capabilities, engineering mode and arming.
 
 <details markdown="1">

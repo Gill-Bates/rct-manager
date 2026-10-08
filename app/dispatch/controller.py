@@ -634,7 +634,9 @@ class DispatchController:
     def soc_target_policy(self, device_id: str) -> SocTargetPolicy:
         return self._soc_target_policies.policy(device_id)
 
-    async def force_restore_or_raise(self, device_id: str) -> None:
+    async def force_restore_or_raise(
+        self, device_id: str, reason: StopReason = StopReason.DEVICE_RECONFIGURED
+    ) -> None:
         """Synchronously drive ``device_id`` to a clean, restored state before its transport is
         closed by a device-list reconfiguration. A no-op if there is nothing to restore.
 
@@ -647,7 +649,7 @@ class DispatchController:
             record = await self._get(device_id)
             if record.intent is None and not record.restore_required:
                 return
-            await self._restore(record, StopReason.DEVICE_RECONFIGURED)
+            await self._restore(record, reason)
             if record.state is not DispatchState.IDLE:
                 raise ReconfigurationRejected(device_id, record.fault_code)
 

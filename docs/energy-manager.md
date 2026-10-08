@@ -89,6 +89,11 @@ The page is layered by in-page progressive disclosure:
   the four required registers (`power_mng_soc_strategy`, `power_mng_soc_target_set`,
   `power_mng_battery_power_extern`, `power_mng_use_grid_power_enable`) are approved under
   **Writable parameters** on the **Inverters** page; the global write switch alone is not enough.
+  The first time **Write access** is switched on, these four registers are approved automatically
+  (add-only, applied once). Clearing one later is respected: a later off/on toggle does not approve it
+  again, the actions answer `write_not_permitted`, and the checklist step shows it missing. While a
+  device is armed or dispatching, clearing a required register is refused (HTTP 409), because the
+  handback writes it.
   Power limits are shown in **kW**.
 - **Expert** (collapsed) — the hardware verification form, engineering mode and the kW power limits
   behind a warning, and the SoC target policy. Verification is entered by an operator with measured

@@ -489,7 +489,8 @@ def test_save_state_has_one_writer_and_five_distinguishable_states():
     render = js[js.index("function renderSaveState()"):js.index("// Derived on demand")]
     for text in ("Save failed", "Saving …", "Unsaved changes", "Incomplete — not saved yet"):
         assert text in js, text
-    assert "`Saved ${hhmm(savedAt)}`" in render
+    # A successful save shows no label text (the toast reports it); the state stays readable as data-state.
+    assert "`Saved ${hhmm(savedAt)}`" not in render and "label.dataset.state = top;" in render
     # Absent on tokens/about/login/change-password: the alerts are reconciled first, then it returns.
     assert render.index("renderSectionAlert(id, entry.failure)") < render.index("if (!label) return;")
     # The persistent alert is lifted out of a folded <details> and anchored before its section.
@@ -562,19 +563,20 @@ def test_build_group_body_is_shared_so_a_group_rerender_adds_no_second_heading()
     assert "return `settings-group-${group.toLowerCase().replace(/\\s+/g, '-')}`;" in js
 
 
-def test_dashboard_has_no_stale_data_banner_and_no_last_update_line():
-    """The stale-data warning banner and the 'Updated HH:MM' line were removed from the Overview
-    page per user request; the KPI/device polling stays."""
+def test_dashboard_keeps_last_known_data_on_fetch_failure():
+    """A failed poll must not blank the Overview: the last snapshot stays, dimmed, with a banner."""
     js = JS.read_text(encoding="utf-8")
     html = (TEMPLATES / "dashboard.html").read_text(encoding="utf-8")
-    for marker in ('id="dashboard-staleness"', 'id="dashboard-stale-text"', 'id="refresh-dashboard"',
-                   'markDashboardStale', 'dataset.stale', 'dashboard-stale-text'):
+    block = js[js.index("async function loadDashboard("):js.index("function initDashboardPolling(")]
+    fail = block[block.index("} catch (error) {"):]
+    assert "setDashboardStale(error)" in fail and "clearDashboardStale()" in block
+    # The failure path only replaces the list with the error notice when no snapshot exists at all.
+    assert fail.index("if (dashboardSnapshot) setDashboardStale") < fail.index("dashboardNotices.error")
+    assert "SNAPSHOT_MAX_AGE_MS" in js and "localStorage" in js
+    assert "dashboard-offline-banner" in (ADMIN_DIR / "static/css/admin.css").read_text(encoding="utf-8")
+    # The removed 'Updated HH:MM' line stays removed.
+    for marker in ('dashboard-updated', 'dashboardLastSuccess', 'id="refresh-dashboard"'):
         assert marker not in html and marker not in js, marker
-    for marker in ('dashboard-updated', 'dashboardLastSuccess'):
-        assert marker not in html and marker not in js, marker
-    css = (ADMIN_DIR / "static/css/admin.css").read_text(encoding="utf-8")
-    assert ".dashboard-staleness" not in css
-    assert "data-stale" not in css
 
 
 def test_accessibility_wiring_for_help_texts_field_errors_and_icon_only_buttons():
@@ -723,4 +725,4 @@ def test_energy_poll_is_bounded_keeps_panels_and_never_overwrites_a_running_acti
     assert "panel.acceptsPoll(requestedAt)" in poll
     assert "pendingArmed ?? device.armed" in js
     # The Setup step names the required writes that are not approved yet.
-    assert "ENERGY_REQUIRED_WRITES.filter((name) => !approved.has(name))" in js
+    assert "(device.required_write_names || []).filter((name) => !approved.has(name))" in js

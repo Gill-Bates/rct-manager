@@ -919,3 +919,60 @@ async def test_the_admin_status_shows_the_restore_retry_state_but_the_public_sta
         assert admin["restore_attempts"] == 0 and admin["next_restore_at"] is None
         public = (await harness.client.get("/api/v1/devices/main/energy", headers=WRITER)).json()
         assert "restore_attempts" not in public and "next_restore_at" not in public
+
+
+async def test_enabling_write_support_approves_the_required_writes_and_never_removes(tmp_path: Path) -> None:
+    """Switching write access on adds REQUIRED_WRITES to the allowlist (add-only, live); switching
+    it off leaves the allowlist untouched. The Setup checklist's list is served by the backend."""
+    settings = energy_settings(tmp_path)
+    async with running_app(settings) as harness:
+        store = harness.app.state.admin_store
+        store.put_many({"write_names": []})
+        headers = await admin_session(harness)
+        off = await harness.client.put("/admin/api/settings", headers=headers, json={"enable_write_support": False})
+        assert off.status_code == 200, off.text
+        assert store.get("write_names") == []  # switching off changes nothing
+        on = await harness.client.put("/admin/api/settings", headers=headers, json={"enable_write_support": True})
+        assert on.status_code == 200, on.text
+        assert set(DISPATCH_WRITE_NAMES) <= set(store.get("write_names"))
+        parameters = await harness.client.get("/admin/api/parameters")
+        assert set(DISPATCH_WRITE_NAMES) <= set(parameters.json()["write_names"])
+        energy = await harness.client.get("/admin/api/energy/devices")
+        main = next(item for item in energy.json() if item["device_id"] == "main")
+        assert set(main["required_write_names"]) == set(DISPATCH_WRITE_NAMES)
+        assert set(DISPATCH_WRITE_NAMES) <= set(main["approved_write_names"])
+        exposed = store.get("exposed_names")
+        trimmed = [name for name in store.get("write_names") if name != DISPATCH_WRITE_NAMES[0]]
+        assert (await harness.client.put(
+            "/admin/api/parameters", headers=headers, json={"exposed_names": exposed, "write_names": trimmed}
+        )).status_code == 200
+        assert (await harness.client.put(
+            "/admin/api/settings", headers=headers, json={"enable_write_support": False}
+        )).status_code == 200
+        assert store.get("write_names") == trimmed  # switching off changes nothing
+        assert (await harness.client.put(
+            "/admin/api/settings", headers=headers, json={"enable_write_support": True}
+        )).status_code == 200
+        # Applied once: a register the operator cleared on purpose stays cleared.
+        assert store.get("write_names") == trimmed
+        assert store.get("write_defaults_applied") is True
+
+
+async def test_clearing_a_required_register_closes_the_gate_and_the_checklist(tmp_path: Path) -> None:
+    """Disarmed: clearing a required register leaves the actions refused (write_not_permitted) and
+    the Setup data shows it missing. Armed: the clearing is refused (409), see the test above."""
+    async with running_app(energy_settings(tmp_path)) as harness:
+        seed_payloads(harness)
+        headers = await admin_session(harness)
+        store = harness.app.state.admin_store
+        store.put_many({"write_names": list(DISPATCH_WRITE_NAMES)})
+        exposed = store.get("exposed_names")
+        trimmed = [n for n in DISPATCH_WRITE_NAMES if n != DISPATCH_WRITE_NAMES[1]]
+        assert (await harness.client.put(
+            "/admin/api/parameters", headers=headers, json={"exposed_names": exposed, "write_names": trimmed}
+        )).status_code == 200
+        main = next(i for i in (await harness.client.get("/admin/api/energy/devices")).json() if i["device_id"] == "main")
+        assert DISPATCH_WRITE_NAMES[1] in set(main["required_write_names"]) - set(main["approved_write_names"])
+        status = await harness.client.get("/api/v1/devices/main/energy", headers=WRITER)
+        reasons = {i["reason"] for i in status.json()["actions"] if i["action"] != "auto"}
+        assert reasons <= {"write_not_permitted", "not_armed"}

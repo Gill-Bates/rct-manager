@@ -156,6 +156,7 @@ class AdminEnergyDeviceStatus(EnergyStatusResponse):
     capabilities: list[CapabilityView]
     added_write_names: list[str]  # what arming contributed, display only
     approved_write_names: list[str]  # the live write allowlist, state-independent (Setup checklist)
+    required_write_names: list[str]  # what the Setup checklist needs approved (single source: backend)
     armed_at: datetime | None
     armed_by: str | None
     restore_attempts: int = 0  # failed automatic restore attempts since the last clean restore
@@ -217,6 +218,7 @@ async def _admin_status(request: Request, device_id: str) -> AdminEnergyDeviceSt
         ],
         added_write_names=list(record.added_write_names),
         approved_write_names=list(energy.approved_write_names()),
+        required_write_names=list(energy.required_write_names()),
         armed_at=record.armed_at,
         armed_by=record.armed_by,
         restore_attempts=restore_attempts,

@@ -92,7 +92,7 @@ class EnergyManager:
         clock: Clock,
         config: DispatchConfig,
         devices: Mapping[str, DeviceEntry],
-        write_support_enabled: bool,
+        write_support_enabled: bool | Callable[[], bool],
         approve_writes: Callable[[Iterable[str]], Sequence[str]] | None,
         approved_writes: Callable[[], tuple[str, ...]] | None,
         allowlist_candidates: Callable[[], frozenset[str]] | None,
@@ -105,7 +105,10 @@ class EnergyManager:
         self._clock = clock
         self._config = config
         self._devices = devices
-        self._write_support_enabled = write_support_enabled
+        # A callable follows the live admin switch; a plain bool is fixed (in-process callers, tests).
+        self._write_support_enabled = (
+            write_support_enabled if callable(write_support_enabled) else (lambda: write_support_enabled)
+        )
         # Setter, reader and candidate set are deliberately separate and all late-bound: an operator
         # can change the approved register names on the Inverters page at any time, so a snapshot
         # taken at construction time would go stale.
@@ -118,6 +121,20 @@ class EnergyManager:
         # other way round, so the one-directional order rules a lock cycle out.
         self._locks: dict[str, asyncio.Lock] = {}
         self._approval_lock = asyncio.Lock()  # approvals are shared by all devices
+
+    def attach_dispatch(
+        self,
+        *,
+        port: BatteryDispatchPort,
+        store: DispatchStore,
+        readings: EnergyReadingsPort,
+        armed: Mapping[str, ArmedRecord],
+    ) -> None:
+        """Bind the dispatch objects built after boot, when write access is enabled live."""
+        self._port = port
+        self._store = store
+        self._readings = readings
+        self._armed_states = dict(armed)
 
     # --- state ------------------------------------------------------------------------------
 
@@ -149,6 +166,10 @@ class EnergyManager:
         Inverters page still reports them here.
         """
         return tuple(self._approved_writes()) if self._approved_writes is not None else ()
+
+    def required_write_names(self) -> tuple[str, ...]:
+        """The register names every manual command needs, so the GUI need not repeat the list."""
+        return tuple(self._required_writes)
 
     def gate_decisions(self, device_id: str) -> tuple[tuple[EnergyAction, GateDecision], ...]:
         """The raw gate decision per action, for the admin surface only.
@@ -215,6 +236,9 @@ class EnergyManager:
             # gateway write allowlist (system=True skips only the request budget). The admin
             # Parameters endpoint refuses to revoke a required dispatch write name while any device
             # is armed or has an unfinished dispatch; if not, the handback fails closed below.
+            if command.action is not EnergyAction.AUTO and not self._write_support_enabled():
+                log.warning("Energy command refused: write support is disabled (device=%s)", device_id)
+                raise EnergyRejected("energy_write_support_required", device_id=device_id)
             missing = self._missing_write_names() if command.action is not EnergyAction.AUTO else []
             if missing:
                 log.warning(
@@ -323,9 +347,8 @@ class EnergyManager:
 
     async def _arm(self, device_id: str, actor: str | None) -> None:
         """Design 2.6.1: read-only preflight, then the add-only approval, then the commit."""
-        if not self._write_support_enabled:
-            # Deliberately not flipped here: it is a global security switch, a change needs a
-            # restart, and the routers that serve an armed device are registered under it.
+        if not self._write_support_enabled():
+            # Deliberately not flipped here: it is a global security switch the operator sets in Settings.
             log.warning("Arming refused: write support is disabled (device=%s)", device_id)
             raise EnergyRejected("energy_write_support_required", device_id=device_id)
         if (

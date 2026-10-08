@@ -49,7 +49,7 @@ from app.dispatch.capabilities import (
     CapabilityRegistry,
 )
 from app.dispatch.controller import DispatchController
-from app.dispatch.models import DeviceLimits, DispatchConfig
+from app.dispatch.models import DeviceLimits, DispatchConfig, StopReason
 from app.dispatch.soc_policy import SocTargetPolicyRegistry
 from app.dispatch.store import DispatchStore
 from app.energy.manager import EnergyManager
@@ -69,7 +69,11 @@ from app.scheduling.retry import RetryConfig
 from app.scheduling.serializer import AccessSerializer
 from app.scheduling.shutdown import ShutdownCoordinator
 from app.security.client_ip import ClientIpResolver
-from app.security.dependencies import SecurityContext, source_address
+from app.security.dependencies import (
+    SecurityContext,
+    require_write_enabled,
+    source_address,
+)
 from app.security.ratelimit import RateLimiter
 from app.security.tokens import TokenStore
 from app.transport.endpoint import (
@@ -81,6 +85,7 @@ from app.transport.endpoint import (
 
 log = logging.getLogger(__name__)
 _PERIODIC_CHECK_SECONDS = 10.0
+_NAME_RETRY_SECONDS = 15.0  # between attempts to read the inverter's own name
 _PASSWORD_POLL_SECONDS = 1.0
 _RECONFIGURE_DRAIN_SECONDS = 10.0  # shutdown waits this long for an in-flight reconfiguration
 _REFRESH_CYCLE_SECONDS = 10.0  # 8 reads per cycle cover 40 values within the 2 x pas.period threshold
@@ -451,24 +456,34 @@ async def _log_startup_device(
     entry: DeviceEntry,
     settings: Settings,
 ) -> None:
+    """Read the inverter's own name, retrying until it succeeds.
+
+    A single attempt left the dashboard on the device id ("main") for good whenever the inverter was
+    unreachable at startup; the loop ends on success or when a reconfiguration cancels the task.
+    """
     await asyncio.gather(connect, return_exceptions=True)
     address = f"{entry.host}:{entry.port}"
-    if endpoint.state is not EndpointState.CONNECTED:
-        log.warning("Inverter %s at %s: connection failed", entry.device_id, address)
-        return
-    try:
-        timeout = (
-            settings.queue_max_wait_seconds + settings.connect_timeout_seconds + settings.read_total_timeout_seconds
-        )
-        async with asyncio.timeout(timeout):
-            raw_name = await gateway.read_inverter_name(entry.device_id)
-    except (DeviceApiError, TimeoutError) as exc:
-        reason = exc.code if isinstance(exc, DeviceApiError) else "startup_timeout"
-        log.warning("Inverter %s at %s: connected, name read failed (%s)", entry.device_id, address, reason)
-        return
-    name = "".join(ch if ch.isprintable() else "?" for ch in raw_name).strip()[:64] or "unknown"
-    gateway.set_reported_name(entry.device_id, name)
-    log.info("Inverter %s at %s: connected, name=%s", entry.device_id, address, name)
+    timeout = settings.queue_max_wait_seconds + settings.connect_timeout_seconds + settings.read_total_timeout_seconds
+    first_attempt = True
+    while True:
+        if endpoint.state is not EndpointState.CONNECTED:
+            if first_attempt:
+                log.warning("Inverter %s at %s: connection failed", entry.device_id, address)
+        else:
+            try:
+                async with asyncio.timeout(timeout):
+                    raw_name = await gateway.read_inverter_name(entry.device_id)
+            except (DeviceApiError, TimeoutError) as exc:
+                if first_attempt:
+                    reason = exc.code if isinstance(exc, DeviceApiError) else "startup_timeout"
+                    log.warning("Inverter %s at %s: connected, name read failed (%s)", entry.device_id, address, reason)
+            else:
+                name = "".join(ch if ch.isprintable() else "?" for ch in raw_name).strip()[:64] or "unknown"
+                gateway.set_reported_name(entry.device_id, name)
+                log.info("Inverter %s at %s: connected, name=%s", entry.device_id, address, name)
+                return
+        first_attempt = False
+        await asyncio.sleep(_NAME_RETRY_SECONDS)
 
 
 async def _periodic_loop(manager: PeriodicManager, clock: Clock) -> None:
@@ -793,6 +808,44 @@ def _lifespan(
             async with reconfigure_lock:  # concurrent settings saves must not interleave teardown/rebuild
                 await _reconfigure_devices_unlocked()
 
+        async def enable_dispatch() -> None:
+            """Build the dispatch controller and Energy Manager backing when write access is switched on
+            after boot, and start its tasks the way the boot path does. A no-op when already built.
+            """
+            if runtime.dispatch is not None or is_closing() or not _dispatch_enabled(runtime.settings):
+                return
+            dispatch_store_new, armed = _create_dispatch(runtime, app.state.dispatch_config)
+            app.state.dispatch_store = dispatch_store_new
+            if runtime.energy is not None:
+                runtime.energy.attach_dispatch(
+                    port=runtime.dispatch, store=dispatch_store_new, readings=runtime.energy_readings, armed=armed
+                )
+            # While the bootstrap password is pending, start_device_jobs() will start them later.
+            if store is None or not await asyncio.to_thread(store.password_change_pending):
+                tasks.append(asyncio.create_task(runtime.dispatch.recover()))
+                start_dispatch_tasks(runtime.devices)
+            log.info("Battery dispatch enabled at runtime")
+
+        async def disable_dispatch() -> list[str]:
+            """Hand every device back to automatic operation and disarm it after write access was
+            switched off. The controller and its loops stay up so an unfinished restore keeps being
+            retried; returns the devices whose restore is still pending.
+            """
+            pending: list[str] = []
+            if runtime.dispatch is None:
+                return pending
+            for device_id in list(runtime.devices):
+                try:
+                    await runtime.dispatch.force_restore_or_raise(device_id, StopReason.WRITE_NOT_ALLOWED)
+                    if runtime.energy is not None and runtime.energy.armed(device_id):
+                        await runtime.energy.set_armed(device_id, armed=False, actor=None)
+                except Exception:
+                    log.exception("Restore after disabling write access is pending for device %s", device_id)
+                    pending.append(device_id)
+            return pending
+
+        app.state.enable_dispatch = enable_dispatch
+        app.state.disable_dispatch = disable_dispatch
         app.state.restart_export = restart_export
         app.state.reconfigure_devices = reconfigure_devices
         app.state.loop = asyncio.get_running_loop()  # lets a sync admin route schedule restart_export
@@ -872,6 +925,61 @@ def _add_docs(app: FastAPI, settings: Settings) -> None:
         log.info("API documentation disabled (DOCS_PUBLIC=false)")
 
 
+def _create_dispatch(runtime: Runtime, config: DispatchConfig) -> tuple[DispatchStore, dict[str, ArmedRecord]]:
+    """Build the dispatch controller and its store onto ``runtime``; used at boot and on a live enable.
+
+    Returns the store and the persisted armed states. The caller starts the controller's tasks.
+    """
+    settings = runtime.settings
+    gateway = runtime.gateway
+    dispatch_store = DispatchStore(settings.dispatch_db_path, settings.hmac_secret.get_secret_value())
+    dispatch_store.initialize()
+    # One registry instance for the adapter and the controller: a second one would be a
+    # second truth about which hardware is verified.
+    dispatch_capabilities = CapabilityRegistry(dispatch_store.get_capabilities())
+    # Same rule for the per-device SoC-target derivation policy: one instance, so an operator's
+    # policy change reaches the adapter that actually writes the register, not just the
+    # controller.
+    soc_target_policies = SocTargetPolicyRegistry(dispatch_store.get_soc_target_policies())
+    dispatch_gateway = RctDispatchGateway(
+        gateway, capabilities=dispatch_capabilities, soc_target_policies=soc_target_policies
+    )
+    # The live capability registry, so a verification reaches the published grid sign without a
+    # restart. The readings are cache-only and never queue a device transaction.
+    runtime.energy_readings = RctEnergyReadings(gateway, capabilities=dispatch_capabilities)
+    energy_armed = dispatch_store.get_energy_states()
+    # The store is the truth for the per-device limits and the engineering switch: they are an
+    # operator setting, made through the admin dispatch API, and must survive a restart. The
+    # environment values are only a bootstrap seed for a device that has no record yet.
+    limits = _seed_limits(settings, dispatch_store.get_device_configs())
+    runtime.dispatch = DispatchController(
+        dispatch_gateway,
+        dispatch_store,
+        runtime.clock,
+        config,
+        limits,
+        capabilities=dispatch_capabilities,
+        soc_target_policies=soc_target_policies,
+    )
+
+    async def restore_for_shutdown() -> None:
+        gateway.begin_shutdown_restore()  # bounded readbacks: the restore runs against the work deadline
+        await runtime.dispatch.shutdown_restore()
+
+    runtime.shutdown.set_dispatch_restore(restore_for_shutdown)
+    return dispatch_store, energy_armed
+
+
+def _load_default_write_entries(settings: Settings, catalog: RegistryCatalog) -> dict:
+    """The shipped write allowlist entries, loaded regardless of the current write switch.
+
+    Raises ``ConfigError`` when the file is unusable; the boot path treats that as "none" while
+    writes are off, a live enable refuses.
+    """
+    allowlist = load_allowlist(settings.model_copy(update={"enable_write_support": True}), catalog)
+    return {name: allowlist.entry(name) for name in catalog.names() if allowlist.entry(name)}
+
+
 def create_app(settings: Settings, *, clock: Clock | None = None, connector: Connector | None = None) -> FastAPI:
     clock = clock or SystemClock()
     admin_store = AdminStore(settings.admin_db_path, settings.hmac_secret.get_secret_value()) if settings.hmac_secret else None
@@ -932,40 +1040,7 @@ def create_app(settings: Settings, *, clock: Clock | None = None, connector: Con
     # dispatch-enabled branch below replaces this with the live capability registry.
     runtime.energy_readings = RctEnergyReadings(gateway, capabilities=CapabilityRegistry())
     if _dispatch_enabled(settings):
-        dispatch_store = DispatchStore(settings.dispatch_db_path, settings.hmac_secret.get_secret_value())
-        dispatch_store.initialize()
-        # One registry instance for the adapter and the controller: a second one would be a second
-        # truth about which hardware is verified.
-        dispatch_capabilities = CapabilityRegistry(dispatch_store.get_capabilities())
-        # Same rule for the per-device SoC-target derivation policy: one instance, so an operator's
-        # policy change reaches the adapter that actually writes the register, not just the
-        # controller.
-        soc_target_policies = SocTargetPolicyRegistry(dispatch_store.get_soc_target_policies())
-        dispatch_gateway = RctDispatchGateway(
-            gateway, capabilities=dispatch_capabilities, soc_target_policies=soc_target_policies
-        )
-        # The live capability registry, so a verification reaches the published grid sign without a
-        # restart. The readings are cache-only and never queue a device transaction.
-        runtime.energy_readings = RctEnergyReadings(gateway, capabilities=dispatch_capabilities)
-        energy_armed = dispatch_store.get_energy_states()
-        # The store is the truth for the per-device limits and the engineering switch: they are an
-        # operator setting, made through the admin dispatch API, and must survive a restart. The
-        # environment values are only a bootstrap seed for a device that has no record yet.
-        limits = _seed_limits(settings, dispatch_store.get_device_configs())
-        runtime.dispatch = DispatchController(
-            dispatch_gateway,
-            dispatch_store,
-            clock,
-            dispatch_config,
-            limits,
-            capabilities=dispatch_capabilities,
-            soc_target_policies=soc_target_policies,
-        )
-        async def restore_for_shutdown() -> None:
-            gateway.begin_shutdown_restore()  # bounded readbacks: the restore runs against the work deadline
-            await runtime.dispatch.shutdown_restore()
-
-        coordinator.set_dispatch_restore(restore_for_shutdown)
+        dispatch_store, energy_armed = _create_dispatch(runtime, dispatch_config)
     app = FastAPI(
         title="RCT Manager",
         version=__version__,
@@ -979,10 +1054,15 @@ def create_app(settings: Settings, *, clock: Clock | None = None, connector: Con
     app.state.admin_desired_settings = settings
     app.state.admin_store = admin_store
     app.state.dispatch_store = dispatch_store
+    app.state.dispatch_config = dispatch_config
     app.state.first_start_password = bootstrap_password  # printed by the server once it is listening
     if admin_store is not None:
-        initial_allowlist = load_allowlist(settings, catalog)  # a missing file is fine while writes are off
-        app.state.default_write_entries = {name: initial_allowlist.entry(name) for name in catalog.names() if initial_allowlist.entry(name)}
+        try:
+            app.state.default_write_entries = _load_default_write_entries(settings, catalog)
+        except ConfigError:
+            if settings.enable_write_support:
+                raise
+            app.state.default_write_entries = {}  # a missing file is fine while writes are off; a live enable reloads it
         app.state.build_write_allowlist = lambda names: Allowlist(
             {name: app.state.default_write_entries[name] for name in names if name in app.state.default_write_entries},
             catalog,
@@ -1009,7 +1089,7 @@ def create_app(settings: Settings, *, clock: Clock | None = None, connector: Con
             clock=clock,
             config=dispatch_config,
             devices=_LiveDevices(runtime),
-            write_support_enabled=settings.enable_write_support,
+            write_support_enabled=lambda: runtime.settings.enable_write_support,
             approve_writes=_approve_writes,
             # Synchronous by contract; one small local SQLite read that never waits on the device.
             approved_writes=lambda: tuple(admin_store.get("write_names") or ()),
@@ -1054,10 +1134,11 @@ def create_app(settings: Settings, *, clock: Clock | None = None, connector: Con
     app.include_router(metrics.router, dependencies=read_auth if settings.metrics_require_token else [])
     if settings.enable_vendor_diagnostics:
         app.include_router(vendor.router, dependencies=[Depends(_bearer)])
-    if settings.enable_write_support:
-        app.include_router(writes.router, dependencies=[Depends(_bearer)])
-        app.include_router(dispatch.router, dependencies=[Depends(_bearer)])
-        app.include_router(energy.router, dependencies=[Depends(_bearer)])
+    # Always registered and gated per request on the live switch, so toggling write access needs no
+    # restart. The gate runs before authentication, like the former "route does not exist" answer.
+    write_deps = [Depends(require_write_enabled), Depends(_bearer)]
+    for router in (writes.router, dispatch.router, energy.router):
+        app.include_router(router, dependencies=write_deps)
     _add_docs(app, settings)
     return app
 

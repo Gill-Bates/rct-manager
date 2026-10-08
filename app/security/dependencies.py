@@ -62,6 +62,12 @@ async def require_read(request: Request, ctx: Context) -> Principal:
     return principal
 
 
+async def require_write_enabled(ctx: Context) -> None:
+    """Router-level gate for the write routers, which are always registered; the switch is live."""
+    if not ctx.write_enabled:
+        raise WriteDisabled()
+
+
 async def require_write(principal: Annotated[Principal, Depends(require_read)], ctx: Context) -> Principal:
     """Write support first, then the token role; allowlist and value checks follow in the handler."""
     if not ctx.write_enabled:

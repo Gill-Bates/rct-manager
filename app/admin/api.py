@@ -27,7 +27,7 @@ from app.config import Settings
 from app.dispatch.controller import ReconfigurationRejected
 from app.dispatch.models import DispatchState
 from app.energy.readings import EnergyReadings, absent_readings
-from app.errors import ReconfigurationBuildError
+from app.errors import ConfigError, ReconfigurationBuildError
 from app.gateway.rct_dispatch import RctDispatchGateway
 from app.security.dependencies import source_address
 
@@ -95,7 +95,7 @@ _DEVICE_LIVE_KEYS = frozenset({"devices"})
 _LIVE = frozenset({
     "auth_required", "docs_public", "enable_metrics_endpoint", "behind_reverse_proxy",
     "metrics_require_token", "metrics_trusted_sources", "metrics_rate_limit_requests",
-    "metrics_rate_limit_window_seconds",
+    "metrics_rate_limit_window_seconds", "enable_write_support",
 }) | _EXPORT_RESTART_KEYS | _DEVICE_LIVE_KEYS
 _SECRET_EDITABLE = frozenset({"influxdb_token", "questdb_password"})
 # Authentication and proxy-trust settings: changing them with a PAT would let a leaked token
@@ -120,6 +120,7 @@ _SETTINGS_LOCK = threading.Lock()
 # Serializes live device reconfigurations without holding _SETTINGS_LOCK while they run.
 _RECONFIGURE_LOCK = threading.Lock()
 _PARAMETERS_LOCK = threading.Lock()
+_WRITE_DEFAULTS_APPLIED_KEY = "write_defaults_applied"
 _RECONFIGURE_TIMEOUT_SECONDS = 120.0
 log = logging.getLogger(__name__)
 
@@ -602,10 +603,23 @@ def put_settings(body: dict[str, Any], request: Request) -> dict:
             update={key: getattr(updated, key) for key in _LIVE}
         )
         request.app.state.security.tokens.set_auth_required(updated.auth_required)
+        # Same lock, same moment as runtime.settings: the write routers refuse from here on.
+        request.app.state.security.write_enabled = updated.enable_write_support
         if {"metrics_rate_limit_requests", "metrics_rate_limit_window_seconds"} & set(body):
             request.app.state.security.limiter.set_scrape_limit(
                 updated.metrics_rate_limit_requests, updated.metrics_rate_limit_window_seconds
             )
+    write_warnings: dict[str, Any] = {}
+    if updated.enable_write_support and not previous.enable_write_support:
+        try:
+            _enable_write_support(request)
+        except ConfigError as exc:
+            _revert_write_support(request)
+            raise HTTPException(409, "The write allowlist could not be loaded; write access stays off.") from exc
+    elif previous.enable_write_support and not updated.enable_write_support:
+        pending = _disable_write_support(request)
+        if pending:
+            write_warnings = {"write_restore_pending": pending}
     # The slow live reloads run outside _SETTINGS_LOCK so they cannot stall other settings requests.
     if changed_export_keys:
         _restart_export(request)
@@ -618,7 +632,81 @@ def put_settings(body: dict[str, Any], request: Request) -> dict:
                     _revert_devices(request, updated, previous)
                 raise
     return {"settings": _pat_safe_view(updated, session), "restart_required": _pending_restart(request, session),
-            "live": sorted(_LIVE)}
+            "live": sorted(_LIVE), **write_warnings}
+
+
+def _run_on_loop(request: Request, name: str, timeout: float) -> Any:
+    """Run the app-state coroutine function ``name`` on the event loop from this worker thread."""
+    func = getattr(request.app.state, name, None)
+    loop = getattr(request.app.state, "loop", None)
+    if func is None or loop is None:
+        return None
+    return asyncio.run_coroutine_threadsafe(func(), loop).result(timeout=timeout)
+
+
+def _enable_write_support(request: Request) -> None:
+    """Make a just-enabled write switch effective: allowlist, default approvals, dispatch backing."""
+    # Late import: app_factory imports this module.
+    from app.api.app_factory import (
+        _load_default_write_entries,
+    )
+
+    state = request.app.state
+    # Reloaded because it is skipped at boot while writes are off; a broken file refuses the enable.
+    state.default_write_entries = _load_default_write_entries(state.runtime.settings, state.runtime.catalog)
+    _approve_default_writes(request)
+    with _PARAMETERS_LOCK:
+        names = list(_store(request).get("write_names") or [])
+        state.runtime.gateway.set_allowlist(state.build_write_allowlist(names))
+    try:
+        _run_on_loop(request, "enable_dispatch", _RECONFIGURE_TIMEOUT_SECONDS)
+    except Exception:
+        # Writes would be accepted by the router but have no dispatch to run on: fail closed.
+        log.exception("Building battery dispatch for the enabled write support failed")
+        _revert_write_support(request)
+        raise HTTPException(500, "Battery dispatch could not be started; write access stays off.") from None
+
+
+def _disable_write_support(request: Request) -> list[str]:
+    """Hand the devices back to automatic operation after the switch went off; returns pending ids."""
+    try:
+        return _run_on_loop(request, "disable_dispatch", _RECONFIGURE_TIMEOUT_SECONDS) or []
+    except Exception:
+        log.exception("Restoring the inverters after disabling write access failed")
+        return list(request.app.state.runtime.devices)
+
+
+def _revert_write_support(request: Request) -> None:
+    """Switch write access back off after the live enable failed (it was off before)."""
+    state = request.app.state
+    with _SETTINGS_LOCK:
+        reverted = _store(request).merge_operator_settings(
+            state.admin_desired_settings, {"enable_write_support": False}
+        )
+        state.admin_desired_settings = reverted
+        state.runtime.settings = state.runtime.settings.model_copy(
+            update={"enable_write_support": False}
+        )
+        state.security.write_enabled = False
+
+
+def _approve_default_writes(request: Request) -> None:
+    """Approve the registers manual dispatch needs, once, the first time write access is enabled.
+
+    Add-only and applied a single time (persisted flag), so a register the operator later cleared
+    on purpose is not silently approved again by a later off/on toggle.
+    """
+    state = request.app.state
+    with _PARAMETERS_LOCK:
+        store = _store(request)
+        if store.get(_WRITE_DEFAULTS_APPLIED_KEY):
+            return
+        current = list(store.get("write_names") or [])
+        wanted = [n for n in RctDispatchGateway.REQUIRED_WRITES if n in state.default_write_entries]
+        merged = current + [name for name in wanted if name not in current]
+        allowlist = state.build_write_allowlist(merged)  # build first: persist only what works
+        store.put_many({"write_names": merged, _WRITE_DEFAULTS_APPLIED_KEY: True})
+        state.runtime.gateway.set_allowlist(allowlist)
 
 
 def _revert_devices(request: Request, updated: Settings, previous: Settings) -> None:

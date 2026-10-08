@@ -756,21 +756,34 @@
   // Collapsed device ids live in localStorage (survives logins); read once, then kept in memory
   // so blocked storage or malformed JSON only costs persistence, never the dashboard.
   const COLLAPSED_KEY = 'rct-admin.collapsedDevices';
-  let collapsedDevices = null;
+  const EXPANDED_KEY = 'rct-admin.expandedDevices';
+  const collapseChoices = { [COLLAPSED_KEY]: null, [EXPANDED_KEY]: null };
   let deviceCardCount = 0;
 
-  function collapsedSet() {
-    if (collapsedDevices) return collapsedDevices;
-    collapsedDevices = new Set();
+  function choiceSet(storageKey) {
+    if (collapseChoices[storageKey]) return collapseChoices[storageKey];
+    const ids = new Set();
+    collapseChoices[storageKey] = ids;
     try {
-      const stored = JSON.parse(localStorage.getItem(COLLAPSED_KEY));
-      if (Array.isArray(stored)) stored.forEach((id) => { if (typeof id === 'string') collapsedDevices.add(id); });
-    } catch { /* storage blocked or JSON malformed: start expanded */ }
-    return collapsedDevices;
+      const stored = JSON.parse(localStorage.getItem(storageKey));
+      if (Array.isArray(stored)) stored.forEach((id) => { if (typeof id === 'string') ids.add(id); });
+    } catch { /* storage blocked or JSON malformed: fall back to the default */ }
+    return ids;
   }
 
-  function saveCollapsed() {
-    try { localStorage.setItem(COLLAPSED_KEY, JSON.stringify([...collapsedSet()])); } catch { /* keep in-memory state */ }
+  // An explicit user choice wins; without one a single inverter starts open, several start closed.
+  function isCollapsed(key, deviceCount) {
+    if (choiceSet(COLLAPSED_KEY).has(key)) return true;
+    if (choiceSet(EXPANDED_KEY).has(key)) return false;
+    return deviceCount > 1;
+  }
+
+  function rememberCollapsed(key, collapsed) {
+    choiceSet(collapsed ? COLLAPSED_KEY : EXPANDED_KEY).add(key);
+    choiceSet(collapsed ? EXPANDED_KEY : COLLAPSED_KEY).delete(key);
+    for (const storageKey of [COLLAPSED_KEY, EXPANDED_KEY]) {
+      try { localStorage.setItem(storageKey, JSON.stringify([...choiceSet(storageKey)])); } catch { /* keep in-memory state */ }
+    }
   }
 
   function setCardCollapsed(ref, collapsed) {
@@ -779,7 +792,7 @@
     ref.toggle.setAttribute('aria-expanded', String(!collapsed));
   }
 
-  function createDeviceCard(key) {
+  function createDeviceCard(key, deviceCount) {
     const toggle = element('button', 'device-toggle');
     toggle.type = 'button';
     const icon = element('span', 'material-icons', 'expand_more');
@@ -801,12 +814,12 @@
     };
     ref.visual.node.id = `device-body-${++deviceCardCount}`;
     toggle.setAttribute('aria-controls', ref.visual.node.id);
-    setCardCollapsed(ref, collapsedSet().has(key));
+    let collapsedNow = isCollapsed(key, deviceCount);
+    setCardCollapsed(ref, collapsedNow);
     toggle.addEventListener('click', () => {
-      const collapsed = !collapsedSet().has(key);
-      if (collapsed) collapsedSet().add(key); else collapsedSet().delete(key);
-      saveCollapsed();
-      setCardCollapsed(ref, collapsed);
+      collapsedNow = !collapsedNow;
+      rememberCollapsed(key, collapsedNow);
+      setCardCollapsed(ref, collapsedNow);
     });
     return ref;
   }
@@ -841,6 +854,42 @@
   let dashboardTimer = null;
   let dashboardController = null;
   let dashboardGeneration = 0;
+  // Last good snapshot: a failed poll keeps showing it (dimmed, with a banner) instead of blanking the page.
+  const SNAPSHOT_KEY = 'rct.dashboard.snapshot';
+  const SNAPSHOT_MAX_AGE_MS = 60 * 60 * 1000;
+  let dashboardSnapshot = null;
+  let dashboardBanner = null;
+
+  function saveSnapshot(snapshot) {
+    try { localStorage.setItem(SNAPSHOT_KEY, JSON.stringify(snapshot)); } catch { /* storage full or blocked */ }
+  }
+
+  function loadSnapshot() {
+    try {
+      const stored = JSON.parse(localStorage.getItem(SNAPSHOT_KEY) || 'null');
+      if (stored && Array.isArray(stored.devices) && Number.isFinite(stored.at) && Date.now() - stored.at < SNAPSHOT_MAX_AGE_MS) return stored;
+    } catch { /* corrupt entry: ignore */ }
+    return null;
+  }
+
+  function setDashboardStale(error) {
+    const grid = $('dashboard-grid') || $('devices-list');
+    if (!dashboardBanner) {
+      dashboardBanner = element('div', 'dashboard-offline-banner');
+      dashboardBanner.setAttribute('role', 'status');
+      document.body.append(dashboardBanner);
+    }
+    const when = new Date(dashboardSnapshot.at).toLocaleTimeString('en-GB');
+    const reason = error?.status >= 500 ? `Server error (${error.status})` : 'Connection to server lost';
+    dashboardBanner.textContent = `${reason} \u2013 showing data from ${when}`;
+    dashboardBanner.hidden = false;
+    grid.classList.add('is-offline');
+  }
+
+  function clearDashboardStale() {
+    if (dashboardBanner) dashboardBanner.hidden = true;
+    ($('dashboard-grid') || $('devices-list')).classList.remove('is-offline');
+  }
 
   function dashboardDelay() {
     const base = Math.min(DASHBOARD_INTERVAL_MS * 2 ** dashboardFailures, DASHBOARD_MAX_INTERVAL_MS);
@@ -902,7 +951,7 @@
       while (seen.has(key)) key += '+';
       seen.add(key);
       let ref = dashboardCards.get(key);
-      if (!ref) { ref = createDeviceCard(key); dashboardCards.set(key, ref); }
+      if (!ref) { ref = createDeviceCard(key, devices.length); dashboardCards.set(key, ref); }
       patchDeviceCard(ref, device);
       return ref.card;
     });
@@ -928,11 +977,20 @@
       dashboardPollFailing = false;
       dashboardFailures = 0;
       renderDashboard(Array.isArray(data.devices) ? data.devices : [], data.tsdb || null);
+      dashboardSnapshot = { devices: Array.isArray(data.devices) ? data.devices : [], tsdb: data.tsdb || null, at: Date.now() };
+      saveSnapshot(dashboardSnapshot);
+      clearDashboardStale();
       return 'ok';
     } catch (error) {
       if (generation !== dashboardGeneration) return 'skipped';
       dashboardFailures += 1;
-      syncChildren($('devices-list'), [dashboardNotices.error]);
+      // Server unreachable or failing: keep the last known data on screen (a reload restores it from storage).
+      if (!dashboardSnapshot) {
+        dashboardSnapshot = loadSnapshot();
+        if (dashboardSnapshot) renderDashboard(dashboardSnapshot.devices, dashboardSnapshot.tsdb);
+      }
+      if (dashboardSnapshot) setDashboardStale(error);
+      else syncChildren($('devices-list'), [dashboardNotices.error]);
       // Automatic background polls toast only on the first failure after a success streak, so a
       // sustained outage does not spam one alert per poll; a non-automatic load always toasts.
       if (!automatic || !dashboardPollFailing) toast(messageFrom(error), 'danger');
@@ -1081,12 +1139,12 @@
     limits_missing: 'power limits are not configured', hardware_not_verified: 'hardware is not verified',
     restore_required: 'the inverter must be handed back first',
   };
-  // The register approvals every manual command needs (RctDispatchGateway.REQUIRED_WRITES).
-  // The Setup checklist's "Write access enabled" row is REQUIRED_WRITES ⊆ approved_write_names.
-  const ENERGY_REQUIRED_WRITES = [
-    'power_mng_soc_strategy', 'power_mng_soc_target_set',
-    'power_mng_battery_power_extern', 'power_mng_use_grid_power_enable',
-  ];
+  // The Setup checklist's "Write access enabled" row is required_write_names (served by the
+  // backend, RctDispatchGateway.REQUIRED_WRITES) ⊆ approved_write_names.
+  const missingRequiredWrites = (device) => {
+    const approved = new Set(device.approved_write_names || []);
+    return (device.required_write_names || []).filter((name) => !approved.has(name));
+  };
   // The three capabilities that must all be verified before manual control is released.
   const ENERGY_REQUIRED_CAPABILITIES = ['write_path_convention', 'battery_power_sign_convention', 'grid_power_sign_convention'];
   const ENERGY_POLICY_MODES = [['business_target', 'Business target'], ['below_current_soc', 'Below current SoC']];
@@ -1272,8 +1330,7 @@
   // (unlike device.actions[].reason, which collapses to not_armed while disarmed). Shared by the
   // Operate "needs setup" banner (§9) and the Setup block renderer (§12).
   function energyChecklist(device) {
-    const approved = new Set(device.approved_write_names || []);
-    const writeAccess = ENERGY_REQUIRED_WRITES.every((name) => approved.has(name));
+    const writeAccess = missingRequiredWrites(device).length === 0;
     const verified = ENERGY_REQUIRED_CAPABILITIES.every((name) => {
       const cap = (device.capabilities || []).find((item) => item.name === name);
       return cap && cap.status === 'verified';
@@ -1379,7 +1436,7 @@
     return { lo, hi, valid: lo <= hi };
   }
 
-  function createEnergyPanel(first) {
+  function createEnergyPanel(first, deviceCount) {
     const id = first.device_id;
     const path = `energy/devices/${encodeURIComponent(id)}`;
     let device = first;
@@ -1401,7 +1458,13 @@
     const nameNode = element('h2', 'h5 mb-0');
     const dot = element('span', 'status-dot');
     const connection = element('span', 'small text-secondary');
-    title.append(nameNode, dot, connection);
+    const collapseKey = `energy:${id}`; // own namespace: collapsing here must not collapse the dashboard card
+    const collapseToggle = element('button', 'device-toggle');
+    collapseToggle.type = 'button';
+    const collapseIcon = element('span', 'material-icons', 'expand_more');
+    collapseIcon.setAttribute('aria-hidden', 'true');
+    collapseToggle.append(collapseIcon);
+    title.append(collapseToggle, nameNode, dot, connection);
     const switchBox = element('div', 'energy-switch form-check form-switch');
     const armedInput = element('input', 'form-check-input');
     armedInput.type = 'checkbox';
@@ -1416,7 +1479,23 @@
     const layout = element('div', 'energy-body');
     const control = element('div', 'energy-control');
     layout.append(control);
-    body.append(layout);
+    const content = element('div', 'energy-content'); // everything below the header folds away
+    content.id = `energy-content-${++deviceCardCount}`;
+    content.append(layout);
+    body.append(content);
+    collapseToggle.setAttribute('aria-controls', content.id);
+    function setCollapsed(collapsed) {
+      content.hidden = collapsed;
+      setClass(card, 'is-collapsed', collapsed);
+      collapseToggle.setAttribute('aria-expanded', String(!collapsed));
+    }
+    let collapsedNow = isCollapsed(collapseKey, deviceCount);
+    setCollapsed(collapsedNow);
+    collapseToggle.addEventListener('click', () => {
+      collapsedNow = !collapsedNow;
+      rememberCollapsed(collapseKey, collapsedNow);
+      setCollapsed(collapsedNow);
+    });
 
     // The state-independent Setup checklist (design §12), shown only when a prerequisite is unmet.
     const setupBox = element('div', 'energy-setup');
@@ -1608,6 +1687,7 @@
     function render() {
       const readyState = energyControlState(device, lastPoll503);
       nameNode.textContent = device.device_name;
+      collapseToggle.setAttribute('aria-label', `Show or hide details of ${device.device_name}`);
       dot.className = `status-dot ${device.connected ? 'online' : 'offline'}`;
       connection.textContent = `${device.connected ? 'Connected' : 'Not connected'} · ${device.host}`;
       const shownArmed = pendingArmed ?? device.armed;
@@ -1654,8 +1734,8 @@
       if (selected && buttons[selected].disabled) selected = null;
       renderTarget();
       advanced.update(device, expertOn, lastPoll503);
-      if (expertOn !== (advanced.expert.parentNode === body)) {
-        if (expertOn) body.append(advanced.expert); else advanced.expert.remove();
+      if (expertOn !== (advanced.expert.parentNode === content)) {
+        if (expertOn) content.append(advanced.expert); else advanced.expert.remove();
       }
     }
 
@@ -2001,8 +2081,7 @@
     // only reported when the poll answered 503 (write support disabled).
     const writeAccessText = steps.write_access.querySelector('p');
     function renderWriteAccessText(device, writeSupportOff) {
-      const approved = new Set(device.approved_write_names || []);
-      const missing = ENERGY_REQUIRED_WRITES.filter((name) => !approved.has(name));
+      const missing = missingRequiredWrites(device);
       const parts = [];
       if (writeSupportOff) parts.push('Write access is switched off. Turn on "Write access" on the Inverters page.');
       if (missing.length) {
@@ -2116,7 +2195,7 @@
       for (const device of devices) {
         const panel = energyPanels.get(device.device_id);
         if (!panel) {
-          const created = createEnergyPanel(device);
+          const created = createEnergyPanel(device, devices.length);
           energyPanels.set(device.device_id, created);
           host.append(created.root);
         } else if (panel.acceptsPoll(requestedAt)) {
@@ -2201,11 +2280,11 @@
     saving: ['Saving …', 'text-secondary'],
     unsaved: ['Unsaved changes', 'text-warning'],
     incomplete: ['Incomplete — not saved yet', 'text-warning'],
-    saved: ['Saved', 'text-success'],
+    saved: ['', 'text-secondary'], // success is announced by the toast, not by a second label
     idle: ['', 'text-secondary'],
   };
   const SAVE_STATE_CLASSES = ['text-danger', 'text-secondary', 'text-warning', 'text-success'];
-  const saveSections = new Map();         // id -> { state, message, lastSavedAt }
+  const saveSections = new Map();         // id -> { state, message, failure }
   const anySection = (states) => [...saveSections.values()].some((entry) => states.includes(entry.state));
 
   const FAILURE_MESSAGES = {
@@ -2286,7 +2365,6 @@
     const failure = state === 'failed' ? message : (resolved ? '' : previous?.failure || '');
     saveSections.set(id, {
       state, message, failure,
-      lastSavedAt: state === 'saved' ? new Date() : previous?.lastSavedAt || null,
     });
     renderSaveState();
   }
@@ -2301,13 +2379,12 @@
     const label = $('save-state');
     if (!label) return; // absent on tokens/about/login/change-password; the alerts above are independent
     let top = 'idle';
-    let savedAt = null;
     for (const entry of saveSections.values()) {
       if (SAVE_STATES[entry.state] > SAVE_STATES[top]) top = entry.state;
-      if (entry.lastSavedAt && (!savedAt || entry.lastSavedAt > savedAt)) savedAt = entry.lastSavedAt;
     }
     const [text, className] = SAVE_STATE_TEXT[top];
-    label.textContent = top === 'saved' && savedAt ? `Saved ${hhmm(savedAt)}` : text;
+    label.textContent = text;
+    label.dataset.state = top;
     label.classList.remove(...SAVE_STATE_CLASSES);
     label.classList.add(className);
   }
@@ -2435,6 +2512,8 @@
         if (control) { control.value = ''; control.placeholder = 'set'; }
       }
       showRestartNotice(result.restart_required);
+      // Switching write access on makes the server approve the registers manual control needs.
+      if (keys.includes('enable_write_support') && payload.enable_write_support) refreshWriteApprovals();
       if (page === 'prometheus') markPrometheusSaved();
       for (const id of sentSections) setSectionState(id, 'saved');
       if (keys.some((key) => result.restart_required?.includes(key))) toast('Saved. A restart is required for this setting.', 'warning');
@@ -3203,6 +3282,14 @@
     setSectionState('parameters', 'unsaved');
     clearTimeout(parameterTimer);
     parameterTimer = setTimeout(flushParameters, 400);
+  }
+
+  // Reloads the Writable parameters list and the Energy checklist after the server changed them.
+  async function refreshWriteApprovals() {
+    try {
+      if ($('write-search') && !parameterDirty && !parameterSending) { parameterData = await api('parameters'); renderParameters(); }
+      if ($('energy-list')) pollEnergy();
+    } catch (error) { toast(messageFrom(error), 'danger'); }
   }
 
   async function flushParameters() {
