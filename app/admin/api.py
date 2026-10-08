@@ -103,15 +103,18 @@ _SECRET_EDITABLE = frozenset({"influxdb_token", "questdb_password"})
 _SESSION_ONLY_SETTINGS = frozenset({
     "auth_required", "trusted_proxies", "bind_address", "behind_reverse_proxy", "forwarded_header",
     "metrics_require_token", "metrics_trusted_sources", "enable_write_support", "devices", "docs_public",
+    "bind_port", "log_level",
 })
 # Export destination and credential keys: a PAT that could change them could send metrics (and the
 # stored credentials) to an attacker-controlled host. Unlike _SESSION_ONLY_SETTINGS they stay visible
-# to a PAT on read.
+# to a PAT on read. The retention days are here too: a PAT must not be able to shorten them and
+# thereby make the TSDB drop history.
 _EXPORT_TARGET_SETTINGS = frozenset({
     "db_type", "influxdb_hostname", "influxdb_port", "influxdb_tls_enabled", "influxdb_verify_tls",
     "influxdb_allow_plaintext_credentials", "influxdb_organization", "influxdb_bucket", "influxdb_token",
     "questdb_hostname", "questdb_port", "questdb_tls_enabled", "questdb_verify_tls",
     "questdb_allow_plaintext_credentials", "questdb_username", "questdb_password",
+    "questdb_retention_days", "questdb_raw_retention_days",
 })
 _SETTINGS_LOCK = threading.Lock()
 # Serializes live device reconfigurations without holding _SETTINGS_LOCK while they run.
@@ -351,11 +354,14 @@ def _settings_persisted(settings: Settings) -> dict[str, Any]:
     return result
 
 
-def _pending_restart(request: Request) -> list[str]:
+def _pending_restart(request: Request, session: dict | None) -> list[str]:
     """Settings whose saved value differs from the one the running server uses."""
     desired = _settings_persisted(request.app.state.admin_desired_settings)
     active = _settings_persisted(request.app.state.runtime.settings)
-    return sorted(key for key in desired if key not in _LIVE and desired[key] != active.get(key))
+    pending = sorted(key for key in desired if key not in _LIVE and desired[key] != active.get(key))
+    if session is None:  # same visibility rule as _pat_safe_view: a PAT must not learn session-only key names
+        pending = [key for key in pending if key not in _SESSION_ONLY_SETTINGS]
+    return pending
 
 
 _NAME_MIGRATION = "devices_display_name_repaired"
@@ -365,37 +371,35 @@ def _is_address_name(device) -> bool:
     return device.display_name in {f"{device.host}:{device.port}", device.host}
 
 
-def _repair_device_names(request: Request) -> None:
+def repair_device_names(store, desired: Settings) -> Settings:
     """Older saves stored host:port as display_name, which then beat the name the inverter reports.
 
-    Runs once per database and drops only those address-shaped names, so an operator-chosen name stays.
+    Runs once per database, at startup (a GET must never persist), and drops only those
+    address-shaped names, so an operator-chosen name stays. Returns the settings to run with.
     """
-    store = _store(request)
     if store.get(_NAME_MIGRATION):
-        return
-    with _SETTINGS_LOCK:
-        desired = request.app.state.admin_desired_settings
-        if any(_is_address_name(device) for device in desired.devices):
-            repaired = []
-            for device in desired.devices:
-                entry = device.model_dump(mode="json")
-                if _is_address_name(device):
-                    entry["display_name"] = None
-                repaired.append(entry)
-            request.app.state.admin_desired_settings = store.merge_operator_settings(desired, {"devices": repaired})
-            runtime = request.app.state.runtime
-            for device_id, device in list(runtime.devices.items()):  # heading recovers without a restart
-                if _is_address_name(device):
-                    runtime.devices[device_id] = device.model_copy(update={"display_name": None})
-        store.put(_NAME_MIGRATION, True)
+        return desired
+    if any(_is_address_name(device) for device in desired.devices):
+        repaired = []
+        for device in desired.devices:
+            entry = device.model_dump(mode="json")
+            if _is_address_name(device):
+                entry["display_name"] = None
+            repaired.append(entry)
+        try:
+            desired = store.merge_operator_settings(desired, {"devices": repaired})
+        except ValidationError:
+            log.warning("Device name repair skipped: the stored settings did not validate")
+            return desired
+    store.put(_NAME_MIGRATION, True)
+    return desired
 
 
 @router.get("/settings")
 def get_settings(request: Request) -> dict:
     session = require_admin(request, sensitive=True)
-    _repair_device_names(request)
     return {"settings": _pat_safe_view(request.app.state.admin_desired_settings, session),
-            "restart_required": _pending_restart(request), "live": sorted(_LIVE)}
+            "restart_required": _pending_restart(request, session), "live": sorted(_LIVE)}
 
 
 _DISPLAY_NAME_MAX = 64
@@ -452,7 +456,10 @@ def _normalize_devices(raw: Any) -> list[dict[str, Any]]:
         if address in seen_addresses:
             raise HTTPException(400, f"The inverter address {host}:{port} is listed twice")
         seen_addresses.add(address)
-        entry = {"host": host, "port": port, "device_id": item.get("device_id") or None,
+        device_id = item.get("device_id") or None
+        if device_id is not None and not isinstance(device_id, str):
+            raise HTTPException(400, "The device id must be text")
+        entry = {"host": host, "port": port, "device_id": device_id,
                  "display_name": _display_name(item.get("display_name")), "network_id": network_id}
         result.append(entry)
     used = {e["device_id"] for e in result if e["device_id"]}
@@ -610,7 +617,7 @@ def put_settings(body: dict[str, Any], request: Request) -> dict:
                 if exc.rollback:
                     _revert_devices(request, updated, previous)
                 raise
-    return {"settings": _pat_safe_view(updated, session), "restart_required": _pending_restart(request),
+    return {"settings": _pat_safe_view(updated, session), "restart_required": _pending_restart(request, session),
             "live": sorted(_LIVE)}
 
 
@@ -991,8 +998,8 @@ def _energy_flow_view(readings: EnergyReadings | None) -> dict:
 @router.get("/devices")
 def devices(request: Request) -> dict:
     require_admin(request)
-    _repair_device_names(request)
     runtime = request.app.state.runtime
+    devices_now = tuple(runtime.devices.values())  # one reference read: the dict is swapped, never mutated
     result = []
     exposed = _exposed_names(runtime, _store(request))
     # Card values are independent of the Prometheus export selection.
@@ -1000,7 +1007,7 @@ def devices(request: Request) -> dict:
                  "ac_power")
     selected = [name for name in preferred if name in exposed]
     selected += [name for name in DEVICE_CARD_METRIC_NAMES if runtime.catalog.exists(name)]
-    for item in runtime.devices.values():
+    for item in devices_now:
         status = runtime.gateway.device_status(item.device_id)
         readings = []
         for name in selected:
@@ -1082,7 +1089,7 @@ def get_parameters(request: Request) -> dict:
 def _dispatch_in_use(request: Request) -> bool:
     runtime = request.app.state.runtime
     energy = runtime.energy
-    if energy is not None and any(energy.armed(device_id) for device_id in runtime.devices):
+    if energy is not None and any(energy.armed(device_id) for device_id in tuple(runtime.devices)):
         return True
     dispatch_store = getattr(request.app.state, "dispatch_store", None)
     if dispatch_store is None:

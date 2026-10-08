@@ -169,6 +169,11 @@ async def test_admin_writes_need_admin_session_or_read_write_pat(tmp_path, auth_
         assert "metrics_rate_limit_requests" in seen
         assert not ({"docs_public", "auth_required", "trusted_proxies", "bind_address", "behind_reverse_proxy",
                      "forwarded_header", "metrics_require_token", "metrics_trusted_sources"} & set(seen))
+        # Retention stays readable for a PAT; only writing it is session-only.
+        assert "questdb_retention_days" in seen
+        bad_id = await client.put("/admin/api/settings", json={"devices": [{"host": "192.0.2.5", "device_id": ["x"]}]},
+                                  headers=bearer(write_pat))
+        assert bad_id.status_code == 400  # a non-text device id is a client error, not a 500
         made = await client.post("/admin/api/tokens", json={"name": "x", "role": "read"}, headers=bearer(write_pat))
         assert made.status_code == 403
         for key, value in (
@@ -176,6 +181,8 @@ async def test_admin_writes_need_admin_session_or_read_write_pat(tmp_path, auth_
             ("enable_write_support", True), ("docs_public", True), ("devices", [{"host": "192.0.2.99", "port": 8899}]),
             ("influxdb_hostname", "attacker.example"), ("questdb_hostname", "attacker.example"),
             ("influxdb_token", "stolen"), ("questdb_password", "stolen"), ("db_type", "questdb"),
+            ("bind_port", 9999), ("log_level", "DEBUG"),
+            ("questdb_retention_days", 1), ("questdb_raw_retention_days", 1),
         ):
             denied = await client.put("/admin/api/settings", json={key: value}, headers=bearer(write_pat))
             assert denied.status_code == 403, key

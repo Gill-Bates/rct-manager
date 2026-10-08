@@ -84,8 +84,10 @@
         },
       });
     } catch (error) {
-      // A genuine network failure (not a caller abort) opens the connection-lost modal at once.
-      if (error?.name !== 'AbortError') window.RCTReconnect?.start();
+      // A genuine network failure opens the connection-lost modal at once; a caller-initiated
+      // abort (supersede or timeout) says nothing about the link.
+      const callerAbort = options.signal?.aborted || error?.name === 'AbortError' || error?.name === 'TimeoutError';
+      if (!callerAbort) window.RCTReconnect?.start();
       throw error;
     }
     if (response.ok && window.RCTReconnect?.isActive()) window.RCTReconnect.stop();
@@ -967,9 +969,13 @@
     return row;
   }
 
+  let tokensRequest = 0;
+
   async function loadTokens() {
     const host = $('tokens-list');
+    const request = ++tokensRequest;
     const data = await api('tokens');
+    if (request !== tokensRequest) return; // a newer load owns the table
     host.replaceChildren();
     if (!data.tokens?.length) { host.append(tokenEmptyRow()); return; }
     for (const token of data.tokens) {
@@ -1085,10 +1091,15 @@
   const ENERGY_REQUIRED_CAPABILITIES = ['write_path_convention', 'battery_power_sign_convention', 'grid_power_sign_convention'];
   const ENERGY_POLICY_MODES = [['business_target', 'Business target'], ['below_current_soc', 'Below current SoC']];
   const ENERGY_POLL_MS = 3000;
+  const ENERGY_POLL_TIMEOUT_MS = 8000;
   const ENERGY_IDLE_WATTS = 20; // below this a flow counts as standing still
   const SVG_NS = 'http://www.w3.org/2000/svg';
   const energyPanels = new Map();
   let energyPolling = false;
+  // Logical clock ordering poll requests against finished panel actions, so a poll requested before
+  // an action completed never overwrites its result.
+  let energyClock = 0;
+  let energyNote = null;
   let energyExpertMode = false; // page-wide display switch; never persisted, resets on every load
 
   function svgEl(tag, attrs = {}, text) {
@@ -1374,6 +1385,8 @@
     let device = first;
     let selected = null; // 'charge' | 'discharge' while its target slider is open
     let busy = false;
+    let pendingArmed = null;   // the user's switch value while its PUT is in flight
+    let actionFinishedAt = 0;  // energyClock tick of the last finished action
     let lastPoll503 = false;   // the Operate poll returned 503 (write support disabled) — §9.2
     let lastPollFailed = false; // a non-503 transient poll failure — §13 freshness note
     const touched = { charge: false, discharge: false };
@@ -1471,6 +1484,7 @@
 
     function setBusy(value) {
       busy = value;
+      if (!value) actionFinishedAt = ++energyClock;
       render();
     }
 
@@ -1503,14 +1517,16 @@
 
     armedInput.addEventListener('change', async () => {
       const wanted = armedInput.checked;
+      pendingArmed = wanted;
       setBusy(true);
       try {
         const result = await api(`${path}/armed`, { method: 'PUT', body: JSON.stringify({ armed: wanted }) });
+        pendingArmed = null;
         toast(wanted ? 'Manual control is enabled.' : 'Manual control is disabled; the inverter is back in automatic operation.');
         if (!wanted) selected = null;
         await applyActionResult(result);
       } catch (error) { toast(messageFrom(error), 'danger'); }
-      finally { setBusy(false); }
+      finally { pendingArmed = null; setBusy(false); }
     });
 
     buttons.hold.addEventListener('click', () => send({ action: 'hold' }));
@@ -1594,9 +1610,10 @@
       nameNode.textContent = device.device_name;
       dot.className = `status-dot ${device.connected ? 'online' : 'offline'}`;
       connection.textContent = `${device.connected ? 'Connected' : 'Not connected'} · ${device.host}`;
-      armedInput.checked = device.armed;
+      const shownArmed = pendingArmed ?? device.armed;
+      armedInput.checked = shownArmed;
       armedInput.disabled = busy || lastPoll503;
-      armedLabel.textContent = `Manual control: ${device.armed ? 'Enabled' : 'Disabled'}`;
+      armedLabel.textContent = `Manual control: ${shownArmed ? 'Enabled' : 'Disabled'}`;
 
       renderSetup(energyChecklist(device));
 
@@ -1636,7 +1653,7 @@
       if (!operable && selected) selected = null;
       if (selected && buttons[selected].disabled) selected = null;
       renderTarget();
-      advanced.update(device, expertOn);
+      advanced.update(device, expertOn, lastPoll503);
       if (expertOn !== (advanced.expert.parentNode === body)) {
         if (expertOn) body.append(advanced.expert); else advanced.expert.remove();
       }
@@ -1652,6 +1669,8 @@
       // Lets pollEnergy signal a 503/transient failure without a fresh device payload.
       setPollState(flags) { lastPoll503 = Boolean(flags.poll503); lastPollFailed = Boolean(flags.pollFailed); render(); },
       setTimestamp(text) { advanced.setTimestamp(text); },
+      // False while an action runs or when the poll was requested before the last action finished.
+      acceptsPoll(requestedAt) { return !busy && requestedAt > actionFinishedAt; },
       // Display only: no request, no stored value.
       setExpert(on) { expertOn = Boolean(on); render(); },
     };
@@ -1748,11 +1767,15 @@
       note.textContent = message;
       input.classList.add('is-invalid');
       input.setAttribute('aria-invalid', 'true');
+      const previousDescribedBy = input.getAttribute('aria-describedby');
       input.setAttribute('aria-describedby', note.id);
       input.focus();
       input.addEventListener('change', () => {
         input.classList.remove('is-invalid');
         input.removeAttribute('aria-invalid');
+        note.textContent = '';
+        if (previousDescribedBy && previousDescribedBy !== note.id) input.setAttribute('aria-describedby', previousDescribedBy);
+        else input.removeAttribute('aria-describedby');
       }, { once: true });
       throw new Error(message);
     };
@@ -1969,11 +1992,26 @@
     const verifySetupSlot = element('div');
     const steps = {
       connection: stepNode('Inverter connection', 'The inverter is not connected. Check its connection settings.', inverterLink('Open inverter settings')),
-      write_access: stepNode('Write access', 'Write access is required for manual battery control.', inverterLink('Open inverter settings')),
+      write_access: stepNode('Write access', '', inverterLink('Open inverter settings')),
       limits: stepNode('Power limits', 'The most power the battery may be charged and discharged with, in kW.', limitSetupSlot),
       hardware: stepNode('Hardware verification',
         'These values must come from an actual hardware and firmware verification of this inverter. Do not guess them.', verifySetupSlot),
     };
+    // Names what is missing; the global write switch is not part of the device payload, so it is
+    // only reported when the poll answered 503 (write support disabled).
+    const writeAccessText = steps.write_access.querySelector('p');
+    function renderWriteAccessText(device, writeSupportOff) {
+      const approved = new Set(device.approved_write_names || []);
+      const missing = ENERGY_REQUIRED_WRITES.filter((name) => !approved.has(name));
+      const parts = [];
+      if (writeSupportOff) parts.push('Write access is switched off. Turn on "Write access" on the Inverters page.');
+      if (missing.length) {
+        parts.push(`Manual battery control needs these writable parameters approved on the Inverters page (under "Writable parameters"): ${missing.join(', ')}.`);
+      } else if (!writeSupportOff) {
+        parts.push('Write access is required for manual battery control.');
+      }
+      writeAccessText.textContent = parts.join(' ');
+    }
     const place = (node, slot) => { if (node.parentNode !== slot) slot.append(node); };
     function layout(firstUnmet) {
       place(limitForm, firstUnmet === 'limits' ? limitSetupSlot : limitExpertSlot);
@@ -2014,8 +2052,9 @@
       }
     }
 
-    function update(device, expertOn) {
+    function update(device, expertOn, writeSupportOff = false) {
       revokeButton.hidden = !energyChecklist(device).hardwareVerified;
+      renderWriteAccessText(device, writeSupportOff);
       refill(device);
       if (!expertOn) return; // the Expert section is not on the page; build its tables when it is
       gateHost.replaceChildren(simpleTable(
@@ -2051,25 +2090,45 @@
     return { expert, update, setTimestamp, layout, busy: () => saving > 0, step: (name) => steps[name] || null };
   }
 
+  // Shows one status paragraph in the list while there are no panels; null removes it.
+  function setEnergyNote(host, text) {
+    if (!text) { energyNote?.remove(); energyNote = null; return; }
+    if (!energyNote) energyNote = element('p', 'text-secondary mb-0');
+    energyNote.textContent = text;
+    if (energyNote.parentNode !== host) host.append(energyNote);
+  }
+
   async function pollEnergy() {
     if (energyPolling) return;
     energyPolling = true;
     const host = $('energy-list');
+    const requestedAt = ++energyClock;
+    // A hung fetch must not stop the polling for good; the abort lands in the failure branch.
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(Object.assign(new Error('The energy request timed out.'), { name: 'TimeoutError' })), ENERGY_POLL_TIMEOUT_MS);
     try {
-      const devices = await api('energy/devices');
+      const devices = await api('energy/devices', { signal: controller.signal });
       const ids = devices.map((item) => item.device_id);
-      if (ids.join('\n') !== [...energyPanels.keys()].join('\n')) {
-        energyPanels.clear();
-        host.replaceChildren();
-        for (const device of devices) {
-          const panel = createEnergyPanel(device);
-          energyPanels.set(device.device_id, panel);
-          host.append(panel.root);
-        }
-        if (!devices.length) host.append(element('p', 'text-secondary mb-0', 'No inverters configured yet.'));
-      } else {
-        for (const device of devices) energyPanels.get(device.device_id).update(device, { poll503: false, pollFailed: false });
+      // Keep panels of devices that still exist (their unsaved input survives); add or drop the rest.
+      for (const [id, panel] of [...energyPanels]) {
+        if (!ids.includes(id)) { panel.root.remove(); energyPanels.delete(id); }
       }
+      for (const device of devices) {
+        const panel = energyPanels.get(device.device_id);
+        if (!panel) {
+          const created = createEnergyPanel(device);
+          energyPanels.set(device.device_id, created);
+          host.append(created.root);
+        } else if (panel.acceptsPoll(requestedAt)) {
+          panel.update(device, { poll503: false, pollFailed: false });
+        }
+      }
+      if ([...energyPanels.keys()].join('\n') !== ids.join('\n')) {
+        const ordered = new Map(ids.map((id) => [id, energyPanels.get(id)]));
+        energyPanels.clear();
+        for (const [id, panel] of ordered) { energyPanels.set(id, panel); host.append(panel.root); }
+      }
+      setEnergyNote(host, devices.length ? null : 'No inverters configured yet.');
       // The absolute timestamp lives in Diagnostics now (design §13), not a top-of-page line.
       const stamp = `Updated ${new Date().toLocaleTimeString('en-GB')}`;
       for (const device of devices) {
@@ -2079,13 +2138,12 @@
       }
     } catch (error) {
       // 503 means write support/dispatch is disabled (design §9.2): render the config empty-state on
-      // every panel; it clears on the next 200. Any other failure is a transient note (§13).
+      // every panel; it clears on the next 200. Any other failure (including a timeout) is a
+      // transient note (§13).
       const poll503 = error && error.status === 503;
       for (const panel of energyPanels.values()) panel.setPollState({ poll503, pollFailed: !poll503 });
-      if (poll503 && !energyPanels.size) {
-        host.replaceChildren(element('p', 'text-secondary mb-0', 'Manual battery control requires write support to be enabled.'));
-      }
-    } finally { energyPolling = false; }
+      if (poll503 && !energyPanels.size) setEnergyNote(host, 'Manual battery control requires write support to be enabled.');
+    } finally { clearTimeout(timer); energyPolling = false; }
   }
 
   // Reads the cache only (server side), so the poll rate does not load the inverter.

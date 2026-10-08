@@ -32,7 +32,7 @@ protocol knowledge needed.
 | Category | Highlights |
 |---|---|
 | **REST API** | Read any metric from the full protocol catalog (894 of 895 IDs), partial success on multi-metric requests, RFC 9457 error responses |
-| **Administration GUI** | Overview, Inverters, TSDB, Prometheus, API tokens, Settings and About pages with autosave; first-login password change |
+| **Administration GUI** | Overview (configurable widget layout), Inverters, Energy Manager, TSDB, Prometheus, API tokens, Settings and About pages with autosave; first-login password change |
 | **Prometheus** | Ready-made `/metrics` endpoint for Telegraf, Grafana and friends; a scrape never touches the inverter |
 | **Safe by default** | API token authentication, separate admin sessions, `read` and `read/write` roles, encrypted SQLite administration storage |
 | **Guarded writes** | Off by default, allowlist-based, with readback confirmation |
@@ -58,15 +58,13 @@ python -m app
 ```
 
 Open `http://127.0.0.1:8000/`. The first start prints a boxed `FIRST START - admin login` block
-with the one-time `admin` password in clear text (also saved to `data/initial-admin-password` as
-a fallback); the first login requires a password change
-([details](docs/configuration/authentication.md)). Until then, periodic reads, heartbeat and
-metric export stay paused; they start automatically afterwards. Manage inverters, TSDB export, Prometheus metrics,
-PATs and settings in the GUI. Changes autosave with a toast.
-Settings are stored in `data/rct.db` using authenticated encryption with HMAC.
-The stable `HMAC_SECRET` stays in `settings.env`; local startup generates it
-when absent. For Docker, provide it before starting. Back up the database and
-secret together. See [Configuration](docs/getting-started/configuration.md).
+with the one-time `admin` password (also saved to `data/initial-admin-password`); the first login
+requires a password change ([details](docs/configuration/authentication.md)). Until then, periodic
+reads, heartbeat and metric export stay paused.
+
+Settings live in `data/rct.db`, encrypted and authenticated with `HMAC_SECRET` from `settings.env`
+(generated on a local start, required for Docker). Back up the database and the secret together.
+See [Configuration](docs/getting-started/configuration.md).
 
 Installation, configuration, authentication and the full API reference are in the
 **[Documentation](https://gill-bates.github.io/rct-manager/)**. Container details

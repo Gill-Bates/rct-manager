@@ -61,6 +61,8 @@ class PeriodicManager:
         self._retry_delay = RETRY_BASE_SECONDS
         self._retry_at = 0.0  # monotonic; no new setup before this point after a failure
         self._consecutive_failures = 0
+        self._failed_at = 0.0  # monotonic time and connection epoch of the latest failed setup
+        self._failed_epoch = -1
         self.last_failure: str | None = None  # reason of the latest failed setup, for the retry log
         self._registered: set[int] = set()
         self._registered_epoch = -1
@@ -94,8 +96,13 @@ class PeriodicManager:
         """(Re-)register when the connection changed since the last setup."""
         if self.available and self._endpoint.connection_epoch == self._epoch:
             return True
-        if not self.available and self._clock.monotonic() < self._retry_at:
-            return False  # every attempt rewrites the device-global pas.period: back off
+        now = self._clock.monotonic()
+        if not self.available and now < self._retry_at:
+            # Every attempt rewrites the device-global pas.period: back off. A connection that was
+            # re-established since the failure ends the long wait early, but not before the base delay.
+            reconnected = self._endpoint.connection_epoch != self._failed_epoch
+            if not reconnected or now < self._failed_at + RETRY_BASE_SECONDS:
+                return False
         if self._setup_lock.locked():
             return self.available
         async with self._setup_lock:
@@ -109,7 +116,9 @@ class PeriodicManager:
             self._retry_delay = RETRY_BASE_SECONDS
         else:
             self._consecutive_failures += 1
-            self._retry_at = self._clock.monotonic() + self._retry_delay
+            self._failed_at = self._clock.monotonic()
+            self._failed_epoch = self._endpoint.connection_epoch
+            self._retry_at = self._failed_at + self._retry_delay
             # A single failure is usually a transient connection hiccup that the retry resolves
             # by itself; only a persistent failure is worth a WARNING.
             persistent = self._consecutive_failures >= WARN_AFTER_FAILURES

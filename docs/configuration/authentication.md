@@ -23,15 +23,22 @@ issued automatically; PATs are created only by the admin in the GUI.
 ## Personal access tokens
 
 A PAT has the form `pat_` followed by 40 base62 characters and a 6 character CRC32 checksum
-(base62), so a mistyped token is rejected without a lookup. The former `API_TOKENS`,
-`API_TOKENS_FILE` and the `tokens` CLI no longer exist. The administration API (`/admin/api/...`) accepts a session or a PAT;
-`read` tokens get 403 on the settings and token endpoints and on every change. Listing, creating or
-deleting tokens needs a signed-in session. `GET /admin/api/settings` is readable with a `read/write` PAT, but omits the
-authentication and proxy-trust values listed next. Changing `auth_required`, `trusted_proxies`, `bind_address`,
-`behind_reverse_proxy`, `forwarded_header`, `metrics_require_token`,
-`metrics_trusted_sources`, `enable_write_support`, `devices` or `docs_public` needs a signed-in session;
-a PAT gets 403 for a real change of these (re-sending the current value is accepted). Enabling
-`enable_metrics_endpoint` is session-only as well while scrapes would not require a token.
+(base62), so a mistyped token is rejected without a lookup. The administration API
+(`/admin/api/...`) accepts a session or a PAT. `read` tokens get 403 on the settings and token
+endpoints and on every change; listing, creating or deleting tokens needs a signed-in session.
+
+`GET /admin/api/settings` is readable with a `read/write` PAT but omits the session-only values.
+A real change of the following needs a signed-in session; a PAT gets 403 (re-sending the
+current value is accepted):
+
+- authentication and proxy trust: `auth_required`, `trusted_proxies`, `bind_address`,
+  `behind_reverse_proxy`, `forwarded_header`, `metrics_require_token`, `metrics_trusted_sources`,
+  `docs_public`;
+- `enable_write_support`, `devices`, `bind_port`, `log_level`;
+- export target and credentials: `db_type`, the InfluxDB/QuestDB host, port, TLS and credential
+  settings, and the QuestDB retention days (a PAT must not redirect metrics or shorten retention).
+  These stay readable for a PAT;
+- `enable_metrics_endpoint` while scrapes would not require a token.
 
 Create named PATs with a `read` or `read/write` role and an expiry of 30 days, 90 days (the
 preselected value), 1 year or never on the **API tokens** page. Copy the secret when it is shown: it cannot be retrieved

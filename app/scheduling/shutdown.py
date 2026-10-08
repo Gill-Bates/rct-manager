@@ -16,6 +16,7 @@ from enum import StrEnum
 
 from app.clock import Clock
 from app.scheduling.periodic import PeriodicManager
+from app.scheduling.retry import cancel_and_wait
 from app.scheduling.serializer import AccessSerializer
 from app.transport.endpoint import TransportEndpoint
 
@@ -79,9 +80,16 @@ class ShutdownCoordinator:
                 await task
             return False
         timer = asyncio.create_task(self._clock.sleep(remaining))
-        await asyncio.wait({task, timer}, return_when=asyncio.FIRST_COMPLETED)
+        try:
+            await asyncio.wait({task, timer}, return_when=asyncio.FIRST_COMPLETED)
+        except asyncio.CancelledError:
+            await cancel_and_wait(task, timer)
+            raise
         timer.cancel()
         if task.done():
+            if task.cancelled():
+                log.warning("Shutdown step was cancelled")
+                return False
             if (exc := task.exception()) is not None:
                 log.warning("Shutdown step failed: %s", type(exc).__name__)
                 return False

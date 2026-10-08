@@ -25,7 +25,9 @@ Histogram buckets are not exported. Export health is part of `/metrics`
 
 An unreachable or rejecting database never affects the REST API or device polling. A failed
 push is dropped (the next one carries current values), the delay doubles up to 300 s, and the
-log shows the first failure and then each power of two, plus the recovery.
+log shows the first failure and then each power of two, plus the recovery. QuestDB provisioning
+(retention and rollup DDL) runs only when the set of metric columns changed and retries with its
+own backoff; its failures do not mark the export as failed.
 
 ## QuestDB retention and downsampling
 

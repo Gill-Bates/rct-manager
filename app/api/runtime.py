@@ -38,6 +38,8 @@ class Runtime:
     clock: Clock
     catalog: MetricCatalog
     gateway: DeviceGateway
+    # Replaced as a whole on reconfiguration and never mutated in place, so a reader on another
+    # thread that took a reference iterates a stable snapshot.
     devices: dict[str, DeviceEntry]
     roles: dict[str, str]
     shutdown: ShutdownCoordinator | None = None
@@ -53,6 +55,9 @@ class Runtime:
     # dashboard's energy_flow projection works even with write support disabled (design §4.2).
     energy_readings: EnergyReadingsPort | None = None
     export_task: asyncio.Task | None = None  # the running push-exporter task; an explicit handle (not list position)
+    # Set when a device reconfiguration failed after the old graph was torn down: the live graph is
+    # then partial, so readiness must not report the service as healthy.
+    graph_failed: bool = False
 
     def shutting_down(self) -> bool:
         return self.shutdown is not None and self.shutdown.plan is not None

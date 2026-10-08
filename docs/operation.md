@@ -36,6 +36,17 @@ read succeeds.
 - `GET /health` is token-free and turns 503 once the shutdown has begun. The
   container health check queries it on the container's own address.
 
+## Admin dashboard
+
+- **Edit dashboard** opens the edit mode of the **Overview** page (move and resize widgets, **Add
+  widget**, **Reset layout**, **Done**). Changes autosave.
+- The layout is stored in `data/rct.db`, separate from the device settings, through
+  `GET`/`PUT`/`DELETE /admin/api/dashboard-layout` (admin API, not part of the public contract). The
+  server accepts only known widget ids, at most 32 widgets and a 12-column grid.
+- The About page checks GitHub for a newer release: results are cached for 1 h, errors for 60 s, and
+  a forced refresh runs at most once per 30 s.
+- `/admin/static/` answers 404 for any path with a dot-prefixed segment.
+
 ## Writes
 
 - Write support is enabled on the GUI **Inverters** page; the `read/write` role and the
@@ -123,6 +134,10 @@ the admin dispatch API (`/admin/api/dispatch/...`, not part of the public, docum
   verification plan before enabling dispatch in production; it is not part of this documentation
   site, because a filled-in sheet holds operator measurements that belong with the operator, not
   on a published page.
+- **A removed device loses its dispatch state.** Removing a device (or re-addressing it under the
+  same id) resets all its capabilities to `unverified`, switches engineering mode off and disarms the
+  Energy Manager, so a device later added under that id starts unverified. The reset runs only
+  after the new device graph was built.
 - **A capability or device-limit change is refused while an operation it affects is active.**
   Flipping a sign convention, re-verifying the write path, or changing the power limits/
   engineering-mode switch of a device with a running dispatch answers `409

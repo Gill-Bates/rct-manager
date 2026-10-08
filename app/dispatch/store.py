@@ -229,12 +229,23 @@ class DispatchStore:
         record.record_version = next_version
 
     def get_capabilities(self) -> list[CapabilityRecord]:
+        """Every readable capability row. An unreadable row is skipped and reported, so that
+        capability reads as unverified — fail closed — and one bad row blocks no other device.
+        """
         with self.connect() as db:
             rows = db.execute("SELECT device_id,name,encrypted FROM dispatch_capabilities").fetchall()
-        return [
-            CapabilityRecord.from_dict(self._decrypt(f"{row['device_id']}/{row['name']}", row["encrypted"]))
-            for row in rows
-        ]
+        records = []
+        for row in rows:
+            try:
+                records.append(
+                    CapabilityRecord.from_dict(self._decrypt(f"{row['device_id']}/{row['name']}", row["encrypted"]))
+                )
+            except (ValueError, TypeError, KeyError):
+                log.error(
+                    "Capability %s of device %s is unreadable and was skipped; it reads as unverified",
+                    row["name"], row["device_id"],
+                )
+        return records
 
     def put_capability(self, record: CapabilityRecord) -> None:
         self.put_capabilities([record])
@@ -262,12 +273,19 @@ class DispatchStore:
             ).fetchall()
         configs = {}
         for row in rows:
-            data = self._decrypt(row["device_id"], row["encrypted"])
-            configs[row["device_id"]] = DeviceLimits(
-                max_charge_power_w=float(data["max_charge_power_w"]),
-                max_discharge_power_w=float(data["max_discharge_power_w"]),
-                engineering_mode=bool(row["engineering_mode"]),
-            )
+            try:
+                data = self._decrypt(row["device_id"], row["encrypted"])
+                configs[row["device_id"]] = DeviceLimits(
+                    max_charge_power_w=float(data["max_charge_power_w"]),
+                    max_discharge_power_w=float(data["max_discharge_power_w"]),
+                    engineering_mode=bool(row["engineering_mode"]),
+                )
+            except (ValueError, TypeError, KeyError):
+                log.error(
+                    "Device configuration for %s is unreadable and was skipped; the environment limits "
+                    "apply and engineering mode stays off",
+                    row["device_id"],
+                )
         return configs
 
     def put_device_config(self, device_id: str, limits: DeviceLimits) -> None:

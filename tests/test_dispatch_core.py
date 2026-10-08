@@ -22,6 +22,7 @@ from app.dispatch.controller import (
     DispatchRejected,
     ReconfigurationRejected,
 )
+from app.dispatch.gating import should_write
 from app.dispatch.models import (
     ControlTelemetry,
     DeviceControlSnapshot,
@@ -917,3 +918,33 @@ async def test_recover_reports_an_unreadable_record_as_critical(tmp_path: Path, 
         await dispatch.recover()
     assert dispatch.unreadable_devices == ("ghost",)
     assert any(r.levelname == "CRITICAL" and "ghost" in r.getMessage() for r in caplog.records)
+
+
+def test_export_cut_bypasses_deadband_and_interval_for_a_reduction() -> None:
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    config = DispatchConfig()
+    current = PowerSetpoint(PowerDirection.DISCHARGE, 1000)
+    desired = PowerSetpoint(PowerDirection.DISCHARGE, 850)
+    kwargs = {"now": now, "last_write_at": now, "config": config}
+    assert not should_write(desired, current, **kwargs)
+    assert should_write(desired, current, export_cut=True, **kwargs)
+    # Only a reduction is urgent; an increase still honours the deadband.
+    assert not should_write(PowerSetpoint(PowerDirection.DISCHARGE, 1150), current, export_cut=True, **kwargs)
+
+
+async def test_a_successful_restore_clears_the_fault_code(tmp_path: Path) -> None:
+    clock = ManualClock()
+    gateway = FakeDispatchGateway(clock)
+    dispatch = controller(tmp_path, clock, gateway)
+    await dispatch.submit(
+        "main",
+        DispatchCommand(DispatchMode.CHARGE_FROM_GRID, 80, 2000, clock.now() + timedelta(hours=1)),
+    )
+    gateway.fail_restore = True
+    stuck = await dispatch.cancel("main")
+    assert stuck.fault_code == "device_unreachable"
+    gateway.fail_restore = False
+    clock.advance(1)
+    status = await dispatch.tick("main")
+    assert status.state is DispatchState.IDLE
+    assert status.fault_code is None

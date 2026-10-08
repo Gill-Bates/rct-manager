@@ -170,7 +170,9 @@ async def _admin_status(request: Request, device_id: str) -> AdminEnergyDeviceSt
     runtime = request.app.state.runtime
     limits = dispatch.device_limits(device_id)
     restore_attempts, next_restore_at = await dispatch.restore_retry_info(device_id)
-    device = runtime.devices[device_id]
+    device = runtime.devices.get(device_id)
+    if device is None:  # removed by a reconfiguration while this request was awaiting
+        raise HTTPException(404, "Unknown device")
     state = runtime.gateway.device_status(device_id).state
     return AdminEnergyDeviceStatus(
         **public.model_dump(),
@@ -228,10 +230,15 @@ async def list_devices(
 ) -> list[AdminEnergyDeviceStatus]:
     """One entry per configured device, readings included, so the GUI needs one poll per cycle."""
     del admin
-    return [
-        await _admin_status(request, device_id)
-        for device_id in sorted(request.app.state.runtime.devices)
-    ]
+    result = []
+    for device_id in sorted(request.app.state.runtime.devices):  # sorted() copies: safe across the awaits
+        try:
+            result.append(await _admin_status(request, device_id))
+        except HTTPException as exc:
+            if exc.status_code != 404:
+                raise
+            # removed by a concurrent reconfiguration: leave it out of the listing
+    return result
 
 
 async def _status_after_action(request: Request, device_id: str) -> AdminEnergyDeviceStatus:

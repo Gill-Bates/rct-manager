@@ -15,7 +15,7 @@ import pytest
 
 from app.config import Settings
 from app.export.lineprotocol import batches, build_lines, escape_key, escape_measurement
-from app.export.pusher import MAX_BACKOFF_SECONDS, PushExporter
+from app.export.pusher import MAX_BACKOFF_SECONDS, PushError, PushExporter
 from app.observability.exporter import MetricsExporter, _labels
 from app.observability.stats import ServiceCounters
 
@@ -60,6 +60,9 @@ class _Metrics:
 
 
 class _Clock:
+    def monotonic(self) -> float:
+        return 0.0
+
     async def sleep(self, seconds: float) -> None:
         return None
 
@@ -127,6 +130,30 @@ async def test_questdb_basic_auth_and_provisioning(server) -> None:
     assert stats.export_success == 1
 
 
+async def test_rejected_provisioning_does_not_taint_a_stored_write(server) -> None:
+    exporter, stats = _exporter(db_type="questdb", questdb_hostname=server.url)
+    calls = []
+
+    def reject(*, ensure: bool = True) -> bool:
+        calls.append(ensure)
+        raise PushError("QuestDB rejected SQL: nope", retryable=False)
+
+    exporter._provisioner.run = reject
+    assert await exporter.cycle() == 30
+    assert await exporter.cycle() == 30  # still inside the provisioning backoff
+    assert (stats.export_success, stats.export_failures) == (2, 0)
+    assert calls == [False]
+
+
+async def test_provisioning_runs_once_per_column_set(server) -> None:
+    exporter, _ = _exporter(db_type="questdb", questdb_hostname=server.url)
+    runs = []
+    exporter._provisioner.run = lambda *, ensure=True: runs.append(ensure) or True
+    for _ in range(3):
+        await exporter.cycle()
+    assert len(runs) == 1
+
+
 async def test_collect_runs_on_the_event_loop_thread(server) -> None:
     seen: list[int] = []
 
@@ -146,6 +173,9 @@ def test_escaping() -> None:
     assert escape_measurement("my table,x") == "my\\ table\\,x"
     assert escape_key("a b,c=d") == "a\\ b\\,c\\=d"
     assert "\n" not in escape_key("a\nb")
+    assert escape_key("a\\") == "a\\\\"
+    assert escape_measurement("m\\ x") == "m\\\\\\ x"
+    assert build_lines([("m", {"t": "a\\"}, 1.0)], "r", 1) == ["r,t=a\\\\ m=1.0 1"]
 
 
 def test_groups_fields_by_tag_set_and_writes_floats() -> None:

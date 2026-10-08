@@ -23,7 +23,7 @@ curl -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/jso
 | Action | `target_soc_percent` | `max_power_w` | Effect |
 | --- | --- | --- | --- |
 | `charge` | required | optional | Charges until the target SoC is reached |
-| `discharge` | required | optional | Discharges following the house load until the target SoC |
+| `discharge` | required | optional | Discharges following the house load until the target SoC; cuts discharge immediately on grid export, bypassing deadband and write interval |
 | `hold` | omit | omit | Holds the battery at 0 W, grid charging off |
 | `auto` | omit | omit | Hands control back to the inverter |
 
@@ -84,8 +84,12 @@ The page is layered by in-page progressive disclosure:
   automatic**. When the battery data is healthy nothing is shown about polling; a stale reading shows
   "Measurements are N seconds old." and a transient failure "Live data unavailable."
 - **Setup** (shown only when a prerequisite is missing) — a state-independent readiness checklist
-  (Inverter connected / Write access enabled / Power limits configured / Hardware control verified)
-  with a single call-to-action that routes to the first unmet step. Power limits are shown in **kW**.
+  (Inverter connected / Write access / Power limits configured / Hardware control verified)
+  with a single call-to-action that routes to the first unmet step. "Write access" is met only when
+  the four required registers (`power_mng_soc_strategy`, `power_mng_soc_target_set`,
+  `power_mng_battery_power_extern`, `power_mng_use_grid_power_enable`) are approved under
+  **Writable parameters** on the **Inverters** page; the global write switch alone is not enough.
+  Power limits are shown in **kW**.
 - **Expert** (collapsed) — the hardware verification form, engineering mode and the kW power limits
   behind a warning, and the SoC target policy. Verification is entered by an operator with measured
   evidence; nothing is verified by default.

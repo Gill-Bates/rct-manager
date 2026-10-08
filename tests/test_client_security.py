@@ -89,7 +89,7 @@ def _settings(tmp_path):
     return make_settings(enable_write_support=True, **write_fixtures(tmp_path))
 
 
-async def test_oversized_content_length_is_422_before_auth_and_without_reading() -> None:
+async def test_oversized_content_length_is_413_before_auth_and_without_reading() -> None:
     reads = 0
 
     async def inner(scope, receive, send):  # pragma: no cover - must never run
@@ -116,13 +116,13 @@ async def test_oversized_content_length_is_422_before_auth_and_without_reading()
         "app": SimpleNamespace(state=SimpleNamespace()),
     }
     await BodyLimitMiddleware(inner)(scope, receive, send)
-    assert reads == 0 and sent[0]["status"] == 422
+    assert reads == 0 and sent[0]["status"] == 413
 
 
-async def test_oversized_declared_body_without_token_is_422_not_401(tmp_path) -> None:
+async def test_oversized_declared_body_without_token_is_413_not_401(tmp_path) -> None:
     async with running_app(_settings(tmp_path), authorize=False) as h:
         response = await h.client.put(URL, content=b"x" * (MAX_BODY_BYTES + 1))
-    assert response.status_code == 422
+    assert response.status_code == 413
     assert response.headers["content-type"].startswith("application/problem+json")
     body = response.json()
     assert body["code"] == "invalid_request"
@@ -130,14 +130,14 @@ async def test_oversized_declared_body_without_token_is_422_not_401(tmp_path) ->
     assert response.headers["x-request-id"] and body["correlation_id"] == response.headers["x-request-id"]
 
 
-async def test_oversized_chunked_body_is_422(tmp_path) -> None:
+async def test_oversized_chunked_body_is_413(tmp_path) -> None:
     async def chunks():
         for _ in range(MAX_BODY_BYTES // 65536 + 2):
             yield b"x" * 65536
 
     async with running_app(_settings(tmp_path), authorize=False) as h:
         response = await h.client.put(URL, content=chunks())
-    assert response.status_code == 422 and response.json()["code"] == "invalid_request"
+    assert response.status_code == 413 and response.json()["code"] == "invalid_request"
 
 
 async def test_large_legal_body_passes_the_limit(tmp_path) -> None:

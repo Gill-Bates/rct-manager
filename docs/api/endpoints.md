@@ -102,6 +102,7 @@ curl -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/jso
 ```
 
 - `max_power_w` is an upper bound and is clamped to the configured device limit.
+- `discharge_to_load` reduces the setpoint immediately when the grid is exporting; deadband and write interval do not delay the cut.
 - `valid_until` is mandatory and must include a timezone offset. The service also caps it at six hours.
 - A second `POST` replaces the active operation. Set `expected_operation_id` for compare-and-swap semantics.
 - `DELETE` first requests 0 W and then restores the captured pre-dispatch register values.

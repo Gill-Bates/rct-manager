@@ -72,6 +72,37 @@ async def test_unanswered_write_keeps_the_connection() -> None:
     await endpoint.close()
 
 
+async def test_late_write_echo_cannot_answer_the_readback_read() -> None:
+    """The echo arrives while the write holds the lock, so it must not be taken for the READ's response."""
+    echo = Frame(Command.RESPONSE, 0x1234, b"\x00\x00\x00\x05")  # differs from the stored value 7
+
+    class EchoDuringQuietWindow(AutoClock):
+        net: FakeNetwork | None = None
+
+        async def sleep(self, seconds: float) -> None:
+            if self.net is not None and seconds == 0.05:  # the write quiet window
+                self.net.push(echo)
+                await asyncio.sleep(0.01)  # let the receiver classify the echo
+            await super().sleep(seconds)
+
+    clock = EchoDuringQuietWindow()
+    net = FakeNetwork(clock)
+    clock.net = net
+    cfg = EndpointConfig(
+        response_timeout_seconds=1.0,
+        write_response_timeout_seconds=0.05,
+        write_quiet_window_seconds=0.05,
+        min_interval=timedelta(0),
+    )
+    endpoint = TransportEndpoint("e", KEY, cfg, clock, connector=net.connect)
+    written = await endpoint.execute(_request(Command.WRITE))
+    assert not written.ok and written.committed
+    read = await endpoint.execute(_request(Command.READ))
+    assert read.ok and read.frame is not None and read.frame.payload == b"\x00\x00\x00\x07"
+    assert endpoint.counters.unexpected_frames == 1  # the late echo, discarded
+    await endpoint.close()
+
+
 async def test_answered_write_is_confirmed() -> None:
     clock = AutoClock()
     net = FakeNetwork(clock)

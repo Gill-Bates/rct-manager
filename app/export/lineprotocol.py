@@ -17,12 +17,12 @@ def _clean(text: str) -> str:
 
 
 def escape_measurement(name: str) -> str:
-    return _clean(name).replace(",", "\\,").replace(" ", "\\ ")
+    return _clean(name).replace("\\", "\\\\").replace(",", "\\,").replace(" ", "\\ ")
 
 
 def escape_key(name: str) -> str:
     """Tag keys, tag values and field keys."""
-    return _clean(name).replace(",", "\\,").replace("=", "\\=").replace(" ", "\\ ")
+    return _clean(name).replace("\\", "\\\\").replace(",", "\\,").replace("=", "\\=").replace(" ", "\\ ")
 
 
 def _field(value: float) -> str:

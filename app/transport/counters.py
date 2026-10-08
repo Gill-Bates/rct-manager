@@ -16,6 +16,9 @@ from datetime import datetime
 # RESPONSE frames, exempt from the flood-reconnect limit, could otherwise grow its deque by one
 # float per frame for as long as the peer kept sending.
 _BUCKET_SECONDS = 1.0
+# Pruning uses the largest configurable window (UNEXPECTED_FRAME_WINDOW_SECONDS le=3600), so a
+# reader with a short window never deletes buckets that a reader with a longer window still needs.
+_RETENTION_SECONDS = 3600.0
 
 
 @dataclass(slots=True)
@@ -57,10 +60,11 @@ def _bucket_append(window: deque[list[float]], now: float) -> None:
 
 
 def _in_window(window: deque[list[float]], now: float, window_seconds: float) -> int:
-    horizon = now - window_seconds
-    while window and window[0][0] <= horizon:
+    retention_horizon = now - max(window_seconds, _RETENTION_SECONDS)
+    while window and window[0][0] <= retention_horizon:
         window.popleft()
-    return sum(count for _, count in window)
+    horizon = now - window_seconds
+    return sum(count for start, count in window if start > horizon)
 
 
 @dataclass(slots=True)

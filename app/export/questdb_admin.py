@@ -143,9 +143,10 @@ class QuestDbProvisioner:
         self._exec(create_table_sql(self.table))
         self._exec(create_state_table_sql())
 
-    def run(self) -> bool:
+    def run(self, *, ensure: bool = True) -> bool:
         """Apply retention and rollups; False while the rollup is not ready (retry later)."""
-        self.ensure_tables()
+        if ensure:
+            self.ensure_tables()
         preset = PRESETS.get(self.downsampling)
         if preset is None:
             if self.downsampling == "manual":

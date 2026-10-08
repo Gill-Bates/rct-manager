@@ -710,3 +710,17 @@ def test_dashboard_js_reuses_the_shared_api_helper_and_does_not_touch_polling():
     # dashboard.js never reimplements the polling helpers it must leave alone.
     for forbidden in ("function loadDashboard", "function initDashboardPolling", "setInterval"):
         assert forbidden not in js
+
+
+def test_energy_poll_is_bounded_keeps_panels_and_never_overwrites_a_running_action():
+    js = JS.read_text(encoding="utf-8")
+    poll = js[js.index("async function pollEnergy("):js.index("function initEnergy(")]
+    # A caller-initiated abort (timeout or supersede) must not open the reconnect modal.
+    assert "error?.name === 'TimeoutError'" in js and "options.signal?.aborted" in js
+    assert "ENERGY_POLL_TIMEOUT_MS" in poll and "signal: controller.signal" in poll
+    # Panels of surviving devices are kept; polls requested before an action finished are dropped.
+    assert "energyPanels.clear()" not in poll.split("const ordered")[0]
+    assert "panel.acceptsPoll(requestedAt)" in poll
+    assert "pendingArmed ?? device.armed" in js
+    # The Setup step names the required writes that are not approved yet.
+    assert "ENERGY_REQUIRED_WRITES.filter((name) => !approved.has(name))" in js

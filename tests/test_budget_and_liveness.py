@@ -28,7 +28,7 @@ from app.protocol.frames import Frame
 from app.protocol.types import Command
 from app.scheduling.budget import WorkBudget
 from app.scheduling.heartbeat import Heartbeat, LivenessSource
-from app.scheduling.retry import RetryConfig
+from app.scheduling.retry import RetryConfig, execute_read
 from app.scheduling.serializer import AccessSerializer
 from app.transport.endpoint import EndpointConfig, TransportEndpoint
 from app.transport.types import (
@@ -437,3 +437,31 @@ def test_one_slave_does_not_hide_a_silent_one() -> None:
 
     total, a_count, b_count, probes, b_never, source = asyncio.run(scenario())
     assert (total, a_count, b_count, probes, b_never, source) == (1, 1, 0, 1, True, LivenessSource.HEARTBEAT)
+
+
+async def test_cancelled_read_cancels_the_endpoint_call() -> None:
+    started, cancelled = asyncio.Event(), asyncio.Event()
+
+    class Endpoint:
+        async def execute(self, request, response_timeout):
+            started.set()
+            try:
+                await asyncio.sleep(3600)
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+
+    class Clock:
+        def monotonic(self) -> float:
+            return 0.0
+
+        async def sleep(self, seconds: float) -> None:
+            await asyncio.sleep(3600)
+
+    request = SimpleNamespace(read_total_timeout_seconds=None, abandoned=False)
+    runner = asyncio.ensure_future(execute_read(Endpoint(), request, RetryConfig(), Clock()))
+    await started.wait()
+    runner.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await runner
+    assert cancelled.is_set()

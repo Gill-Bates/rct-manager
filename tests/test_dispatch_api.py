@@ -409,3 +409,39 @@ async def test_failed_graph_build_leaves_identity_bound_state_untouched(tmp_path
         assert write_path["note"] == "keep me"
         assert harness.runtime.dispatch.device_limits("main").engineering_mode is True
         assert harness.runtime.devices["main"].host == HOST
+
+
+async def test_a_device_added_after_a_removal_does_not_inherit_the_removed_ones_capabilities(tmp_path: Path) -> None:
+    """remove -> save -> add without a device_id -> save hands the freed id "main" to new hardware;
+    the removed device's verified capabilities and engineering mode must not follow that id."""
+    config = settings(tmp_path, devices=[DeviceEntry(device_id="main", host=HOST, port=PORT)])
+    admin_write_token(config)
+    async with running_app(config) as harness:
+        headers = await admin_session_headers(harness.client, "replacement-test-password")
+        # The fixture verified "main"; engineering mode is switched on for the removed device.
+        assert any(r.status.value == "verified" for r in harness.runtime.dispatch.capabilities("main"))
+        put_limits = await harness.client.put(
+            "/admin/api/dispatch/devices/main", headers=headers,
+            json={"max_charge_power_w": 3000, "max_discharge_power_w": 5000, "engineering_mode": True},
+        )
+        assert put_limits.status_code == 200, put_limits.text
+
+        removed = await harness.client.put(
+            "/admin/api/settings", headers=headers,
+            json={"devices": [{"device_id": "slave1", "host": "192.0.2.50", "port": 48990}]},
+        )
+        assert removed.status_code == 200, removed.text
+        assert "main" not in harness.runtime.devices
+
+        added = await harness.client.put(
+            "/admin/api/settings", headers=headers,
+            json={"devices": [
+                {"device_id": "slave1", "host": "192.0.2.50", "port": 48990},
+                {"host": "192.0.2.51", "port": 48991},
+            ]},
+        )
+        assert added.status_code == 200, added.text
+        assert "main" in harness.runtime.devices
+        assert all(r.status.value == "unverified" for r in harness.runtime.dispatch.capabilities("main"))
+        limits = harness.runtime.dispatch.device_limits("main")
+        assert limits is None or limits.engineering_mode is False

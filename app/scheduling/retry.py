@@ -31,6 +31,13 @@ def backoff_seconds(attempt: int, cfg: RetryConfig) -> float:
     return min(cfg.backoff_initial_ms * 2 ** (attempt - 2), cfg.backoff_max_ms) / 1000
 
 
+async def cancel_and_wait(*tasks: "asyncio.Future[object]") -> None:
+    """Cancel and drain helper tasks so none outlives its cancelled owner (e.g. the endpoint lock)."""
+    for t in tasks:
+        t.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
+
+
 async def _execute_within(
     endpoint: TransportEndpoint, request: TransactionRequest, response_timeout: float, remaining: float, clock: Clock
 ) -> TransactionResult:
@@ -42,7 +49,11 @@ async def _execute_within(
     """
     task = asyncio.ensure_future(endpoint.execute(request, response_timeout=response_timeout))
     timer = asyncio.ensure_future(clock.sleep(remaining))
-    await asyncio.wait({task, timer}, return_when=asyncio.FIRST_COMPLETED)
+    try:
+        await asyncio.wait({task, timer}, return_when=asyncio.FIRST_COMPLETED)
+    except asyncio.CancelledError:
+        await cancel_and_wait(task, timer)
+        raise
     timer.cancel()
     if task.done():
         return task.result()

@@ -16,6 +16,7 @@ from pathlib import Path
 
 import pytest
 
+from app.dispatch.capabilities import CapabilityName, CapabilityRecord
 from app.dispatch.models import DeviceLimits
 from app.dispatch.soc_policy import SocTargetMode, SocTargetPolicy
 from app.dispatch.store import DispatchStore
@@ -167,3 +168,18 @@ def test_an_energy_state_blob_moved_to_another_row_is_rejected(tmp_path: Path) -
         )
     states = store.get_energy_states()
     assert set(states) == {"main"}  # the forged row is skipped, so slave1 reads as not armed
+
+
+def test_one_unreadable_capability_or_device_config_row_blocks_no_other_row(tmp_path: Path) -> None:
+    """A corrupt row must not stop startup for every other battery; it reads as unverified/absent."""
+    store = DispatchStore(tmp_path / "dispatch.db", SECRET)
+    store.initialize()
+    good = CapabilityRecord(device_id="slave1", name=CapabilityName.BATTERY_POWER_SIGN)
+    store.put_capabilities([CapabilityRecord(device_id="main", name=CapabilityName.BATTERY_POWER_SIGN), good])
+    store.put_device_config("main", DeviceLimits(1000, 2000))
+    store.put_device_config("slave1", DeviceLimits(3000, 4000))
+    with store.connect() as db:
+        db.execute("UPDATE dispatch_capabilities SET encrypted=? WHERE device_id='main'", (b"garbage",))
+        db.execute("UPDATE dispatch_device_config SET encrypted=? WHERE device_id='main'", (b"garbage",))
+    assert store.get_capabilities() == [good]
+    assert list(store.get_device_configs()) == ["slave1"]

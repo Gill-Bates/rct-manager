@@ -298,7 +298,12 @@ class DispatchController:
                 # the derivation of the device-level SoC target needs the measured value.
                 await self._apply(record, soc_percent=soc)
             except Exception as exc:
-                await self._restore(record, StopReason.DEVICE_ERROR, getattr(exc, "code", "internal_error"))
+                try:
+                    await self._restore(record, StopReason.DEVICE_ERROR, getattr(exc, "code", "internal_error"))
+                except Exception:
+                    # The record stays RESTORING/APPLYING, so tick()/recover() finish the restore;
+                    # the apply error below is the one the caller needs to see.
+                    log.exception("Restore after failed apply of device %s raised", device_id)
                 raise
             record.state = _STATE_FOR_MODE[command.mode]
             record.restore_required = False
@@ -464,6 +469,9 @@ class DispatchController:
                     now=self._clock.now(),
                     last_write_at=record.last_write_at,
                     config=self._config,
+                    export_cut=(
+                        record.intent.mode is DispatchMode.DISCHARGE_TO_LOAD and telemetry.grid_import_w <= 0
+                    ),
                 ):
                     record.plan = [{"name": "setpoint", "status": "sent"}]
                     await self._put(record)
@@ -494,6 +502,7 @@ class DispatchController:
             record.intent = None
             record.restore_required = False
             record.stop_reason = reason
+            record.fault_code = None
             record.next_restore_at = None
             record.restore_attempts = 0
             await self._put(record)
@@ -543,6 +552,7 @@ class DispatchController:
         record.last_commanded = PowerSetpoint()
         record.restore_required = False
         record.plan = []
+        record.fault_code = None
         record.next_restore_at = None
         record.restore_attempts = 0
         await self._put(record)

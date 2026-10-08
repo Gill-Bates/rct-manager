@@ -55,6 +55,9 @@ class EndpointConfig:
     response_timeout_seconds: float = 5.0
     # The device does not answer WRITE at all (device test 2026-10-02), so writes wait only briefly.
     write_response_timeout_seconds: float = 0.3
+    # After an unanswered WRITE the lock is held this long, so a late echo is read as an
+    # unexpected frame instead of arriving after the readback READ went out (no transaction id).
+    write_quiet_window_seconds: float = 0.1
     # Bounds writer.drain(); a stuck send would otherwise hold the transaction lock forever.
     send_timeout_seconds: float = 5.0
     min_interval: timedelta = timedelta(milliseconds=300)
@@ -279,7 +282,8 @@ class TransportEndpoint:
                 )
             else:
                 log.info("Connection to %s ended: %s", self.endpoint_id, reason)
-            self._receiver_task = None
+            if self._receiver_task is asyncio.current_task():
+                self._receiver_task = None
             await self._drop_connection(error)
 
     def _fail_pending(self, error: DeviceApiError) -> None:
@@ -290,6 +294,10 @@ class TransportEndpoint:
     async def _drop_connection(self, error: DeviceApiError) -> None:
         writer, self._writer, self._reader = self._writer, None, None
         self._fail_pending(error)
+        task = self._receiver_task
+        if task is not None and task is not asyncio.current_task():
+            self._receiver_task = None
+            task.cancel()  # the dropped connection's receiver must not outlive it
         if writer is not None:
             writer.close()
             with contextlib.suppress(OSError, TimeoutError, asyncio.CancelledError):
@@ -370,6 +378,8 @@ class TransportEndpoint:
                     # caller still sees TransactionResult.ok == False because no frame was received,
                     # but failure statistics and device state must not be dragged down by a routine
                     # write.
+                    self._demux.pending = None
+                    await self._clock.sleep(self._cfg.write_quiet_window_seconds)
                     return TransactionResult(outcome)
                 # The response is still in flight and carries no transaction id, so only a new
                 # connection keeps it from answering the next transaction.

@@ -9,7 +9,7 @@
 import asyncio
 import contextlib
 import logging
-from collections.abc import AsyncIterator, Callable, Iterable
+from collections.abc import AsyncIterator, Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import timedelta
 from pathlib import Path
@@ -24,6 +24,7 @@ from app.admin.api import (
     DEVICE_CARD_METRIC_NAMES,
     RCT_MODULE_SN_SLOTS,
     _settings_persisted,
+    repair_device_names,
 )
 from app.admin.api import router as admin_router
 from app.admin.dispatch_api import router as admin_dispatch_router
@@ -81,6 +82,7 @@ from app.transport.endpoint import (
 log = logging.getLogger(__name__)
 _PERIODIC_CHECK_SECONDS = 10.0
 _PASSWORD_POLL_SECONDS = 1.0
+_RECONFIGURE_DRAIN_SECONDS = 10.0  # shutdown waits this long for an in-flight reconfiguration
 _REFRESH_CYCLE_SECONDS = 10.0  # 8 reads per cycle cover 40 values within the 2 x pas.period threshold
 _bearer = HTTPBearer(auto_error=False, description="Bearer token")
 _FAVICON_BYTES = (Path(__file__).resolve().parent.parent / "admin" / "static" / "img" / "favicon.ico").read_bytes()
@@ -141,6 +143,22 @@ def load_allowlist(settings: Settings, catalog: RegistryCatalog, selected: list[
             return available
         return Allowlist({name: available.entry(name) for name in selected if available.entry(name)}, catalog)
     return Allowlist({}, catalog)
+
+
+class _LiveDevices(Mapping[str, DeviceEntry]):
+    """Read-only view that follows ``runtime.devices`` across the whole-dict swap on reconfiguration."""
+
+    def __init__(self, runtime: Runtime) -> None:
+        self._runtime = runtime
+
+    def __getitem__(self, key: str) -> DeviceEntry:
+        return self._runtime.devices[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._runtime.devices)
+
+    def __len__(self) -> int:
+        return len(self._runtime.devices)
 
 
 def _roles(settings: Settings) -> dict[str, str]:
@@ -507,6 +525,12 @@ def _lifespan(
         refresh_tasks: list[asyncio.Task] = []
         dispatch_tasks: list[asyncio.Task] = []
         connects: dict[int, asyncio.Task] = {}
+        # Set first thing in the teardown: runtime.shutting_down() only turns true once the shutdown
+        # coordinator runs, and a reconfiguration must stop starting work before that as well.
+        closing = False
+
+        def is_closing() -> bool:
+            return closing or runtime.shutting_down()
 
         def start_dispatch_tasks(device_ids) -> None:
             """One ``dispatch.run()`` loop per device_id, tracked so a later reconfiguration can
@@ -616,9 +640,9 @@ def _lifespan(
             happens. Limits are rebuilt from the new device list and handed to the live
             ``DispatchController``, and fresh dispatch tasks are started for the new device set.
             """
-            if runtime.shutting_down():
+            if is_closing():
                 return
-            readdressed: set[str] = set()
+            reset_ids: set[str] = set()
             if runtime.dispatch is not None:
                 old_ids = set(runtime.devices)
                 new_devices = {d.device_id: d for d in runtime.settings.devices}
@@ -639,10 +663,16 @@ def _lifespan(
                 }
                 for device_id in removed | readdressed:
                     await runtime.dispatch.force_restore_or_raise(device_id)  # raises: abort, nothing torn down yet
+                # A removed id is reset like a re-addressed one: _normalize_devices hands a freed id
+                # (e.g. "main") to the next device added without an id, and that device must not
+                # inherit the removed hardware's capabilities, engineering mode or arming.
+                reset_ids = removed | readdressed
 
             selected_exposed = getattr(app.state, "active_exposed_names", None)
             if selected_exposed is None and store is not None:
                 selected_exposed = await asyncio.to_thread(store.get, "exposed_names")
+            if is_closing():
+                return  # nothing has been built or torn down yet
             # Same set as at boot: this path runs on every Inverters-page save, and a narrower one
             # would make the Energy Manager card go dark on the next settings change.
             periodic_names = _effective_periodic_names(runtime.settings, runtime.catalog, selected_exposed)
@@ -661,7 +691,7 @@ def _lifespan(
 
             # Identity-bound resets run only now that the new graph built: a failed build above must
             # leave evidence, engineering mode and arming exactly as they were.
-            for device_id in readdressed:
+            for device_id in reset_ids:
                 # Evidence and arming were given for the old physical device, not the new one.
                 # Every capability is reset, not only the VERIFIED ones: a revoke keeps its
                 # evidence (strategy code, byte widths, sign assumptions, ...) on an UNVERIFIED
@@ -684,6 +714,16 @@ def _lifespan(
                 if runtime.energy is not None and runtime.energy.armed(device_id):
                     await runtime.energy.set_armed(device_id, armed=False, actor=None)
 
+            try:
+                await _swap_graph(graph)
+            except Exception:
+                # The old graph is already torn down, so what runs now is a partial one. Say so
+                # loudly and keep readiness red until the operator restarts or saves again.
+                runtime.graph_failed = True
+                log.exception("Device reconfiguration failed after the old graph was torn down; service marked not ready")
+                raise
+
+        async def _swap_graph(graph: _DeviceGraph) -> None:
             old_tasks = [
                 *connect_tasks, *startup_tasks, *heartbeat_tasks, *periodic_tasks, *refresh_tasks, *dispatch_tasks,
             ]
@@ -700,6 +740,17 @@ def _lifespan(
             await asyncio.gather(*(s.stop() for s in parts.serializers), return_exceptions=True)
             await asyncio.gather(*(e.close() for e in parts.endpoints), return_exceptions=True)
 
+            # Read off the event loop; fetched after the teardown so the window to the set_limits()
+            # below stays as short as it was with the synchronous read.
+            dispatch_store_now = app.state.dispatch_store
+            stored = (
+                await asyncio.to_thread(dispatch_store_now.get_device_configs)
+                if runtime.dispatch is not None and dispatch_store_now is not None
+                else {}
+            )
+            if is_closing():
+                return  # shutdown began while tearing down: start nothing, the shutdown cleans up
+
             gateway.replace_devices(graph.bindings)
 
             parts.adopt(graph)
@@ -707,17 +758,14 @@ def _lifespan(
                 parts.exporter.set_devices(parts.device_views)
                 parts.exporter.set_endpoints(parts.endpoint_views)
 
-            runtime.devices.clear()
-            runtime.devices.update({d.device_id: d for d in runtime.settings.devices})
-            runtime.roles.clear()
-            runtime.roles.update(_roles(runtime.settings))
+            # Swapped as whole objects: sync handlers in the thread pool iterate these dicts.
+            runtime.devices = {d.device_id: d for d in runtime.settings.devices}
+            runtime.roles = _roles(runtime.settings)
 
             if runtime.dispatch is not None:
                 # Rebuilt the same way as at boot: stored operator values win, the environment only
                 # seeds a device that has no record, so a device-list change cannot silently drop a
                 # limit or an engineering switch an operator set.
-                store_for_limits = app.state.dispatch_store
-                stored = store_for_limits.get_device_configs() if store_for_limits is not None else {}
                 runtime.dispatch.set_limits(_seed_limits(runtime.settings, stored))
 
             for serializer in parts.serializers:
@@ -726,6 +774,8 @@ def _lifespan(
             # Same guard start_device_jobs() already uses: a device added while the bootstrap
             # password is still pending must not jump the queue ahead of _await_password_change().
             if store is None or not await asyncio.to_thread(store.password_change_pending):
+                if is_closing():
+                    return
                 start_polling_tasks()
                 # Not recover(): that is a one-time startup sweep over every persisted record and
                 # would re-run its (heavier) fault handling for devices that were never touched by
@@ -735,6 +785,7 @@ def _lifespan(
                 # unchanged across the reconfiguration simply gets a new loop for the same state it
                 # already had.
                 start_dispatch_tasks(runtime.devices)
+            runtime.graph_failed = False
 
         reconfigure_lock = asyncio.Lock()
 
@@ -758,8 +809,16 @@ def _lifespan(
         try:
             yield
         finally:
+            closing = True  # an in-flight reconfiguration stops starting work from here on
             if runtime.shutdown is not None and runtime.shutdown.plan is None:
                 await runtime.shutdown.run()  # no signal drove the shutdown: run the same phases now
+            try:
+                # Let a reconfiguration that is mid-teardown finish before the final cancel, so no
+                # task or connection it starts can outlive the sweep below; bounded against a hang.
+                await asyncio.wait_for(reconfigure_lock.acquire(), timeout=_RECONFIGURE_DRAIN_SECONDS)
+                reconfigure_lock.release()
+            except TimeoutError:
+                log.warning("A device reconfiguration did not finish during shutdown; cancelling its tasks anyway")
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
@@ -828,6 +887,7 @@ def create_app(settings: Settings, *, clock: Clock | None = None, connector: Con
         selected_exposed = admin_store.get("exposed_names")
         if selected_exposed is not None:
             settings = settings.model_copy(update={"metrics_exposed_names": selected_exposed})
+        settings = repair_device_names(admin_store, settings)
         selected_writes = admin_store.get("write_names")
         if selected_writes is None:
             selected_writes = []  # deny by default: the shipped catalog lists what may be enabled, nothing is on
@@ -921,7 +981,7 @@ def create_app(settings: Settings, *, clock: Clock | None = None, connector: Con
     app.state.dispatch_store = dispatch_store
     app.state.first_start_password = bootstrap_password  # printed by the server once it is listening
     if admin_store is not None:
-        initial_allowlist = Allowlist.load(settings.write_allowlist_path, catalog)
+        initial_allowlist = load_allowlist(settings, catalog)  # a missing file is fine while writes are off
         app.state.default_write_entries = {name: initial_allowlist.entry(name) for name in catalog.names() if initial_allowlist.entry(name)}
         app.state.build_write_allowlist = lambda names: Allowlist(
             {name: app.state.default_write_entries[name] for name in names if name in app.state.default_write_entries},
@@ -936,6 +996,8 @@ def create_app(settings: Settings, *, clock: Clock | None = None, connector: Con
             """Exactly what the Inverters page does, add-only: persist, then widen the allowlist."""
             selected = list(names)
             allowlist = app.state.build_write_allowlist(selected)  # build first: persist only what works
+            # Sync SQLite write on the loop: EnergyManager's callback contract is synchronous, and
+            # this runs only on an operator arming action against a local WAL database.
             admin_store.put_many({"write_names": selected})
             runtime.gateway.set_allowlist(allowlist)
             return selected
@@ -946,9 +1008,10 @@ def create_app(settings: Settings, *, clock: Clock | None = None, connector: Con
             readings=runtime.energy_readings,
             clock=clock,
             config=dispatch_config,
-            devices=runtime.devices,
+            devices=_LiveDevices(runtime),
             write_support_enabled=settings.enable_write_support,
             approve_writes=_approve_writes,
+            # Synchronous by contract; one small local SQLite read that never waits on the device.
             approved_writes=lambda: tuple(admin_store.get("write_names") or ()),
             allowlist_candidates=lambda: frozenset(app.state.default_write_entries),
             required_writes=RctDispatchGateway.REQUIRED_WRITES,

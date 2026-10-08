@@ -11,6 +11,7 @@ Validation problems carry an `errors` list with `parameter`, `code` and
 | `insufficient_scope`, `write_not_allowed` | 403 | Role too low, or metric not approved for writing |
 | `not_found`, `unknown_device`, `unknown_metric`, `write_disabled`, `docs_not_available` | 404 | Unknown path, device or metric; write support off; docs not released |
 | `method_not_allowed` | 405 | Method not allowed for the path |
+| `invalid_request` | 413 | Request body too large |
 | `metric_is_action`, `fresh_not_available_for_periodic_metric` | 409 | Wrong endpoint for an action; fresh read not possible |
 | `invalid_request`, `invalid_parameter`, `batch_too_large`, `fresh_batch_too_large`, `value_out_of_range`, `value_type_mismatch`, `value_not_finite`, `value_step_mismatch` | 422 | Request body or parameters invalid (`unknown_metric` is 422 for a name from `names`) |
 | `rate_limited`, `device_budget_exhausted` | 429 | Request rate, failed-authentication limit or device work budget exceeded |

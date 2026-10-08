@@ -120,6 +120,10 @@ class PushExporter:
         self._clock = clock
         self._target = Target.from_settings(settings)
         self._failures = 0
+        self._tables_ready = False
+        self._provisioned_columns: frozenset[str] | None = None
+        self._provision_failures = 0
+        self._provision_retry_at = 0.0
         self._provisioner: QuestDbProvisioner | None = None
         if settings.db_type is DbType.QUESTDB:
             target = self._target
@@ -136,8 +140,9 @@ class PushExporter:
 
     def _push_lines(self, lines: list[str]) -> None:
         """Blocking I/O only; runs in a worker thread with already built, immutable lines."""
-        if self._provisioner is not None:
+        if self._provisioner is not None and not self._tables_ready:
             self._provisioner.ensure_tables()  # symbol columns exist before the first line arrives
+            self._tables_ready = True
         for body in batches(lines):
             write(self._target, body)
 
@@ -146,11 +151,9 @@ class PushExporter:
         interval = float(self._settings.metrics_export_interval_seconds)
         try:
             # collect() reads loop-owned state (queues, budget, counters), so it stays on the loop.
-            lines = build_lines(self._exporter.collect(), self.measurement, time.time_ns())
+            samples = list(self._exporter.collect())
+            lines = build_lines(samples, self.measurement, time.time_ns())
             await asyncio.to_thread(self._push_lines, lines)
-            if self._provisioner is not None:
-                # Re-run every cycle: a new metric adds a DOUBLE column, and run() renames the view.
-                await asyncio.to_thread(self._provisioner.run)
         except PushError as exc:
             self._record_failure(str(exc))
             if not exc.retryable:
@@ -164,8 +167,35 @@ class PushExporter:
             self._failures = 0
             self._stats.export_success += 1
             self._stats.export_last_success_unix = time.time()
+            await self._provision(frozenset(name for name, _, _ in samples) | {k for _, t, _ in samples for k in t})
             return interval
         return min(interval * 2 ** min(self._failures, 8), max(interval, MAX_BACKOFF_SECONDS))
+
+    async def _provision(self, columns: frozenset[str]) -> None:
+        """Retention and rollup DDL after a stored write; its failures never taint the export.
+
+        Runs when the column set changed (a new metric adds a DOUBLE column and renames the view),
+        with its own backoff after a failure.
+        """
+        if self._provisioner is None or columns == self._provisioned_columns:
+            return
+        now = self._clock.monotonic()
+        if now < self._provision_retry_at:
+            return
+        try:
+            ready = await asyncio.to_thread(lambda: self._provisioner.run(ensure=False))
+        except Exception as exc:  # noqa: BLE001 - provisioning must never fail the export
+            self._provision_failures += 1
+            interval = float(self._settings.metrics_export_interval_seconds)
+            self._provision_retry_at = now + min(
+                interval * 2 ** min(self._provision_failures, 8), max(interval, MAX_BACKOFF_SECONDS)
+            )
+            if self._provision_failures & (self._provision_failures - 1) == 0:
+                log.warning("QuestDB provisioning failed (attempt %d): %s", self._provision_failures, exc)
+            return
+        self._provision_failures = 0
+        if ready:
+            self._provisioned_columns = columns
 
     def _record_failure(self, message: str) -> None:
         self._failures += 1

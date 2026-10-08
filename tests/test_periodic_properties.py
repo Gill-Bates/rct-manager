@@ -15,9 +15,10 @@ from app.observability.names import prometheus_name
 from app.protocol.frames import Frame
 from app.protocol.types import Command, DataType
 from app.protocol.values import encode_value
-from app.scheduling.periodic import PAS_PERIOD_OBJECT_ID, PeriodicManager
+from app.scheduling.periodic import PAS_PERIOD_OBJECT_ID, RETRY_BASE_SECONDS, PeriodicManager
 from app.scheduling.serializer import AccessSerializer
 from app.transport.endpoint import EndpointConfig, TransportEndpoint
+from app.transport.types import TransactionOrigin, TransactionRequest, make_frame
 from tests.api_helpers import make_settings, running_app
 from tests.conftest import AutoClock
 from tests.fakes import FakeNetwork
@@ -160,6 +161,32 @@ def test_concurrent_ensure_runs_one_setup() -> None:
         return net
 
     assert _pas_writes(asyncio.run(scenario())) == 1
+
+
+def test_reconnect_after_outage_ends_the_long_setup_backoff() -> None:
+    """A lost connection that comes back must not wait out the grown retry delay (up to 300 s)."""
+
+    async def scenario():
+        clock = AutoClock()
+        net = FakeNetwork(clock)
+        manager = _manager(clock, net, [0x1111])
+        net.fail_connects = 10**6  # device unreachable: setup fails and the backoff grows
+        while manager._consecutive_failures < 6:  # loop ticks of 10 s, like the periodic loop
+            await manager.ensure()
+            clock.advance(10)
+        assert not manager.available and manager._retry_delay > RETRY_BASE_SECONDS * 4
+        failed_at = clock.monotonic()
+        net.fail_connects = 0  # device is back; any read re-establishes the connection
+        read = TransactionRequest(
+            manager._key, make_frame(None, Command.READ, 0x1111), TransactionOrigin.CALLER, "read", clock.now()
+        )
+        assert (await manager._endpoint.execute(read)).ok
+        clock.advance(RETRY_BASE_SECONDS + 1)
+        return await manager.ensure(), clock.monotonic() - failed_at
+
+    ok, elapsed = asyncio.run(scenario())
+    assert ok
+    assert elapsed < 60
 
 
 async def test_values_reach_metrics_after_setup_against_a_silent_write_device() -> None:
