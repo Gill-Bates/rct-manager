@@ -174,6 +174,8 @@ async def test_admin_writes_need_admin_session_or_read_write_pat(tmp_path, auth_
         for key, value in (
             ("auth_required", not auth_required), ("trusted_proxies", ["10.0.0.0/8"]),
             ("enable_write_support", True), ("docs_public", True), ("devices", [{"host": "192.0.2.99", "port": 8899}]),
+            ("influxdb_hostname", "attacker.example"), ("questdb_hostname", "attacker.example"),
+            ("influxdb_token", "stolen"), ("questdb_password", "stolen"), ("db_type", "questdb"),
         ):
             denied = await client.put("/admin/api/settings", json={key: value}, headers=bearer(write_pat))
             assert denied.status_code == 403, key

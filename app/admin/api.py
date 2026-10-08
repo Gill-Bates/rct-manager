@@ -104,6 +104,15 @@ _SESSION_ONLY_SETTINGS = frozenset({
     "auth_required", "trusted_proxies", "bind_address", "behind_reverse_proxy", "forwarded_header",
     "metrics_require_token", "metrics_trusted_sources", "enable_write_support", "devices", "docs_public",
 })
+# Export destination and credential keys: a PAT that could change them could send metrics (and the
+# stored credentials) to an attacker-controlled host. Unlike _SESSION_ONLY_SETTINGS they stay visible
+# to a PAT on read.
+_EXPORT_TARGET_SETTINGS = frozenset({
+    "db_type", "influxdb_hostname", "influxdb_port", "influxdb_tls_enabled", "influxdb_verify_tls",
+    "influxdb_allow_plaintext_credentials", "influxdb_organization", "influxdb_bucket", "influxdb_token",
+    "questdb_hostname", "questdb_port", "questdb_tls_enabled", "questdb_verify_tls",
+    "questdb_allow_plaintext_credentials", "questdb_username", "questdb_password",
+})
 _SETTINGS_LOCK = threading.Lock()
 # Serializes live device reconfigurations without holding _SETTINGS_LOCK while they run.
 _RECONFIGURE_LOCK = threading.Lock()
@@ -541,6 +550,12 @@ def _changed_session_only(request: Request, body: dict[str, Any]) -> set[str]:
     """
     current = _settings_view(request.app.state.admin_desired_settings)
     changed = {key for key in body if key in _SESSION_ONLY_SETTINGS and current.get(key) != body[key]}
+    # Secrets are never in the view, so any non-null value counts as a change.
+    changed |= {key for key in body if key in _SECRET_EDITABLE and body[key] is not None}
+    changed |= {
+        key for key in body
+        if key in _EXPORT_TARGET_SETTINGS - _SECRET_EDITABLE and current.get(key) != body[key]
+    }
     # Switching the scrape endpoint on is a privilege change only where it would serve metrics
     # without a token (token requirement off, or trusted scrape sources configured). Switching it
     # off, or on behind the token requirement, stays available to a PAT.

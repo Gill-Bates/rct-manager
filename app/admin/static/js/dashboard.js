@@ -77,7 +77,7 @@
         }
       }
     } finally {
-      grid.commit();
+      grid.batchUpdate(false); // commits the batch (GridStack has no separate commit() call)
     }
   }
 
@@ -140,7 +140,7 @@
         el.classList.add('d-none');
       }
     } finally {
-      grid.commit();
+      grid.batchUpdate(false);
     }
     widgetState.set(id, { ...state, visible });
     renderAddWidgetList();
@@ -212,4 +212,5 @@
   }
 
   window.RCTDashboard = Object.freeze({ initLayout });
+  document.dispatchEvent(new CustomEvent('rct:dashboard-ready'));
 })();

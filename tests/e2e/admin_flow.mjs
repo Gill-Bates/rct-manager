@@ -289,7 +289,7 @@ await page.route('**/admin/api/devices', async (route) => {
 await page.reload();
 await page.waitForFunction(() => document.getElementById('grid-power')?.textContent.includes('250')
   && [...document.querySelectorAll('.device-chip')].some((badge) => badge.textContent.trim().length > 0));
-const staleUi = await page.locator('#dashboard-kpis, .device-visual').evaluateAll((nodes) =>
+const staleUi = await page.locator('#dashboard-grid, .device-visual').evaluateAll((nodes) =>
   nodes.map((node) => `${node.textContent} ${[...node.querySelectorAll('[title]')].map((child) => child.title).join(' ')}`).join(' '));
 check('stale API readings display values without stale labels or titles', staleReadings > 0 && !/\bstale\b/i.test(staleUi), `stale readings: ${staleReadings}; UI: ${staleUi}`);
 await page.unroute('**/admin/api/devices');
@@ -1599,6 +1599,78 @@ await shot('prometheus-master-toggle-on');
   await energyContext.close();
   spawned.proc.kill('SIGTERM');
 }
+
+// 6a. GridStack dashboard layout: edit mode, move+resize a widget, autosave, reload, reset.
+await page.goto(base + '/ui/dashboard');
+await page.waitForSelector('#dashboard-grid .grid-stack-item');
+const editToggle = page.locator('#dashboard-edit-toggle');
+check('dashboard starts in view mode with the drag handle hidden',
+  (await editToggle.getAttribute('aria-pressed')) === 'false'
+  && !(await page.locator('.dashboard-widget-header').first().isVisible()));
+await editToggle.click();
+await page.waitForSelector('.dashboard-editing');
+check('edit mode shows Add widget, Reset layout and Done',
+  await page.locator('#dashboard-add-widget:visible').count() === 1
+  && await page.locator('#dashboard-reset-layout:visible').count() === 1
+  && await page.locator('#dashboard-edit-done:visible').count() === 1);
+
+let dashboardLayoutPut = null;
+await page.route('**/admin/api/dashboard-layout', async (route) => {
+  if (route.request().method() === 'PUT') dashboardLayoutPut = route.request().postDataJSON();
+  await route.continue();
+});
+// GridStack's own API moves/resizes the widget (equivalent to a completed drag/resize) and fires
+// the 'change' event dashboard.js listens on, which triggers the debounced autosave.
+const movedPosition = await page.evaluate(() => {
+  const grid = document.querySelector('#dashboard-grid').gridstack;
+  const el = document.querySelector('.grid-stack-item[data-widget-id="pv-power"]');
+  grid.update(el, { x: 6, y: 6, w: 4, h: 3 });
+  const node = el.gridstackNode;
+  return { x: node.x, y: node.y, w: node.w, h: node.h };
+});
+await sleep(700); // past the 300-500ms autosave debounce
+check('moving/resizing a widget autosaves the layout via PUT /admin/api/dashboard-layout',
+  Boolean(dashboardLayoutPut) && dashboardLayoutPut.widgets.some((w) =>
+    w.id === 'pv-power' && w.x === movedPosition.x && w.y === movedPosition.y
+    && w.w === movedPosition.w && w.h === movedPosition.h),
+  JSON.stringify({ movedPosition, dashboardLayoutPut }));
+check('autosave shows the "Dashboard layout saved." toast once', (await toastText()).includes('Dashboard layout saved.'));
+await page.unroute('**/admin/api/dashboard-layout');
+
+await page.reload();
+await page.waitForSelector('#dashboard-grid .grid-stack-item');
+const afterReload = await page.evaluate(() => {
+  const node = document.querySelector('.grid-stack-item[data-widget-id="pv-power"]').gridstackNode;
+  return { x: node.x, y: node.y, w: node.w, h: node.h };
+});
+check('the moved/resized position persists after a browser reload',
+  afterReload.x === movedPosition.x && afterReload.y === movedPosition.y
+  && afterReload.w === movedPosition.w && afterReload.h === movedPosition.h,
+  JSON.stringify(afterReload));
+
+await editToggle.click();
+await page.waitForSelector('.dashboard-editing');
+dialogAnswer = true; // "Restore default layout?" confirm()
+await page.locator('#dashboard-reset-layout').click();
+await sleep(400);
+check('"Restore default layout?" confirmation was shown', dialogs.includes('Restore default layout?'));
+const afterReset = await page.evaluate(() => {
+  const node = document.querySelector('.grid-stack-item[data-widget-id="pv-power"]').gridstackNode;
+  return { x: node.x, y: node.y, w: node.w, h: node.h };
+});
+check('reset layout restores the default pv-power position immediately',
+  afterReset.x === 0 && afterReset.y === 2 && afterReset.w === 3 && afterReset.h === 2, JSON.stringify(afterReset));
+await page.reload();
+await page.waitForSelector('#dashboard-grid .grid-stack-item');
+const afterResetReload = await page.evaluate(() => {
+  const node = document.querySelector('.grid-stack-item[data-widget-id="pv-power"]').gridstackNode;
+  return { x: node.x, y: node.y, w: node.w, h: node.h };
+});
+check('default position survives a reload after reset',
+  afterResetReload.x === 0 && afterResetReload.y === 2 && afterResetReload.w === 3 && afterResetReload.h === 2,
+  JSON.stringify(afterResetReload));
+check('dashboard GridStack flow raised no script errors', problems.filter((p) => /dashboard\.js|gridstack/i.test(p)).length === 0,
+  problems.filter((p) => /dashboard\.js|gridstack/i.test(p)).join('; '));
 
 // 7. restart persistence
 await stop(server);

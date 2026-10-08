@@ -97,9 +97,15 @@
       const detail = data.detail;
       // dispatch_capability_conflict (409) carries a structured detail {detail, operation_id, mode}
       // instead of a plain string; naming the blocking operation is what makes the refusal useful.
-      const error = (detail && typeof detail === 'object')
-        ? new Error(`${detail.detail || 'Conflict.'} (operation ${detail.operation_id}, mode ${detail.mode})`)
-        : new Error(typeof detail === 'string' ? detail : `Request failed (${response.status}).`);
+      // FastAPI's 422 detail is an array of {msg, ...}; only the documented conflict shape is formatted
+      // as operation/mode.
+      let message = `Request failed (${response.status}).`;
+      if (typeof detail === 'string') message = detail;
+      else if (Array.isArray(detail) && typeof detail[0]?.msg === 'string') message = detail[0].msg;
+      else if (detail && typeof detail === 'object' && 'operation_id' in detail && 'mode' in detail) {
+        message = `${detail.detail || 'Conflict.'} (operation ${detail.operation_id}, mode ${detail.mode})`;
+      }
+      const error = new Error(message);
       error.status = response.status; // callers (e.g. the Energy poll) branch on 503 vs transient
       throw error;
     }
@@ -3369,6 +3375,16 @@
     });
   }
 
+  // dashboard.js is a separate deferred script; wait for its ready event instead of assuming it ran.
+  function startDashboardLayout() {
+    if (window.RCTDashboard) return window.RCTDashboard.initLayout();
+    return new Promise((resolve, reject) => {
+      document.addEventListener('rct:dashboard-ready', () => {
+        window.RCTDashboard.initLayout().then(resolve, reject);
+      }, { once: true });
+    });
+  }
+
   async function bootstrap() {
     if (['login', 'change-password'].includes(page)) {
       // The handler is already registered; the session only fetches the CSRF token up front.
@@ -3380,9 +3396,9 @@
       await session();
       if (page === 'dashboard') {
         initDashboardPolling();
-        // dashboard.js (loaded after this file) owns the GridStack layout; it is independent of
-        // the polling above and must not delay or alter it.
-        await window.RCTDashboard?.initLayout();
+        // dashboard.js owns the GridStack layout; it is independent of the polling above and of
+        // data loading, so it is started without awaiting it.
+        startDashboardLayout().catch((error) => toast(messageFrom(error), 'danger'));
         await Promise.all([loadDashboard(), loadMetricCount(), initSettings()]);
       }
       else if (page === 'tokens') initTokens();

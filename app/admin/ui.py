@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -37,6 +37,9 @@ _HEADERS = {
 
 class _AdminStaticFiles(StaticFiles):
     async def get_response(self, path, scope):
+        # Dotfiles (e.g. local tool state such as .omc/) are never public.
+        if any(part.startswith(".") for part in path.replace("\\", "/").split("/")):
+            raise HTTPException(404)
         response = await super().get_response(path, scope)
         response.headers.update(_HEADERS)
         return response

@@ -343,7 +343,11 @@ class AdminStore:
             row = db.execute("SELECT * FROM pats WHERE digest=?", (self._pat_digest(sha256),)).fetchone()
         if row is None:
             return None
-        record = self._decode(row["id"], row["encrypted"])
+        try:
+            record = self._decode(row["id"], row["encrypted"])
+        except ValueError:
+            log.warning("Rejected an unreadable token record")  # tampered or encrypted under another HMAC_SECRET
+            return None
         if record["expires_at"] and datetime.fromisoformat(record["expires_at"]) <= datetime.now(UTC):
             return None
         self._note_use(record)

@@ -705,7 +705,7 @@ def test_dashboard_js_reuses_the_shared_api_helper_and_does_not_touch_polling():
     admin_js = JS.read_text(encoding="utf-8")
     assert "const { api, toast, messageFrom } = window.RCTAdmin;" in js
     assert "window.RCTAdmin = Object.freeze({ api, toast, messageFrom, element });" in admin_js
-    assert "window.RCTDashboard?.initLayout()" in admin_js
+    assert "startDashboardLayout()" in admin_js and "rct:dashboard-ready" in js
     assert "initDashboardPolling()" in admin_js
     # dashboard.js never reimplements the polling helpers it must leave alone.
     for forbidden in ("function loadDashboard", "function initDashboardPolling", "setInterval"):
