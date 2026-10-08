@@ -82,6 +82,15 @@
     opacity: .45;
 }
 
+/* Inset the corner grip from the tile's rounded edge and keep a 24px touch target. */
+.dashboard-editing.dashboard-grid .grid-stack-item > .ui-resizable-se {
+    width: 24px;
+    height: 24px;
+    right: calc(var(--gs-item-margin-right, 10px) + 6px);
+    bottom: calc(var(--gs-item-margin-bottom, 10px) + 6px);
+    background-size: 16px 16px;
+}
+
 .dashboard-editing .ui-resizable-handle:hover {
     opacity: 1;
 }

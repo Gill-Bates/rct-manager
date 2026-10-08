@@ -11,7 +11,7 @@
 
   if (document.body.dataset.page !== 'dashboard') return;
 
-  const { api, toast, messageFrom, confirmAction, element } = window.RCTAdmin;
+  const { api, toast, messageFrom, confirmAction } = window.RCTAdmin;
   const $ = (id) => document.getElementById(id);
 
   // Mirrors app/admin/api.py's _DASHBOARD_WIDGETS allowlist and its default layout (order is the
@@ -55,7 +55,7 @@
         byId.set(widget.id, widget); // unknown ids are dropped below: only DEFAULT_LAYOUT ids are read
       }
     }
-    return DEFAULT_LAYOUT.map((def) => {
+    return separateOverlaps(DEFAULT_LAYOUT.map((def) => {
       const saved = byId.get(def.id);
       if (!saved) return { id: def.id, x: def.x, y: def.y, w: def.w, h: def.h, visible: true };
       const inRange = (value, max) => Number.isInteger(value) && value >= 0 && value <= max;
@@ -64,7 +64,22 @@
         Number.isInteger(saved.h) && saved.h >= 1 && saved.h <= 100 && saved.x + saved.w <= 12;
       if (!valid) return { id: def.id, x: def.x, y: def.y, w: def.w, h: def.h, visible: true };
       return { id: def.id, x: saved.x, y: saved.y, w: saved.w, h: saved.h, visible: saved.visible !== false };
-    });
+    }));
+  }
+
+  // A stored layout can hold overlapping boxes (e.g. a stale push). Applying it widget by widget
+  // would let the last one shove the earlier ones below it, so the upper/left box keeps its place
+  // and the later one moves down instead.
+  function separateOverlaps(layout) {
+    const placed = [];
+    const overlaps = (a, b) => a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
+    const byPosition = layout.filter((entry) => entry.visible).sort((a, b) => a.y - b.y || a.x - b.x);
+    for (const entry of byPosition) {
+      let blocker;
+      while ((blocker = placed.find((other) => overlaps(entry, other)))) entry.y = blocker.y + blocker.h;
+      placed.push(entry);
+    }
+    return layout;
   }
 
   function applyLayout(layout) {
@@ -153,11 +168,24 @@
 
   function scheduleSave() {
     clearTimeout(saveTimer);
-    saveTimer = setTimeout(saveLayout, SAVE_DEBOUNCE_MS);
+    saveTimer = setTimeout(() => { saveTimer = null; saveLayout(); }, SAVE_DEBOUNCE_MS);
+  }
+
+  // Change events can report a position before GridStack's final compaction or miss pushed
+  // neighbours, so the saved layout is read from the settled grid, not from the event deltas.
+  function syncStateFromGrid() {
+    for (const def of DEFAULT_LAYOUT) {
+      const node = widgetElement(def.id)?.gridstackNode;
+      const prev = widgetState.get(def.id);
+      if (!node || !prev || prev.visible === false) continue;
+      const h = fitRows.get(def.id) === node.h ? prev.h : node.h;
+      widgetState.set(def.id, { id: def.id, x: node.x, y: node.y, w: node.w, h, visible: true });
+    }
   }
 
   // Only the known structured props travel to the server; nothing from the DOM/HTML is ever sent.
   async function saveLayout() {
+    syncStateFromGrid();
     const widgets = DEFAULT_LAYOUT.map((def) => {
       const state = widgetState.get(def.id);
       return { id: def.id, x: state.x, y: state.y, w: state.w, h: state.h, visible: state.visible };
@@ -186,57 +214,6 @@
   }
 
   let editingNow = false;
-
-  // Keyboard alternative to dragging: one menu per widget, moving and resizing through the GridStack API.
-  const LAYOUT_ACTIONS = [
-    { label: 'Move up', change: (n) => ({ y: n.y - 1 }) },
-    { label: 'Move down', change: (n) => ({ y: n.y + 1 }) },
-    { label: 'Move left', change: (n) => ({ x: n.x - 1 }) },
-    { label: 'Move right', change: (n) => ({ x: n.x + 1 }) },
-    { label: 'Make narrower', change: (n) => ({ w: n.w - 1 }) },
-    { label: 'Make wider', change: (n) => ({ w: n.w + 1 }) },
-    { label: 'Make shorter', change: (n) => ({ h: n.h - 1 }), fixedHeightOnly: true },
-    { label: 'Make taller', change: (n) => ({ h: n.h + 1 }), fixedHeightOnly: true },
-  ];
-
-  function applyLayoutAction(el, action) {
-    const node = el.gridstackNode;
-    if (!node) return;
-    const next = { x: node.x, y: node.y, w: node.w, h: node.h, ...action.change(node) };
-    // Out-of-range requests (left edge, width 12, ...) are ignored instead of clamped silently.
-    if (next.x < 0 || next.y < 0 || next.w < 1 || next.h < 1 || next.x + next.w > 12) return;
-    grid.update(el, next);
-  }
-
-  function buildLayoutMenus() {
-    for (const def of DEFAULT_LAYOUT) {
-      const header = widgetElement(def.id)?.querySelector('.dashboard-widget-header');
-      if (!header) continue;
-      const menu = element('div', 'dropdown dashboard-layout-menu');
-      const toggle = element('button', 'btn btn-sm btn-outline-secondary');
-      toggle.type = 'button';
-      toggle.dataset.bsToggle = 'dropdown';
-      toggle.dataset.bsStrategy = 'fixed';
-      toggle.setAttribute('aria-expanded', 'false');
-      toggle.setAttribute('aria-label', `Layout actions: ${def.label}`);
-      const icon = element('span', 'material-icons', 'open_with');
-      icon.setAttribute('aria-hidden', 'true');
-      toggle.append(icon);
-      const list = element('ul', 'dropdown-menu dropdown-menu-end');
-      for (const action of LAYOUT_ACTIONS) {
-        if (action.fixedHeightOnly && def.id === AUTO_HEIGHT_ID) continue; // its height follows the content
-        const button = element('button', 'dropdown-item', action.label);
-        button.type = 'button';
-        button.setAttribute('aria-label', `${action.label}: ${def.label}`);
-        button.addEventListener('click', () => applyLayoutAction(widgetElement(def.id), action));
-        const item = element('li');
-        item.append(button);
-        list.append(item);
-      }
-      menu.append(toggle, list);
-      header.prepend(menu);
-    }
-  }
 
   function setEditing(editing) {
     editingNow = editing;
@@ -341,7 +318,6 @@
     }
     applyLayout(mergeWithDefault(stored));
     renderAddWidgetList();
-    buildLayoutMenus();
 
     fitLayout();
     observeContent();
@@ -349,7 +325,10 @@
     grid.on('change', onGridChange);
     grid.on('dragstop resizestop', scheduleFit);
     $('dashboard-edit-toggle').addEventListener('click', () => setEditing(true));
-    $('dashboard-edit-done').addEventListener('click', () => setEditing(false));
+    $('dashboard-edit-done').addEventListener('click', () => {
+      setEditing(false);
+      if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; saveLayout(); } // an immediate reload must not lose the last move
+    });
     // Positions are ignored by the stacked phone layout, so editing ends when the viewport shrinks to it.
     window.matchMedia(MOBILE_QUERY).addEventListener('change', (event) => { if (event.matches && editingNow) setEditing(false); });
     // Deep link from the Inverters page.

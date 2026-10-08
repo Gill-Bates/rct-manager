@@ -215,6 +215,23 @@ await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')))
 await page.waitForTimeout(300);
 check('the dashboard poll makes no energy/devices request', dashboardNetworkLegs.length === 0, dashboardNetworkLegs.join(','));
 
+// A stored layout with overlapping boxes (tiles at y=3 under the inverter widget at y=4) must reload
+// with the tiles where they were placed and the inverter widget moved below them, never the reverse.
+const overlapping = [
+  ['device-count', 0, 0, 2, 2], ['connected-count', 2, 0, 2, 2], ['pv-power', 4, 0, 2, 2], ['metric-count', 6, 0, 2, 2],
+  ['grid-power', 8, 0, 2, 2], ['tsdb-status', 10, 0, 2, 2], ['battery-soc', 0, 3, 2, 2], ['house-power', 2, 3, 2, 2], ['devices', 0, 4, 12, 8],
+].map(([id, x, y, w, h]) => ({ id, x, y, w, h, visible: true }));
+await page.evaluate((widgets) => window.RCTAdmin.api('dashboard-layout', { method: 'PUT', body: JSON.stringify({ version: 1, widgets }) }), overlapping);
+await page.reload();
+await page.waitForFunction(() => document.querySelector('#dashboard-grid .grid-stack-item[data-widget-id="devices"]')?.gridstackNode);
+const reloadedGrid = await page.evaluate(() => Object.fromEntries([...document.querySelectorAll('#dashboard-grid .grid-stack-item[data-widget-id]')]
+  .map((el) => [el.dataset.widgetId, { x: el.gridstackNode.x, y: el.gridstackNode.y, h: el.gridstackNode.h }])));
+check('reload keeps the Battery level and House consumption tiles above the inverter widget',
+  ['battery-soc', 'house-power'].every((id) => reloadedGrid[id].y + reloadedGrid[id].h <= reloadedGrid.devices.y)
+  && reloadedGrid['battery-soc'].x === 0 && reloadedGrid['house-power'].x === 2, JSON.stringify(reloadedGrid));
+await page.evaluate(() => window.RCTAdmin.api('dashboard-layout', { method: 'DELETE' }));
+await page.reload();
+
 // The inverter image sits beside the power card's readings; the battery tower is now a stack of
 // top + N middle + bottom slices (app/admin/static/img/battery_{top,middle,bottom}.svg) beside the
 // battery card's readings, so the device no longer carries exactly 2 images.
