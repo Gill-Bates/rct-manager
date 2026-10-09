@@ -421,6 +421,27 @@ def test_concurrent_store_writes_do_not_lose_updates(tmp_path):
     assert all(saved[k] == v for c in changes for k, v in c.items())
 
 
+def test_concurrent_token_creation_respects_the_cap(tmp_path):
+    store = AdminStore(tmp_path / "rct.db", "x" * 48)
+    store.initialize()
+    for index in range(31):
+        store.create_token(f"t{index}", "read", None)
+    outcomes: list[str] = []
+
+    def work() -> None:
+        try:
+            store.create_token("race", "read", None)
+            outcomes.append("created")
+        except ValueError:
+            outcomes.append("refused")
+
+    threads = [threading.Thread(target=work) for _ in range(8)]
+    [t.start() for t in threads]
+    [t.join() for t in threads]
+    assert outcomes.count("created") == 1
+    assert len(store.list_tokens()) == 32
+
+
 def test_legacy_admin_secret_is_used_with_deprecation_warning(tmp_path, monkeypatch, caplog):
     from app.__main__ import _ensure_hmac_secret
     from app.config import load_settings

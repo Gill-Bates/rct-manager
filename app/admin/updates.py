@@ -33,12 +33,27 @@ _lock = threading.Lock()  # guards the cache state only
 _fetch_lock = threading.Lock()  # serializes the network request
 
 
+# PEP 440 style pre-release markers; rank orders them below the final release of the same numbers.
+_PRERELEASE_RANK = {"dev": -1, "a": 0, "alpha": 0, "b": 1, "beta": 1, "c": 2, "rc": 2, "pre": 2, "preview": 2}
+_VERSION_RE = re.compile(
+    r"^v?(\d+(?:\.\d+)*)(?:[-._]?(dev|alpha|a|beta|b|preview|pre|rc|c)[-._]?(\d+)?)?", re.IGNORECASE
+)
+
+
 def _version_parts(value: str) -> tuple[int, ...]:
-    match = re.match(r"^v?(\d+(?:\.\d+)*)", value, re.IGNORECASE)
+    match = _VERSION_RE.match(value)
     if match is None:
         return (0,)
     parts = tuple(int(part) for part in match.group(1).split("."))
     return parts + (0,) * max(0, 3 - len(parts))
+
+
+def _version_key(value: str) -> tuple[tuple[int, ...], int, int]:
+    """Sort key where ``2.0.0rc1`` < ``2.0.0``; a final release outranks every pre-release."""
+    match = _VERSION_RE.match(value)
+    if match is None or match.group(2) is None:
+        return _version_parts(value), 3, 0
+    return _version_parts(value), _PRERELEASE_RANK[match.group(2).lower()], int(match.group(3) or 0)
 
 
 def _cached(force: bool) -> dict | None:
@@ -94,7 +109,7 @@ def _fetch() -> dict:
         result["latest_version"] = latest
         result["release_url"] = _release_url(data.get("html_url"))
         result["published_at"] = data.get("published_at")
-        result["update_available"] = _version_parts(latest) > _version_parts(__version__)
+        result["update_available"] = _version_key(latest) > _version_key(__version__)
     except HTTPError as exc:
         result["error"] = f"GitHub API error: {exc.code}"
     except (URLError, TimeoutError) as exc:

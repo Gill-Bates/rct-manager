@@ -889,6 +889,53 @@ async def test_admin_api_sets_device_limits_and_the_engineering_switch(tmp_path:
         assert harness.runtime.dispatch.device_limits("main").engineering_mode is True
 
 
+async def test_admin_api_rejects_non_finite_or_absurd_device_limits(tmp_path: Path) -> None:
+    async with _admin_harness(tmp_path) as (harness, headers):
+        for charge in ("Infinity", "NaN", "1e12"):
+            resp = await harness.client.put(
+                "/admin/api/dispatch/devices/main",
+                headers={**headers, "Content-Type": "application/json"},
+                content=f'{{"max_charge_power_w": {charge}, "max_discharge_power_w": 2500}}',
+            )
+            assert resp.status_code == 422, (charge, resp.text)
+
+
+async def test_capability_get_returns_the_evidence_a_put_accepts(tmp_path: Path) -> None:
+    body = {
+        "status": "unverified", "soc_strategy_external_code": 2, "enum_byte_width": 1, "bool_byte_width": 2,
+        "write_frame_layout_verified": True, "apply_sequence_verified": True, "sequence_order_relevant": True,
+        "soc_target_unit": "percent", "note": "bench evidence",
+    }
+    url = "/admin/api/dispatch/devices/main/capabilities"
+    async with _admin_harness(tmp_path) as (harness, headers):
+        assert (await harness.client.put(f"{url}/write_path_convention", headers=headers, json=body)).status_code == 200
+        listed = {row["name"]: row for row in (await harness.client.get(url, headers=headers)).json()}
+        row = listed["write_path_convention"]
+        assert {key: row[key] for key in body} == body
+        # GET -> edit -> PUT: server-managed fields are dropped, nulls of ungoverned fields are tolerated.
+        edited = {k: v for k, v in row.items() if k not in {"device_id", "name", "verified_at", "verified_by"}}
+        edited["bool_byte_width"] = 4
+        edited["battery_discharge_positive"] = None
+        resp = await harness.client.put(f"{url}/write_path_convention", headers=headers, json=edited)
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["bool_byte_width"] == 4
+
+
+async def test_capability_optional_fields_belong_to_their_own_capability(tmp_path: Path) -> None:
+    url = "/admin/api/dispatch/devices/main/capabilities"
+    async with _admin_harness(tmp_path) as (harness, headers):
+        wrong = await harness.client.put(
+            f"{url}/write_path_convention", headers=headers, json={"status": "unverified", "volatile": True}
+        )
+        assert wrong.status_code == 422
+        right = await harness.client.put(
+            f"{url}/setpoint_volatility", headers=headers,
+            json={"status": "unverified", "volatile": True, "refresh_interval_seconds": 30},
+        )
+        assert right.status_code == 200, right.text
+        assert (right.json()["volatile"], right.json()["refresh_interval_seconds"]) == (True, 30.0)
+
+
 def _admin_settings(tmp_path: Path, admin_path: Path, **overrides):
     from tests.api_helpers import dispatch_fixtures, make_settings
 

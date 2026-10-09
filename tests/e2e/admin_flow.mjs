@@ -521,6 +521,13 @@ const towerGeometry = async () => {
   await page.waitForTimeout(250);
   return (await readLayout()).towers;
 };
+// The dashboard keeps a tower's last trusted module count when a later answer is not 'ok' (resilience
+// by design), so a first-time anomaly/pending answer needs a view without that memory and a stored snapshot.
+const freshDashboardView = async () => {
+  await page.evaluate(() => localStorage.removeItem('rct.dashboard.snapshot'));
+  await page.reload();
+  await page.waitForSelector('.device-item .device-battery-stack, .device-item .device-subcard');
+};
 // Graphic contract (owner-mandated): the drawn tower is 1 top cap + 1..BATTERY_TOWER_MAX_SEGMENTS
 // (5) battery segments + 1 bottom cap. 2..5 modules render every module; the hardware maximum of
 // 6 modules (RCT_MAX_MODULES_PER_TOWER) is drawn with 5 segments and the note keeps the true count.
@@ -575,6 +582,7 @@ for (const [name, slots] of [['seven populated slots', [0, 1, 2, 3, 4, 5, 6]], [
     battery.module_count_status = 'anomaly';
     battery.populated_module_slots = slots;
   }));
+  await freshDashboardView();
   const towers = await towerGeometry();
   await page.unroute('**/admin/api/devices');
   check(`${name} renders a diagnostic note instead of a tower`,
@@ -590,6 +598,7 @@ await patchBatteries((batteries) => batteries.forEach((battery) => {
   battery.module_count_status = 'pending';
   battery.populated_module_slots = [];
 }));
+await freshDashboardView();
 const pendingTowers = await towerGeometry();
 await page.unroute('**/admin/api/devices');
 check('a mid-scan tower (module_count_status pending) renders a neutral "detecting modules" placeholder, not a one-module tower',
@@ -784,8 +793,17 @@ check('a second consecutive automatic failure does not stack another toast', dup
 // Slide-out: dismissing the toast marks it leaving, moves it back to the right edge, then removes it.
 const leavingToast = page.locator('#toast-region .alert-danger', { hasText: 'rate or the failed-authentication limit' }).first();
 await leavingToast.locator('.btn-close').click();
-const leaveState = await leavingToast.evaluate((node) => ({ leaving: node.classList.contains('is-leaving'), transform: getComputedStyle(node).transform }))
-  .catch(() => null);
+// The transform only starts moving on the next frame, so wait for the real condition instead of sampling at click time.
+const leaveState = await leavingToast.evaluate((node) => new Promise((resolve) => {
+  const read = () => ({ leaving: node.classList.contains('is-leaving'), transform: getComputedStyle(node).transform });
+  const deadline = performance.now() + 1500;
+  const poll = () => {
+    const state = read();
+    const x = Number(state.transform.match(/matrix\(([^)]*)\)/)?.[1].split(',')[4] ?? 0);
+    if (x > 0 || performance.now() > deadline) resolve(state); else requestAnimationFrame(poll);
+  };
+  poll();
+})).catch(() => null);
 check('dismissed toast is marked leaving and slides out to the right', Boolean(leaveState?.leaving && settledX(leaveState.transform) > 0), JSON.stringify(leaveState));
 await page.waitForFunction(() => ![...document.querySelectorAll('#toast-region .alert-danger')].some((n) => n.textContent.includes('rate or the failed-authentication limit')), null, { timeout: 2000 });
 await page.unroute('**/admin/api/devices');
@@ -959,6 +977,7 @@ async function stackedGeometry() {
     return { zoom, token, gaps, gridGap, blocks: blocks.length, tiles: tiles.length, overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth };
   });
 }
+const stackedLoopStart = problems.length;
 for (const scheme of ['light', 'dark']) {
   await page.evaluate((value) => localStorage.setItem('rct-admin-theme', value), scheme);
   for (const width of [1280, 390]) {
@@ -1020,6 +1039,25 @@ for (const scheme of ['light', 'dark']) {
     if (width >= 768) check(`the primary Add action is top right on both pages ${label}`, near(pm.addFromRight, inv.addFromRight) && pm.addFromRight < 40, JSON.stringify([pm.addFromRight, inv.addFromRight]));
   }
 }
+// This server runs without the Energy Manager, so the /ui/energy visits above deliberately get its 503.
+scrubExpected(stackedLoopStart, expectedStatus(`${base}/admin/api/energy/devices`, 503));
+// Prove this measurement catches a single-card spacing regression, then restore the page.
+await page.goto(base + '/ui/prometheus');
+await page.waitForSelector('#exposed-list tr', { state: 'attached' });
+// A constructable stylesheet is not blocked by the page's style-src CSP, unlike an injected <style> tag.
+await page.evaluate(() => {
+  const sheet = new CSSStyleSheet();
+  sheet.replaceSync('#main-content > .card { margin-top: calc(var(--rct-card-gap) + 7px) !important; }');
+  window.__gapMutation = sheet;
+  document.adoptedStyleSheets = [...document.adoptedStyleSheets, sheet];
+});
+const mutatedGap = await stackedGeometry();
+check('card gap measurement rejects a 7px margin mutation',
+  mutatedGap.gaps.some(({ gap }) => Math.abs(gap - mutatedGap.token) > GAP_TOLERANCE), JSON.stringify(mutatedGap.gaps));
+await page.evaluate(() => { document.adoptedStyleSheets = document.adoptedStyleSheets.filter((sheet) => sheet !== window.__gapMutation); });
+const restoredGap = await stackedGeometry();
+check('card gap measurement passes after the mutation is removed',
+  restoredGap.gaps.length > 0 && restoredGap.gaps.every(({ gap }) => Math.abs(gap - restoredGap.token) <= GAP_TOLERANCE), JSON.stringify(restoredGap.gaps));
 await page.evaluate(() => localStorage.setItem('rct-admin-theme', 'light'));
 await page.setViewportSize({ width: 1280, height: 800 });
 

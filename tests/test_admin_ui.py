@@ -223,6 +223,48 @@ def test_settings_grid_stretches_its_cards_on_every_page_including_tsdb():
     assert ".export-grid" not in css
 
 
+def test_admin_card_spacing_uses_one_token_and_sibling_rule():
+    css = (ADMIN_DIR / "static/css/admin.css").read_text(encoding="utf-8")
+    roots = re.findall(r":root\s*\{([^}]*)\}", css)
+    assert any(re.search(r"--rct-card-gap:\s*1\.25rem\s*;", root) for root in roots)
+    assert len(re.findall(r"--rct-card-gap\s*:", css)) == 1
+    assert re.search(
+        r"#main-content\s+\.page-heading\s*~\s*:is\(\.card,\s*\.settings-grid,\s*"
+        r"\.energy-grid,\s*#export-actions\),\s*#main-content\s+\.about-top-row\s*~\s*"
+        r"\.card\s*\{\s*margin-top:\s*var\(--rct-card-gap\);\s*\}", css,
+    )
+    for selector in ("settings-grid", "energy-grid"):
+        rule = re.search(rf"\.{selector}\s*\{{([^}}]*)\}}", css)
+        assert rule and re.search(r"\bgap:\s*var\(--rct-card-gap\)\s*;", rule.group(1))
+        assert len(re.findall(r"\bgap\s*:", rule.group(1))) == 1
+    about_row = re.search(r"#main-content\s+\.about-top-row\s*\{([^}]*)\}", css)
+    assert about_row
+    assert "--bs-gutter-x: var(--rct-card-gap);" in about_row.group(1)
+    assert "--bs-gutter-y: var(--rct-card-gap);" in about_row.group(1)
+
+
+@pytest.mark.parametrize("page", ("prometheus", "tokens", "inverters", "settings", "tsdb", "energy", "about"))
+def test_admin_top_level_cards_and_grids_have_no_margin_utilities(page):
+    html = (TEMPLATES / f"{page}.html").read_text(encoding="utf-8")
+    targets = re.findall(r'<(?:section|details|div)\b[^>]*\bclass="([^"]+)"', html)
+    targets = [classes for classes in targets if set(classes.split()) & {"card", "settings-grid", "energy-grid", "about-top-row"}]
+    assert targets, page
+    assert all(not ({"mt-3", "mt-4"} & set(classes.split())) for classes in targets), page
+
+
+def test_prometheus_and_inverters_share_parameter_table_markup():
+    macro = (TEMPLATES / "_param_table.html").read_text(encoding="utf-8")
+    for page, prefix in (("prometheus", "exposed"), ("inverters", "writable")):
+        html = (TEMPLATES / f"{page}.html").read_text(encoding="utf-8")
+        assert '{% from "_param_table.html" import param_table %}' in html
+        assert re.search(r'<div class="page-heading">', html)
+        assert re.search(rf"\{{\{{ param_table\('{prefix}',", html)
+    for shared_class in ("card", "param-card-head", "param-table-wrap", "param-table", "btn-group"):
+        assert re.search(rf"\b{shared_class}\b", macro)
+    for suffix in ("search", "list", "range", "prev", "next"):
+        assert f'{{{{ prefix }}}}-{suffix}' in macro
+
+
 def test_metrics_fields_hide_behind_the_master_toggle():
     js = (ADMIN_DIR / "static/js/admin.js").read_text(encoding="utf-8")
     assert "label: 'Enable Metrics Endpoint'" in js

@@ -108,14 +108,14 @@ _SESSION_ONLY_SETTINGS = frozenset({
 })
 # Export destination and credential keys: a PAT that could change them could send metrics (and the
 # stored credentials) to an attacker-controlled host. Unlike _SESSION_ONLY_SETTINGS they stay visible
-# to a PAT on read. The retention days are here too: a PAT must not be able to shorten them and
-# thereby make the TSDB drop history.
+# to a PAT on read. The retention days and the downsampling preset (which sets raw retention) are
+# here too: a PAT must not be able to shorten them and thereby make the TSDB drop history.
 _EXPORT_TARGET_SETTINGS = frozenset({
     "db_type", "influxdb_hostname", "influxdb_port", "influxdb_tls_enabled", "influxdb_verify_tls",
     "influxdb_allow_plaintext_credentials", "influxdb_organization", "influxdb_bucket", "influxdb_token",
     "questdb_hostname", "questdb_port", "questdb_tls_enabled", "questdb_verify_tls",
     "questdb_allow_plaintext_credentials", "questdb_username", "questdb_password",
-    "questdb_retention_days", "questdb_raw_retention_days",
+    "questdb_retention_days", "questdb_raw_retention_days", "questdb_downsampling",
 })
 _SETTINGS_LOCK = threading.Lock()
 # Serializes live device reconfigurations without holding _SETTINGS_LOCK while they run.
@@ -123,6 +123,11 @@ _RECONFIGURE_LOCK = threading.Lock()
 _PARAMETERS_LOCK = threading.Lock()
 _WRITE_DEFAULTS_APPLIED_KEY = "write_defaults_applied"
 _RECONFIGURE_TIMEOUT_SECONDS = 120.0
+_EXPORT_RESTART_TIMEOUT_SECONDS = 30.0
+# Guards the "one live transition at a time" check-and-schedule in _run_on_loop.
+_TRANSITION_GUARD = threading.Lock()
+# Settings keys whose change needs a live transition on the event loop.
+_TRANSITION_KEYS = _EXPORT_RESTART_KEYS | _DEVICE_LIVE_KEYS | {"enable_write_support"}
 log = logging.getLogger(__name__)
 
 
@@ -548,6 +553,8 @@ def _reconfigure_devices(request: Request) -> None:
     try:
         # The timeout only stops waiting: cancelling mid-teardown would be worse than a slow answer.
         _run_on_loop(request, "reconfigure_devices", _RECONFIGURE_TIMEOUT_SECONDS)
+    except _TransitionBusy as exc:
+        raise _ReconfigureFailed(409, _BUSY_DETAIL, rollback=False) from exc
     except ReconfigurationRejected as exc:
         raise _ReconfigureFailed(
             409,
@@ -584,9 +591,19 @@ def _restart_export(request: Request) -> None:
     """
     try:
         # A no-op until the lifespan has installed the hook on app.state.
-        _run_on_loop(request, "restart_export", 5.0)
-    except Exception:
+        _run_on_loop(request, "restart_export", _EXPORT_RESTART_TIMEOUT_SECONDS)
+    except _TransitionBusy as exc:
+        raise HTTPException(409, _BUSY_DETAIL) from exc
+    except TimeoutError as exc:
+        log.error("Restarting the metrics export did not finish within %.0f s", _EXPORT_RESTART_TIMEOUT_SECONDS)
+        raise HTTPException(
+            504, "The export settings are saved, but restarting the export is still in progress."
+        ) from exc
+    except Exception as exc:
         log.exception("Restarting the metrics export after a settings change failed")
+        raise HTTPException(
+            500, "The export settings are saved, but the export could not be restarted; the previous export may still be running."
+        ) from exc
 
 
 def _changed_session_only(request: Request, body: dict[str, Any]) -> set[str]:
@@ -596,8 +613,9 @@ def _changed_session_only(request: Request, body: dict[str, Any]) -> set[str]:
     """
     current = _settings_view(request.app.state.admin_desired_settings)
     changed = {key for key in body if key in _SESSION_ONLY_SETTINGS and current.get(key) != body[key]}
-    # Secrets are never in the view, so any non-null value counts as a change.
-    changed |= {key for key in body if key in _SECRET_EDITABLE and body[key] is not None}
+    # Secrets are never in the view, and "" (keep) was dropped by the caller, so any remaining
+    # presence is a change: a value replaces the credential, null deletes it.
+    changed |= {key for key in body if key in _SECRET_EDITABLE}
     changed |= {
         key for key in body
         if key in _EXPORT_TARGET_SETTINGS - _SECRET_EDITABLE and current.get(key) != body[key]
@@ -624,7 +642,11 @@ def put_settings(body: dict[str, Any], request: Request) -> dict:
         body["devices"] = _normalize_devices(body["devices"])
     if session is None and _changed_session_only(request, body):
         raise HTTPException(403, "Administration session required")
+    # Refused before anything is persisted: a transition that outlived its wait is still running.
+    if _TRANSITION_KEYS & set(body) and _transition_running(request):
+        raise HTTPException(409, _BUSY_DETAIL)
     runtime = request.app.state.runtime
+    write_generation = 0
     with _SETTINGS_LOCK:  # keeps concurrent autosaves from publishing an older merge last
         previous = request.app.state.admin_desired_settings
         try:
@@ -643,6 +665,10 @@ def put_settings(body: dict[str, Any], request: Request) -> dict:
         request.app.state.security.tokens.set_auth_required(updated.auth_required)
         # Same lock, same moment as runtime.settings: the write routers refuse from here on.
         request.app.state.security.write_enabled = updated.enable_write_support
+        if updated.enable_write_support != previous.enable_write_support:
+            write_generation = request.app.state.write_support_generation = (
+                getattr(request.app.state, "write_support_generation", 0) + 1
+            )
         if {"metrics_rate_limit_requests", "metrics_rate_limit_window_seconds"} & set(body):
             request.app.state.security.limiter.set_scrape_limit(
                 updated.metrics_rate_limit_requests, updated.metrics_rate_limit_window_seconds
@@ -650,17 +676,24 @@ def put_settings(body: dict[str, Any], request: Request) -> dict:
     write_warnings: dict[str, Any] = {}
     if updated.enable_write_support and not previous.enable_write_support:
         try:
-            _enable_write_support(request)
+            _enable_write_support(request, write_generation)
         except ConfigError as exc:
-            _revert_write_support(request)
-            raise HTTPException(409, "The write allowlist could not be loaded; write access stays off.") from exc
+            _revert_write_support(request, write_generation)
+            raise HTTPException(
+                409, "The write allowlist could not be loaded; write access stays off. "
+                "The other settings of this request were saved."
+            ) from exc
     elif previous.enable_write_support and not updated.enable_write_support:
         pending = _disable_write_support(request)
         if pending:
             write_warnings = {"write_restore_pending": pending}
     # The slow live reloads run outside _SETTINGS_LOCK so they cannot stall other settings requests.
+    export_failure: HTTPException | None = None
     if changed_export_keys:
-        _restart_export(request)
+        try:
+            _restart_export(request)
+        except HTTPException as exc:
+            export_failure = exc  # the device reconfiguration below must still run
     if devices_changed:
         with _RECONFIGURE_LOCK:
             try:
@@ -669,20 +702,43 @@ def put_settings(body: dict[str, Any], request: Request) -> dict:
                 if exc.rollback:
                     _revert_devices(request, updated, previous)
                 raise
+    if export_failure is not None:
+        raise export_failure
     return {"settings": _pat_safe_view(updated, session), "restart_required": _pending_restart(request, session),
             "live": sorted(_LIVE), **write_warnings}
 
 
+class _TransitionBusy(RuntimeError):
+    """A previous live transition is still running on the event loop."""
+
+
+_BUSY_DETAIL = "A previous change is still being applied; wait for it to finish and try again."
+
+
+def _transition_running(request: Request) -> bool:
+    running = getattr(request.app.state, "live_transition", None)
+    return running is not None and not running.done()
+
+
 def _run_on_loop(request: Request, name: str, timeout: float) -> Any:
-    """Run the app-state coroutine function ``name`` on the event loop from this worker thread."""
+    """Run the app-state coroutine function ``name`` on the event loop from this worker thread.
+
+    One transition at a time: a timeout only ends the wait, the coroutine keeps running, so the
+    future stays in app state and further transitions are refused until it has finished.
+    """
     func = getattr(request.app.state, name, None)
     loop = getattr(request.app.state, "loop", None)
     if func is None or loop is None:
         return None
-    return asyncio.run_coroutine_threadsafe(func(), loop).result(timeout=timeout)
+    with _TRANSITION_GUARD:
+        if _transition_running(request):
+            raise _TransitionBusy(name)
+        future = asyncio.run_coroutine_threadsafe(func(), loop)
+        request.app.state.live_transition = future
+    return future.result(timeout=timeout)
 
 
-def _enable_write_support(request: Request) -> None:
+def _enable_write_support(request: Request, generation: int) -> None:
     """Make a just-enabled write switch effective: allowlist, default approvals, dispatch backing."""
     # Late import: app_factory imports this module.
     from app.api.app_factory import (
@@ -698,11 +754,17 @@ def _enable_write_support(request: Request) -> None:
         state.runtime.gateway.set_allowlist(state.build_write_allowlist(names))
     try:
         _run_on_loop(request, "enable_dispatch", _RECONFIGURE_TIMEOUT_SECONDS)
+    except _TransitionBusy:
+        _revert_write_support(request, generation)
+        raise HTTPException(409, _BUSY_DETAIL) from None
     except Exception:
         # Writes would be accepted by the router but have no dispatch to run on: fail closed.
         log.exception("Building battery dispatch for the enabled write support failed")
-        _revert_write_support(request)
-        raise HTTPException(500, "Battery dispatch could not be started; write access stays off.") from None
+        _revert_write_support(request, generation)
+        raise HTTPException(
+            500, "Battery dispatch could not be started; write access stays off. "
+            "The other settings of this request were saved."
+        ) from None
 
 
 def _disable_write_support(request: Request) -> list[str]:
@@ -714,10 +776,15 @@ def _disable_write_support(request: Request) -> list[str]:
         return list(request.app.state.runtime.devices)
 
 
-def _revert_write_support(request: Request) -> None:
-    """Switch write access back off after the live enable failed (it was off before)."""
+def _revert_write_support(request: Request, generation: int) -> None:
+    """Switch write access back off after the live enable failed (it was off before).
+
+    Skipped when a newer save has changed the switch since: that save owns the value now.
+    """
     state = request.app.state
     with _SETTINGS_LOCK:
+        if getattr(state, "write_support_generation", 0) != generation:
+            return
         reverted = _store(request).merge_operator_settings(
             state.admin_desired_settings, {"enable_write_support": False}
         )
@@ -1127,11 +1194,10 @@ def devices(request: Request) -> dict:
     runtime = request.app.state.runtime
     devices_now = tuple(runtime.devices.values())  # one reference read: the dict is swapped, never mutated
     result = []
-    exposed = _exposed_names(runtime, _store(request))
     # Card values are independent of the Prometheus export selection.
     preferred = ("solar_a_power", "solar_b_power", "household_load_power", "grid_power", "battery_soc",
                  "ac_power")
-    selected = [name for name in preferred if name in exposed]
+    selected = [name for name in preferred if runtime.catalog.exists(name)]
     selected += [name for name in DEVICE_CARD_METRIC_NAMES if runtime.catalog.exists(name)]
     for item in devices_now:
         status = runtime.gateway.device_status(item.device_id)

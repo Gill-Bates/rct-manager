@@ -13,6 +13,7 @@ subsystem, so it must be present and correctly populated whether or not write su
 
 import asyncio
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -144,3 +145,15 @@ async def test_energy_flow_present_with_write_support_disabled(tmp_path: Path):
         assert set(flow) == set(FLOW_KEYS)
         assert flow["pv_power_w"]["value"] == pytest.approx(2400.0)
         assert all(not flow[key]["stale"] for key in FLOW_KEYS)
+
+
+@pytest.mark.asyncio
+async def test_dashboard_card_values_do_not_depend_on_the_prometheus_selection(tmp_path: Path):
+    settings, headers = bootstrapped_settings(tmp_path)
+    async with running_app(settings) as harness:
+        seed_flow_payloads(harness)
+        await fill_cache(harness)
+        with patch("app.admin.api._exposed_names", return_value=[]):
+            devices = await fetch_devices(harness, headers)
+        main = next(d for d in devices if d["id"] == "main")
+        assert {"grid_power", "battery_soc", "solar_a_power"} <= {m["name"] for m in main["metrics"]}

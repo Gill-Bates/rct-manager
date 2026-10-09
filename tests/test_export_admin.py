@@ -7,8 +7,15 @@
 """Export settings through the admin API: validation, write-only secrets, persistence."""
 
 
-import httpx
+import asyncio
+import threading
+from types import SimpleNamespace
 
+import httpx
+import pytest
+from fastapi import HTTPException
+
+from app.admin.api import _changed_session_only, _restart_export, _run_on_loop, _TransitionBusy
 from app.api.app_factory import create_app
 from app.config import DbType, QuestDbDownsampling, Settings
 
@@ -376,3 +383,56 @@ async def test_app_starts_with_export_and_contains_failures(tmp_path):
         text = (await h.client.get("/metrics")).text
         assert 'rct_export_pushes_total{result="error"}' in text
         assert (await h.client.get("/admin/api/session")).status_code == 200
+
+
+def _request_with_loop(**hooks):
+    loop = asyncio.new_event_loop()
+    thread = threading.Thread(target=loop.run_forever, daemon=True)
+    thread.start()
+    state = SimpleNamespace(loop=loop, **hooks)
+    return SimpleNamespace(app=SimpleNamespace(state=state)), loop, thread
+
+
+def test_a_timed_out_transition_blocks_the_next_one_until_it_finishes():
+    release = threading.Event()
+
+    async def slow() -> None:
+        while not release.is_set():
+            await asyncio.sleep(0.01)
+
+    request, loop, thread = _request_with_loop(restart_export=slow)
+    try:
+        with pytest.raises(TimeoutError):
+            _run_on_loop(request, "restart_export", 0.05)
+        with pytest.raises(_TransitionBusy):
+            _run_on_loop(request, "restart_export", 0.05)
+        release.set()
+        request.app.state.live_transition.result(timeout=2)
+        _run_on_loop(request, "restart_export", 2)
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+        thread.join(timeout=2)
+
+
+def test_a_failed_export_restart_is_reported_not_swallowed():
+    async def broken() -> None:
+        raise RuntimeError("boom")
+
+    request, loop, thread = _request_with_loop(restart_export=broken)
+    try:
+        with pytest.raises(HTTPException) as caught:
+            _restart_export(request)
+        assert caught.value.status_code == 500
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+        thread.join(timeout=2)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [{"questdb_downsampling": "high"}, {"influxdb_token": None}, {"questdb_password": None}],
+)
+def test_a_pat_cannot_change_retention_presets_or_delete_credentials(body):
+    settings = Settings(_env_file=None, hmac_secret="s" * 48)
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(admin_desired_settings=settings)))
+    assert _changed_session_only(request, body) == set(body)

@@ -18,10 +18,10 @@ mode it guards; the server, not the caller, stamps who did it and when.
 
 import logging
 from datetime import datetime
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.admin.api import require_admin
 from app.dispatch.capabilities import (
@@ -32,6 +32,7 @@ from app.dispatch.capabilities import (
 )
 from app.dispatch.controller import CapabilityConflict
 from app.dispatch.models import DeviceLimits
+from app.energy.manager import MAX_POWER_W
 
 
 def _require_admin_read(request: Request) -> dict | None:
@@ -83,18 +84,23 @@ _TRUTHY_FLAGS = frozenset({"write_frame_layout_verified", "apply_sequence_verifi
 # A value that is present but blank is no evidence: `note` carries the human-readable backing for
 # the strategy code, so an empty or whitespace-only string counts as missing.
 _NON_BLANK_FIELDS = frozenset({"note"})
-# `note` is the one required field that is not capability-specific — every row may carry one — so it
-# is excluded from the governance map derived below.
-_CAPABILITY_AGNOSTIC_FIELDS = frozenset({"note"})
-# Single source of truth for "which capability does this evidence field govern", derived from
-# _REQUIRED_FOR_VERIFIED so the response projection and the PUT rejection cannot drift apart. The
-# adapter (app.gateway.rct_dispatch) reads each of these fields from exactly that one capability;
-# the same value stored on any other capability is inert.
+# Which capability reads which field. Kept apart from _REQUIRED_FOR_VERIFIED: a field can belong to
+# a capability without being required for VERIFIED (volatile, refresh_interval_seconds, ...). The
+# adapter reads each of these from exactly that one capability; the same value stored on any other
+# capability is inert. `note` is capability-agnostic and therefore absent.
 _GOVERNED_BY: dict[str, CapabilityName] = {
-    field_name: name
-    for name, field_names in _REQUIRED_FOR_VERIFIED.items()
-    for field_name in field_names
-    if field_name not in _CAPABILITY_AGNOSTIC_FIELDS
+    "battery_discharge_positive": CapabilityName.BATTERY_POWER_SIGN,
+    "grid_import_positive": CapabilityName.GRID_POWER_SIGN,
+    "soc_strategy_external_code": CapabilityName.WRITE_PATH,
+    "enum_byte_width": CapabilityName.WRITE_PATH,
+    "bool_byte_width": CapabilityName.WRITE_PATH,
+    "write_frame_layout_verified": CapabilityName.WRITE_PATH,
+    "apply_sequence_verified": CapabilityName.WRITE_PATH,
+    "sequence_order_relevant": CapabilityName.WRITE_PATH,
+    "soc_target_unit": CapabilityName.WRITE_PATH,
+    "export_limit_zero_blocks_export": CapabilityName.EXPORT_LIMIT,
+    "volatile": CapabilityName.SETPOINT_VOLATILITY,
+    "refresh_interval_seconds": CapabilityName.SETPOINT_VOLATILITY,
 }
 
 
@@ -119,13 +125,14 @@ def _misplaced_evidence(name: CapabilityName, body: "CapabilityUpdate") -> list[
     """Evidence fields the caller set explicitly on a capability that does not govern them.
 
     Storing such a value would echo it back from GET while the adapter ignores it entirely, so the
-    PUT is refused instead. Only explicitly sent fields count (``model_fields_set``): an omitted
-    field is the caller saying nothing, not setting a value.
+    PUT is refused instead. Only explicitly sent, non-null fields count: an omitted field is
+    the caller saying nothing, and ``null`` is what GET returns for a field the capability does not
+    govern, so a GET body can be sent back unchanged.
     """
     return sorted(
         field_name
         for field_name in body.model_fields_set & _GOVERNED_BY.keys()
-        if _GOVERNED_BY[field_name] is not name
+        if _GOVERNED_BY[field_name] is not name and getattr(body, field_name) is not None
     )
 
 
@@ -151,8 +158,26 @@ def _conflict(
     )
 
 
+_NON_NULL_UPDATE_FIELDS = frozenset({
+    "battery_discharge_positive", "grid_import_positive", "write_frame_layout_verified",
+    "apply_sequence_verified", "soc_target_unit",
+})
+
+
 class CapabilityUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _drop_null_defaults(cls, data: Any) -> Any:
+        # GET returns null for fields the capability does not govern; for fields with a non-null
+        # default that must read as "omitted", so a GET body can be edited and sent back.
+        if isinstance(data, dict):
+            return {
+                key: value for key, value in data.items()
+                if value is not None or key not in _NON_NULL_UPDATE_FIELDS
+            }
+        return data
 
     status: CapabilityStatus
     battery_discharge_positive: bool = True
@@ -166,7 +191,7 @@ class CapabilityUpdate(BaseModel):
     export_limit_zero_blocks_export: bool | None = None
     soc_target_unit: Literal["ratio", "percent"] = "ratio"
     volatile: bool | None = None
-    refresh_interval_seconds: float | None = Field(None, ge=0)
+    refresh_interval_seconds: float | None = Field(None, ge=0, le=86_400, allow_inf_nan=False)
     verified_device_model: str | None = Field(None, min_length=1, max_length=128)
     verified_firmware: str | None = Field(None, min_length=1, max_length=64)
     note: str | None = Field(None, max_length=NOTE_MAX_LENGTH)
@@ -214,6 +239,38 @@ class CapabilityResponse(BaseModel):
         " device's SoC-target register expects (V-17). `null` on every other capability, which"
         " this field does not govern.",
     )
+    enum_byte_width: int | None = Field(
+        default=None, description="WRITE_PATH evidence: byte width of enum register writes (1..4)."
+        " `null` on every other capability."
+    )
+    bool_byte_width: int | None = Field(
+        default=None, description="WRITE_PATH evidence: byte width of bool register writes (1..4)."
+        " `null` on every other capability."
+    )
+    write_frame_layout_verified: bool | None = Field(
+        default=None, description="WRITE_PATH evidence: the write frame layout was verified on hardware."
+        " `null` on every other capability."
+    )
+    apply_sequence_verified: bool | None = Field(
+        default=None, description="WRITE_PATH evidence: the apply sequence was verified on hardware."
+        " `null` on every other capability."
+    )
+    sequence_order_relevant: bool | None = Field(
+        default=None, description="WRITE_PATH evidence: whether the order of the writes matters."
+        " `null` when unknown or on every other capability."
+    )
+    export_limit_zero_blocks_export: bool | None = Field(
+        default=None, description="EXPORT_LIMIT evidence: whether a zero export limit stops grid"
+        " export. `null` when unknown or on every other capability."
+    )
+    volatile: bool | None = Field(
+        default=None, description="SETPOINT_VOLATILITY evidence: whether the device resets a written"
+        " setpoint on its own. `null` when unknown or on every other capability."
+    )
+    refresh_interval_seconds: float | None = Field(
+        default=None, description="SETPOINT_VOLATILITY evidence: how often the setpoint must be"
+        " rewritten. `null` when unknown or on every other capability."
+    )
     verified_device_model: str | None
     verified_firmware: str | None
     verified_at: datetime | None
@@ -230,6 +287,14 @@ class CapabilityResponse(BaseModel):
             grid_import_positive=_governed(record, "grid_import_positive"),
             soc_strategy_external_code=_governed(record, "soc_strategy_external_code"),
             soc_target_unit=_governed(record, "soc_target_unit"),
+            enum_byte_width=_governed(record, "enum_byte_width"),
+            bool_byte_width=_governed(record, "bool_byte_width"),
+            write_frame_layout_verified=_governed(record, "write_frame_layout_verified"),
+            apply_sequence_verified=_governed(record, "apply_sequence_verified"),
+            sequence_order_relevant=_governed(record, "sequence_order_relevant"),
+            export_limit_zero_blocks_export=_governed(record, "export_limit_zero_blocks_export"),
+            volatile=_governed(record, "volatile"),
+            refresh_interval_seconds=_governed(record, "refresh_interval_seconds"),
             verified_device_model=record.verified_device_model,
             verified_firmware=record.verified_firmware,
             verified_at=record.verified_at,
@@ -251,8 +316,8 @@ class CopyFrom(BaseModel):
 class DeviceLimitsUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    max_charge_power_w: float = Field(gt=0)
-    max_discharge_power_w: float = Field(gt=0)
+    max_charge_power_w: float = Field(gt=0, le=MAX_POWER_W, allow_inf_nan=False)
+    max_discharge_power_w: float = Field(gt=0, le=MAX_POWER_W, allow_inf_nan=False)
     engineering_mode: bool = False
 
 

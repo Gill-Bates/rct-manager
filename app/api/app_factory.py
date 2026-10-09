@@ -1059,6 +1059,16 @@ def create_app(settings: Settings, *, clock: Clock | None = None, connector: Con
     selected_writes = selected_exposed = bootstrap_password = None
     if admin_store is not None:
         bootstrap_password = admin_store.initialize()
+        if bootstrap_password is not None:
+            # Durable in the same bootstrap step as account creation: initialize() has committed
+            # the admin row with the generated password, so the password file must be written
+            # before anything below (graph build, lifespan startup) can fail. Otherwise a failure
+            # after this point would lose the only copy of the one-time password, and the next boot
+            # would find the existing admin and generate no replacement — a locked-out install.
+            # The server still prints the banner once it is listening.
+            from app.api.server import write_first_start_password
+
+            write_first_start_password(settings, bootstrap_password)
         overrides = admin_store.get("operator_settings")
         if overrides is None:
             overrides = _settings_persisted(settings)

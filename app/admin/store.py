@@ -329,6 +329,7 @@ class AdminStore:
 
     def create_token(self, name: str, role: str, expires_at: datetime | None) -> tuple[dict, str]:
         with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")  # the 32-token cap is count-then-insert: take the write lock first
             return self._insert_token(db, name, role, expires_at)
 
     def delete_token(self, token_id: str) -> bool:

@@ -91,11 +91,29 @@ def write_first_start_password(settings: Settings, password: str) -> Path:
     """Hand the bootstrap credential over through a 0600 file next to the admin DB.
 
     Stdout is persisted and centrally collected in systemd/Docker/Kubernetes, so it must not carry it.
+
+    The secret filename is never ``resolve()``d: a pre-planted ``initial-admin-password`` symlink
+    must not let an attacker redirect the unlink/create onto its target. The file is created with
+    ``O_NOFOLLOW`` through a directory fd so the final path component cannot be a symlink either.
     """
-    path = (settings.admin_db_path.parent / FIRST_START_PASSWORD_FILE).resolve()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.unlink(missing_ok=True)  # the mode must be owner-only from creation, never tightened afterwards
-    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    directory = settings.admin_db_path.parent
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    path = directory / FIRST_START_PASSWORD_FILE
+    dir_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        if os.fstat(dir_fd).st_mode & 0o077:
+            os.fchmod(dir_fd, 0o700)  # tighten a parent directory created with a looser umask
+        # Relative to the trusted directory fd and never following a symlink: unlink the plain name,
+        # then create it exclusively. The mode is owner-only from creation, never tightened afterwards.
+        try:
+            os.unlink(FIRST_START_PASSWORD_FILE, dir_fd=dir_fd)
+        except FileNotFoundError:
+            pass
+        descriptor = os.open(
+            FIRST_START_PASSWORD_FILE, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=dir_fd
+        )
+    finally:
+        os.close(dir_fd)
     with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
         handle.write(password + "\n")
     return path

@@ -2972,6 +2972,11 @@
       // A full renderSettings() would tear down and rebuild every section's DOM, including one the
       // operator was mid-edit on but that was never part of this save — losing focus and any input
       // in that unrelated section. Only the controls for the keys that actually failed are refreshed.
+      // A failed save can still have stored part of the request, so the server state is the baseline.
+      try {
+        const fresh = await api('settings');
+        if (fresh.settings) settingsCommitted = structuredClone(fresh.settings);
+      } catch { /* keep the last known state */ }
       for (const key of keys) {
         if (pendingKeys.has(key)) continue;  // re-queued during the request: that value wins
         if (isSecretKey(key)) continue;      // the committed view holds no raw secret, only _configured
