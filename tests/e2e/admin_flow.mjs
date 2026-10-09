@@ -1296,6 +1296,13 @@ check('inverters page has the writable list', (await page.locator('#writable-lis
 check('exposed list is not on the inverters page', (await page.locator('#exposed-list').count()) === 0);
 await page.goto(base + '/ui/tsdb');
 await page.waitForSelector('#setting-db_type');
+await page.locator('#setting-metrics_export_enabled').click({ force: true });
+check('disabled export hides every dependent TSDB section',
+  (await page.locator('.export-grid > .card').count()) === 1
+  && (await page.locator('#setting-db_type, #setting-metrics_export_interval_seconds, #tsdb-mini-console').count()) === 0);
+await page.waitForFunction(async () => !(await (await fetch('/admin/api/settings')).json()).settings.metrics_export_enabled);
+await page.locator('#setting-metrics_export_enabled').click({ force: true });
+await page.waitForSelector('#setting-db_type');
 await page.locator('#setting-db_type').selectOption('questdb');
 check('tsdb page shows backend fields', (await page.locator('#setting-questdb_hostname').count()) === 1);
 check('docs toggle lives on settings only', (await page.locator('#setting-docs_public').count()) === 0);
@@ -1303,6 +1310,8 @@ check('docs toggle lives on settings only', (await page.locator('#setting-docs_p
 // 6c. TSDB export cards: all cards visible, two-column grid on large screens, autosave (no Save button)
 await sleep(200);
 check('questdb backend shows all four export cards', (await page.locator('.export-grid > .card').count()) === 4);
+check('retention lives in TSDB Settings', (await page.locator('.export-section-settings #setting-questdb_downsampling').count()) === 1);
+check('TSDB page has a runtime mini console', (await page.locator('#tsdb-mini-console').count()) === 1);
 check('no explicit Save button on the TSDB page', (await page.locator('.export-layout button, #settings-sections button:has-text("Save")').count()) === 0);
 const questdbColumns = await page.evaluate(() => new Set([...document.querySelectorAll('.export-grid > .card')].map((c) => Math.round(c.getBoundingClientRect().left))).size);
 check('export grid is two columns on large screens', questdbColumns === 2, String(questdbColumns));
@@ -1364,7 +1373,7 @@ check('db_type survived the withheld export saves', (await (await context.reques
 
 await page.locator('#setting-db_type').selectOption('influxdb_v2');
 await sleep(200);
-check('influxdb backend shows its three export cards', (await page.locator('.export-grid > .card').count()) === 3);
+check('influxdb backend shows all four export cards', (await page.locator('.export-grid > .card').count()) === 4);
 check('still no Save button after switching backend', (await page.locator('.export-layout button').count()) === 0);
 
 // 6c-3. finding 5: a value typed while the save is in flight must survive the response, which

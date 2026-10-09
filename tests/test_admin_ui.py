@@ -575,7 +575,7 @@ def test_dashboard_keeps_last_known_data_on_fetch_failure():
     # A successful poll renders from the merged last-known state, never from the raw payload.
     assert "absorbDashboard(" in block and "refreshDashboard()" in block and "renderDashboard(data" not in block
     # Values run out by age (n/a), structure (towers, flow graphic) outlives them; a reload restores both.
-    for marker in ("VALUE_MAX_AGE_MS", "expired: true", "flow_known", "restoreSnapshot()", "SNAPSHOT_MAX_AGE_MS", "localStorage"):
+    for marker in ("VALUE_MAX_AGE_MS", "expired: metricShown(metric)", "flow_known", "restoreSnapshot()", "SNAPSHOT_MAX_AGE_MS", "localStorage"):
         assert marker in js, marker
     # The note replaces the subtitle instead of being inserted above the grid, so nothing shifts.
     assert "subtitle.after(dashboardBanner)" in js and "grid.before(dashboardBanner)" in js

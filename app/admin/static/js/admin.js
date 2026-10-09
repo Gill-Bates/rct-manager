@@ -2690,6 +2690,7 @@
 
   let settingsCommitted = {};
   let settingsDraft = {};
+  let tsdbRuntimeStatus = null;
   const pendingKeys = new Set();          // scalar keys
   let pendingExportGroup = false;         // the export fields are queued as a group, never per key
   const secretRevision = new Map();       // secret key -> monotonically increasing edit counter
@@ -2951,6 +2952,9 @@
       if (keys.includes('enable_write_support') && payload.enable_write_support) refreshWriteApprovals();
       if (page === 'prometheus') markPrometheusSaved();
       for (const id of sentSections) setSectionState(id, 'saved');
+      if (page === 'tsdb' && sentSections.has('export')) {
+        refreshTsdbRuntimeStatus().catch((error) => console.warn('Could not refresh TSDB status:', messageFrom(error)));
+      }
       const restartKeys = keys.filter((key) => result.restart_required?.includes(key));
       if (restartKeys.length) toast(`Saved, but not active yet. The service must be restarted to apply: ${restartKeys.map(settingLabel).join(', ')}.`, 'warning');
       else toast('Settings saved and active.');
@@ -3139,8 +3143,8 @@
         if (risk && !(await confirmAction(risk))) { restoreControl(control, settingsDraft[field.key]); return; }
         settingsDraft[field.key] = control.checked;
       } else settingsDraft[field.key] = control.value;
-      if (field.key === 'db_type' || field.key === 'questdb_downsampling') onChange();
-      queueExportSettings();
+      if (['db_type', 'metrics_export_enabled', 'questdb_downsampling'].includes(field.key)) onChange();
+      queueExportSettings(field.key);
     });
     return wrap;
   }
@@ -3153,14 +3157,13 @@
   }
 
   // The export fields depend on each other (required per backend), so they are saved together.
-  // Order matches the 2-column grid's row-major placement: Export/Target share the top row,
-  // Connection/Retention the bottom row (see .export-grid in admin.css).
-  const EXPORT_GROUPS = ['Export', 'Target', 'Connection', 'Retention'];
+  const EXPORT_GROUPS = ['Settings', 'Target', 'Connection', 'Console'];
 
   function exportGroup(key) {
-    if (key === 'db_type' || key === 'metrics_export_enabled' || key === 'metrics_export_interval_seconds') return 'Export';
+    if (key === 'metrics_export_enabled' || key === 'metrics_export_interval_seconds') return 'Settings';
+    if (key === 'db_type') return 'Target';
     if (/_(hostname|port|tls_enabled|verify_tls|allow_plaintext_credentials)$/.test(key)) return 'Connection';
-    if (/_(downsampling|raw_retention_days|retention_days)$/.test(key)) return 'Retention';
+    if (/_(downsampling|raw_retention_days|retention_days)$/.test(key)) return 'Settings';
     return 'Target';
   }
 
@@ -3229,8 +3232,15 @@
   // all filled, nothing is sent, so the server never has to reject a half-entered combination.
   // Becoming incomplete again retracts the whole group *and* stops the debounce timer a complete
   // state had started, so a configuration that regressed inside the window is never sent.
-  function queueExportSettings() {
+  function queueExportSettings(changedKey = '') {
     const type = settingsDraft.db_type || '';
+    if (changedKey === 'metrics_export_enabled' && !settingsDraft.metrics_export_enabled) {
+      pendingExportGroup = false;
+      pendingKeys.add(changedKey);
+      setSectionState('export', 'unsaved');
+      restartDebounce();
+      return;
+    }
     if (!exportReady(type)) {
       pendingExportGroup = false;
       setSectionState('export', 'incomplete', missingExportHint(type));
@@ -3242,8 +3252,40 @@
     restartDebounce();
   }
 
+  function tsdbConsoleLines() {
+    const type = settingsDraft.db_type || '';
+    const now = hhmm(new Date());
+    const lines = [[now, type ? `Target: ${backendLabel(type)}` : 'No target database selected']];
+    if (!settingsDraft.metrics_export_enabled) lines.push([now, 'Export paused']);
+    else if (!type) lines.push([now, 'Waiting for configuration']);
+    else if (!exportReady(type)) lines.push([now, 'Configuration incomplete']);
+    else if (!tsdbRuntimeStatus?.export_enabled) lines.push([now, 'Exporter is not running']);
+    else lines.push([now, tsdbRuntimeStatus.healthy ? 'Exporter running' : 'Waiting for a successful export']);
+    if (tsdbRuntimeStatus?.last_success_at) {
+      lines.push([hhmm(new Date(tsdbRuntimeStatus.last_success_at)), 'Last successful export']);
+    }
+    return lines;
+  }
+
+  function fillTsdbConsole(consoleNode) {
+    consoleNode.replaceChildren();
+    for (const [time, message] of tsdbConsoleLines()) {
+      const line = element('div', 'tsdb-console-line');
+      const timestamp = element('time', 'tsdb-console-time', time);
+      line.append(timestamp, element('span', '', message));
+      consoleNode.append(line);
+    }
+  }
+
+  async function refreshTsdbRuntimeStatus() {
+    const data = await api('devices');
+    tsdbRuntimeStatus = data.tsdb || null;
+    const consoleNode = $('tsdb-mini-console');
+    if (consoleNode) fillTsdbConsole(consoleNode);
+  }
+
   // Export fields autosave through the shared queueSettings/flushSettings path, same as every
-  // other settings page; db_type changes still re-render because the field set depends on it.
+  // other settings page; status and backend changes re-render because their visible flow depends on them.
   function renderExportSettings(host) {
     const layout = element('div', 'export-layout');
     host.append(layout);
@@ -3253,18 +3295,30 @@
     const render = () => {
       const grid = element('div', 'export-grid');
       const type = settingsDraft.db_type || '';
+      const enabled = Boolean(settingsDraft.metrics_export_enabled);
       for (const group of EXPORT_GROUPS) {
+        if (!enabled && group !== 'Settings') continue;
         const body = element('div', 'card-body');
-        body.append(element('h2', 'h5 mb-3', group === 'Export' ? 'Metrics export' : group));
+        body.append(element('h2', 'h5 mb-3', group === 'Settings' ? 'TSDB Settings' : group === 'Target' ? 'Target database' : group === 'Console' ? 'Mini console' : group));
         for (const field of exportFields) {
           if (exportGroup(field.key) !== group || !exportFieldKnown(field)) continue;
+          if (!enabled && field.key !== 'metrics_export_enabled') continue;
           if ((field.backend && field.backend !== type) || (field.any && !type)) continue;
           if (field.key === 'questdb_raw_retention_days' && settingsDraft.questdb_downsampling !== 'manual') continue;
           if (field.key === 'questdb_retention_days' && settingsDraft.questdb_downsampling === 'manual') continue;
           body.append(exportControl(field, rerender));
         }
+        if (group === 'Console') {
+          const consoleNode = element('div', 'tsdb-console');
+          consoleNode.id = 'tsdb-mini-console';
+          consoleNode.setAttribute('role', 'log');
+          consoleNode.setAttribute('aria-live', 'polite');
+          fillTsdbConsole(consoleNode);
+          body.append(consoleNode);
+        }
         if (body.children.length < 2) continue;
         const section = element('section', 'card');
+        section.classList.add(`export-section-${group.toLowerCase()}`);
         section.append(body);
         grid.append(section);
       }
@@ -3703,9 +3757,13 @@
   }
 
   async function initSettings() {
-    const result = await api('settings');
+    const [result, devices] = await Promise.all([
+      api('settings'),
+      page === 'tsdb' ? api('devices') : Promise.resolve(null),
+    ]);
     settingsCommitted = structuredClone(result.settings || {});
     settingsDraft = structuredClone(settingsCommitted);
+    if (devices) tsdbRuntimeStatus = devices.tsdb || null;
     // The one place that mints a device identity, besides the blank trailing row.
     if (Object.hasOwn(settingsDraft, 'devices')) adoptDevices(settingsDraft.devices);
     renderSettings();

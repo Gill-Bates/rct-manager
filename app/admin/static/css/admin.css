@@ -1800,6 +1800,54 @@ samp,
     flex: 1 1 auto;
 }
 
+/* TSDB follows a decision flow while using the available grid. On narrow screens it stacks. */
+.export-section-settings .setting-row:first-of-type {
+    padding-top: 0;
+    border-top: 0;
+}
+
+.export-section-settings .form-switch {
+    min-height: 2.8rem;
+}
+
+.export-section-settings .form-switch .form-check-label {
+    font-size: 1rem;
+}
+
+.tsdb-console {
+    min-height: 9rem;
+    padding: .8rem .9rem;
+    border: 1px solid var(--rct-line);
+    border-radius: .45rem;
+    background: #111418;
+    color: #d7e0e8;
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: .8rem;
+    line-height: 1.6;
+}
+
+.tsdb-console-line {
+    display: grid;
+    grid-template-columns: 3.5rem minmax(0, 1fr);
+    gap: .65rem;
+}
+
+.tsdb-console-time {
+    color: #8fa2b3;
+}
+
+@media (forced-colors: active) {
+    .tsdb-console {
+        border: 1px solid CanvasText;
+        background: Canvas;
+        color: CanvasText;
+    }
+
+    .tsdb-console-time {
+        color: CanvasText;
+    }
+}
+
 @media (min-width: 992px) {
     .export-grid {
         grid-template-columns: 1fr 1fr;

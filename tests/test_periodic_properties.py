@@ -370,6 +370,11 @@ async def test_pushed_values_cause_no_refresh_reads_and_the_cycle_is_limited() -
     async with running_app(settings, settle=False) as h:
         await _registered(h)
         gateway = h.runtime.gateway
+        # The startup heartbeat read and the name read are not part of the refresh cycle; under load
+        # they would land inside the counted window, so let them finish before counting.
+        async with asyncio.timeout(5):
+            while gateway._device("main").last_heartbeat_at is None or gateway.reported_name("main") is None:
+                await asyncio.sleep(0.01)
         start = len(h.net.frames)
         for _ in range(5):  # the device keeps pushing this one value
             h.net.push(Frame(Command.RESPONSE, entry.object_id, encode_value(DataType.FLOAT, 1.0)))
