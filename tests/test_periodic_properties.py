@@ -112,6 +112,43 @@ def test_reconnect_during_setup_discards_registrations_from_the_old_connection()
     assert old_object_registered is False
 
 
+def test_setup_that_throws_mid_registration_leaves_no_endpoint_registration() -> None:
+    """A submit() that throws after a route was pre-registered must roll the registration back,
+    not leave the demux routing a value frame for an object the manager considers unregistered."""
+
+    async def scenario() -> tuple[bool, int, bool, int]:
+        clock = AutoClock()
+        key = EndpointKey("10.0.0.5", 8899)
+        net = FakeNetwork(clock)
+        cfg = EndpointConfig(response_timeout_seconds=0.01, min_interval=timedelta(0))
+        endpoint = TransportEndpoint("endpoint-1", key, cfg, clock, connector=net.connect)
+
+        async def handler(request):
+            return await endpoint.execute(request)
+
+        serializer = AccessSerializer(endpoint, handler, queue_max_length=10, queue_max_wait_seconds=10)
+        serializer.start()
+        manager = PeriodicManager(endpoint, serializer, DeviceKey(key), [0x1111, 0x3333], 30, clock)
+
+        real_submit = serializer.submit
+
+        async def submit_or_throw(request):
+            # Let pas.period and the first registration through; throw on the second registration,
+            # by which point object 0x1111 is already registered on the endpoint.
+            if request.frame.command is Command.READ_PERIODICALLY and request.frame.object_id == 0x3333:
+                raise RuntimeError("transport blew up mid-registration")
+            return await real_submit(request)
+
+        serializer.submit = submit_or_throw
+        ok = await manager.setup()
+        return ok, endpoint._demux.periodic_count(), manager.available, manager.registrations
+
+    ok, leftover, available, registrations = asyncio.run(scenario())
+    assert ok is False and available is False
+    assert leftover == 0, "a throwing setup left periodic routes registered on the endpoint"
+    assert registrations == 0
+
+
 def _manager(clock, net, ids, interval=30):
     key = EndpointKey("10.0.0.5", 8899)
     cfg = EndpointConfig(response_timeout_seconds=0.01, min_interval=timedelta(0))

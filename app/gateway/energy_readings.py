@@ -30,6 +30,10 @@ from app.gateway.conventions import (
 from app.gateway.rct import RctGateway
 
 _BATTERY_SOC = "battery_soc"
+# The object catalog declares battery_soc's unit as "ratio"; soc_percent converts by this declared
+# unit instead of guessing from magnitude. A catalog change to this register's unit must be
+# mirrored here (pinned by tests/test_energy_readings.py).
+_BATTERY_SOC_UNIT = "ratio"
 _GRID_POWER = "grid_power"
 _SOLAR_POWER = ("solar_a_power", "solar_b_power")
 _HOUSE_LOAD = "household_load_power"
@@ -70,7 +74,14 @@ class RctEnergyReadings:
         reading = self._sample(device_id, _BATTERY_SOC)
         if reading.value is None:
             return reading
-        return DeviceReading(soc_percent(reading.value), reading.age_seconds, reading.stale)
+        # battery_soc is declared a ratio in the object catalog; the conversion follows that
+        # declared unit, not the value's magnitude. An unexpected unit yields an absent advisory
+        # figure rather than an exception, because this status path must never raise.
+        try:
+            percent = soc_percent(reading.value, _BATTERY_SOC_UNIT)
+        except ValueError:
+            return ABSENT
+        return DeviceReading(percent, reading.age_seconds, reading.stale)
 
     def _grid(self, device_id: str) -> DeviceReading:
         reading = self._sample(device_id, _GRID_POWER)

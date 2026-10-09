@@ -80,20 +80,29 @@ class RctDispatchGateway:
             raise DeviceApiError("protocol_error", name=name)
         return float(value)
 
+    def _soc_percent(self, reading) -> float:
+        """SoC in percent from a reading, converted by its catalog unit and bounded to 0..100.
+
+        The unit comes from the catalog (``MetricReading.unit``), not from the number's magnitude,
+        and the domain bound is enforced here at the adapter boundary because ``ControlTelemetry``
+        does not yet carry a SoC-range invariant.
+        """
+        value = soc_percent(self._number(reading.value, reading.name), reading.unit)
+        if not 0.0 <= value <= 100.0:
+            raise DeviceApiError("protocol_error", name=reading.name)
+        return value
+
     async def read_soc(self, device_id: str) -> float:
         reading = await self._rct.read_system(device_id, "battery_soc")
-        # The catalog reports battery_soc as a ratio. The public dispatch contract uses percent.
-        value = self._number(reading.value, reading.name)
-        return soc_percent(value)
+        return self._soc_percent(reading)
 
     async def read_control_telemetry(self, device_id: str) -> ControlTelemetry:
         soc = await self._rct.read_system(device_id, "battery_soc")
         grid = await self._rct.read_system(device_id, "grid_power")
         battery = await self._rct.read_system(device_id, "battery_power")
         load = await self._rct.read_system(device_id, "household_load_power")
-        soc_value = self._number(soc.value, soc.name)
         return ControlTelemetry(
-            soc_percent=soc_percent(soc_value),
+            soc_percent=self._soc_percent(soc),
             soc_age_seconds=soc.age_seconds,
             soc_source=soc.source,
             grid_import_w=self._grid_convention(device_id).import_watts(
@@ -150,13 +159,17 @@ class RctDispatchGateway:
         soc_percent: float,
     ):
         policy = self._soc_target_policies.policy(device_id)
+        # The register's wire unit is attested WRITE_PATH evidence (V-17), not a fixed ratio: a
+        # percent-attested device must receive e.g. 80, not 0.8. Reading it here closes the gap
+        # where the verification attested a unit that the write then ignored.
+        unit = self._capabilities.record(device_id, CapabilityName.WRITE_PATH).soc_target_unit
         try:
-            ratio = RctSocTargetConvention(policy.mode, policy.below_margin_percent).register_ratio(
-                dispatch_mode, stop_target_percent=stop_target_percent, soc_percent=soc_percent
+            value = RctSocTargetConvention(policy.mode, policy.below_margin_percent).register_value(
+                dispatch_mode, stop_target_percent=stop_target_percent, soc_percent=soc_percent, unit=unit
             )
         except ValueError as exc:
             raise DeviceApiError("protocol_error", name="power_mng_soc_target_set") from exc
-        return await self._rct.write_metric(device_id, "power_mng_soc_target_set", ratio, system=True)
+        return await self._rct.write_metric(device_id, "power_mng_soc_target_set", value, system=True)
 
     async def apply_control_mode(self, device_id: str, *, external: bool):
         # Second, independent lock next to the controller's capability gate (defense in depth): a

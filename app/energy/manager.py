@@ -99,6 +99,7 @@ class EnergyManager:
         approved_writes: Callable[[], Awaitable[tuple[str, ...]]] | None,
         allowlist_candidates: Callable[[], frozenset[str]] | None,
         required_writes: tuple[str, ...],
+        revoke_writes: Callable[[Iterable[str]], Awaitable[Sequence[str]]] | None = None,
         modes: Mapping[str, ModeRecord] | None = None,
     ) -> None:
         self._port = port
@@ -118,6 +119,11 @@ class EnergyManager:
         self._approved_writes = approved_writes
         self._allowlist_candidates = allowlist_candidates
         self._required_writes = required_writes
+        # Separate compensation primitive: the add-only ``approve_writes`` cannot remove a name, so
+        # a failed commit's rollback must go through a replace/remove path instead (P2). When no
+        # revoker is injected, the rollback is skipped rather than silently no-op'd through the
+        # add-only path, and the add is logged for manual repair.
+        self._revoke_writes = revoke_writes
         self._mode_states: dict[str, ModeRecord] = dict(modes or {})
         # Strictly outside the controller's per-device lock: the manager calls the port, never the
         # other way round, so the one-directional order rules a lock cycle out.
@@ -362,7 +368,7 @@ class EnergyManager:
         self._entry(device_id)
         async with self._lock(device_id):
             if mode is EnergyMode.OFF:
-                await self._switch_off(device_id)
+                await self._switch_off(device_id, actor)
             else:
                 await self._switch_on(device_id, mode, actor)
             status = None if self._port is None else await self._port.status(device_id)
@@ -428,9 +434,19 @@ class EnergyManager:
                 await asyncio.to_thread(self._store.put_energy_state, record)
             except Exception:
                 if missing:
-                    # Remove only what this call added: another device may have changed the approvals.
-                    still_approved = await self._approved_writes()
-                    await self._approve_writes([n for n in still_approved if n not in missing])
+                    # Remove only what this call added. The revoker runs the removal under the same
+                    # shared allowlist lock as the add, reading the live approvals, so another
+                    # device's concurrent change is preserved. The add-only approve_writes must not
+                    # be used here: passing it a reduced list is a silent no-op that would leave the
+                    # four dispatch-control registers permanently approved after a failed commit.
+                    if self._revoke_writes is not None:
+                        await self._revoke_writes(missing)
+                    else:
+                        log.error(
+                            "Mode commit failed and no write-approval revoker is configured; the "
+                            "approvals added for %s (device=%s) remain and need manual review",
+                            ",".join(missing), device_id,
+                        )  # fmt: skip
                 raise
         self._mode_states[device_id] = record  # memory only after the commit returned
         log.warning(
@@ -446,7 +462,7 @@ class EnergyManager:
         if status.state is not DispatchState.IDLE or status.restore_required:
             await self._handback(device_id)  # raises dispatch_restore_required, mode stays as it was
 
-    async def _switch_off(self, device_id: str) -> None:
+    async def _switch_off(self, device_id: str, actor: str | None) -> None:
         """Design 2.6.2: hand back first, refuse while the device is still controlled, remove no
         write approval — another feature, another device or the operator's own selection may depend
         on those registers.
@@ -463,6 +479,10 @@ class EnergyManager:
             # Kept for display: it records what a mode switch once contributed, and switching off
             # revokes none of it.
             added_write_names=current.added_write_names,
+            # Switching off is a mode change like any other: record when and by whom, so the audit
+            # trail does not lose the last transition (its contract is "UTC, last mode change").
+            changed_at=self._clock.now(),
+            changed_by=_actor_name(actor),
         )
         await asyncio.to_thread(self._store.put_energy_state, record)
         self._mode_states[device_id] = record

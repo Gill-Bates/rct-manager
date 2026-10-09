@@ -91,6 +91,15 @@ class MetricsExporter:
         self._service = service
         self._devices = list(devices)
         self._endpoints = list(endpoints)
+        # Device/endpoint counters live on the per-request bindings and the transport endpoint, both
+        # rebuilt from zero on a live device-list reload. Without a carry-over a _total counter would
+        # fall across the swap within one process lifetime, which Prometheus reads as a reset. The
+        # outgoing totals are folded in here on every view swap so each _total stays monotonic.
+        self._carry_cache_hits = 0
+        self._carry_cache_misses = 0
+        self._carry_device_errors: dict[str, int] = {}
+        self._carry_device_durations: dict[str, Histogram] = {}
+        self._carry_endpoint: dict[tuple[str, str], int] = {}
         self._names = dict(metric_names)
         self._help = dict(help_texts or {})
         # Dropping unknown or duplicate entries would hide a configuration error as missing or
@@ -117,12 +126,40 @@ class MetricsExporter:
         self._exposed = list(names)
 
     def set_devices(self, views: Sequence[DeviceView]) -> None:
-        """Replace the device views (live device-list reload)."""
+        """Replace the device views (live device-list reload); fold the outgoing totals forward."""
+        for d in self._devices:
+            self._carry_cache_hits += d.cache_hits()
+            self._carry_cache_misses += d.cache_misses()
+            self._carry_device_errors[d.device_id] = self._carry_device_errors.get(d.device_id, 0) + d.errors()
+            carried = self._carry_device_durations.setdefault(d.device_id, Histogram(d.durations.bounds))
+            self._accumulate_histogram(carried, d.durations)
         self._devices = list(views)
 
     def set_endpoints(self, views: Sequence[EndpointView]) -> None:
-        """Replace the transport-endpoint views (live device-list reload)."""
+        """Replace the transport-endpoint views (live device-list reload); fold the outgoing totals forward."""
+        for e in self._endpoints:
+            for metric, value in self._endpoint_totals(e):
+                key = (e.endpoint_id, metric)
+                self._carry_endpoint[key] = self._carry_endpoint.get(key, 0) + value
         self._endpoints = list(views)
+
+    @staticmethod
+    def _accumulate_histogram(into: "Histogram", source: "Histogram") -> None:
+        """Add one histogram's observations into a carry-over histogram sharing the same bounds."""
+        for i, n in enumerate(source.counts):
+            into.counts[i] += n
+        into.total += source.total
+        into.count += source.count
+
+    @staticmethod
+    def _endpoint_totals(e: EndpointView) -> tuple[tuple[str, int], ...]:
+        """The transport ``*_total`` counter values of one endpoint view, keyed by metric name."""
+        return (
+            ("rct_transport_bytes_discarded_total", e.counters.discarded_bytes),
+            ("rct_transport_crc_errors_total", e.counters.crc_errors),
+            ("rct_transport_framing_errors_total", e.counters.framing_errors),
+            ("rct_transport_unexpected_frames_total", e.counters.unexpected_frames),
+        )
 
     def _state_samples(self, metric: str, device: str, value: float) -> list[tuple[str, str, float]]:
         # An unlabelled code maps to the fixed state "unknown"; the code stays out of the labels
@@ -170,8 +207,8 @@ class MetricsExporter:
         self._value_families(family)
 
     def _service_families(self, family) -> None:
-        hits = sum(d.cache_hits() for d in self._devices)
-        misses = sum(d.cache_misses() for d in self._devices)
+        hits = self._carry_cache_hits + sum(d.cache_hits() for d in self._devices)
+        misses = self._carry_cache_misses + sum(d.cache_misses() for d in self._devices)
         family(
             "rct_api_requests_total",
             "counter",
@@ -207,17 +244,21 @@ class MetricsExporter:
         name = "rct_device_request_duration_seconds"
         samples: list[tuple[str, str, float]] = []
         for d in self._devices:
+            carried = self._carry_device_durations.get(d.device_id)
             hist, cumulative = d.durations, 0
-            for bound, n in zip(hist.bounds, hist.counts, strict=True):
-                cumulative += n
+            for i, (bound, n) in enumerate(zip(hist.bounds, hist.counts, strict=True)):
+                cumulative += n + (carried.counts[i] if carried is not None else 0)
                 samples.append((f"{name}_bucket", _labels(device=d.device_id, le=_number(bound)), cumulative))
-            samples.append((f"{name}_bucket", _labels(device=d.device_id, le="+Inf"), hist.count))
-            samples.append((f"{name}_sum", _labels(device=d.device_id), hist.total))
-            samples.append((f"{name}_count", _labels(device=d.device_id), hist.count))
+            total_count = hist.count + (carried.count if carried is not None else 0)
+            total_sum = hist.total + (carried.total if carried is not None else 0.0)
+            samples.append((f"{name}_bucket", _labels(device=d.device_id, le="+Inf"), total_count))
+            samples.append((f"{name}_sum", _labels(device=d.device_id), total_sum))
+            samples.append((f"{name}_count", _labels(device=d.device_id), total_count))
         family(name, "histogram", "Duration of device transactions.", samples)
         family(
             "rct_device_errors_total", "counter", "Failed device transactions.",
-            [("rct_device_errors_total", _labels(device=d.device_id), d.errors()) for d in self._devices],
+            [("rct_device_errors_total", _labels(device=d.device_id),
+              self._carry_device_errors.get(d.device_id, 0) + d.errors()) for d in self._devices],
         )  # fmt: skip
         succeeded = [(d, d.last_success_at()) for d in self._devices]
         family(
@@ -267,7 +308,13 @@ class MetricsExporter:
             ),
         )
         for name, kind, help_text, getter in rows:
-            family(name, kind, help_text, [(name, _labels(endpoint=e.endpoint_id), getter(e)) for e in self._endpoints])
+            carried = kind == "counter"  # only the *_total counters carry over a view swap
+            family(
+                name, kind, help_text,
+                [(name, _labels(endpoint=e.endpoint_id),
+                  getter(e) + (self._carry_endpoint.get((e.endpoint_id, name), 0) if carried else 0))
+                 for e in self._endpoints],
+            )  # fmt: skip
 
     def _value_families(self, family) -> None:
         now = self._monotonic()

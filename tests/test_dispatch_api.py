@@ -113,6 +113,49 @@ async def test_grid_charge_then_delete_restores_device(tmp_path: Path) -> None:
         assert stopped.json()["restore_required"] is False
 
 
+async def test_a_generic_write_to_a_dispatch_register_is_refused_during_an_active_dispatch(
+    tmp_path: Path,
+) -> None:
+    """P1 ownership: while a dispatch controls the inverter, the four dispatch-control registers may
+    not be written through the generic PAT endpoint — the controller keeps no consistent state of a
+    parallel raw write. Fail-closed: 409 dispatch_register_locked, no device transaction.
+    """
+    async with running_app(settings(tmp_path)) as harness:
+        seed_payloads(harness)
+        armed = await harness.client.post(
+            "/api/v1/devices/main/battery/dispatch",
+            headers=WRITER,
+            json={
+                "mode": "charge_from_grid",
+                "target_soc_percent": 80,
+                "max_power_w": 4000,
+                "valid_until": (datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+            },
+        )
+        assert armed.status_code == 200, armed.text
+        blocked = await harness.client.put(
+            "/api/v1/devices/main/metrics/power_mng_battery_power_extern",
+            headers=WRITER,
+            json={"value": 1500.0},
+        )
+    assert blocked.status_code == 409, blocked.text
+    assert blocked.json()["code"] == "dispatch_register_locked"
+
+
+async def test_a_generic_write_to_a_dispatch_register_is_allowed_when_idle(tmp_path: Path) -> None:
+    """The lock is scoped to an active dispatch: with no dispatch and the Energy Manager off, the
+    same register is writable through the generic endpoint (the escape hatch still exists).
+    """
+    async with running_app(settings(tmp_path)) as harness:
+        seed_payloads(harness)
+        response = await harness.client.put(
+            "/api/v1/devices/main/metrics/power_mng_battery_power_extern",
+            headers=WRITER,
+            json={"value": 0.0},
+        )
+    assert response.status_code == 200, response.text
+
+
 async def test_an_existing_request_body_produces_the_recorded_response(tmp_path: Path) -> None:
     """AC-16: the body an existing client sends today must still produce the same response, field
     for field. Recorded here so a regression shows up as a diff instead of as a silent change.

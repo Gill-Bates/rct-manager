@@ -17,7 +17,12 @@ import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
-from app.dispatch.capabilities import CapabilityRegistry
+from app.dispatch.capabilities import (
+    CapabilityName,
+    CapabilityRecord,
+    CapabilityRegistry,
+    CapabilityStatus,
+)
 from app.dispatch.models import DeviceControlSnapshot, DispatchMode, PowerSetpoint
 from app.dispatch.soc_policy import (
     NOTE_MAX_LENGTH,
@@ -174,6 +179,38 @@ async def test_adapter_writes_the_business_target_ratio_under_the_shipped_policy
         "main", dispatch_mode=DispatchMode.CHARGE_FROM_GRID, stop_target_percent=80.0, soc_percent=54.9
     )
     assert rct.writes == [("main", "power_mng_soc_target_set", 0.8)]
+
+
+async def test_adapter_writes_percent_when_the_device_attests_the_percent_unit() -> None:
+    """soc_target_unit is verification evidence that must reach the write: a percent-attested device
+    must receive 80, not the ratio 0.8. Without this the verification attested a unit the adapter
+    then ignored (the P1 ineffective-verification finding).
+    """
+    verified_percent = CapabilityRegistry(
+        [
+            CapabilityRecord(
+                device_id="main",
+                name=CapabilityName.WRITE_PATH,
+                status=CapabilityStatus.VERIFIED,
+                soc_strategy_external_code=1,
+                enum_byte_width=1,
+                bool_byte_width=1,
+                write_frame_layout_verified=True,
+                apply_sequence_verified=True,
+                soc_target_unit="percent",
+            )
+        ]
+    )
+    rct = FakeRctGateway()
+    dispatch = RctDispatchGateway(
+        rct,  # type: ignore[arg-type]
+        capabilities=verified_percent,
+        soc_target_policies=SocTargetPolicyRegistry(),
+    )
+    await dispatch.apply_soc_target(
+        "main", dispatch_mode=DispatchMode.CHARGE_FROM_GRID, stop_target_percent=80.0, soc_percent=54.9
+    )
+    assert rct.writes == [("main", "power_mng_soc_target_set", pytest.approx(80.0))]
 
 
 async def test_adapter_derives_per_device_and_per_call_from_the_policy_registry() -> None:

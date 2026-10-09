@@ -146,6 +146,42 @@ def test_metric_names_and_labels_separate_device_and_transport(state) -> None:
     assert "NaN" not in text
 
 
+def test_total_counters_stay_monotonic_across_a_live_view_swap() -> None:
+    """A live device-list reload rebuilds the per-binding/endpoint counters from zero; the exported
+    _total families must carry the old values forward instead of dropping within one process life."""
+    cache = MemoryCache(10.0, 20.0)
+    before_device = DeviceView("main", Histogram(), lambda: 4, lambda: None, lambda: 0, lambda: 10, lambda: 3)
+    before_device.durations.observe(0.3)
+    before_device.durations.observe(0.3)
+    before_endpoint = EndpointView(
+        "ep1", EndpointCounters(discarded_bytes=70, crc_errors=2, framing_errors=1, unexpected_frames=5),
+        lambda: 0, lambda: 0, lambda: False,
+    )
+    exporter = MetricsExporter(cache, lambda: NOW, ServiceCounters(), [before_device], [before_endpoint], NAMES, [])
+
+    def totals(text: str) -> dict[str, float]:
+        return {name: value for name, _labels, value in _parse(text)
+                if name.endswith("_total") or name.endswith(("_count", "_sum"))}
+
+    first = totals(exporter.render())
+    assert first["rct_api_cache_hits_total"] == 10 and first["rct_api_cache_misses_total"] == 3
+    assert first["rct_device_errors_total"] == 4
+    assert first["rct_device_request_duration_seconds_count"] == 2
+    assert first["rct_transport_bytes_discarded_total"] == 70 and first["rct_transport_crc_errors_total"] == 2
+
+    # The reload replaces the views with freshly built, zeroed ones for the same device/endpoint.
+    exporter.set_devices([DeviceView("main", Histogram(), lambda: 0, lambda: None, lambda: 0, lambda: 0, lambda: 0)])
+    exporter.set_endpoints([EndpointView("ep1", EndpointCounters(), lambda: 0, lambda: 0, lambda: False)])
+    after = totals(exporter.render())
+    for name, value in first.items():
+        assert after[name] >= value, f"{name} fell from {value} to {after[name]} across the swap"
+
+    # New activity on the rebuilt views adds on top of the carried baseline.
+    exporter.set_devices([DeviceView("main", Histogram(), lambda: 1, lambda: None, lambda: 0, lambda: 2, lambda: 1)])
+    grown = totals(exporter.render())
+    assert grown["rct_api_cache_hits_total"] == 12 and grown["rct_device_errors_total"] == 5
+
+
 async def test_metrics_route_is_served_when_enabled_and_absent_when_disabled() -> None:
     async with running_app(make_settings(enable_metrics_endpoint=True)) as h:
         assert (await h.client.get("/metrics")).status_code == 200

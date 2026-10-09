@@ -1234,6 +1234,27 @@ def create_app(settings: Settings, *, clock: Clock | None = None, connector: Con
             """One small local SQLite read; offloaded for the same reason as ``_approve_writes``."""
             return tuple(await asyncio.to_thread(admin_store.get, "write_names") or ())
 
+        async def _revoke_writes(names: Iterable[str]) -> list[str]:
+            """Remove exactly ``names`` from the approved write allowlist (P2 rollback primitive).
+
+            The counterpart to ``_approve_writes``: it runs a *remove* mutator through the same
+            shared critical section (``update_write_names``, M8), so a failed mode commit can undo
+            only the names it just added without racing a concurrent widen or revoke. The add-only
+            ``_approve_writes`` cannot do this — handing it a reduced list silently adds nothing and
+            removes nothing — so compensation needs its own replace-capable path. Offloaded for the
+            same event-loop reason as the widen.
+            """
+            from app.admin.api import update_write_names
+
+            selected = frozenset(names)
+            return await asyncio.to_thread(
+                update_write_names,
+                admin_store,
+                runtime.gateway,
+                app.state.build_write_allowlist,
+                lambda current: [n for n in current if n not in selected],
+            )
+
         runtime.energy = EnergyManager(
             port=runtime.dispatch,
             store=dispatch_store,
@@ -1246,6 +1267,7 @@ def create_app(settings: Settings, *, clock: Clock | None = None, connector: Con
             approved_writes=_approved_writes,
             allowlist_candidates=lambda: frozenset(app.state.default_write_entries),
             required_writes=RctDispatchGateway.REQUIRED_WRITES,
+            revoke_writes=_revoke_writes,
             modes=energy_modes,
         )
     app.state.security = SecurityContext(

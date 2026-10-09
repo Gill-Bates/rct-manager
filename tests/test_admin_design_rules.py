@@ -20,7 +20,8 @@ Rules:
      incomplete form is reported by a toast plus aria-invalid on the field.
  R4  The admin scripts never open the native "leave page" dialog (beforeunload).
  R5  The TSDB action bar is exactly one `btn btn-primary` "Apply changes" button, requested through
-     the shared bar's `compact` option; there is no Discard, count badge or hint text.
+     the shared bar (every explicit-apply form, Inverters included); there is no Discard, count badge or
+     hint text.
  R6  Card grids define at most four columns (`.settings-grid`), a card may span a whole row via the
      shared `.card-span-all`.
  R7  `.btn-primary` themes every state, so no Bootstrap blue shows through (the disabled state used to).
@@ -30,6 +31,11 @@ Rules:
      wrappers.
  R10 Energy Manager step buttons (`energy-step-link`) are plain `btn btn-primary` and no CSS rule
      targets `.energy-step-link`: size, radius, font and height come from the shared button.
+ R11 The maximum viewport height of a parameter table page (Prometheus, Inverters, and any future
+     param_table page) is the height of the Inverters page: the card fills the space down to the
+     footer, the pager is pinned at the card bottom, and the page does not exceed the viewport
+     because of this card. That behaviour lives only in the shared macro (`param-card`) and the
+     shared CSS (`#main-content>.param-card`, `.param-table-wrap`); pages set no heights of their own.
 """
 
 import re
@@ -101,15 +107,14 @@ def check_r4_unload(scripts: dict[str, str]) -> list[str]:
 def check_r5_apply_bar(js: str, template: str) -> list[str]:
     problems = []
     builder = js[js.index("function buildApplyBar("):js.index("function buildDeviceApplyBar(")]
-    compact = builder[builder.index("if (compact) {"):builder.index("const discard = element(")]
-    if "'Discard'" in compact or "badge" in compact or "status" in compact:
-        problems.append("admin.js: R5 - the compact apply bar must hold the button only")
+    if "'Discard'" in builder or "badge" in builder or "status" in builder:
+        problems.append("admin.js: R5 - the shared apply bar must hold the button only")
     if "element('button', 'btn btn-primary', applyLabel)" not in builder:
         problems.append("admin.js: R5 - the apply button must use the shared primary class (btn btn-primary)")
     if "applyLabel = 'Apply changes'" not in builder:
         problems.append("admin.js: R5 - the apply label must be exactly 'Apply changes'")
-    if "buildApplyBar('export', {" not in js or "compact: true," not in js:
-        problems.append("admin.js: R5 - the TSDB form must request the compact apply bar")
+    if "buildApplyBar('export', {" not in js:
+        problems.append("admin.js: R5 - the TSDB form must use the shared apply bar")
     if 'id="export-actions"' not in template:
         problems.append("tsdb.html: R5 - missing #export-actions container")
     return problems
@@ -172,6 +177,37 @@ def check_r10_energy_step_buttons(js: str, css: str) -> list[str]:
     for selector, _body, line in _rules(css):
         if "energy-step-link" in selector:
             problems.append(f"admin.css:{line}: R10 - {selector} restyles the shared button; delete it")
+    return problems
+
+
+R11_HEIGHT_PROPS = re.compile(r"(?:^|[;\s])(?:min-|max-)?height\s*:|\d(?:d|s|l)?vh\b|overflow(?:-y)?\s*:\s*(?:auto|scroll)")
+R11_PAGES = ("prometheus.html", "inverters.html")
+
+
+def check_r11_param_card_height(css: str, macro: str, pages: dict[str, str]) -> list[str]:
+    problems = []
+    if not re.search(r'<section class="card param-card"', macro) or "param-table-wrap" not in macro:
+        problems.append("_param_table.html: R11 - the macro must render <section class=\"card param-card\"> with .param-table-wrap")
+    for name in R11_PAGES:
+        text = pages.get(name, "")
+        if "param_table(" not in text:
+            problems.append(f"{name}: R11 - the card must come from the shared param_table macro")
+        if re.search(r"style\s*=\s*\"[^\"]*(?:height|vh)", text, flags=re.IGNORECASE):
+            problems.append(f"{name}: R11 - no inline height: the height behaviour lives in the shared CSS")
+    shared = {"#main-content:has(>.param-card)", ".param-card>.card-body", "#main-content>.param-card", ".param-card .param-table-wrap"}
+    seen = set()
+    for selector, body, line in _rules(css):
+        names = [part.strip() for part in selector.split(",")]
+        compact = [re.sub(r"\s*([>+~])\s*", r"\1", n) for n in names]
+        seen.update(c for c in compact if c in shared)
+        page_specific = re.search(r'data-page=|#(?:exposed|writable)\b|prometheus|inverters', selector)
+        param = re.search(r"param-(?:card|table-wrap|table)\b", selector)
+        if (page_specific or param) and R11_HEIGHT_PROPS.search(body):
+            problems.append(f"admin.css:{line}: R11 - {selector} sets a height/vh/overflow; the param card must only grow with flex (Inverters is the reference)")
+        if page_specific and "flex" in body and re.search(r"\.card\b|main-content|param-", selector):
+            problems.append(f"admin.css:{line}: R11 - {selector} is a page-specific height rule; move it to the shared .param-card rules")
+    for missing in sorted(shared - seen):
+        problems.append(f"admin.css: R11 - shared rule '{missing}' not found")
     return problems
 
 
@@ -247,3 +283,16 @@ def test_r10_energy_step_buttons_use_the_shared_button() -> None:
     assert check_r10_energy_step_buttons(js, _read(CSS_FILE)) == []
     assert check_r10_energy_step_buttons(js.replace("'btn btn-primary energy-step-link'", "'btn btn-sm btn-primary energy-step-link'"), "")
     assert check_r10_energy_step_buttons(js, ".energy-step-link { min-height: 44px; }")
+
+
+def test_r11_param_table_pages_share_the_inverters_viewport_height() -> None:
+    css = _read(CSS_FILE)
+    macro = _read(TEMPLATES / "_param_table.html")
+    pages = {name: _read(TEMPLATES / name) for name in R11_PAGES}
+    assert check_r11_param_card_height(css, macro, pages) == []
+    assert check_r11_param_card_height(css + '\nbody[data-page="prometheus"] #main-content>.card { flex: 1 0 auto; }', macro, pages)
+    assert check_r11_param_card_height(css + "\n.param-table-wrap { max-height: 60vh; }", macro, pages)
+    assert check_r11_param_card_height(css + "\n.param-card { min-height: 40rem; }", macro, pages)
+    assert check_r11_param_card_height(css, macro.replace("card param-card", "card"), pages)
+    assert check_r11_param_card_height(css, macro, {**pages, "prometheus.html": '<div style="height: 30rem"></div>'})
+    assert check_r11_param_card_height(css, macro, {**pages, "inverters.html": "<section class=\"card\"></section>"})

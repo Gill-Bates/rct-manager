@@ -151,11 +151,23 @@ def test_a_soc_ratio_becomes_a_percentage() -> None:
     assert result.battery_soc_percent.stale is False
 
 
-def test_a_soc_already_in_percent_is_left_alone() -> None:
-    """A value above 1.5 is already a percentage; the shared soc_percent rule leaves it alone."""
+def test_the_soc_conversion_follows_the_catalog_unit_not_the_magnitude() -> None:
+    """battery_soc is a ratio by the catalog, so the conversion is x100 regardless of magnitude.
+
+    The old code guessed from the value (<=1.5 ratio, else percent), which turned a genuine 0.8 %
+    (reported as the ratio 0.008) into 80 %. The unit is now a catalog fact: every value is treated
+    as the declared ratio, so a low charge converts correctly instead of being misread.
+    """
     rct = CountingGateway(ManualClock())
-    rct.put("battery_soc", 54.0)
-    assert readings(rct).readings("main").battery_soc_percent.value == pytest.approx(54.0)
+    rct.put("battery_soc", 0.008)
+    assert readings(rct).readings("main").battery_soc_percent.value == pytest.approx(0.8)
+
+
+def test_the_catalog_still_declares_battery_soc_as_a_ratio() -> None:
+    """Pins the single source of truth the energy-readings adapter trusts: if the catalog ever
+    redeclares battery_soc's unit, app/gateway/energy_readings._BATTERY_SOC_UNIT must follow.
+    """
+    assert CATALOG.object_entry("battery_soc").unit == "ratio"
 
 
 @pytest.mark.parametrize(

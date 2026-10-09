@@ -1560,18 +1560,24 @@
       badgeNodes[key] = { node, state, caption };
     }
 
-    // state is [text, ok] or null when the reading is unknown (badge hidden, no invented state).
+    // state is [text, favourable] or null when the reading is unknown (badge hidden, no invented state).
+    // Tone per state: favourable -> success; every other normal state and n/a -> neutral. No flow
+    // state is a fault, so warning/danger are never used here.
+    //   Generation:  Generating success | No generation neutral
+    //   Consumption: Independent success | Grid supplied neutral
+    //   Grid:        Feed-in success | Idle neutral | Import neutral
+    //   Battery:     Charging success | Discharging neutral | Idle neutral
+    //   Any badge:   n/a (reading expired) neutral
     // `expired`: the reading ran out, so the badge reads n/a instead of vanishing (the row keeps its height).
     function setBadge(key, state, stale, expired = false) {
       const badge = badgeNodes[key];
       const shown = Boolean(state) || expired;
       if (badge.node.hidden !== !shown) badge.node.hidden = !shown;
       if (!shown) return;
-      const [text, ok] = state || ['n/a', null];
+      const [text, favourable] = state || ['n/a', false];
       setText(badge.state, text);
-      setClass(badge.state, 'status-badge-success', ok === true);
-      setClass(badge.state, 'status-badge-danger', ok === false);
-      setClass(badge.state, 'status-badge-neutral', ok === null);
+      setClass(badge.state, 'status-badge-success', favourable === true);
+      setClass(badge.state, 'status-badge-neutral', favourable !== true);
       const label = `${badge.caption}: ${text}`;
       if (badge.node.getAttribute('aria-label') !== label) badge.node.setAttribute('aria-label', label);
     }
@@ -3545,7 +3551,6 @@
     };
     $('export-actions')?.replaceChildren(buildApplyBar('export', {
       onApply: () => { applyExport().catch((error) => toast(messageFrom(error), 'danger')); },
-      compact: true,
     }));
     render();
   }
@@ -3615,7 +3620,7 @@
   // The device list is applied explicitly: edits only change the draft, and one PUT (with the live
   // reconfiguration it triggers) is sent on Apply. Unlike the other settings it never autosaves.
   let deviceBaseline = [];                  // server state: [{ uid, host, port, network_id, device_id, display_name }]
-  const deviceUi = { applying: false, error: '', notice: '' };
+  const deviceUi = { applying: false };
 
   function deviceSnapshot(device) {
     return {
@@ -3687,21 +3692,6 @@
     if (apply) {
       apply.disabled = deviceUi.applying || invalid || changes.count === 0;
       apply.setAttribute('aria-busy', String(deviceUi.applying));
-      card.querySelector('#device-discard').disabled = deviceUi.applying || (changes.count === 0 && !deviceUi.error);
-      const count = card.querySelector('#device-change-count');
-      count.hidden = changes.count === 0;
-      count.textContent = `${changes.count} unsaved ${changes.count === 1 ? 'change' : 'changes'}`;
-      const warning = card.querySelector('#device-reset-warning');
-      warning.hidden = changes.risky.length === 0;
-      warning.textContent = changes.risky.length ? `${RESET_NOTE} when you apply: ${changes.risky.map(deviceLabel).join(', ')}.` : '';
-      let status = deviceUi.notice;
-      if (deviceUi.applying) status = 'Applying — the inverter connections are being rebuilt …';
-      else if (invalid) status = 'Fix the marked inverter rows — nothing is applied until they are valid.';
-      else if (changes.count) status = 'Unsaved changes — nothing has been sent yet.';
-      card.querySelector('#device-apply-status').textContent = status;
-      const error = card.querySelector('#device-apply-error');
-      error.hidden = !deviceUi.error;
-      error.textContent = deviceUi.error;
     }
     return !invalid;
   }
@@ -3716,16 +3706,6 @@
       body.replaceChildren(element('h2', 'h5 mb-3', 'Inverters'));
       renderDevicesSettings(body);
     });
-  }
-
-  // The "rebuild consistently" branch: only ever on the operator's explicit request.
-  function discardDeviceChanges() {
-    if (deviceUi.applying) return;
-    adoptDevices(deviceBaseline.map(({ uid, ...rest }) => rest));
-    deviceUi.error = '';
-    deviceUi.notice = '';
-    rebuildDeviceSection();
-    toast('Inverter changes discarded.', 'info');
   }
 
   function renderDevicesSettings(card) {
@@ -3798,7 +3778,6 @@
         device.host = hostInput.value;
         device.port = portInput.value === '' ? null : Number(portInput.value);
         device.network_id = networkId(networkInput.value);
-        deviceUi.notice = '';
         refreshDeviceState(card);
       };
       hostInput.addEventListener('input', onInput);
@@ -3818,7 +3797,6 @@
           (rows?.[Math.min(at, rows.length - 1)]?.querySelector('button')
             || editor?.parentElement?.querySelector('.device-settings ~ button'))?.focus();
         }
-        deviceUi.notice = '';
         if (editor?.parentElement) refreshDeviceState(editor.parentElement);
       });
     }
@@ -3834,46 +3812,23 @@
     refreshDeviceState(card);
   }
 
-  // The shared Apply/Discard bar of every explicit-apply form; `prefix` namespaces the element ids.
-  // `compact` renders the button alone (no Discard, change count or status text).
-  function buildApplyBar(prefix, { onApply, onDiscard, applyLabel = 'Apply changes', compact = false }) {
-    const bar = element('div', compact ? 'apply-bar' : 'apply-bar mt-4');
-    const actions = element('div', 'd-flex flex-wrap align-items-center gap-2');
+  // The shared action bar of every explicit-apply form: the Apply button alone. Its native disabled
+  // state tells assistive technology that there is nothing (valid) to apply; `prefix` namespaces the id.
+  function buildApplyBar(prefix, { onApply, applyLabel = 'Apply changes' }) {
+    const bar = element('div', 'apply-bar');
     const apply = element('button', 'btn btn-primary', applyLabel);
     apply.type = 'button';
     apply.id = `${prefix}-apply`;
-    if (!compact) apply.setAttribute('aria-describedby', `${prefix}-apply-status`);
     apply.addEventListener('click', onApply);
-    if (compact) {
-      actions.append(apply);
-      bar.append(actions);
-      return bar;
-    }
-    const discard = element('button', 'btn btn-outline-secondary', 'Discard');
-    discard.type = 'button';
-    discard.id = `${prefix}-discard`;
-    discard.addEventListener('click', onDiscard);
-    const count = element('span', 'status-badge status-badge-warning');
-    count.id = `${prefix}-change-count`;
-    actions.append(apply, discard, count);
-    const status = element('p', 'text-secondary small mt-2 mb-0');
-    status.id = `${prefix}-apply-status`;
-    status.setAttribute('role', 'status'); // polite live region: progress and result are announced
-    const error = element('div', 'alert alert-danger mt-3 mb-0');
-    error.id = `${prefix}-apply-error`;
-    error.tabIndex = -1; // focus target after a failed apply; the toast carries the same text
-    bar.append(actions, status, error);
+    bar.append(apply);
     return bar;
   }
 
   function buildDeviceApplyBar(card) {
     const bar = buildApplyBar('device', {
       onApply: () => { applyDevices(card).catch((error) => toast(messageFrom(error), 'danger')); },
-      onDiscard: discardDeviceChanges,
     });
-    const warning = element('div', 'alert alert-warning small mt-3 mb-0');
-    warning.id = 'device-reset-warning';
-    bar.querySelector('#device-apply-status').before(warning);
+    bar.classList.add('mt-4');
     return bar;
   }
 
@@ -3910,8 +3865,6 @@
       danger: true,
     })) return;
     deviceUi.applying = true;
-    deviceUi.error = '';
-    deviceUi.notice = '';
     refreshDeviceState(card);
     let failed = false;
     try {
@@ -3920,14 +3873,12 @@
       settingsCommitted = result.settings || { ...settingsCommitted, ...payload };
       // After a successful apply the draft is the server state, including newly assigned ids.
       adoptDevices(structuredClone(settingsCommitted.devices || payload.devices));
-      deviceUi.notice = `Applied ${hhmm(new Date())}.`;
       showRestartNotice(result.restart_required);
       if (page === 'dashboard') { loadDashboard().catch((error) => toast(messageFrom(error), 'danger')); loadMetricCount(); }
       toast('Inverters applied.');
     } catch (error) {
       failed = true;
-      deviceUi.error = applyFailureMessage(error);
-      toast(deviceUi.error, 'danger');
+      toast(applyFailureMessage(error), 'danger');
     } finally {
       deviceUi.applying = false;
     }
@@ -3935,7 +3886,7 @@
     if (!host?.parentElement) return;
     if (failed) refreshDeviceState(host.parentElement);
     else rebuildDeviceSection();
-    if (failed) document.getElementById('device-apply-error')?.focus();
+    if (failed) document.getElementById('device-apply')?.focus();
   }
 
   // One builder for both renderSettings() and rerenderGroup(), so the Account relabel cannot drift
@@ -4014,6 +3965,7 @@
   }
 
   function showRestartNotice(keys) {
+    if (page === 'tsdb') return; // no persistent banner there; the save toast carries the same text
     let notice = $('restart-notice');
     if (!notice) {
       notice = element('div', 'alert alert-warning mt-3 mb-0');

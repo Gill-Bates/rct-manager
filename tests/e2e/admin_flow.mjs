@@ -232,10 +232,10 @@ const statusBadges = await page.evaluate(() => {
   return {
     count: badges.length,
     states: badges.map((b) => b.querySelector('.flow-badge-state').textContent),
-    colored: badges.every((b) => b.querySelector('.flow-badge-state').matches('.status-badge-success, .status-badge-danger')),
+    colored: badges.every((b) => b.querySelector('.flow-badge-state').matches('.status-badge-success, .status-badge-neutral')),
   };
 });
-check('dashboard flow graphic shows status badges, each green or red', statusBadges.count > 0 && statusBadges.colored, JSON.stringify(statusBadges));
+check('dashboard flow graphic shows status badges, each success or neutral', statusBadges.count > 0 && statusBadges.colored, JSON.stringify(statusBadges));
 // Final colour semantics: PV/export/discharge green, import red/orange, charge blue/neutral.
 // Probed on disposable elements, not the live graphic — the simulator's battery leg can be idle,
 // so flow-charge/flow-discharge may not be applied to any current DOM node.
@@ -340,6 +340,21 @@ check('status badges share size, padding, radius, typography and dot (colour asi
   JSON.stringify(badgeMetrics.map((b) => [b.text, b.size, b.height])));
 check('status badges are never dimmed and keep text contrast of at least 4.5:1',
   badgeMetrics.every((b) => b.opacity === '1' && b.contrast >= 4.5), JSON.stringify(badgeMetrics.map((b) => [b.text, b.opacity, +b.contrast.toFixed(2)])));
+// Forced stale readings (route rewrite) must not dim or flicker the flow badges across several polls.
+await page.route('**/admin/api/devices*', async (route) => {
+  const response = await route.fetch();
+  const mark = (node) => { if (node && typeof node === 'object') { if ('stale' in node) node.stale = true; Object.values(node).forEach(mark); } return node; };
+  await route.fulfill({ response, json: mark(await response.json()) });
+});
+const staleSeen = new Set();
+for (let i = 0; i < 90; i++) {
+  (await page.$$eval('.device-item .flow-badge:not([hidden])', (list) => list.map((n) => getComputedStyle(n).opacity + '|' + getComputedStyle(n.querySelector('.flow-badge-state')).color)))
+    .forEach((v) => staleSeen.add(v));
+  await page.waitForTimeout(250);
+}
+await page.unroute('**/admin/api/devices*');
+check('flow badges keep full opacity and one colour per badge while readings are forced stale',
+  staleSeen.size > 0 && [...staleSeen].every((v) => v.startsWith('1|')) && staleSeen.size <= 4, JSON.stringify([...staleSeen]));
 check('no external requests', external.size === 0, [...external].join(','));
 
 // Two simulated battery towers (primary + battery_placeholder_0, tests/e2e/fake_inverter.py) must
@@ -1081,6 +1096,38 @@ for (const scheme of ['light', 'dark']) {
     if (width >= 768) check(`the primary Add action is top right on both pages ${label}`, near(pm.addFromRight, inv.addFromRight) && pm.addFromRight < 40, JSON.stringify([pm.addFromRight, inv.addFromRight]));
   }
 }
+// Viewport height contract: the Inverters page is the reference. Every param_table page ends its card right above
+// the footer once scrolled to the bottom, and a short page fills exactly the viewport (no scroll caused by the card).
+{
+  const savedViewport = page.viewportSize();
+  const heightProbe = () => page.evaluate((pfx) => {
+    window.scrollTo({ top: document.documentElement.scrollHeight, behavior: 'instant' });
+    const card = document.getElementById(`${pfx}-list`).closest('.card');
+    const footer = document.querySelector('.admin-footer').getBoundingClientRect();
+    const de = document.documentElement;
+    return { cardToFooter: footer.top - card.getBoundingClientRect().bottom, docOverflowY: de.scrollHeight - de.clientHeight, footerTop: footer.top, cardBottom: card.getBoundingClientRect().bottom, rows: document.querySelectorAll(`#${pfx}-list .metric-row`).length };
+  }, pfx);
+  let pfx;
+  for (const [width, height] of [[1280, 720], [1280, 900], [1536, 864], [1280, 1200], [1280, 2200], [390, 844]]) {
+    await page.setViewportSize({ width, height });
+    const probes = {};
+    for (const [url, prefix] of [['/ui/prometheus', 'exposed'], ['/ui/inverters', 'writable']]) {
+      await page.goto(base + url);
+      await page.waitForSelector(`#${prefix}-list tr`, { state: 'attached' });
+      await page.waitForLoadState('networkidle');
+      await sleep(300);
+      pfx = prefix;
+      probes[prefix] = await heightProbe();
+    }
+    const [pm, inv] = [probes.exposed, probes.writable];
+    const label = `@${width}x${height}`;
+    check(`Prometheus card ends above the footer exactly like Inverters when scrolled to the bottom ${label}`,
+      Math.abs(pm.cardToFooter - inv.cardToFooter) <= 1 && pm.cardToFooter >= 0, JSON.stringify([pm, inv]));
+    if (height === 2200) check(`short Prometheus page fills the viewport like Inverters ${label}`,
+      pm.docOverflowY <= 1 && inv.docOverflowY <= 1 && Math.abs(pm.cardBottom - inv.cardBottom) <= 1, JSON.stringify([pm, inv]));
+  }
+  await page.setViewportSize(savedViewport);
+}
 // This server runs without the Energy Manager, so the /ui/energy visits above deliberately get its 503.
 scrubExpected(stackedLoopStart, expectedStatus(`${base}/admin/api/energy/devices`, 503));
 // Prove this measurement catches a single-card spacing regression, then restore the page.
@@ -1278,14 +1325,8 @@ const rowState = (index) => page.evaluate((i) => {
 // A toast can sit over the bottom-right controls; closing it first keeps the click deterministic.
 const clearToasts = () => page.evaluate(() => document.querySelectorAll('#toast-region .alert').forEach((node) => node.remove()));
 const settleDevicePuts = async () => { await sleep(900); return devicePuts.length; }; // > the old 450 ms debounce
-const barState = () => page.evaluate(() => ({
-  apply: !document.getElementById('device-apply').disabled,
-  discard: !document.getElementById('device-discard').disabled,
-  count: document.getElementById('device-change-count').hidden ? '' : document.getElementById('device-change-count').textContent,
-  warning: document.getElementById('device-reset-warning').hidden ? '' : document.getElementById('device-reset-warning').textContent,
-  status: document.getElementById('device-apply-status').textContent,
-  error: document.getElementById('device-apply-error').hidden ? '' : document.getElementById('device-apply-error').textContent,
-}));
+const barState = () => page.evaluate(() => ({ apply: !document.getElementById('device-apply').disabled }));
+
 const serverDevices = async () => (await (await context.request.get(base + '/admin/api/settings')).json()).settings.devices;
 const unloadWarns = () => page.evaluate(() => { const event = new Event('beforeunload', { cancelable: true }); window.dispatchEvent(event); return event.defaultPrevented; });
 check('the dialog offers one empty row below the saved inverter', (await deviceRows()) === 2, String(await deviceRows()));
@@ -1293,11 +1334,11 @@ check('trash icon has an accessible label', (await page.locator('.device-setting
 check('the empty row has no remove button', (await page.locator('.device-settings-item').nth(1).locator('button').count()) === 0);
 check('no id or name fields', (await page.locator('.device-settings-item input[data-field="device_id"], .device-settings-item input[data-field="display_name"]').count()) === 0);
 let bar = await barState();
-check('Apply and Discard are disabled while the draft is clean', !bar.apply && !bar.discard && bar.count === '' && bar.status === '', JSON.stringify(bar));
-check('the Apply button has an accessible name and a described status region',
+check('Apply is disabled while the draft is clean', !bar.apply, JSON.stringify(bar));
+check('the action bar is the Apply changes button alone',
   (await page.locator('#device-apply').innerText()).trim() === 'Apply changes'
-  && (await page.locator('#device-apply').getAttribute('aria-describedby')) === 'device-apply-status'
-  && (await page.locator('#device-apply-status').getAttribute('role')) === 'status');
+  && (await page.locator('.apply-bar button').count()) === 1
+  && (await page.locator('.apply-bar .badge, .apply-bar p, #device-discard, #device-reset-warning').count()) === 0);
 check('a clean draft shows no browser warning', !(await unloadWarns()));
 
 // (b)-(d) invalid rows: field-level errors as before, Apply stays disabled, nothing is sent
@@ -1306,7 +1347,7 @@ await deviceField(1, 'host').fill('http://nope/path');
 let state = await rowState(1);
 check('invalid host is reported on the host field', state.invalid.join(',') === 'host' && state.feedback.includes('without scheme'), JSON.stringify(state));
 bar = await barState();
-check('an invalid draft keeps Apply disabled and says why', !bar.apply && bar.status.includes('Fix the marked'), JSON.stringify(bar));
+check('an invalid draft keeps Apply disabled; the marked field says why', !bar.apply && (await rowState(1)).feedback.length > 0, JSON.stringify(bar));
 await deviceField(1, 'host').fill('192.0.2.10');
 await deviceField(1, 'port').fill('70000');
 state = await rowState(1);
@@ -1331,8 +1372,7 @@ check('a changed field sends no request, not even after change events and spinne
 state = await rowState(1);
 bar = await barState();
 check('the changed row is marked as unsaved', state.flag.includes('New') && state.flag.includes('unsaved'), JSON.stringify(state));
-check('the draft is counted and Apply is enabled', bar.apply && bar.discard && bar.count === '1 unsaved change' && bar.status.includes('Unsaved changes'), JSON.stringify(bar));
-check('a new inverter needs no reset warning', bar.warning === '', bar.warning);
+check('Apply is enabled for the unsaved row', bar.apply, JSON.stringify(bar));
 check('leaving with an unsaved draft shows no browser warning', !(await unloadWarns()));
 await deviceField(1, 'port').fill('18899');
 await clearToasts();
@@ -1344,18 +1384,18 @@ check('Apply sends exactly one PUT with the new list', devicePuts.length === put
 check('the PUT carries nothing but the device list', Object.keys(devicePuts.at(-1)).join(',') === 'devices');
 check('Apply keeps the dialog open and the server has the new inverter', (await modalOpen()) === 1 && (await serverDevices()).some((d) => d.host === '192.0.2.10' && Number(d.port) === 18899));
 bar = await barState();
-check('after a successful apply the draft is the server state', !bar.apply && !bar.discard && bar.count === '' && /^Applied \d\d:\d\d/.test(bar.status) && (await deviceRows()) === 3, JSON.stringify(bar));
+check('after a successful apply the draft is the server state', !bar.apply && (await deviceRows()) === 3, JSON.stringify(bar));
 check('no browser warning after apply', !(await unloadWarns()));
 await shot('inverter-added');
 
-// (f) Discard drops the draft without a request
+// (f) Reloading the page drops an unsaved draft silently and sends nothing
 const putsAtDiscard = devicePuts.length;
 await deviceField(0, 'port').fill(String(Number(savedPort) + 1));
-check('editing a saved row marks it as changed and warns about the reset',
-  (await rowState(0)).flag.includes('Changed') && (await barState()).warning.includes('Engineering Mode') && (await barState()).warning.includes(`${savedHost}:${savedPort}`), JSON.stringify(await barState()));
-await clearToasts();
-await page.click('#device-discard');
-check('Discard restores the server state and sends nothing', (await deviceField(0, 'port').inputValue()) === savedPort && (await barState()).count === '' && (await settleDevicePuts()) === putsAtDiscard);
+check('editing a saved row marks it as changed', (await rowState(0)).flag.includes('Changed'), JSON.stringify(await rowState(0)));
+await page.reload();
+await page.click('#add-inverter');
+await page.waitForSelector('#inverters-modal.show .device-settings-item input[data-field="host"]');
+check('reloading restores the server state and sends nothing', (await deviceField(0, 'port').inputValue()) === savedPort && (await settleDevicePuts()) === putsAtDiscard);
 
 // (g) re-addressing needs a confirmation that names the reset; cancelling sends nothing
 const extraRow = 1;
@@ -1380,12 +1420,12 @@ await clearToasts();
 await page.click('#device-apply');
 await page.waitForSelector('#confirm-modal.show', { timeout: 5000 });
 await page.click('#confirm-accept');
-await page.waitForFunction(() => document.getElementById('device-apply-error') && !document.getElementById('device-apply-error').hidden, null, { timeout: 8000 });
+await page.waitForFunction(() => [...document.querySelectorAll('#toast-region .alert-danger')].some((n) => n.textContent.includes('Injected failure')), null, { timeout: 8000 });
 bar = await barState();
-check('a failed apply shows the error with the reason and keeps the draft', bar.error.includes('Injected failure') && bar.error.includes('kept') && bar.apply && bar.count === '1 unsaved change', JSON.stringify(bar));
+check('a failed apply names the reason and keeps the draft', bar.apply && (await page.locator('#toast-region .alert-danger').first().innerText()).includes('kept'), JSON.stringify(bar));
 check('a failed apply raises the danger toast exactly once',
   (await page.$$eval('#toast-region .alert-danger', (nodes) => nodes.filter((n) => n.textContent.includes('Injected failure')).length)) === 1);
-check('focus moves to the error after a failed apply', await page.evaluate(() => document.activeElement?.id === 'device-apply-error'));
+check('focus returns to the Apply button after a failed apply', await page.evaluate(() => document.activeElement?.id === 'device-apply'));
 check('the draft value survives the failed apply', (await deviceField(extraRow, 'port').inputValue()) === '18898');
 await page.unroute('**/admin/api/settings');
 await page.route('**/admin/api/settings', (route) => route.request().method() === 'PUT'
@@ -1395,8 +1435,8 @@ await clearToasts();
 await page.click('#device-apply');
 await page.waitForSelector('#confirm-modal.show', { timeout: 5000 });
 await page.click('#confirm-accept');
-await page.waitForFunction(() => document.getElementById('device-apply-error').textContent.includes('rolled back'), null, { timeout: 8000 });
-check('a 409 reports the rollback and keeps the draft', (await barState()).error.includes('Device graph build failed') && (await barState()).apply);
+await page.waitForFunction(() => [...document.querySelectorAll('#toast-region .alert-danger')].some((n) => n.textContent.includes('rolled back')), null, { timeout: 8000 });
+check('a 409 reports the rollback and keeps the draft', (await page.locator('#toast-region .alert-danger').first().innerText()).includes('Device graph build failed') && (await barState()).apply);
 await page.unroute('**/admin/api/settings');
 await page.route('**/admin/api/settings', (route) => route.request().method() === 'PUT'
   ? route.fulfill({ status: 504, contentType: 'application/json', body: JSON.stringify({ detail: 'Reconfiguration timed out' }) })
@@ -1405,7 +1445,7 @@ await clearToasts();
 await page.click('#device-apply');
 await page.waitForSelector('#confirm-modal.show', { timeout: 5000 });
 await page.click('#confirm-accept');
-await page.waitForFunction(() => document.getElementById('device-apply-error').textContent.includes('timed out'), null, { timeout: 8000 });
+await page.waitForFunction(() => [...document.querySelectorAll('#toast-region .alert-danger')].some((n) => n.textContent.includes('timed out')), null, { timeout: 8000 });
 check('a 504 reports the timeout and keeps the draft', (await barState()).apply);
 await page.unroute('**/admin/api/settings');
 scrubExpected(injectedApplyStart, (p) => p.includes(`${base}/admin/api/settings`) &&
@@ -1434,11 +1474,12 @@ check('the re-addressed inverter is on the server', (await serverDevices()).some
 await page.locator('.device-settings-item').nth(extraRow).locator('button').click();
 check('Remove drops the row from the draft only', (await deviceRows()) === 2 && (await serverDevices()).some((d) => d.host === '192.0.2.10'));
 bar = await barState();
-check('a pending removal is counted and warns about the reset', bar.count === '1 unsaved change' && bar.warning.includes('192.0.2.10:18898'), JSON.stringify(bar));
+check('a pending removal enables Apply', bar.apply, JSON.stringify(bar));
 const putsAtRemove = devicePuts.length;
 await clearToasts();
 await page.click('#device-apply');
 await page.waitForSelector('#confirm-modal.show', { timeout: 5000 });
+check('the confirmation names the reset and the removed inverter', /192\.0\.2\.10:18898/.test(await page.locator('#confirm-modal').innerText()) && /Engineering Mode/.test(await page.locator('#confirm-modal').innerText()));
 await page.click('#confirm-accept');
 await page.waitForFunction(() => document.getElementById('toast-region').textContent.includes('Inverters applied'), null, { timeout: 8000 });
 check('Apply removes the inverter with exactly one PUT', devicePuts.length === putsAtRemove + 1 && devicePuts.at(-1).devices.length === 1
@@ -1451,9 +1492,10 @@ await page.waitForSelector('#inverters-modal', { state: 'hidden' });
 await page.click('#add-inverter');
 await page.waitForSelector('#inverters-modal.show .device-settings-item input[data-field="host"]');
 check('an unsaved draft survives closing the dialog', (await deviceField(1, 'host').inputValue()) === '192.0.2.55' && (await barState()).apply);
-await clearToasts();
-await page.click('#device-discard');
-check('Discard clears the leftover draft', (await deviceField(1, 'host').inputValue()) === '' && !(await barState()).apply);
+await page.reload();
+await page.click('#add-inverter');
+await page.waitForSelector('#inverters-modal.show .device-settings-item input[data-field="host"]');
+check('reloading clears the leftover draft', (await deviceField(1, 'host').inputValue()) === '' && !(await barState()).apply);
 // "Add another inverter" reuses the empty row and focuses it
 await page.click('#device-add-row');
 check('Add another inverter focuses the empty row without sending anything', await deviceField(1, 'host').evaluate((input) => document.activeElement === input) && (await deviceRows()) === 2);

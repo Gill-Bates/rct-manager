@@ -57,8 +57,11 @@ async def require_read(request: Request, ctx: Context) -> Principal:
     except AuthenticationError:
         ctx.limiter.record_auth_failure(address)
         raise
+    # Record the identity as soon as authentication succeeds, before the business rate-limit check:
+    # a request rejected by check_request() is still an authenticated caller and must appear in the
+    # access log as that token, not as "token -" (Requirement 9.11).
+    request.scope["token_id"] = principal.token_id  # picked up by the request and action logs
     ctx.limiter.check_request(caller_key(principal.token_id, address))
-    request.scope["token_id"] = principal.token_id  # picked up by the request and action logs (Requirement 9.11)
     return principal
 
 

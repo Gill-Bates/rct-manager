@@ -30,6 +30,7 @@ from app.scheduling.budget import WorkBudget
 from app.scheduling.heartbeat import Heartbeat, LivenessSource
 from app.scheduling.retry import RetryConfig, execute_read
 from app.scheduling.serializer import AccessSerializer
+from app.transport.counters import DeviceCounters
 from app.transport.endpoint import EndpointConfig, TransportEndpoint
 from app.transport.types import (
     SendOutcome,
@@ -437,6 +438,31 @@ def test_one_slave_does_not_hide_a_silent_one() -> None:
 
     total, a_count, b_count, probes, b_never, source = asyncio.run(scenario())
     assert (total, a_count, b_count, probes, b_never, source) == (1, 1, 0, 1, True, LivenessSource.HEARTBEAT)
+
+
+def test_failed_tick_clears_the_liveness_source() -> None:
+    """A failed heartbeat must not keep reporting the last successful source as the current one."""
+
+    async def scenario() -> tuple[LivenessSource | None, int, LivenessSource | None, int]:
+        clock = AutoClock()
+        counters = DeviceCounters(last_success_monotonic=clock.monotonic())
+        alive = [True]
+
+        async def read() -> bool:
+            return alive[0]
+
+        beat = Heartbeat(counters, read, clock, interval_seconds=30, failure_threshold=3)
+        await beat.tick()  # a recent transaction wins: source is TRANSACTION
+        first = (beat.liveness_source, beat.consecutive_failures)
+        alive[0] = False
+        counters.last_success_monotonic = None  # no recent transaction or periodic either
+        clock.advance(31)
+        await beat.tick()  # every path fails: the stale source must be cleared
+        return (*first, beat.liveness_source, beat.consecutive_failures)
+
+    source, failures, after_source, after_failures = asyncio.run(scenario())
+    assert (source, failures) == (LivenessSource.TRANSACTION, 0)
+    assert (after_source, after_failures) == (None, 1)
 
 
 async def test_cancelled_read_cancels_the_endpoint_call() -> None:

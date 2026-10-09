@@ -380,11 +380,11 @@ def test_tsdb_form_has_a_button_only_apply_bar_and_does_not_autosave():
     html = (TEMPLATES / "tsdb.html").read_text(encoding="utf-8")
     assert 'id="export-actions"' in html and "align-items-end" in html
     # The shared bar is parameterised, not overridden: TSDB asks for the button alone.
-    assert "buildApplyBar('export', {" in js and "compact: true," in js
+    assert "buildApplyBar('export', {" in js
     builder = js[js.index("function buildApplyBar("):js.index("function buildDeviceApplyBar(")]
-    compact = builder[builder.index("if (compact) {"):builder.index("const discard = element(")]
-    assert "actions.append(apply);" in compact and "'Discard'" not in compact and "badge" not in compact
-    assert "'Apply changes'" in builder  # the default label, kept for the compact variant
+    # Every explicit-apply form shows the button alone: no Discard, count badge or status text.
+    assert "'Discard'" not in builder and "badge" not in builder and "status" not in builder
+    assert "bar.append(apply);" in builder and "'Apply changes'" in builder
     bar = js[js.index("function refreshExportBar()"):js.index("async function applyExport()")]
     assert "apply.disabled = settingsSending || !exportDirty() || incomplete;" in bar
     assert "export-discard" not in js and "export-change-count" not in js and "discardExport" not in js
@@ -449,16 +449,15 @@ def test_device_list_has_no_autosave_path():
 def test_device_apply_bar_is_explicit_accessible_and_guards_reset_and_unload():
     js = (ADMIN_DIR / "static/js/admin.js").read_text(encoding="utf-8")
     bar = js[js.index("function buildApplyBar("):js.index("function addDeviceRow(")]
-    assert "'Apply changes'" in bar and "apply.id = `${prefix}-apply`" in bar and "'Discard'" in bar
+    assert "'Apply changes'" in bar and "apply.id = `${prefix}-apply`" in bar and "'Discard'" not in bar
     assert "buildApplyBar('device'" in bar
-    assert "status.setAttribute('role', 'status')" in bar  # polite live region for the result
-    assert "error.tabIndex = -1" in bar
+    assert "discardDeviceChanges" not in js and "device-reset-warning" not in js
     state = js[js.index("function refreshDeviceState(card)"):js.index("function rebuildDeviceSection()")]
     assert "apply.disabled = deviceUi.applying || invalid || changes.count === 0;" in state
     run = js[js.index("async function applyDevices(card)"):js.index("function buildGroupBody(")]
     assert "if (deviceUi.applying) return;" in run
     assert "confirmAction({" in run and "message: `${RESET_NOTE}" in run and "changes.risky.length" in run
-    assert "document.getElementById('device-apply-error')?.focus()" in run
+    assert "document.getElementById('device-apply')?.focus()" in run
     assert "error?.status === 409" in js and "error?.status === 504" in js
     # Leaving the page with an unsaved draft is silent: no native beforeunload dialog anywhere.
     assert "beforeunload" not in js and "onbeforeunload" not in js and "returnValue" not in js
@@ -979,10 +978,10 @@ def test_manual_mode_toast_does_not_promise_control_while_the_setup_is_incomplet
     assert "wanted === 'manual' && energyNeedsSetup(energyChecklist(device))" in js
 
 
-def test_hardware_step_text_names_the_missing_profile_and_the_expert_path():
+def test_hardware_step_text_names_the_guided_check_and_the_expert_path():
     js = JS.read_text(encoding="utf-8")
-    assert "No built-in profile covers this inverter yet" in js
-    assert "An experienced administrator can enter them under Expert settings" in js
+    assert "A guided check reads the inverter" in js and "Nothing is guessed" in js
+    assert "Experienced administrators can instead enter measured values under Expert settings" in js
 
 
 def test_tsdb_page_uses_the_shared_page_heading_cards_and_setting_rows():
@@ -1044,7 +1043,8 @@ def test_all_status_badges_share_one_component_with_fixed_tones():
                      "'flow-badge-state status-badge status-badge-neutral'", "status-badge ${write ? 'status-badge-warning' : 'status-badge-success'}"):
         assert creation in js, creation
     assert "'status-badge-warning', Boolean(notice)" in js and "'status-badge-neutral', !notice" in js
-    assert "'status-badge-success', ok === true" in js and "'status-badge-danger', ok === false" in js
+    assert "'status-badge-success', favourable === true" in js and "'status-badge-neutral', favourable !== true" in js
+    assert "status-badge-danger" not in js[js.index("function setBadge("):js.index("function setLine(")]
     # The old per-badge variants are gone; no other rule sets a badge's font or padding.
     for legacy in ("device-status-badge", "device-chip", "token-role-", "flow-badge-state.is-", "badge text-bg-warning"):
         assert legacy not in css and legacy not in js, legacy
@@ -1136,7 +1136,7 @@ def test_prometheus_and_inverters_build_their_table_from_the_one_shared_macro():
 @pytest.mark.asyncio
 async def test_prometheus_and_inverters_render_the_same_table_card_structure(tmp_path):
     def card_classes(html: str, prefix: str) -> set[str]:
-        section = re.search(rf'<section class="card" aria-labelledby="{prefix}-title">.*?</section>', html, re.DOTALL)
+        section = re.search(rf'<section class="card param-card" aria-labelledby="{prefix}-title">.*?</section>', html, re.DOTALL)
         assert section, prefix
         return {name for value in re.findall(r'class="([^"]*)"', section[0]) for name in value.split()}
 

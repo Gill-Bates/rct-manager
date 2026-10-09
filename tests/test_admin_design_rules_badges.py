@@ -85,6 +85,13 @@ def rule_flow_badge_classes_set_in_one_place(js: str) -> list[str]:
     return errors
 
 
+def rule_flow_badges_use_no_problem_tones(js: str) -> list[str]:
+    start = js.find("function setBadge(")
+    body = js[start: js.find("\n    }\n", start)] if start >= 0 else ""
+    return [f"setBadge() uses {tone} (admin.js:{_line(js, 'function setBadge(')}); normal flow states are success or neutral"
+            for tone in ("status-badge-danger", "status-badge-warning") if tone in body]
+
+
 def _tokens(name: str) -> tuple[str, str]:
     values = re.findall(rf"--bs-{name}:\s*([^;}}]+)", BOOTSTRAP.read_text(encoding="utf-8"))
     return values[0].strip(), values[1].strip()
@@ -148,6 +155,10 @@ def test_flow_badges_are_never_dimmed_or_faded():
     assert not rule_flow_badges_never_dimmed(CSS, JS)
 
 
+def test_flow_badges_never_signal_a_problem_for_normal_states():
+    assert not rule_flow_badges_use_no_problem_tones(JS)
+
+
 def test_flow_badge_classes_are_written_in_one_place():
     assert not rule_flow_badge_classes_set_in_one_place(JS)
 
@@ -163,6 +174,7 @@ def test_every_tone_meets_aa_text_contrast_in_light_and_dark():
         (rule_no_badge_specific_metrics, (".status-badge-warning { --status-badge-fg: red; padding: 1px; }",)),
         (rule_badge_keeps_dot_and_text, ("", "")),
         (rule_flow_badges_never_dimmed, (".flow-badge.is-stale { opacity: .55; }", "")),
+        (rule_flow_badges_use_no_problem_tones, ("function setBadge(a) {\n setClass(x, 'status-badge-danger', 1)\n    }\n",)),
         (rule_flow_badge_classes_set_in_one_place, ("function setBadge(a) {\n    }\n  setClass(badge.node, 'x', 1)",)),
     ],
 )

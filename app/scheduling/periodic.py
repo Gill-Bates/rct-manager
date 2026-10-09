@@ -180,6 +180,13 @@ class PeriodicManager:
         except ValueError:
             return False
 
+    def _rollback_registrations(self) -> None:
+        """Drop every endpoint registration this setup round made and reset the per-round state."""
+        self._endpoint.unregister_all_periodic(self._key)
+        self._registered.clear()
+        self.registrations = 0
+        self.available = False
+
     async def setup(self) -> bool:
         self._endpoint.unregister_all_periodic(self._key)
         self.available, self.registrations = False, 0
@@ -229,6 +236,9 @@ class PeriodicManager:
                 self._registered.add(object_id)
                 self.registrations += 1
         except DeviceApiError as exc:
+            # A throw past the loop above leaves the routes already registered on the endpoint; roll
+            # them back so a failed setup never leaves available == False while the demux still routes.
+            self._rollback_registrations()
             if exc.code != "not_ready":
                 self.last_failure = f"{type(exc).__name__}: {exc}"
                 log.warning("Periodic setup failed: %s", self.last_failure, exc_info=True)
@@ -238,6 +248,7 @@ class PeriodicManager:
             log.info("Periodic setup aborted: device access is shutting down")
             return False
         except Exception as exc:  # the periodic feature must never disturb plain reads
+            self._rollback_registrations()
             self.last_failure = f"{type(exc).__name__}: {exc}"
             log.warning("Periodic setup failed: %s", self.last_failure, exc_info=True)
             return False

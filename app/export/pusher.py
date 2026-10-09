@@ -28,6 +28,9 @@ log = logging.getLogger(__name__)
 
 HTTP_TIMEOUT_SECONDS = 10.0
 MAX_BACKOFF_SECONDS = 300.0
+# How often the QuestDB rollup health is re-checked once its schema is provisioned, so a view that
+# regresses to invalid or stops refreshing is noticed while the shortened raw TTL is still active.
+PROVISION_RECHECK_SECONDS = 300.0
 _BODY_LIMIT = 300
 _RESPONSE_LIMIT = 1_048_576  # bounded read of QuestDB /exec JSON replies
 
@@ -129,6 +132,7 @@ class PushExporter:
         self._provisioned_columns: frozenset[str] | None = None
         self._provision_failures = 0
         self._provision_retry_at = 0.0
+        self._provision_recheck_at = 0.0
         self._provisioner: QuestDbProvisioner | None = None
         if settings.db_type is DbType.QUESTDB:
             target = self._target
@@ -171,20 +175,34 @@ class PushExporter:
                 log.info("Metrics export recovered after %d failed attempt(s)", self._failures)
             self._failures = 0
             self._stats.export_success += 1
-            self._stats.export_last_success_unix = time.time()
+            # Only a cycle that actually sent at least one line counts as a successful *export*: an
+            # empty build_lines() (no samples, or all non-finite) makes no write() call, so marking
+            # it as a last-success would let the TSDB status show "healthy / recently exported" when
+            # not a byte reached the database.
+            if lines:
+                self._stats.export_last_success_unix = time.time()
             await self._provision(frozenset(name for name, _, _ in samples) | {k for _, t, _ in samples for k in t})
             return interval
         return _backoff(interval, self._failures)
 
     async def _provision(self, columns: frozenset[str]) -> None:
-        """Retention and rollup DDL after a stored write; its failures never taint the export.
+        """Retention and rollup health after a stored write; its failures never taint the export.
 
-        Runs when the column set changed (a new metric adds a DOUBLE column and renames the view),
-        with its own backoff after a failure.
+        Two concerns, deliberately separated: the schema DDL (``CREATE MATERIALIZED VIEW``) only
+        needs to run when the column set changes, but the rollup *health* must keep being checked.
+        The provisioner's ``run()`` does both — its DDL is ``IF NOT EXISTS`` (idempotent) and it
+        re-checks ``_view_current`` and reconciles the TTL every time — so this method re-invokes it
+        periodically even when the columns are unchanged. Without that re-check a view that turns
+        ``invalid`` or stops refreshing days later goes unnoticed while the shortened raw TTL keeps
+        deleting data no working rollup holds. A changed column set runs immediately (bypassing the
+        throttle); an unchanged set runs on a periodic cadence.
         """
-        if self._provisioner is None or columns == self._provisioned_columns:
+        if self._provisioner is None:
             return
         now = self._clock.monotonic()
+        schema_changed = columns != self._provisioned_columns
+        if not schema_changed and now < self._provision_recheck_at:
+            return
         if now < self._provision_retry_at:
             return
         try:
@@ -197,6 +215,9 @@ class PushExporter:
                 log.warning("QuestDB provisioning failed (attempt %d): %s", self._provision_failures, exc)
             return
         self._provision_failures = 0
+        # Re-check the rollup health on a steady cadence regardless of the result: a ``ready`` view
+        # can later regress, and a not-yet-ready one must keep being retried.
+        self._provision_recheck_at = now + PROVISION_RECHECK_SECONDS
         if ready:
             self._provisioned_columns = columns
 

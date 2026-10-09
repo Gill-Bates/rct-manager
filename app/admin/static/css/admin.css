@@ -1446,15 +1446,17 @@ body {
     border-top: 0;
 }
 
-/* Keep the writable table's pager at the bottom when only a few parameters are selected. */
-body[data-page="inverters"] #main-content,
-body[data-page="inverters"] #main-content>.card>.card-body {
+/* Every page with a parameter table (Prometheus, Inverters) fills the viewport down to the footer and
+   keeps the pager at the card bottom when the table is short; taller content scrolls the page.
+   This is the only place that sets the height behaviour (guarded by design rule R11). */
+#main-content:has(>.param-card),
+.param-card>.card-body {
     display: flex;
     flex-direction: column;
 }
 
-body[data-page="inverters"] #main-content>.card,
-body[data-page="inverters"] .param-table-wrap {
+#main-content>.param-card,
+.param-card .param-table-wrap {
     flex: 1 0 auto;
 }
 

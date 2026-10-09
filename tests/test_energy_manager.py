@@ -268,10 +268,20 @@ class ApprovalSpy:
     def __init__(self, existing: tuple[str, ...] = EXISTING_WRITES) -> None:
         self.names = list(existing)
         self.calls: list[list[str]] = []
+        self.revoked: list[list[str]] = []
 
     async def approve(self, names) -> list[str]:
         self.calls.append(list(names))
         self.names = list(names)
+        return self.names
+
+    async def revoke(self, names) -> list[str]:
+        """Remove exactly ``names`` from the live list, reading it fresh — the replace/CAS
+        compensation primitive, as app_factory injects it through update_write_names's lock.
+        """
+        drop = frozenset(names)
+        self.revoked.append(list(names))
+        self.names = [n for n in self.names if n not in drop]
         return self.names
 
     async def read(self) -> tuple[str, ...]:
@@ -314,6 +324,7 @@ def manager(
         approved_writes=spy.read if approved_writes else None,
         allowlist_candidates=lambda: frozenset(offered),
         required_writes=REQUIRED_WRITES,
+        revoke_writes=spy.revoke,
         modes={"main": ModeRecord("main", mode=mode)},
     )
 
@@ -581,6 +592,22 @@ async def test_switching_off_removes_no_write_approval() -> None:
     assert store.records[-1].armed is False
 
 
+async def test_switching_off_records_when_and_by_whom_the_mode_changed() -> None:
+    """P3: switching off is a mode change, so the OFF record carries changed_at and the actor.
+
+    The off record used to leave both at None (and dropped the actor), which contradicts
+    ModeRecord.changed_at's own "UTC, last mode change" contract and blanked the admin audit trail.
+    """
+    store = RecordingStore()
+    service = manager(SpyPort(), mode=EnergyMode.OFF, store=store)
+    await service.set_mode("main", EnergyMode.MANUAL, actor="armed-by")
+    await service.set_mode("main", EnergyMode.OFF, actor="switched-off-by")
+    off_record = store.records[-1]
+    assert off_record.mode is EnergyMode.OFF
+    assert off_record.changed_by == "switched-off-by"
+    assert off_record.changed_at is not None
+
+
 async def test_changed_by_is_truncated_and_cleaned_instead_of_raising() -> None:
     store = RecordingStore()
     service = manager(SpyPort(), mode=EnergyMode.OFF, store=store)
@@ -830,7 +857,13 @@ def test_the_manager_module_names_no_register_and_imports_no_gateway() -> None:
 
 
 async def test_a_failed_arming_commit_rolls_back_only_its_own_approvals() -> None:
-    """An approval another feature added while the commit was in flight must survive the rollback."""
+    """A failed commit must remove exactly the names this call added and nothing else.
+
+    The rollback goes through the replace/CAS revoke primitive, not the add-only approve: the four
+    dispatch-control registers this switch added must be withdrawn, while both the operator's
+    pre-existing approvals and an approval another feature added while the commit was in flight
+    survive. (The old add-only rollback silently left the added registers approved forever.)
+    """
     spy = ApprovalSpy(EXISTING_WRITES)
 
     class FailingStore:
@@ -841,7 +874,8 @@ async def test_a_failed_arming_commit_rolls_back_only_its_own_approvals() -> Non
     service = manager(SpyPort(), mode=EnergyMode.OFF, approvals=spy, store=FailingStore())
     with pytest.raises(OSError):
         await service.set_mode("main", EnergyMode.MANUAL, actor="tester")
-    assert spy.names == [*EXISTING_WRITES, "approved_meanwhile"]
+    assert spy.revoked == [list(REQUIRED_WRITES)]  # removed exactly its own additions
+    assert spy.names == [*EXISTING_WRITES, "approved_meanwhile"]  # the concurrent add survived
     assert service.mode("main") is EnergyMode.OFF
 
 

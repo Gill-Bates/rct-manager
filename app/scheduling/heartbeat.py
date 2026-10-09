@@ -58,6 +58,9 @@ class Heartbeat:
             self.liveness_source = LivenessSource.HEARTBEAT
             self.consecutive_failures = 0
         else:
+            # No source proved the device alive this tick; the stale source would otherwise be
+            # reported as the current one while the device is DEGRADED or UNREACHABLE.
+            self.liveness_source = None
             self.consecutive_failures += 1
 
     async def run(self) -> None:
@@ -67,4 +70,5 @@ class Heartbeat:
                 await self.tick()
             except Exception:  # keep the daemon task alive on a single bad reading
                 log.exception("Heartbeat tick failed")
+                self.liveness_source = None
                 self.consecutive_failures += 1

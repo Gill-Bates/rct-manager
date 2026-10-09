@@ -151,7 +151,59 @@ async def test_provisioning_runs_once_per_column_set(server) -> None:
     exporter._provisioner.run = lambda *, ensure=True: runs.append(ensure) or True
     for _ in range(3):
         await exporter.cycle()
+    assert len(runs) == 1  # within one recheck window and with the column set unchanged
+
+
+async def test_rollup_health_is_rechecked_after_the_recheck_window(server) -> None:
+    """P2: the rollup must keep being health-checked after it is provisioned. Once the recheck
+    window elapses, _provision re-invokes the provisioner even though the column set is unchanged,
+    so a view that later turns invalid or stops refreshing is noticed while the short raw TTL runs.
+    """
+
+    class AdvancingClock:
+        def __init__(self) -> None:
+            self.t = 0.0
+
+        def monotonic(self) -> float:
+            return self.t
+
+        async def sleep(self, seconds: float) -> None:
+            return None
+
+    from app.export.pusher import PROVISION_RECHECK_SECONDS
+
+    clock = AdvancingClock()
+    stats = ServiceCounters(export_enabled=True)
+    exporter = PushExporter(
+        Settings(_env_file=None, **BASE, db_type="questdb", questdb_hostname=server.url), _Metrics(), stats, clock
+    )
+    runs = []
+    exporter._provisioner.run = lambda *, ensure=True: runs.append(clock.t) or True
+    await exporter.cycle()
+    await exporter.cycle()  # same instant, unchanged columns: throttled
     assert len(runs) == 1
+    clock.t += PROVISION_RECHECK_SECONDS + 1.0
+    await exporter.cycle()  # window elapsed: health is re-checked
+    assert len(runs) == 2
+
+
+async def test_an_empty_export_does_not_advance_the_last_success_timestamp() -> None:
+    """P2: build_lines() can legitimately return [] (no samples, or all non-finite). A cycle that
+    wrote nothing must not update export_last_success_unix — otherwise the TSDB status shows a
+    recent successful export when not a byte reached the database.
+    """
+
+    class _NoSamples:
+        def collect(self):
+            return []
+
+    stats = ServiceCounters(export_enabled=True)
+    exporter = PushExporter(
+        Settings(_env_file=None, **BASE, **INFLUX, influxdb_hostname="http://127.0.0.1:0"), _NoSamples(), stats, _Clock()
+    )
+    assert await exporter.cycle() == 30
+    assert stats.export_success == 1  # the cycle itself ran without error
+    assert stats.export_last_success_unix is None  # but nothing was written
 
 
 async def test_collect_runs_on_the_event_loop_thread(server) -> None:

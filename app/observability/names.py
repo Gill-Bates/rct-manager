@@ -28,7 +28,9 @@ _BASE_UNITS = {
     "ohm": "ohms",
     "ratio": "ratio",
 }
-RESERVED_PREFIXES = ("rct_api_", "rct_device_", "rct_transport_")
+# Every family the exporter emits itself lives under one of these prefixes; a registry metric that
+# reused one would collide with the internal family (rct_export_ only once push export is active).
+RESERVED_PREFIXES = ("rct_api_", "rct_device_", "rct_transport_", "rct_export_")
 
 
 def normalize(name: str) -> str:

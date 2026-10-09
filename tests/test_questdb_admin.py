@@ -110,6 +110,29 @@ def test_own_ttl_is_updated_but_unlimited_never_alters() -> None:
     assert db.altered() == []
 
 
+def test_a_correct_ttl_without_an_ownership_marker_is_reconciled_not_ignored() -> None:
+    """P2 atomicity: ALTER and the ownership INSERT are two SQL calls. If a crash applied the TTL
+    but never recorded it, the next run sees the right TTL with no marker. The early return must
+    not leave that gap permanent — otherwise a later retention change mistakes our own TTL for a
+    foreign administrator TTL. The marker is written (reconciled) instead.
+    """
+    db = FakeQuestDb(ttl=(90, "DAY"), recorded=None)
+    assert QuestDbProvisioner(db, "rct", "off", None, 90).run()
+    assert db.altered() == []  # the TTL is already correct; no destructive re-ALTER
+    inserts = [s for s in db.sql if s.startswith("INSERT INTO") and "_rct_export_state" in s]
+    assert len(inserts) == 1 and "90" in inserts[0]
+
+
+def test_an_own_recorded_ttl_that_already_matches_needs_no_reconcile() -> None:
+    """The counterpart: TTL correct and already recorded as ours writes neither an ALTER nor a
+    duplicate ownership marker.
+    """
+    db = FakeQuestDb(ttl=(90, "DAY"), recorded=90)
+    assert QuestDbProvisioner(db, "rct", "off", None, 90).run()
+    assert db.altered() == []
+    assert not any(s.startswith("INSERT INTO") and "_rct_export_state" in s for s in db.sql)
+
+
 def test_downsampling_sets_view_and_raw_ttl() -> None:
     db = FakeQuestDb()
     assert QuestDbProvisioner(db, "rct", "medium", 3, 90).run()

@@ -70,6 +70,7 @@ class ErrorCode(StrEnum):
     DISPATCH_STORE_UNAVAILABLE = "dispatch_store_unavailable"
     DISPATCH_UNVERIFIED = "dispatch_unverified"
     DISPATCH_CAPABILITY_CONFLICT = "dispatch_capability_conflict"
+    DISPATCH_REGISTER_LOCKED = "dispatch_register_locked"
     DISPATCH_RECORD_CORRUPT = "dispatch_record_corrupt"
     DISPATCH_SNAPSHOT_STALE = "dispatch_snapshot_stale"
     ENERGY_MANAGER_OFF = "energy_manager_off"
@@ -125,6 +126,7 @@ STATUS: dict[ErrorCode, int] = {
     E.DISPATCH_STORE_UNAVAILABLE: 503,
     E.DISPATCH_UNVERIFIED: 409,
     E.DISPATCH_CAPABILITY_CONFLICT: 409,
+    E.DISPATCH_REGISTER_LOCKED: 409,
     E.DISPATCH_RECORD_CORRUPT: 503,
     E.DISPATCH_SNAPSHOT_STALE: 503,
     E.ENERGY_MANAGER_OFF: 409,
@@ -178,6 +180,11 @@ _TEXT: dict[ErrorCode, tuple[str, str]] = {
     E.DISPATCH_CAPABILITY_CONFLICT: (
         "Dispatch capability conflict",
         "The capability has an active operation; retry with force to withdraw it anyway.",
+    ),
+    E.DISPATCH_REGISTER_LOCKED: (
+        "Register controlled by dispatch",
+        "This register is a battery-dispatch control register and is locked while the inverter is "
+        "under dispatch or an energy mode other than Off; switch the inverter off to write it directly.",
     ),
     E.DISPATCH_RECORD_CORRUPT: (
         "Dispatch record corrupt",

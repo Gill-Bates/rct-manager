@@ -8,6 +8,7 @@
 
 import math
 from dataclasses import dataclass
+from typing import Literal
 
 from app.dispatch.models import DispatchMode, PowerDirection, PowerSetpoint
 from app.dispatch.soc_policy import SocTargetMode
@@ -39,15 +40,22 @@ class RctGridPowerConvention:
         return watts if self.import_positive else -watts
 
 
-def soc_percent(value: float) -> float:
-    """The catalog reports ``battery_soc`` as a ratio 0..1; the dispatch contract and the UI use percent.
+SocUnit = Literal["ratio", "percent"]
 
-    Values above 1.5 are passed through unchanged only as a compatibility fallback for firmware that
-    already reports percent. There is no hardware evidence either way, and strict validation would
-    make dispatch and restore fail closed on real hardware. Once it is confirmed that ``battery_soc``
-    is always a ratio, drop the fallback and reject out-of-range values.
+
+def soc_percent(value: float, unit: SocUnit) -> float:
+    """Convert a battery-SoC reading to percent using the catalog-declared unit, never magnitude.
+
+    ``unit`` is the catalog's declared unit for ``battery_soc`` (``MetricReading.unit`` /
+    ``RegistryEntry.unit``), so ratio-vs-percent is an explicit metadata fact, not a guess from the
+    number. The old magnitude heuristic turned a genuine 0.8 % reading into 80 %, which in the
+    discharge path reads as "well above the stop target" and keeps discharging (safety bug).
     """
-    return value * 100.0 if value <= 1.5 else value
+    if unit == "ratio":
+        return value * 100.0
+    if unit == "percent":
+        return value
+    raise ValueError(f"battery_soc has unexpected unit {unit!r}; cannot convert to percent")
 
 
 def _finite_percent(value: object, name: str) -> float:
@@ -91,3 +99,22 @@ class RctSocTargetConvention:
         else:
             percent = target
         return min(max(percent / 100.0, 0.0), 1.0)
+
+    def register_value(
+        self, dispatch_mode: DispatchMode, *, stop_target_percent: float, soc_percent: float, unit: SocUnit
+    ) -> float:
+        """The value to write to the SoC-target register in the attested wire ``unit``.
+
+        ``unit`` is the device's verified ``soc_target_unit`` (WRITE_PATH evidence, V-17). The
+        derivation is always done in the canonical 0..1 ratio and then rendered: ``"ratio"`` writes
+        0..1, ``"percent"`` writes 0..100. Without this a ``percent``-attested device was still sent
+        the raw ratio (0.8 instead of 80), so the verification attested a unit the write ignored.
+        """
+        ratio = self.register_ratio(
+            dispatch_mode, stop_target_percent=stop_target_percent, soc_percent=soc_percent
+        )
+        if unit == "ratio":
+            return ratio
+        if unit == "percent":
+            return ratio * 100.0
+        raise ValueError(f"unexpected soc_target_unit {unit!r}")

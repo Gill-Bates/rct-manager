@@ -242,18 +242,40 @@ class QuestDbProvisioner:
             return False
         value, unit = rows[0][:2]
         existing = ttl_days(value, unit)
+        recorded = self._recorded_days(name)
         if value and existing == days:
+            # The TTL is already what we want. ALTER and the ownership INSERT are two separate SQL
+            # calls, so a drop between them earlier could have applied the TTL without recording it.
+            # Reconcile the missing marker here instead of returning blindly: otherwise this same
+            # early return keeps the gap invisible, and a later retention change would mistake our
+            # own unrecorded TTL for a foreign administrator TTL and refuse to adjust it.
+            if recorded != days:
+                self._record_ownership(name)
+                log.info("Reconciled missing TTL ownership marker for QuestDB object '%s' (%d days)", name, days)
             return True
-        if value and existing != self._recorded_days(name):
+        if value and existing != recorded:
             log.warning(
                 "QuestDB object '%s' keeps its administrator TTL of %s %s instead of %d day(s)", name, value, unit, days
             )
             return True
         kind = "MATERIALIZED VIEW" if view else "TABLE"
         self._exec(f"ALTER {kind} {ident(name)} SET TTL {int(days)} DAYS;")
+        self._record_ownership(name, days)
+        log.info("Set TTL of QuestDB object '%s' to %d day(s)", name, days)
+        return True
+
+    def _record_ownership(self, name: str, days: int | None = None) -> None:
+        """Record that this service owns ``name``'s current TTL. ``days`` defaults to the TTL now on
+        the object, so a reconcile writes the value that is actually in effect, not a stale target.
+        """
+        if days is None:
+            rows = self._exec(
+                f"SELECT ttlValue, ttlUnit FROM tables() WHERE table_name = {literal(name)};"
+            ).get("dataset") or []
+            days = ttl_days(rows[0][0], rows[0][1]) if rows else None
+            if days is None:
+                return
         self._exec(
             f"INSERT INTO {ident(STATE_TABLE)} (timestamp, measurement, object, ttl_days) VALUES "
             f"(now(), {literal(self.table)}, {literal(name)}, {int(days)});"
         )
-        log.info("Set TTL of QuestDB object '%s' to %d day(s)", name, days)
-        return True

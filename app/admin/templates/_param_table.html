@@ -1,7 +1,7 @@
 {# Shared card for a searchable, paginated parameter table (Prometheus metrics, inverter write access).
    Element ids derive from `prefix`: <prefix>-list (tbody), -search, -range, -prev, -next. #}
 {% macro param_table(prefix, title, hint, add_label, add_id, modal_id, search_label, pager_label, reorder=false) %}
-<section class="card" aria-labelledby="{{ prefix }}-title">
+<section class="card param-card" aria-labelledby="{{ prefix }}-title">
     <div class="card-body">
         <div class="param-card-head d-flex flex-wrap align-items-center justify-content-between gap-3 mb-3">
             <div>
