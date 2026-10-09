@@ -53,3 +53,13 @@ a single read succeeds.
 Check `foreign_access_suspected` in `GET /api/v1/readiness`: another client
 (vendor app, home automation) may be using port 8899, or a second instance runs
 against the same inverter. See [Operation](operation.md).
+
+## Truncated long value after a split read (known protocol ambiguity)
+
+Some long responses of the inverter declare a wrong length, so the parser takes the frame end from
+the framing and accepts a CRC-verified end at the current read boundary. If a TCP read ends exactly
+inside such a frame and the bytes received so far happen to carry a valid CRC (chance 2^-16 per
+evaluated boundary), the frame is delivered truncated and the rest is discarded. The wire format has
+no further framing information to tell this prefix from a complete frame, and the CRC is not
+weakened to hide it. A suspect value shows up as a long response with an unexpectedly short payload
+together with a rising `discarded_bytes` counter in `/api/v1/vendor/rct/transports`.

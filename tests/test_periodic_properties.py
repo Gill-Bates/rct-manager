@@ -436,3 +436,46 @@ async def test_readiness_and_diagnostics_show_a_lost_periodic_registration_and_c
         transport = h.runtime.gateway.transports()[0]
         assert transport.crc_errors == 1
         assert transport.connection_epoch >= 1
+
+
+async def test_reconnect_flips_periodic_available_and_epoch_and_health_stays_a_process_check() -> None:
+    async with running_app() as h:
+        await _registered(h)
+        binding = h.runtime.gateway._device("main")
+        endpoint = binding.endpoint
+        epoch_before = endpoint.connection_epoch
+
+        await endpoint._drop_connection(DeviceUnreachable())
+        status = h.runtime.gateway.device_status("main")
+        assert status.periodic_available is False
+        assert (await h.client.get("/health")).status_code == 200  # process check only
+
+        assert await binding.periodic.ensure()  # re-registers on a new connection
+        assert endpoint.connection_epoch > epoch_before
+        assert h.runtime.gateway.device_status("main").periodic_available is True
+        info = h.runtime.gateway.transports()[0]
+        assert info.connection_epoch == endpoint.connection_epoch
+        assert info.periodic_setup_failures["main"] == 0 and info.periodic_last_failure["main"] is None
+
+
+def test_failed_registrations_are_counted_named_and_cleared_by_a_successful_one() -> None:
+    async def scenario() -> list:
+        clock = AutoClock()
+        net = FakeNetwork(clock, behavior=lambda f: "ignore" if f.object_id == FAILING_OBJECT_ID else "respond")
+        manager = _manager(clock, net, [0x1111, FAILING_OBJECT_ID])
+        seen = []
+        assert not await manager.ensure()
+        seen.append((manager.consecutive_failures, manager.last_failure, manager.live))
+        clock.advance(RETRY_BASE_SECONDS * 2 + 1)
+        assert not await manager.ensure()
+        seen.append((manager.consecutive_failures, manager.last_failure, manager.live))
+        net.behavior = lambda f: "respond"
+        clock.advance(RETRY_BASE_SECONDS * 4 + 1)
+        assert await manager.ensure()
+        seen.append((manager.consecutive_failures, manager.last_failure, manager.live))
+        return seen
+
+    first, second, third = asyncio.run(scenario())
+    assert first[0] == 1 and first[1] and not first[2]
+    assert second[0] == 2 and second[1] and not second[2]
+    assert third[0] == 0 and third[2]

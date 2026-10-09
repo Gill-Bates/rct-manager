@@ -14,7 +14,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from app import __version__
+from app import __version__, resolve_build
 from app.admin import updates
 from app.api.app_factory import create_app
 from app.config import Settings
@@ -638,7 +638,8 @@ def test_dates_follow_the_browser_locale():
 
 
 @pytest.mark.asyncio
-async def test_about_requires_session_and_renders_project_details(tmp_path):
+async def test_about_requires_session_and_renders_project_details(tmp_path, monkeypatch):
+    monkeypatch.setattr("app.admin.ui.__build__", "abc1234")
     app = create_app(Settings(_env_file=None, hmac_secret="s" * 48, admin_db_path=tmp_path / "rct.db"))
     password = app.state.first_start_password
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver", headers={"Origin": "http://testserver"}) as client:
@@ -667,6 +668,7 @@ async def test_about_requires_session_and_renders_project_details(tmp_path):
         assert 'href="/ui/about" aria-current="page"' in response.text
         assert f"<code>{__version__}</code>" in response.text
         assert 'class="admin-footer"' in response.text and f"v{__version__}" in response.text
+        assert f'v{__version__} (<span class="font-monospace">abc1234</span>)' in response.text
         assert "Application Details" in response.text
         assert "Dependencies" in response.text
         assert "<code>" in response.text
@@ -843,3 +845,31 @@ def test_hardware_verification_form_is_expert_only_and_the_basic_step_only_point
     button = advanced[advanced.index("const openVerifyButton"):advanced.index("const renderHardwareText")]
     assert "'Verify hardware'" in button and "addEventListener('click'" in button
     assert "expertSwitch.checked = true" in button and "setExpert(true)" not in advanced
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("1a240c3bd217e006310ae09a676428bf099c827b", "1a240c3"),
+        ("ABCDEF1234", "abcdef1"),
+        (None, "dev"),
+        ("", "dev"),
+        ("unknown", "dev"),
+        ("abc12", "dev"),
+        ("<script>alert(1)</script>", "dev"),
+        ("abc1234\n<b>", "dev"),
+    ],
+)
+def test_resolve_build_accepts_only_hex(raw, expected):
+    assert resolve_build(raw) == expected
+
+
+def test_banner_shows_build_hash(monkeypatch):
+    from app import banner
+
+    monkeypatch.setattr(banner, "__build__", "abc1234")
+    banner.build_info.cache_clear()
+    try:
+        assert "(abc1234)" in banner.banner()
+    finally:
+        banner.build_info.cache_clear()

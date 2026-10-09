@@ -17,7 +17,7 @@ import platform
 import sys
 from importlib import metadata
 
-from app import __version__
+from app import __build__, __version__
 from app.logging_setup import use_colors
 
 DISTRIBUTION = "rct-manager"
@@ -47,7 +47,7 @@ def resolve_version() -> str:
 @functools.cache
 def build_info() -> str:
     """Short commit of the image build, or 'dev' outside one."""
-    return os.environ.get("GIT_SHA", "").strip()[:7] or "dev"
+    return __build__
 
 
 @functools.cache

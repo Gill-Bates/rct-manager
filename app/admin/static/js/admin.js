@@ -2678,6 +2678,10 @@
     for (const [id, entry] of saveSections) {
       if (entry.failure) renderSectionAlert(id, entry.failure);
       else document.getElementById(`save-error-${id}`)?.remove();
+      if (entry.state === 'incomplete' && entry.message) {
+        const hint = sectionNotice(id, 'hint');
+        if (hint) hint.textContent = entry.message;
+      } else removeNotice(id, 'hint');
     }
     const label = $('save-state');
     if (!label) return; // absent on tokens/about/login/change-password; the alerts above are independent

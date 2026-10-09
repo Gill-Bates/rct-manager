@@ -25,11 +25,11 @@ const results = [];
 const problems = [];
 
 const check = (name, ok, detail = '') => { results.push({ name, ok, detail }); console.log(`${ok ? 'PASS' : 'FAIL'} ${name} ${detail}`); };
-// An intentionally injected failure is not an application problem. Every route-to-failure block
-// scrubs its own status and path from `problems` right after its unroute(), so the final
-// "console and network clean" gate stays strict for the rest of the run instead of being widened
-// to ignore 500/503 everywhere. A new failure-injection block without a trailing scrub is a defect.
-const scrub = (pattern) => { const kept = problems.filter((p) => !pattern.test(p)); problems.length = 0; problems.push(...kept); };
+// Remove only errors produced by the current deliberate fault, never earlier failures.
+const scrubExpected = (start, matches) => {
+  const kept = problems.slice(start).filter((problem) => !matches(problem));
+  problems.splice(start, problems.length - start, ...kept);
+};
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const freePort = () => new Promise((resolve) => { const s = net.createServer(); s.listen(0, '127.0.0.1', () => { const { port } = s.address(); s.close(() => resolve(port)); }); });
 
@@ -52,7 +52,18 @@ async function startServer(db, httpPort, devicePort, tag) {
   }
   throw new Error('server did not start');
 }
-async function stop(server) { server.proc.kill('SIGTERM'); await new Promise((resolve) => server.proc.once('exit', resolve)); }
+async function stop(server) {
+  const proc = server.proc;
+  if (proc.exitCode !== null || proc.signalCode !== null) return;
+  await new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      proc.kill('SIGKILL');
+      reject(new Error(`server process ${proc.pid} did not stop within 5 seconds`));
+    }, 5000);
+    proc.once('exit', () => { clearTimeout(timeout); resolve(); });
+    proc.kill('SIGTERM');
+  });
+}
 
 const dbDir = fs.mkdtempSync(path.join(OUT, 'db-'));
 const db = path.join(dbDir, 'e2e.db');
@@ -82,9 +93,9 @@ const context = await browser.newContext({
   colorScheme: process.env.COLOR_SCHEME || 'light',
 });
 const page = await context.newPage();
-page.on('console', (m) => { if (['error', 'warning'].includes(m.type())) problems.push(`console ${m.type()}: ${m.text()}`); });
+page.on('console', (m) => { if (['error', 'warning'].includes(m.type())) problems.push(`console ${m.type()}: ${m.text()} @ ${m.location().url}`); });
 page.on('pageerror', (e) => problems.push(`pageerror: ${e.message}`));
-page.on('requestfailed', (r) => problems.push(`requestfailed: ${r.url()}`));
+page.on('requestfailed', (r) => problems.push(`requestfailed: ${r.method()} ${r.url()} (${r.failure()?.errorText || 'unknown'})`));
 const external = new Set();
 page.on('request', (r) => { if (!r.url().startsWith(base) && !r.url().startsWith('data:')) external.add(r.url()); });
 page.on('response', (r) => { if (r.status() >= 400) problems.push(`http ${r.status()}: ${r.request().method()} ${r.url()}`); });
@@ -233,9 +244,13 @@ const overlapping = [
 ].map(([id, x, y, w, h]) => ({ id, x, y, w, h, visible: true }));
 await page.evaluate((widgets) => window.RCTAdmin.api('dashboard-layout', { method: 'PUT', body: JSON.stringify({ version: 1, widgets }) }), overlapping);
 await page.reload();
-await page.waitForFunction(() => document.querySelector('#dashboard-grid .grid-stack-item[data-widget-id="devices"]')?.gridstackNode);
-const reloadedGrid = await page.evaluate(() => Object.fromEntries([...document.querySelectorAll('#dashboard-grid .grid-stack-item[data-widget-id]')]
-  .map((el) => [el.dataset.widgetId, { x: el.gridstackNode.x, y: el.gridstackNode.y, h: el.gridstackNode.h }])));
+const layoutWidgets = ['battery-soc', 'house-power', 'devices'];
+await page.waitForFunction((ids) => ids.every((id) =>
+  document.querySelector(`#dashboard-grid .grid-stack-item[data-widget-id="${id}"]`)?.gridstackNode), layoutWidgets);
+const reloadedGrid = await page.evaluate((ids) => Object.fromEntries(ids.map((id) => {
+  const node = document.querySelector(`#dashboard-grid .grid-stack-item[data-widget-id="${id}"]`).gridstackNode;
+  return [id, { x: node.x, y: node.y, h: node.h }];
+})), layoutWidgets);
 check('reload keeps the Battery level and House consumption tiles above the inverter widget',
   ['battery-soc', 'house-power'].every((id) => reloadedGrid[id].y + reloadedGrid[id].h <= reloadedGrid.devices.y)
   && reloadedGrid['battery-soc'].x === 0 && reloadedGrid['house-power'].x === 2, JSON.stringify(reloadedGrid));
@@ -642,11 +657,20 @@ await page.waitForTimeout(400);
 // the real 10s timer and tab-focus handler use, without waiting out the interval.
 await page.evaluate(() => { document.querySelector('.device-item').dataset.probe = 'kept'; });
 const forcePoll = () => page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
+const waitForSuccessfulPoll = async () => {
+  const before = await page.evaluate(() => JSON.parse(localStorage.getItem('rct.dashboard.snapshot') || 'null')?.at || 0);
+  const response = page.waitForResponse((r) => new URL(r.url()).pathname === '/admin/api/devices' && r.status() === 200, { timeout: 20000 });
+  await forcePoll();
+  await response;
+  await page.waitForFunction((previous) => {
+    const snapshot = JSON.parse(localStorage.getItem('rct.dashboard.snapshot') || 'null');
+    return snapshot?.at > previous;
+  }, before, { timeout: 20000 });
+};
 const polledPaths = [];
 const onRequest = (request) => polledPaths.push(new URL(request.url()).pathname);
 page.on('request', onRequest);
-await forcePoll();
-await page.waitForResponse((response) => response.url().endsWith('/admin/api/devices'), { timeout: 20000 }).catch(() => { });
+await waitForSuccessfulPoll();
 page.off('request', onRequest);
 check('forced refresh patches the inverter card in place', (await page.locator('.device-item[data-probe="kept"]').count()) === 1);
 check('periodic refresh does not request /admin/api/parameters', !polledPaths.includes('/admin/api/parameters'), polledPaths.join(','));
@@ -672,9 +696,7 @@ const collapsedState = await toggleState();
 check('collapsing hides the body but keeps the header, and flips aria-expanded',
   collapsedState.expanded === 'false' && !collapsedState.bodyVisible && collapsedState.headVisible && collapsedState.titleVisible, JSON.stringify(collapsedState));
 check('collapsed state is persisted in localStorage', /\[".+"\]/.test(collapsedState.stored || ''), String(collapsedState.stored));
-await forcePoll();
-await page.waitForResponse((response) => response.url().endsWith('/admin/api/devices'), { timeout: 20000 }).catch(() => { });
-await page.waitForTimeout(300);
+await waitForSuccessfulPoll();
 check('a poll cycle does not reset the collapse', (await toggleState()).expanded === 'false');
 await page.reload();
 await page.waitForSelector('.device-item .device-toggle');
@@ -692,6 +714,7 @@ check('CSP header present', Boolean(csp && csp.includes("script-src 'self'")));
 // loadDashboard() trigger left in the UI; a failing poll must still toast once (with the slide-in
 // animation), and a second consecutive automatic failure must not stack another identical toast.
 check('no "Updated" timestamp line on the dashboard', (await page.locator('#dashboard-updated').count()) === 0);
+const rateFailureStart = problems.length;
 await page.route('**/admin/api/devices', (route) => route.fulfill({ status: 429, contentType: 'application/json', body: JSON.stringify({ detail: 'The request rate or the failed-authentication limit was exceeded.' }) }));
 await forcePoll();
 await page.waitForFunction(() => document.querySelector('#toast-region .alert-danger'), null, { timeout: 8000 });
@@ -715,11 +738,13 @@ check('a second consecutive automatic failure does not stack another toast', dup
 await page.unroute('**/admin/api/devices');
 await forcePoll();
 await page.waitForTimeout(300);
-scrub(/\/admin\/api\/devices|429 \(Too Many Requests\)/);
+scrubExpected(rateFailureStart, (p) => p.includes(`${base}/admin/api/devices`) &&
+  (p.startsWith('http 429: GET ') || (p.startsWith('console ') && p.includes('429'))));
 
 // 2d. a failed load keeps the last known KPI values (they are the last truth we had) and shows the
 // inline offline banner with the time of the last good snapshot.
 const kpiBefore = await page.locator('#pv-power').innerText();
+const unavailableStart = problems.length;
 await page.route('**/admin/api/devices', (route) => route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ detail: 'Administration is unavailable' }) }));
 await forcePoll();
 await page.waitForFunction(() => document.querySelector('.dashboard-offline-banner:not([hidden])'), null, { timeout: 20000 });
@@ -731,10 +756,12 @@ await shot('02d-dashboard-failed-poll');
 await page.unroute('**/admin/api/devices');
 await forcePoll();
 await page.waitForFunction(() => !document.querySelector('#devices-list .text-danger'), null, { timeout: 20000 });
-scrub(/http 503: GET .*\/admin\/api\/devices|status of 503|\/admin\/api\/devices/);
+scrubExpected(unavailableStart, (p) => p.includes(`${base}/admin/api/devices`) &&
+  (p.startsWith('http 503: GET ') || (p.startsWith('console ') && p.includes('503'))));
 
 // 2e. connection loss: going offline opens the blocking modal (toasts cleared, page inert), and the
 // return of the connection is detected by the /health probe, which closes the modal again.
+const offlineStart = problems.length;
 await context.setOffline(true);
 await page.waitForSelector('#reconnect-modal.show', { timeout: 8000 });
 check('connection loss opens the reconnect modal', await page.evaluate(() => document.body.classList.contains('is-reconnecting')));
@@ -746,7 +773,9 @@ await shot('02e-connection-lost');
 await context.setOffline(false);
 await page.waitForFunction(() => !document.querySelector('#reconnect-modal.show') && !document.body.classList.contains('is-reconnecting'), null, { timeout: 15000 });
 check('reconnect modal closes once the server answers again', true);
-scrub(/requestfailed:|ERR_INTERNET_DISCONNECTED|Failed to fetch|Failed to load resource/);
+scrubExpected(offlineStart, (p) => p.startsWith('requestfailed: GET ') &&
+  (p.includes(`${base}/health`) || p.includes(`${base}/admin/api/devices`)) &&
+  p.includes('ERR_INTERNET_DISCONNECTED'));
 
 // 2e-2. a probe that fails while the tab is hidden schedules no retry; returning to the foreground
 // must resume probing so the modal closes without any page-level polling.
@@ -754,6 +783,7 @@ const setVisibility = (state) => page.evaluate((value) => {
   Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => value });
   document.dispatchEvent(new Event('visibilitychange'));
 }, state);
+const probeFailureStart = problems.length;
 await page.route('**/health', (route) => route.abort());
 await sleep(800); // Bootstrap ignores show() while the previous hide transition still runs
 await page.evaluate(() => window.RCTReconnect.start());
@@ -765,7 +795,8 @@ await setVisibility('visible');
 await page.waitForFunction(() => !document.querySelector('#reconnect-modal.show') && !document.body.classList.contains('is-reconnecting'), null, { timeout: 15000 });
 check('reconnect modal closes after returning to the foreground once the server is back', true);
 await page.evaluate(() => { delete document.visibilityState; });
-scrub(/requestfailed:|ERR_FAILED|Failed to fetch|Failed to load resource/);
+scrubExpected(probeFailureStart, (p) => p.startsWith('requestfailed: GET ') &&
+  p.includes(`${base}/health`) && p.includes('ERR_FAILED'));
 
 // 3. layouts
 async function layouts(label, urls) {
@@ -850,6 +881,9 @@ check('result state shows the PAT once', token.length > 0 && (await page.locator
 check('new row appears without reload', (await page.locator('#tokens-list tr', { hasText: 'e2e-monitor' }).count()) === 1);
 const call = async () => (await fetch(`${base}/api/v1/devices/sim/metrics/grid_power`, { headers: { Authorization: `Bearer ${token}` } })).status;
 check('new PAT is accepted by the API', (await call()) === 200);
+await page.click('#copy-token');
+await page.waitForFunction(() => !document.querySelector('#token-done').disabled);
+check('copying the PAT enables Done', true);
 await page.click('#token-done');
 await page.waitForSelector('#add-token-modal', { state: 'hidden' });
 await page.waitForSelector('.modal-backdrop', { state: 'detached' });
@@ -980,11 +1014,12 @@ check('order persists after reload', JSON.stringify(await names()) === JSON.stri
 // 6b. dashboard inverter modal and write access, TSDB: backend fields
 await page.goto(base + '/ui/dashboard');
 await page.click('#add-inverter');
-await page.waitForSelector('#inverters-modal.show #device-0-host');
+await page.waitForSelector('#inverters-modal.show .device-settings-item input[data-field="host"]');
 check('plus opens the inverter editor modal', (await page.locator('#inverters-modal.show').count()) === 1);
 await page.waitForFunction(() => document.getElementById('inverters-modal').contains(document.activeElement));
 check('focus stays in the modal', await page.evaluate(() => document.getElementById('inverters-modal').contains(document.activeElement)));
 const deviceRows = () => page.locator('.device-settings-item').count();
+const deviceField = (index, field) => page.locator('.device-settings-item').nth(index).locator(`input[data-field="${field}"]`);
 const modalOpen = () => page.locator('#inverters-modal.show').count();
 const rowState = (index) => page.evaluate((i) => {
   const row = document.querySelectorAll('.device-settings-item')[i];
@@ -1010,7 +1045,7 @@ const unloadWarns = () => page.evaluate(() => { const event = new Event('beforeu
 check('the dialog offers one empty row below the saved inverter', (await deviceRows()) === 2, String(await deviceRows()));
 check('trash icon has an accessible label', (await page.locator('.device-settings-item').nth(0).locator('button[aria-label^="Remove inverter"] .material-icons').innerText()) === 'delete_outline');
 check('the empty row has no remove button', (await page.locator('.device-settings-item').nth(1).locator('button').count()) === 0);
-check('no id or name fields', (await page.locator('#device-0-device_id, #device-0-display_name').count()) === 0);
+check('no id or name fields', (await page.locator('.device-settings-item input[data-field="device_id"], .device-settings-item input[data-field="display_name"]').count()) === 0);
 let bar = await barState();
 check('Apply and Discard are disabled while the draft is clean', !bar.apply && !bar.discard && bar.count === '' && bar.status === '', JSON.stringify(bar));
 check('the Apply button has an accessible name and a described status region',
@@ -1021,28 +1056,28 @@ check('a clean draft does not trigger the unload warning', !(await unloadWarns()
 
 // (b)-(d) invalid rows: field-level errors as before, Apply stays disabled, nothing is sent
 const putsBefore = devicePuts.length;
-await page.fill('#device-1-host', 'http://nope/path');
+await deviceField(1, 'host').fill('http://nope/path');
 let state = await rowState(1);
 check('invalid host is reported on the host field', state.invalid.join(',') === 'host' && state.feedback.includes('without scheme'), JSON.stringify(state));
 bar = await barState();
 check('an invalid draft keeps Apply disabled and says why', !bar.apply && bar.status.includes('Fix the marked'), JSON.stringify(bar));
-await page.fill('#device-1-host', '192.0.2.10');
-await page.fill('#device-1-port', '70000');
+await deviceField(1, 'host').fill('192.0.2.10');
+await deviceField(1, 'port').fill('70000');
 state = await rowState(1);
 check('out-of-range port is reported on the port field, not the host', state.invalid.join(',') === 'port' && state.feedback.includes('65535'), JSON.stringify(state));
-const savedHost = await page.inputValue('#device-0-host');
-const savedPort = await page.inputValue('#device-0-port');
-await page.fill('#device-1-host', savedHost);
-await page.fill('#device-1-port', savedPort);
+const savedHost = await deviceField(0, 'host').inputValue();
+const savedPort = await deviceField(0, 'port').inputValue();
+await deviceField(1, 'host').fill(savedHost);
+await deviceField(1, 'port').fill(savedPort);
 state = await rowState(1);
 check('duplicate inverter is reported on the host field', state.invalid.join(',') === 'host' && state.feedback.includes('already listed'), JSON.stringify(state));
 check('invalid edits sent no request', (await settleDevicePuts()) === putsBefore && (await modalOpen()) === 1);
 
 // (e) a valid new row: draft only, marked, counted, no request even past the old debounce window
-await page.fill('#device-1-host', '192.0.2.10');
-await page.fill('#device-1-port', '18899');
-await page.locator('#device-1-port').dispatchEvent('change');
-await page.locator('#device-1-port').focus();
+await deviceField(1, 'host').fill('192.0.2.10');
+await deviceField(1, 'port').fill('18899');
+await deviceField(1, 'port').dispatchEvent('change');
+await deviceField(1, 'port').focus();
 await page.keyboard.press('ArrowUp');
 await page.keyboard.press('ArrowUp');
 await page.keyboard.press('ArrowDown');
@@ -1053,7 +1088,7 @@ check('the changed row is marked as unsaved', state.flag.includes('New') && stat
 check('the draft is counted and Apply is enabled', bar.apply && bar.discard && bar.count === '1 unsaved change' && bar.status.includes('Unsaved changes'), JSON.stringify(bar));
 check('a new inverter needs no reset warning', bar.warning === '', bar.warning);
 check('leaving with an unsaved draft triggers the unload warning', await unloadWarns());
-await page.fill('#device-1-port', '18899');
+await deviceField(1, 'port').fill('18899');
 await clearToasts();
 await page.click('#device-apply');
 await page.waitForFunction(() => document.getElementById('toast-region').textContent.includes('Inverters applied'), null, { timeout: 8000 });
@@ -1069,16 +1104,16 @@ await shot('inverter-added');
 
 // (f) Discard drops the draft without a request
 const putsAtDiscard = devicePuts.length;
-await page.fill('#device-0-port', String(Number(savedPort) + 1));
+await deviceField(0, 'port').fill(String(Number(savedPort) + 1));
 check('editing a saved row marks it as changed and warns about the reset',
   (await rowState(0)).flag.includes('Changed') && (await barState()).warning.includes('Engineering Mode') && (await barState()).warning.includes(`${savedHost}:${savedPort}`), JSON.stringify(await barState()));
 await clearToasts();
 await page.click('#device-discard');
-check('Discard restores the server state and sends nothing', (await page.inputValue('#device-0-port')) === savedPort && (await barState()).count === '' && (await settleDevicePuts()) === putsAtDiscard);
+check('Discard restores the server state and sends nothing', (await deviceField(0, 'port').inputValue()) === savedPort && (await barState()).count === '' && (await settleDevicePuts()) === putsAtDiscard);
 
 // (g) re-addressing needs a confirmation that names the reset; cancelling sends nothing
 const extraRow = 1;
-await page.fill(`#device-${extraRow}-port`, '18898');
+await deviceField(extraRow, 'port').fill('18898');
 await clearToasts();
 await page.click('#device-apply');
 await page.waitForSelector('#confirm-modal.show', { timeout: 5000 });
@@ -1091,6 +1126,7 @@ await sleep(300);
 check('cancelling the confirmation sends nothing and keeps the draft', devicePuts.length === putsAtDiscard && (await barState()).apply);
 
 // (h) a rejected apply keeps the draft, toasts once, shows the error and moves focus to it
+const injectedApplyStart = problems.length;
 await page.route('**/admin/api/settings', (route) => route.request().method() === 'PUT'
   ? route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ detail: 'Injected failure' }) })
   : route.continue());
@@ -1104,7 +1140,7 @@ check('a failed apply shows the error with the reason and keeps the draft', bar.
 check('a failed apply raises the danger toast exactly once',
   (await page.$$eval('#toast-region .alert-danger', (nodes) => nodes.filter((n) => n.textContent.includes('Injected failure')).length)) === 1);
 check('focus moves to the error after a failed apply', await page.evaluate(() => document.activeElement?.id === 'device-apply-error'));
-check('the draft value survives the failed apply', (await page.inputValue(`#device-${extraRow}-port`)) === '18898');
+check('the draft value survives the failed apply', (await deviceField(extraRow, 'port').inputValue()) === '18898');
 await page.unroute('**/admin/api/settings');
 await page.route('**/admin/api/settings', (route) => route.request().method() === 'PUT'
   ? route.fulfill({ status: 409, contentType: 'application/json', body: JSON.stringify({ detail: 'Device graph build failed' }) })
@@ -1126,7 +1162,9 @@ await page.click('#confirm-accept');
 await page.waitForFunction(() => document.getElementById('device-apply-error').textContent.includes('timed out'), null, { timeout: 8000 });
 check('a 504 reports the timeout and keeps the draft', (await barState()).apply);
 await page.unroute('**/admin/api/settings');
-scrub(/http (500|409|504): PUT .*\/admin\/api\/settings|status of (500|409|504)/);
+scrubExpected(injectedApplyStart, (p) => p.includes(`${base}/admin/api/settings`) &&
+  (p.startsWith('http 500: PUT ') || p.startsWith('http 409: PUT ') || p.startsWith('http 504: PUT ')
+    || (p.startsWith('console ') && /\b(500|409|504)\b/.test(p))));
 
 // (i) the Apply button is locked while the request runs: no double submit
 const putsAtApply = devicePuts.length;
@@ -1161,23 +1199,23 @@ check('Apply removes the inverter with exactly one PUT', devicePuts.length === p
   && !(await serverDevices()).some((d) => d.host === '192.0.2.10'));
 
 // (k) a draft survives closing and reopening the dialog
-await page.fill('#device-1-host', '192.0.2.55');
+await deviceField(1, 'host').fill('192.0.2.55');
 await page.click('#inverters-modal .btn-close');
 await page.waitForSelector('#inverters-modal', { state: 'hidden' });
 await page.click('#add-inverter');
-await page.waitForSelector('#inverters-modal.show #device-0-host');
-check('an unsaved draft survives closing the dialog', (await page.inputValue('#device-1-host')) === '192.0.2.55' && (await barState()).apply);
+await page.waitForSelector('#inverters-modal.show .device-settings-item input[data-field="host"]');
+check('an unsaved draft survives closing the dialog', (await deviceField(1, 'host').inputValue()) === '192.0.2.55' && (await barState()).apply);
 await clearToasts();
 await page.click('#device-discard');
-check('Discard clears the leftover draft', (await page.inputValue('#device-1-host')) === '' && !(await barState()).apply);
+check('Discard clears the leftover draft', (await deviceField(1, 'host').inputValue()) === '' && !(await barState()).apply);
 // "Add another inverter" reuses the empty row and focuses it
 await page.click('#device-add-row');
-check('Add another inverter focuses the empty row without sending anything', await page.evaluate(() => document.activeElement?.id === 'device-1-host') && (await deviceRows()) === 2);
+check('Add another inverter focuses the empty row without sending anything', await deviceField(1, 'host').evaluate((input) => document.activeElement === input) && (await deviceRows()) === 2);
 await page.click('#inverters-modal .btn-close');
 await page.waitForSelector('#inverters-modal', { state: 'hidden' });
 // (g) no stray bottom-right Close button
 await page.click('#add-inverter');
-await page.waitForSelector('#inverters-modal.show #device-0-host');
+await page.waitForSelector('#inverters-modal.show .device-settings-item input[data-field="host"]');
 await sleep(400); // let the Bootstrap fade transform finish before measuring the dialog's position below
 check('the redundant modal-footer Close button is gone', (await page.locator('#inverters-modal .modal-footer .btn-secondary').count()) === 0);
 // (h) centering: the dialog's bounding rect sits with near-equal left/right margins in the viewport.
@@ -1213,7 +1251,7 @@ await sleep(200);
 await page.click('#inverters-modal .btn-close');
 await page.waitForSelector('#inverters-modal', { state: 'hidden' });
 await page.click('#add-inverter');
-await page.waitForSelector('#inverters-modal.show #device-0-host');
+await page.waitForSelector('#inverters-modal.show .device-settings-item input[data-field="host"]');
 await page.waitForFunction(() => document.getElementById('inverters-modal').contains(document.activeElement));
 await page.keyboard.press('Escape');
 await page.waitForSelector('#inverters-modal', { state: 'hidden' });
@@ -1277,7 +1315,7 @@ await sleep(900);
 let exportState = (await (await context.request.get(base + '/admin/api/settings')).json()).settings;
 check('an export config that became incomplete again is not sent', exportState.questdb_hostname === 'questdb.example.org', JSON.stringify(exportState.questdb_hostname));
 check('#save-state reports the incomplete export group', (await page.locator('#save-state').innerText()).includes('Incomplete'), await page.locator('#save-state').innerText());
-check('the export group names what is missing', /Hostname or URL/.test(await page.locator('#save-error-export, #save-state').first().innerText()) || true);
+check('the export group names what is missing', /Hostname or URL/.test(await page.locator('#save-hint-export').innerText()));
 // The pairing branch: every required key is present, so the message has to name the pair instead.
 await page.locator('#setting-questdb_hostname').fill('questdb.example.org');
 await page.locator('#setting-questdb_hostname').dispatchEvent('change');
@@ -1534,7 +1572,7 @@ await shot('prometheus-master-toggle-on');
       body: JSON.stringify({
         verified_device_model: 'Simulator', verified_firmware: '1.0', note: 'e2e', soc_strategy_external_code: 2,
         enum_byte_width: 1, bool_byte_width: 1, write_frame_layout_verified: true, apply_sequence_verified: true,
-        battery_discharge_positive: true, grid_import_positive: true,
+        battery_discharge_positive: true, grid_import_positive: true, soc_target_unit: 'ratio',
       }),
     });
     return response.status;
@@ -1562,7 +1600,7 @@ await shot('prometheus-master-toggle-on');
       verified_device_model: 'Simulator', verified_firmware: '1.0', note: 'e2e simulator',
       soc_strategy_external_code: 2, enum_byte_width: 1, bool_byte_width: 1,
       write_frame_layout_verified: true, apply_sequence_verified: true,
-      battery_discharge_positive: true, grid_import_positive: true,
+      battery_discharge_positive: true, grid_import_positive: true, soc_target_unit: 'ratio',
     },
   });
   check('hardware verification endpoint accepts the evidence', verification.ok(), String(verification.status()));
@@ -1575,11 +1613,11 @@ await shot('prometheus-master-toggle-on');
     (await ep.locator('.energy-mode-switch[role=radiogroup]').count()) === 1
     && (await radios.allInnerTexts()).map((text) => text.replace(/\s+/g, ' ').trim().replace(/^\S+ /, '')).join('|') === 'Off|Manual|External',
     JSON.stringify(await radios.allInnerTexts()));
-  check('initially Off is selected and the only tab stop', (await checkedMode()) === 'power_settings_new Off' || /Off$/.test(await checkedMode()),
+  check('initially Off is selected and the only tab stop', /Off$/.test(await checkedMode()),
     String(await checkedMode()));
   check('roving tabindex: exactly one radio is tabbable', (await ep.locator('.energy-mode-switch [role=radio][tabindex="0"]').count()) === 1);
   check('every radio has an aria-label that starts with its visible text',
-    (await radios.evaluateAll((nodes) => nodes.every((n) => n.getAttribute('aria-label').startsWith(n.textContent.trim().split(/\s+/).pop())))));
+    (await radios.evaluateAll((nodes) => nodes.every((n) => n.getAttribute('aria-label').startsWith(n.lastElementChild.textContent.trim())))));
   const initialStates = await states();
   check('Off: the operate buttons are disabled and name the reason', initialStates.every(Boolean)
     && /switched off/.test(await buttons[0].getAttribute('title') || ''), JSON.stringify(initialStates));
@@ -1609,8 +1647,7 @@ await shot('prometheus-master-toggle-on');
     const viaPat = await ep.request.post(`${energyBase}/api/v1/devices/sim/energy/command`, { headers: { Authorization: `Bearer ${secret}` }, data: { action: 'hold' } });
     check('a PAT command on a Manual inverter answers 409 energy_manager_not_external',
       viaPat.status() === 409 && (await viaPat.json()).code === 'energy_manager_not_external', String(viaPat.status()));
-    // The scripted refusal is intended, not an application problem.
-    scrub(/http 409/);
+    // This request belongs to the separate energy page, outside the main page's error listener.
   } else check('a PAT could be created for the Manual-mode check', false, JSON.stringify(patBody).slice(0, 200));
 
   const cmd = async (action) => {
@@ -1647,7 +1684,6 @@ await shot('prometheus-master-toggle-on');
     const viaPat = await ep.request.post(`${energyBase}/api/v1/devices/sim/energy/command`, { headers: { Authorization: `Bearer ${secret}` }, data: { action: 'hold' } });
     check('External: a PAT command is accepted', viaPat.status() === 200, String(viaPat.status()));
   }
-  scrub(/http 409/);
   // Back to Manual so the remaining checks see the operable controls.
   await radios.nth(1).click();
   await ep.waitForFunction(() => /Manual$/.test(document.querySelector('.energy-mode-switch [aria-checked=true]')?.textContent.trim() || ''), null, { timeout: 15000 }).catch(() => { });
@@ -1809,9 +1845,9 @@ await page.goto(base + '/ui/dashboard');
 check('logout ends the session', page.url().endsWith('/login'));
 
 const relevant = problems.filter((p) => !/http 40[013]: .*\/admin\/api\/(settings|login)|Failed to load resource: the server responded with a status of 40[013]/.test(p));
-fs.writeFileSync(path.join(OUT, 'results.json'), JSON.stringify({ results, problems, relevant }, null, 2));
 console.log('console/network problems:', JSON.stringify(relevant, null, 1));
 check('browser console and network clean', relevant.length === 0);
+fs.writeFileSync(path.join(OUT, 'results.json'), JSON.stringify({ results, problems, relevant }, null, 2));
 await browser.close();
 await stop(server);
 fake.proc.kill('SIGTERM');

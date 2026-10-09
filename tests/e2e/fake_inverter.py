@@ -14,8 +14,9 @@ import struct
 import sys
 from pathlib import Path
 
-from app.catalog.registry import RegistryCatalog
+from app.catalog.registry import RegistryCatalog, RegistryEntry
 from app.protocol.frames import encode_frame
+from app.protocol.slave_data import SLAVE_DATA_SIZE
 from app.protocol.stream import StreamParser
 from app.protocol.types import Command, DataType
 from app.protocol.values import encode_value
@@ -44,15 +45,28 @@ STRING_VALUES = {
 }
 
 
-def _default_payload(data_type: DataType) -> bytes:
+def _default_payload(entry: RegistryEntry | None) -> bytes:
     """A real device answers an unmodeled register with its own type's zero value, not another
     type's bytes reinterpreted; an unpopulated t_string register decodes to '', never garbage."""
-    return b"\x00" if data_type is DataType.STRING else struct.pack(">f", 1.0)
+    if entry is None:
+        return encode_value(DataType.FLOAT, 0.0)
+    if entry.data_type is DataType.STRUCT:
+        return bytes(SLAVE_DATA_SIZE)
+    if entry.data_type is DataType.STRING:
+        value = ""
+    elif entry.data_type is DataType.BOOL:
+        value = False
+    elif entry.data_type is DataType.FLOAT:
+        value = 0.0
+    else:
+        value = 0
+    width = entry.byte_width or (1 if entry.data_type is DataType.STRING else None)
+    return encode_value(entry.data_type, value, byte_width=width)
 
 
-def _by_object_id() -> tuple[dict[int, bytes], dict[int, DataType]]:
+def _by_object_id() -> tuple[dict[int, bytes], dict[int, RegistryEntry]]:
     catalog = RegistryCatalog.from_file(Path(__file__).resolve().parents[2] / "app" / "catalog" / "objects.json")
-    types = {entry.object_id: entry.data_type for entry in catalog.entries()}
+    entries = {entry.object_id: entry for entry in catalog.entries()}
     payloads = {catalog.object_entry(name).object_id: struct.pack(">f", value) for name, value in VALUES.items()}
     for name, value in INT_VALUES.items():
         entry = catalog.object_entry(name)
@@ -60,14 +74,14 @@ def _by_object_id() -> tuple[dict[int, bytes], dict[int, DataType]]:
     for name, value in STRING_VALUES.items():
         entry = catalog.object_entry(name)
         payloads[entry.object_id] = encode_value(entry.data_type, value, byte_width=entry.byte_width)
-    return payloads, types
+    return payloads, entries
 
 
 PAS_PERIOD = 0x9C8FE559
 
 
 async def _serve(port: int) -> None:
-    values, types = _by_object_id()
+    values, entries = _by_object_id()
     stored: dict[int, bytes] = {}  # values the gateway wrote (pas.period readback)
 
     async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
@@ -79,7 +93,7 @@ async def _serve(port: int) -> None:
                 return stored[object_id]
             if object_id in values:
                 return values[object_id]
-            return _default_payload(types.get(object_id, DataType.FLOAT))
+            return _default_payload(entries.get(object_id))
 
         async def push() -> None:
             while True:

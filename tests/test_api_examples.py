@@ -331,3 +331,20 @@ async def test_fresh_without_names_is_rejected_with_invalid_request() -> None:
         response = await h.client.get("/api/v1/devices/main/metrics", params={"fresh": "true"})
     body = assert_problem(response, 422, "invalid_request")
     assert "fresh=true requires an explicit names list of at most 8 metrics" in body["detail"]
+
+
+async def test_cached_value_stays_distinguishable_by_timestamp_age_stale_and_source() -> None:
+    state = {"silent": False}
+    async with running_app(
+        make_settings(cache_ttl_seconds=0, enable_periodic_reads=False),
+        behavior=lambda f: "ignore" if state["silent"] else "respond",
+    ) as h:
+        first = (await h.client.get("/api/v1/devices/main/metrics/battery_soc")).json()
+        assert (first["source"], first["stale"]) == ("device", False)
+        await asyncio.sleep(0.05)
+        state["silent"] = True
+        second = (await h.client.get("/api/v1/devices/main/metrics/battery_soc")).json()
+        assert (second["source"], second["stale"]) == ("cache", True)
+        assert second["timestamp"] == first["timestamp"]  # the device observation time, not the reply time
+        assert second["age_seconds"] > first["age_seconds"]
+        assert second["stale_reason"] == "device_timeout"

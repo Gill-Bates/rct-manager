@@ -16,7 +16,7 @@ from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from app import __version__
+from app import __build__, __version__
 from app.admin.api import admin_session
 
 _ROOT = Path(__file__).resolve().parent
@@ -50,7 +50,12 @@ def _redirect(path: str) -> RedirectResponse:
 
 
 def _render(request: Request, template: str, context: dict):
-    context = {"app_version": __version__, "copyright_year": datetime.now(UTC).year, **context}
+    context = {
+        "app_version": __version__,
+        "build_hash": __build__,
+        "copyright_year": datetime.now(UTC).year,
+        **context,
+    }
     return _TEMPLATES.TemplateResponse(
         request, template, context, headers={**_HEADERS, "Cache-Control": "no-store"}
     )

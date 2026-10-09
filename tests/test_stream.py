@@ -397,3 +397,50 @@ def test_underdeclared_long_frame_ending_in_an_escape_pair_is_delivered_without_
         frames = parser.feed(wire[:cut]) + parser.feed(wire[cut:])
         assert [f.payload for f in frames] == [payload], cut
         assert parser.stats.crc_errors == 0
+
+
+# Under-declared long response (declared 22, carried 38) whose first 12 payload bytes are followed
+# by two bytes that happen to be the CRC of that prefix: header+prefix verifies at offset PREFIX_CUT.
+PREFIX_COLLISION = bytes.fromhex("2b0600165293b6681001303132333435363738393ef6404142434445464748494a4b4c4d4e4f50515253547f")
+PREFIX_COLLISION_OBJECT = 0x5293B668
+PREFIX_CUT = 22
+PREFIX_COLLISION_PAYLOAD = bytes.fromhex("1001303132333435363738393ef6404142434445464748494a4b4c4d4e4f50515253")
+
+
+def test_prefix_collision_fixture_is_what_it_claims_to_be() -> None:
+    assert PREFIX_COLLISION[:1] == b"\x2b"
+    header_and_prefix = PREFIX_COLLISION[1 : PREFIX_CUT - 2]
+    assert crc16_ccitt(header_and_prefix) == int.from_bytes(PREFIX_COLLISION[PREFIX_CUT - 2 : PREFIX_CUT], "big")
+    whole = StreamParser().feed(PREFIX_COLLISION)
+    assert [f.payload for f in whole] == [PREFIX_COLLISION_PAYLOAD]
+    assert whole[0].object_id == PREFIX_COLLISION_OBJECT
+
+
+@pytest.mark.parametrize("follower", [b"", NULL + TRAILER], ids=["alone", "back_to_back"])
+def test_fragmented_long_frame_is_delivered_once_for_every_cut_outside_the_collision(follower: bytes) -> None:
+    data = PREFIX_COLLISION + follower
+    expected = [PREFIX_COLLISION_PAYLOAD] + ([TRAILER_PAYLOAD] if follower else [])
+    for cut in range(1, len(data)):
+        if cut == PREFIX_CUT:
+            continue  # the ambiguous cut has its own test below
+        parser = StreamParser()
+        frames = parser.feed(data[:cut]) + parser.feed(data[cut:])
+        assert [f.payload for f in frames] == expected, cut
+        assert parser.stats.crc_errors == 0, cut
+
+
+TRAILER_PAYLOAD = b"\x01"
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="Protocol ambiguity: a CRC-valid prefix of an under-declared long frame is byte-identical to a "
+    "complete frame at the read boundary; only later bytes can tell them apart (2**-16 per evaluated cut).",
+)
+@pytest.mark.parametrize("follower", [b"", NULL + TRAILER], ids=["alone", "back_to_back"])
+def test_crc_valid_prefix_at_a_read_boundary_is_not_delivered_early(follower: bytes) -> None:
+    data = PREFIX_COLLISION + follower
+    parser = StreamParser()
+    assert parser.feed(data[:PREFIX_CUT]) == []
+    frames = parser.feed(data[PREFIX_CUT:])
+    assert [f.payload for f in frames] == [PREFIX_COLLISION_PAYLOAD] + ([TRAILER_PAYLOAD] if follower else [])
