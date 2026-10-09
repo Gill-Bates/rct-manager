@@ -1149,7 +1149,7 @@
     const date = new Date(value);
     if (Number.isNaN(date.getTime())) return String(value);
     // Locale comes from the browser (undefined), never a hardcoded region.
-    return new Intl.DateTimeFormat(undefined, time ? { dateStyle: 'medium', timeStyle: 'short' } : { dateStyle: 'medium' }).format(date);
+    return new Intl.DateTimeFormat(undefined, time ? { dateStyle: 'medium', timeStyle: 'medium' } : { dateStyle: 'medium' }).format(date);
   }
 
   function tokenEmptyRow() {
@@ -1158,6 +1158,13 @@
     cell.colSpan = 6;
     row.append(cell);
     return row;
+  }
+
+  function tokenRoleCell(role) {
+    const write = role !== 'read';
+    const cell = element('td');
+    cell.append(element('span', `token-role-badge ${write ? 'token-role-write' : 'token-role-read'}`, write ? 'Read and write' : 'Read'));
+    return cell;
   }
 
   let tokensRequest = 0;
@@ -1173,16 +1180,10 @@
       const row = element('tr');
       const nowrap = (text, extra = '') => element('td', `token-nowrap${extra}`, text);
       const actions = element('td', 'text-end token-nowrap');
-      const menu = element('div', 'dropdown');
-      const toggle = element('button', 'btn btn-outline-secondary btn-sm');
-      toggle.type = 'button'; toggle.dataset.bsToggle = 'dropdown'; toggle.dataset.bsStrategy = 'fixed';
-      toggle.setAttribute('aria-expanded', 'false');
-      toggle.setAttribute('aria-label', `Actions for token ${token.name}`);
-      toggle.append(element('span', 'material-icons', 'more_vert'));
-      toggle.firstChild.setAttribute('aria-hidden', 'true');
-      const options = element('ul', 'dropdown-menu dropdown-menu-end');
-      const item = element('li');
-      const revoke = element('button', 'dropdown-item text-danger', 'Revoke token');
+      const revoke = element('button', 'btn btn-outline-danger btn-sm d-inline-flex align-items-center gap-1');
+      const icon = element('span', 'material-icons', 'delete');
+      icon.setAttribute('aria-hidden', 'true');
+      revoke.append(icon, 'Revoke');
       revoke.type = 'button';
       revoke.setAttribute('aria-label', `Revoke token ${token.name}`);
       revoke.addEventListener('click', async () => {
@@ -1196,13 +1197,13 @@
         try { await api(`tokens/${encodeURIComponent(token.id)}`, { method: 'DELETE' }); row.remove(); toast('Token revoked.'); if (!host.childElementCount) host.append(tokenEmptyRow()); }
         catch (error) { revoke.disabled = false; toast(messageFrom(error), 'danger'); }
       });
-      item.append(revoke); options.append(item); menu.append(toggle, options); actions.append(menu);
+      actions.append(revoke);
       row.append(
         element('td', '', token.name),
-        element('td', '', token.role === 'read' ? 'Read' : 'Read and write'),
-        nowrap(formatDate(token.created_at)),
+        tokenRoleCell(token.role),
+        nowrap(formatDate(token.created_at, { time: true })),
         nowrap(formatDate(token.last_used_at, { time: true, empty: 'Never' })),
-        nowrap(formatDate(token.expires_at)),
+        nowrap(formatDate(token.expires_at, { time: true })),
         actions,
       );
       host.append(row);
@@ -1236,10 +1237,21 @@
     // The token is shown once: a stray backdrop click or Escape must not discard it. Only the
     // Done and close buttons (explicit actions) dismiss the result step.
     let explicitClose = false;
+    // Done and the close button stay disabled until a copy succeeded, so the token cannot be lost unseen.
+    let copied = false;
+    const setCopied = (value) => {
+      copied = value;
+      $('token-done').disabled = !value;
+      $('token-close').disabled = !value;
+    };
     // These two buttons close through our own handler, so the flag is set before Bootstrap's hide() runs.
     for (const button of modal.querySelectorAll('#new-token-result [data-bs-dismiss="modal"]')) {
       button.removeAttribute('data-bs-dismiss');
-      button.addEventListener('click', () => { explicitClose = true; window.bootstrap.Modal.getInstance(modal)?.hide(); });
+      button.addEventListener('click', () => {
+        if (!copied) return;
+        explicitClose = true;
+        window.bootstrap.Modal.getInstance(modal)?.hide();
+      });
     }
     modal.addEventListener('hide.bs.modal', (event) => {
       if ($('new-token-result').hidden || explicitClose) return;
@@ -1249,6 +1261,7 @@
     // Closing by any path wipes the plaintext secret from the DOM and restores the form state.
     modal.addEventListener('hidden.bs.modal', () => {
       explicitClose = false;
+      setCopied(false);
       $('new-token-value').textContent = '';
       showResult(false);
       form.reset();
@@ -1263,6 +1276,7 @@
       try {
         const result = await api('tokens', { method: 'POST', body: JSON.stringify(body) });
         $('new-token-value').textContent = result.token || '';
+        setCopied(false);
         showResult(true);
         $('copy-token').focus();
         await loadTokens();
@@ -1271,8 +1285,10 @@
       finally { submitState(form, false); }
     });
     $('copy-token').addEventListener('click', async () => {
-      if (await copyToClipboard($('new-token-value').textContent)) toast('Token copied.');
-      else toast('Copying is not available here. Please select and copy the token.', 'warning');
+      if (await copyToClipboard($('new-token-value').textContent)) {
+        setCopied(true);
+        toast('Token copied.');
+      } else toast('Copying is not available here. Please select and copy the token.', 'warning');
     });
   }
 
@@ -2045,13 +2061,12 @@
     const pollStamp = element('p', 'small text-secondary mb-0', 'Updated –');
     freshSection.append(freshHost, pollStamp);
 
-    // 3. Hardware verification: one form, shown in the Setup step while that step is open and in
-    // the Expert section otherwise (re-verify). Never prefilled with guessed hardware values.
+    // 3. Hardware verification: one form that lives in the Expert section only. The Setup step of a
+    // Basic user just points to it (strategy code and byte widths are protocol detail), and never
+    // switches Expert mode on by itself. Never prefilled with guessed hardware values.
     const verifySection = section(expertInner, 'Hardware verification',
       'Enter what you measured on this inverter. The server stamps who verified it and when; a verification applies to this device only.');
     const verifyExpertSlot = element('div');
-    const verifySetupNote = element('p', 'small text-secondary mb-0', 'Complete the hardware verification step in the setup block above.');
-    verifySetupNote.hidden = true;
     const verifyForm = element('form', 'row g-2 align-items-end');
     const model = textInput(128);
     const firmware = textInput(64);
@@ -2088,7 +2103,8 @@
       field('Battery power sign', batterySign, 'col-sm-6'), field('Grid power sign', gridSign, 'col-sm-6'),
       field('Evidence note', note, 'col-12'), checks, buttonRow,
     );
-    verifySection.append(verifyExpertSlot, verifySetupNote, revokeButton);
+    verifyExpertSlot.append(verifyForm);
+    verifySection.append(verifyExpertSlot, revokeButton);
 
     verifyForm.addEventListener('submit', guarded(verifyButton, async () => {
       if (!attest.input.checked) throw new Error('Confirm that the values were verified on the hardware.');
@@ -2225,17 +2241,37 @@
       return node;
     };
     const limitSetupSlot = element('div');
-    const verifySetupSlot = element('div');
     const steps = {
       connection: stepNode('Inverter connection', 'The inverter is not connected. Check its connection settings.', inverterLink('Manage inverters', '/ui/dashboard?manage=inverters')),
       write_access: stepNode('Write access', '', inverterLink('Open Inverters page', '/ui/inverters')),
       limits: stepNode('Power limits', 'The most power the battery may be charged and discharged with, in kW.', limitSetupSlot),
-      hardware: stepNode('Hardware verification',
-        'These values must come from an actual hardware and firmware verification of this inverter. Do not guess them.', verifySetupSlot),
+      hardware: stepNode('Hardware verification', ''),
     };
     // Names what is missing; the global write switch is not part of the device payload, so it is
     // only reported when the poll answered 503 (write support disabled).
     const writeAccessText = steps.write_access.querySelector('p');
+    // The values come from a real hardware and firmware verification, so the form is Expert-only; the
+    // Basic step says so and never guesses or pre-fills them.
+    const hardwareText = steps.hardware.querySelector('p');
+    // Opens the Expert form on an explicit click only; nothing is switched on by the setup step itself.
+    const openVerifyButton = element('button', 'btn btn-sm btn-primary energy-step-link', 'Verify hardware');
+    openVerifyButton.type = 'button';
+    hardwareText.after(openVerifyButton);
+    openVerifyButton.addEventListener('click', () => {
+      const expertSwitch = $('energy-expert-mode');
+      if (expertSwitch && !expertSwitch.checked) {
+        expertSwitch.checked = true;
+        expertSwitch.dispatchEvent(new Event('change')); // the page handler renders every panel
+      }
+      model.scrollIntoView({ block: 'center' });
+      model.focus();
+    });
+    const renderHardwareText = (expertOn) => {
+      hardwareText.textContent = 'Hardware control must be verified on this inverter before it can be controlled. '
+        + (expertOn ? 'Enter the values you measured under Expert settings below.'
+          : 'This needs the values you measured on the hardware and opens the Expert settings. Do not guess them.');
+      openVerifyButton.hidden = expertOn;
+    };
     // Plain wording first; the raw register names stay one click away for people who need them.
     const technicalNames = element('details', 'small mb-2');
     technicalNames.append(element('summary', null, 'Show technical names'), element('code', 'd-block text-break'));
@@ -2257,8 +2293,6 @@
     function layout(firstUnmet) {
       place(limitForm, firstUnmet === 'limits' ? limitSetupSlot : limitExpertSlot);
       limitButton.textContent = firstUnmet === 'limits' ? 'Save and continue' : 'Save limits';
-      place(verifyForm, firstUnmet === 'hardware' ? verifySetupSlot : verifyExpertSlot);
-      verifySetupNote.hidden = firstUnmet !== 'hardware';
     }
 
     // A form is refilled from the server only while the user has not edited it, so a poll never
@@ -2296,6 +2330,7 @@
     function update(device, expertOn, writeSupportOff = false) {
       revokeButton.hidden = !energyChecklist(device).hardwareVerified;
       renderWriteAccessText(device, writeSupportOff);
+      renderHardwareText(expertOn);
       refill(device);
       if (!expertOn) return; // the Expert section is not on the page; build its tables when it is
       gateHost.replaceChildren(simpleTable(

@@ -89,7 +89,9 @@ The page is layered by in-page progressive disclosure:
 - **Setup** (shown only when a prerequisite is missing) — a state-independent readiness checklist
   (Inverter connected / Write access / Power limits / Hardware verification) that opens the editor
   of the first unmet step right below it: a link to the inverter dialog or the **Inverters** page,
-  the power-limit form, or the hardware verification form. "Write access" is met only when
+  the power-limit form, or — for hardware verification — a **Verify hardware** button (the form
+  itself is Expert-only; Basic mode never shows strategy code or byte widths, and Expert mode is
+  switched on only by that click or by the switch). "Write access" is met only when
   the four required registers (`power_mng_soc_strategy`, `power_mng_soc_target_set`,
   `power_mng_battery_power_extern`, `power_mng_use_grid_power_enable`) are approved under
   **Writable parameters** on the **Inverters** page; the global write switch alone is not enough.
@@ -102,7 +104,8 @@ The page is layered by in-page progressive disclosure:
 - **Expert** (the page-wide **Expert mode** switch next to the heading; off on every page load and
   never stored) — behind a warning: the hardware verification form (re-verify and **Revoke
   verification**), the kW power limits, engineering mode and the SoC target policy. While the Setup
-  block shows the power-limit or verification step, that form sits in the Setup block instead.
+  block shows the power-limit step, that form sits in the Setup block instead; the hardware
+  verification form is always in this Expert section.
   Verification is entered by an operator with measured evidence; nothing is verified by default.
 - **Diagnostics** (collapsed, inside the Expert section) — the gate table (the only place raw
   `reject_detail` and capability names appear), the capability table, the approved/added write

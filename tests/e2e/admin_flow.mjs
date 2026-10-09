@@ -840,7 +840,6 @@ await page.click('#token-done');
 await page.waitForSelector('#add-token-modal', { state: 'hidden' });
 await page.waitForSelector('.modal-backdrop', { state: 'detached' });
 check('closing the modal removes the PAT from the DOM', await page.evaluate((t) => !document.documentElement.outerHTML.includes(t) && !document.body.innerText.includes(t), token));
-await page.locator('#tokens-list tr', { hasText: 'e2e-monitor' }).locator('button[data-bs-toggle=dropdown]').click();
 await page.click('button[aria-label="Revoke token e2e-monitor"]');
 await page.waitForSelector('#confirm-modal.show');
 await page.click('#confirm-accept');
@@ -1478,8 +1477,20 @@ await shot('prometheus-master-toggle-on');
   // The verification form must never pre-select the sign conventions or the evidence checkboxes.
   const verifyPuts = [];
   ep.on('request', (r) => { if (r.method() === 'PUT' && r.url().endsWith('/hardware-verification')) verifyPuts.push(r.postDataJSON()); });
-  const uiForm = ep.locator('.energy-setup-step form');
-  if (await uiForm.locator('label', { hasText: 'Device model' }).count()) {
+  // Basic mode only points to the verification (no strategy code / byte widths); the form is Expert-only
+  // and Expert mode is switched on by the user, never by the setup step.
+  check('Basic mode shows no hardware verification form or protocol fields',
+    (await ep.locator('.energy-setup-step form').count()) === 0 && !/Strategy code|Byte width/.test(shownStep), shownStep.slice(0, 300));
+  if (/Hardware verification/.test(shownStep)) {
+    check('the Basic hardware step offers "Verify hardware" and leaves Expert mode off until it is clicked',
+      (await ep.locator('.energy-setup-step button', { hasText: 'Verify hardware' }).count()) === 1
+      && (await ep.locator('#energy-expert-mode').isChecked()) === false, shownStep.slice(0, 300));
+    await ep.locator('.energy-setup-step button', { hasText: 'Verify hardware' }).click();
+    check('clicking "Verify hardware" opens Expert mode with the form', await ep.locator('#energy-expert-mode').isChecked()
+      && (await ep.locator('.energy-expert form', { hasText: 'Device model' }).count()) === 1);
+  }
+  const uiForm = ep.locator('.energy-expert form').filter({ hasText: 'Device model' });
+  if (await uiForm.count()) {
     const blank = await uiForm.evaluate((form) => ({
       signs: [...form.querySelectorAll('select')].map((select) => select.value),
       checked: [...form.querySelectorAll('input[type=checkbox]')].filter((box) => box.checked).length,

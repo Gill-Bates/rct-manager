@@ -76,16 +76,19 @@
                         <h2 id="token-created-title" class="modal-title h5">Token created</h2>
                         <p class="text-secondary small mb-0">Copy this token now. It will not be shown again.</p>
                     </div>
-                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                    <button id="token-close" type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"
+                        disabled></button>
                 </div>
                 <div class="modal-body">
                     <div class="d-flex gap-2 flex-wrap"><code id="new-token-value"
                             class="token-value flex-grow-1"></code><button id="copy-token"
-                            class="btn btn-outline-secondary" type="button">Copy</button></div>
+                            class="btn btn-outline-secondary icon-button" type="button" aria-label="Copy token"
+                            title="Copy token"><span class="material-icons"
+                                aria-hidden="true">content_copy</span></button></div>
                 </div>
                 <div class="modal-footer">
-                    <button id="token-done" type="button" class="btn btn-primary"
-                        data-bs-dismiss="modal">Done</button>
+                    <button id="token-done" type="button" class="btn btn-primary" data-bs-dismiss="modal"
+                        disabled>Done</button>
                 </div>
             </div>
         </div>

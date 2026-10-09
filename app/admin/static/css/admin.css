@@ -1984,3 +1984,33 @@ body.is-reconnecting #reconnect-modal.show .reconnect-pulse {
         forced-color-adjust: none;
     }
 }
+/* Permission pills in the token table: same pill shape as .device-status-badge. */
+.token-role-badge {
+    display: inline-flex;
+    align-items: center;
+    padding: .25rem .6rem;
+    border-radius: 1rem;
+    font-size: .75rem;
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+.token-role-read {
+    color: #198754;
+    background: rgb(25 135 84 / 12%);
+}
+
+.token-role-write {
+    color: #b45309;
+    background: rgb(245 158 11 / 16%);
+}
+
+[data-bs-theme="dark"] .token-role-read {
+    color: #4ade80;
+    background: rgb(74 222 128 / 14%);
+}
+
+[data-bs-theme="dark"] .token-role-write {
+    color: #fbbf24;
+    background: rgb(251 191 36 / 14%);
+}

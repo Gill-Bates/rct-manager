@@ -799,3 +799,29 @@ def test_one_time_token_cannot_be_dismissed_by_backdrop_or_escape():
     tokens = js[js.index("function initTokens()"):js.index("// Business labels for the Energy Manager")]
     assert "'hide.bs.modal'" in tokens and "event.preventDefault()" in tokens
     assert "$('copy-token').focus()" in tokens
+
+
+def test_token_copy_button_is_icon_only_and_done_waits_for_a_successful_copy():
+    html = (ADMIN_DIR / "templates/tokens.html").read_text(encoding="utf-8")
+    copy = html[html.index('id="copy-token"'):html.index("</button>", html.index('id="copy-token"'))]
+    assert 'aria-label="Copy token"' in copy and 'title="Copy token"' in copy
+    assert 'class="material-icons"' in copy and ">Copy<" not in copy
+    assert re.search(r'id="token-done"[^>]*\bdisabled\b', html)
+    assert re.search(r'id="token-close"[^>]*\bdisabled\b', html)
+    js = JS.read_text(encoding="utf-8")
+    tokens = js[js.index("function initTokens()"):js.index("// Business labels for the Energy Manager")]
+    assert "if (!copied) return;" in tokens
+    assert tokens.index("setCopied(true)") > tokens.index("await copyToClipboard")
+
+
+def test_hardware_verification_form_is_expert_only_and_the_basic_step_only_points_to_it():
+    js = JS.read_text(encoding="utf-8")
+    advanced = js[js.index("function energyAdvanced("):js.index("// Shows one status paragraph in the list")]
+    # The form lives in the Expert section; no Setup slot hosts it, so Basic mode never shows
+    # strategy code or byte widths.
+    assert "verifyExpertSlot.append(verifyForm)" in advanced
+    assert "verifySetupSlot" not in advanced and "place(verifyForm" not in advanced
+    # The Basic step offers a button; Expert mode is only switched on by that click, never by the step itself.
+    button = advanced[advanced.index("const openVerifyButton"):advanced.index("const renderHardwareText")]
+    assert "'Verify hardware'" in button and "addEventListener('click'" in button
+    assert "expertSwitch.checked = true" in button and "setExpert(true)" not in advanced
