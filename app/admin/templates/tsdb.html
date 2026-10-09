@@ -1,13 +1,23 @@
 {% extends "base.html" %}
 {% block title %}TSDB – RCT Administration{% endblock %}
 {% block content %}
-<div class="page-heading">
+<div class="page-heading tsdb-page-heading">
     <div>
         <h1>TSDB</h1>
         <p class="text-secondary mb-0">Push metrics to InfluxDB 2 or QuestDB.</p>
-    </div><span id="save-state" class="save-state text-secondary small" aria-live="polite"></span>
+    </div>
+    <div class="tsdb-heading-status">
+        <div id="tsdb-status-badge" class="tsdb-status-badge" data-tone="muted" role="status" aria-live="polite">
+            <span class="tsdb-status-indicator" aria-hidden="true"></span>
+            <span>
+                <strong id="tsdb-status-label">Loading status</strong>
+                <small id="tsdb-status-detail">Waiting for runtime data</small>
+            </span>
+        </div>
+        <span id="save-state" class="tsdb-save-state text-secondary small" aria-live="polite"></span>
+    </div>
 </div>
-<div id="settings-sections" class="settings-grid mt-4">
+<div id="settings-sections" class="settings-grid tsdb-settings mt-3">
     <p class="text-secondary">Loading settings …</p>
 </div>
 {% endblock %}

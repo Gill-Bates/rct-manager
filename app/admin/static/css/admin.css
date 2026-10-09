@@ -1781,49 +1781,236 @@ samp,
     margin-bottom: 1rem;
 }
 
-/* Row-based grid like .settings-grid: cards sharing a row stretch to the tallest card in that
-   row, so the edges of both columns line up. A multi-column masonry would only balance the total
-   column height, not the per-row alignment. */
+.tsdb-heading-status {
+    display: grid;
+    justify-items: end;
+    gap: .25rem;
+}
+
+.tsdb-status-badge {
+    display: flex;
+    align-items: center;
+    gap: .65rem;
+    width: fit-content;
+    max-width: 14rem;
+    min-width: 10.5rem;
+    padding: .55rem .75rem;
+    border: 1px solid var(--rct-line);
+    border-radius: .5rem;
+    background: var(--bs-body-bg);
+}
+
+.tsdb-status-badge>span:last-child {
+    display: grid;
+}
+
+.tsdb-status-badge strong {
+    font-size: .875rem;
+    line-height: 1.2;
+}
+
+.tsdb-status-badge small,
+.tsdb-save-state {
+    font-size: .75rem;
+}
+
+.tsdb-status-indicator {
+    width: .65rem;
+    height: .65rem;
+    flex: 0 0 .65rem;
+    border: 2px solid currentColor;
+    border-radius: 50%;
+    background: currentColor;
+}
+
+.tsdb-status-badge[data-tone="success"] {
+    color: var(--bs-success-text-emphasis);
+    border-color: var(--bs-success-border-subtle);
+    background: var(--bs-success-bg-subtle);
+}
+
+.tsdb-status-badge[data-tone="warning"] {
+    color: var(--bs-warning-text-emphasis);
+    border-color: var(--bs-warning-border-subtle);
+    background: var(--bs-warning-bg-subtle);
+}
+
+.tsdb-status-badge[data-tone="danger"] {
+    color: var(--bs-danger-text-emphasis);
+    border-color: var(--bs-danger-border-subtle);
+    background: var(--bs-danger-bg-subtle);
+}
+
+.tsdb-status-badge[data-tone="muted"] {
+    color: var(--bs-secondary-color);
+}
+
+.tsdb-flow {
+    display: grid;
+    gap: .75rem;
+}
+
+.tsdb-flow-row>.card-body {
+    display: grid;
+    gap: .75rem;
+    padding: .75rem 1rem;
+}
+
+.tsdb-section-heading {
+    display: flex;
+    align-items: center;
+    gap: .7rem;
+    min-width: 0;
+}
+
+.tsdb-section-icon {
+    display: grid;
+    place-items: center;
+    overflow: hidden;
+    width: 2.2rem;
+    height: 2.2rem;
+    flex: 0 0 2.2rem;
+    border-radius: .45rem;
+    color: var(--bs-body-color);
+    background: var(--bs-secondary-bg);
+    font-size: 1.25rem;
+    line-height: 1;
+}
+
+.tsdb-section-copy {
+    min-width: 0;
+}
+
+.tsdb-section-copy h2 {
+    font-weight: 700;
+}
+
+.tsdb-section-copy p {
+    margin-top: .12rem;
+    font-size: .8rem;
+}
+
+.tsdb-flow-control {
+    min-width: 0;
+}
+
+.tsdb-master-action {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: .65rem;
+    min-height: 2rem;
+    margin: 0;
+    padding: 0;
+    white-space: nowrap;
+}
+
+.tsdb-master-action .form-check-input,
+.tsdb-toggle-control .form-check-input {
+    float: none;
+    margin: 0;
+}
+
+.tsdb-master-state,
+.tsdb-toggle-label,
+.tsdb-field-label {
+    min-width: 0;
+    width: auto;
+    margin: 0;
+    white-space: normal;
+    word-break: normal;
+    overflow-wrap: normal;
+    font-weight: 600;
+}
+
+.tsdb-master-state {
+    white-space: nowrap;
+}
+
+.tsdb-field {
+    display: grid;
+    grid-template-columns: minmax(7rem, 8.5rem) minmax(0, 1fr);
+    align-items: start;
+    gap: 0 .65rem;
+    min-width: 0;
+    padding: .38rem 0;
+}
+
+.tsdb-field-body,
+.tsdb-field-control {
+    min-width: 0;
+    width: 100%;
+}
+
+.tsdb-field-help {
+    margin-top: .12rem;
+    color: var(--bs-secondary-color);
+    font-size: .8rem;
+    line-height: 1.3;
+    overflow-wrap: anywhere;
+}
+
+.tsdb-toggle-field {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    gap: .65rem;
+    min-width: 0;
+    padding: .38rem 0;
+}
+
+.tsdb-toggle-copy {
+    min-width: 0;
+}
+
+.tsdb-toggle-control {
+    margin: 0;
+    padding: 0;
+}
+
 .export-grid {
     display: grid;
-    gap: 1.25rem;
-    align-items: stretch;
+    gap: .75rem;
+    align-items: start;
 }
 
-.export-grid>.card {
-    display: flex;
-    flex-direction: column;
-    margin-bottom: 0;
+.export-card {
+    min-width: 0;
 }
 
-.export-grid>.card>.card-body {
-    flex: 1 1 auto;
+.export-card>.card-body {
+    padding: .7rem .8rem;
 }
 
-/* TSDB follows a decision flow while using the available grid. On narrow screens it stacks. */
-.export-section-settings .setting-row:first-of-type {
-    padding-top: 0;
-    border-top: 0;
+.export-card .tsdb-section-heading {
+    margin-bottom: .35rem;
 }
 
-.export-section-settings .form-switch {
-    min-height: 2.8rem;
+.tsdb-target-row .tsdb-field {
+    display: block;
+    padding: 0;
 }
 
-.export-section-settings .form-switch .form-check-label {
-    font-size: 1rem;
+.tsdb-target-row .tsdb-field-label {
+    display: block;
+    margin-bottom: .22rem;
+    font-size: .875rem;
+}
+
+.tsdb-connection-grid {
+    display: grid;
+    gap: 0 .9rem;
 }
 
 .tsdb-console {
-    min-height: 9rem;
-    padding: .8rem .9rem;
+    padding: .55rem .7rem;
     border: 1px solid var(--rct-line);
     border-radius: .45rem;
     background: #111418;
     color: #d7e0e8;
     font-family: 'IBM Plex Mono', monospace;
     font-size: .8rem;
-    line-height: 1.6;
+    line-height: 1.5;
 }
 
 .tsdb-console-line {
@@ -1837,6 +2024,7 @@ samp,
 }
 
 @media (forced-colors: active) {
+    .tsdb-status-badge,
     .tsdb-console {
         border: 1px solid CanvasText;
         background: Canvas;
@@ -1848,9 +2036,51 @@ samp,
     }
 }
 
+@media (min-width: 768px) {
+    .tsdb-flow-row>.card-body {
+        grid-template-columns: minmax(0, 1fr) minmax(18rem, 46%);
+        align-items: center;
+    }
+}
+
 @media (min-width: 992px) {
     .export-grid {
         grid-template-columns: 1fr 1fr;
+    }
+
+    .tsdb-connection-grid {
+        grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    }
+}
+
+@media (max-width: 1199.98px) and (min-width: 992px) {
+    .tsdb-field {
+        grid-template-columns: minmax(6.5rem, 7.5rem) minmax(0, 1fr);
+    }
+}
+
+@media (max-width: 767.98px) {
+    .tsdb-page-heading,
+    .tsdb-heading-status {
+        align-items: stretch;
+    }
+
+    .tsdb-heading-status,
+    .tsdb-status-badge {
+        width: 100%;
+    }
+
+    .tsdb-heading-status {
+        justify-items: stretch;
+    }
+
+    .tsdb-field {
+        grid-template-columns: minmax(0, 1fr);
+        gap: .22rem;
+    }
+
+    .tsdb-master-action {
+        justify-content: flex-start;
     }
 }
 

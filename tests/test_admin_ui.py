@@ -203,13 +203,12 @@ def test_navbar_shows_the_short_label_and_an_enlarged_logo():
     assert re.search(r"\.navbar\s\.btn\s*\{[^}]*height:\s*2\.3rem", css)
 
 
-def test_settings_grid_cards_share_the_row_height():
+def test_settings_grid_stretches_but_tsdb_cards_keep_natural_height():
     css = (ADMIN_DIR / "static/css/admin.css").read_text(encoding="utf-8")
     assert re.search(r"\.settings-grid\s*\{[^}]*align-items:\s*stretch", css)
     assert re.search(r"\.settings-grid>\.card>\.card-body\s*\{\s*flex:\s*1 1 auto;\s*\}", css)
-    # The TSDB export grid shares the same row-stretch alignment, so cards in one row match height.
-    assert re.search(r"\.export-grid\s*\{[^}]*align-items:\s*stretch", css)
-    assert re.search(r"\.export-grid>\.card>\.card-body\s*\{\s*flex:\s*1 1 auto;\s*\}", css)
+    assert re.search(r"\.export-grid\s*\{[^}]*align-items:\s*start", css)
+    assert not re.search(r"\.export-grid>\.card>\.card-body\s*\{\s*flex:\s*1 1 auto;\s*\}", css)
 
 
 def test_metrics_fields_hide_behind_the_master_toggle():

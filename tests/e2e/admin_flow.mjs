@@ -1298,7 +1298,7 @@ await page.goto(base + '/ui/tsdb');
 await page.waitForSelector('#setting-db_type');
 await page.locator('#setting-metrics_export_enabled').click({ force: true });
 check('disabled export hides every dependent TSDB section',
-  (await page.locator('.export-grid > .card').count()) === 1
+  (await page.locator('.export-grid').count()) === 0
   && (await page.locator('#setting-db_type, #setting-metrics_export_interval_seconds, #tsdb-mini-console').count()) === 0);
 await page.waitForFunction(async () => !(await (await fetch('/admin/api/settings')).json()).settings.metrics_export_enabled);
 await page.locator('#setting-metrics_export_enabled').click({ force: true });
@@ -1310,17 +1310,20 @@ check('docs toggle lives on settings only', (await page.locator('#setting-docs_p
 // 6c. TSDB export cards: all cards visible, two-column grid on large screens, autosave (no Save button)
 await sleep(200);
 check('questdb backend shows all four export cards', (await page.locator('.export-grid > .card').count()) === 4);
-check('retention lives in TSDB Settings', (await page.locator('.export-section-settings #setting-questdb_downsampling').count()) === 1);
+check('retention lives in Export settings', (await page.locator('.export-card-export #setting-questdb_downsampling').count()) === 1);
 check('TSDB page has a runtime mini console', (await page.locator('#tsdb-mini-console').count()) === 1);
+check('TSDB status badge and console share the runtime state',
+  (await page.locator('#tsdb-status-label').innerText()).trim().length > 0
+  && (await page.locator('#tsdb-mini-console').innerText()).includes((await page.locator('#tsdb-status-label').innerText()).trim()));
 check('no explicit Save button on the TSDB page', (await page.locator('.export-layout button, #settings-sections button:has-text("Save")').count()) === 0);
 const questdbColumns = await page.evaluate(() => new Set([...document.querySelectorAll('.export-grid > .card')].map((c) => Math.round(c.getBoundingClientRect().left))).size);
 check('export grid is two columns on large screens', questdbColumns === 2, String(questdbColumns));
 const exportRows = await page.evaluate(() => [...document.querySelectorAll('.export-grid > .card')].map((card) => ({
   top: Math.round(card.getBoundingClientRect().top), height: Math.round(card.getBoundingClientRect().height),
 })));
-check('export cards align within each CSS Grid row', exportRows.length === 4
-  && exportRows[0].top === exportRows[1].top && exportRows[0].height === exportRows[1].height
-  && exportRows[2].top === exportRows[3].top && exportRows[2].height === exportRows[3].height,
+check('export cards align by row without forced equal heights', exportRows.length === 4
+  && exportRows[0].top === exportRows[1].top
+  && exportRows[2].top === exportRows[3].top,
   JSON.stringify(exportRows));
 await page.locator('#setting-questdb_downsampling').selectOption('manual');
 check('manual retention shows raw days but hides total days',
@@ -1345,6 +1348,18 @@ await page.waitForFunction(() => document.getElementById('toast-region').textCon
 await sleep(600);
 settingsNow = (await (await context.request.get(base + '/admin/api/settings')).json()).settings;
 check('toggle autosaves immediately', settingsNow.questdb_tls_enabled === true);
+await page.locator('#setting-questdb_downsampling').selectOption('low');
+await page.waitForFunction(() => document.getElementById('save-state').dataset.state === 'saved', null, { timeout: 8000 });
+if ((await page.locator('html').getAttribute('data-bs-theme')) !== 'dark') await page.locator('#theme-toggle').click();
+for (const [width, height] of [[1920, 1080], [1536, 864]]) {
+  await page.setViewportSize({ width, height });
+  const fit = await page.evaluate(() => ({
+    vertical: document.documentElement.scrollHeight - window.innerHeight,
+    horizontal: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+  }));
+  check(`TSDB configuration fits ${width}x${height} without page scroll`, fit.vertical <= 2 && fit.horizontal <= 0, JSON.stringify(fit));
+}
+await page.setViewportSize({ width: 1280, height: 800 });
 
 // 6c-2. finding 4: a configuration that becomes incomplete again inside the 450 ms debounce window
 // must not be sent, and the already-queued export fields must be dropped as a group.

@@ -3099,7 +3099,7 @@
   }
 
   const exportFields = [
-    { key: 'db_type', label: 'Database type', help: 'Target of the metrics export. The Prometheus endpoint (/metrics) is independent of it.', type: 'select', options: [['', 'Disabled'], ['influxdb_v2', 'InfluxDB 2'], ['questdb', 'QuestDB (Open Source)']] },
+    { key: 'db_type', label: 'Database type', help: 'Target of the metrics export. The Prometheus endpoint (/metrics) is independent of it.', type: 'select', options: [['', 'Select ...'], ['influxdb_v2', 'InfluxDB 2'], ['questdb', 'QuestDB (Open Source)']] },
     { key: 'metrics_export_enabled', label: 'Enable export', help: 'Pause pushing without losing the connection settings below.', type: 'toggle' },
     { key: 'metrics_export_interval_seconds', label: 'Export interval (seconds)', help: '5 to 3600.', type: 'number', min: 5, max: 3600, any: true },
     { key: 'influxdb_hostname', label: 'Hostname or URL', help: 'Host or http(s) URL without a path.', type: 'text', backend: 'influxdb_v2' },
@@ -3124,8 +3124,32 @@
     { key: 'questdb_retention_days', label: 'Total retention (days)', help: '0 keeps all data. An existing TTL in QuestDB is not overwritten.', type: 'number', min: 0, max: 36500, backend: 'questdb' },
   ];
 
-  function exportControl(field, onChange) {
-    const { wrap, control } = buildFieldControl(field, settingsDraft[field.key]);
+  function exportControl(field, onChange, variant = 'field') {
+    const { control, label, help } = buildFieldControl(field, settingsDraft[field.key]);
+    let wrap;
+    if (variant === 'master') {
+      wrap = element('div', 'tsdb-master-action form-check form-switch');
+      label.className = 'tsdb-master-state';
+      label.textContent = control.checked ? 'Enabled' : 'Disabled';
+      wrap.append(control, label);
+    } else if (field.type === 'toggle') {
+      wrap = element('div', 'tsdb-toggle-field');
+      label.className = 'tsdb-toggle-label';
+      help.className = 'tsdb-field-help';
+      const copy = element('div', 'tsdb-toggle-copy');
+      const action = element('div', 'tsdb-toggle-control form-check form-switch');
+      copy.append(label, help);
+      action.append(control);
+      wrap.append(copy, action);
+    } else {
+      wrap = element('div', 'tsdb-field');
+      label.className = 'tsdb-field-label';
+      control.classList.add('tsdb-field-control');
+      help.className = 'tsdb-field-help';
+      const body = element('div', 'tsdb-field-body');
+      body.append(control, help);
+      wrap.append(label, body);
+    }
     // A secret left empty keeps its current value server-side (the PUT handler drops ""), so an
     // empty box must not overwrite settingsDraft and must not autosave on every blur.
     control.addEventListener('change', async () => {
@@ -3144,6 +3168,7 @@
         settingsDraft[field.key] = control.checked;
       } else settingsDraft[field.key] = control.value;
       if (['db_type', 'metrics_export_enabled', 'questdb_downsampling'].includes(field.key)) onChange();
+      syncTsdbStatusSurfaces();
       queueExportSettings(field.key);
     });
     return wrap;
@@ -3156,15 +3181,12 @@
       || (field.type === 'secret' && Object.hasOwn(settingsDraft, `${field.key}_configured`));
   }
 
-  // The export fields depend on each other (required per backend), so they are saved together.
-  const EXPORT_GROUPS = ['Settings', 'Target', 'Connection', 'Console'];
-
   function exportGroup(key) {
-    if (key === 'metrics_export_enabled' || key === 'metrics_export_interval_seconds') return 'Settings';
-    if (key === 'db_type') return 'Target';
+    if (key === 'metrics_export_enabled') return 'Control';
+    if (key === 'db_type') return 'Selector';
+    if (key === 'metrics_export_interval_seconds' || /_(downsampling|raw_retention_days|retention_days)$/.test(key)) return 'Export';
     if (/_(hostname|port|tls_enabled|verify_tls|allow_plaintext_credentials)$/.test(key)) return 'Connection';
-    if (/_(downsampling|raw_retention_days|retention_days)$/.test(key)) return 'Settings';
-    return 'Target';
+    return 'Database';
   }
 
   // Mirrors Settings._check_export: these fields must exist together before the backend will
@@ -3252,19 +3274,37 @@
     restartDebounce();
   }
 
+  function tsdbStatusView() {
+    const type = settingsDraft.db_type || '';
+    const lastSuccess = tsdbRuntimeStatus?.last_success_at ? hhmm(new Date(tsdbRuntimeStatus.last_success_at)) : '';
+    if (!settingsDraft.metrics_export_enabled) return { label: 'Export paused', detail: 'Database settings retained', tone: 'muted' };
+    if (!type) return { label: 'Configuration incomplete', detail: 'Choose a target database', tone: 'warning' };
+    if (!exportReady(type)) return { label: 'Configuration incomplete', detail: 'Complete the required fields', tone: 'warning' };
+    if (!tsdbRuntimeStatus?.export_enabled) return { label: 'Exporter not running', detail: 'Waiting for the exporter service', tone: 'danger' };
+    if (!tsdbRuntimeStatus.healthy) {
+      return { label: 'Waiting for successful export', detail: lastSuccess ? `Last export ${lastSuccess}` : 'No successful export yet', tone: 'warning' };
+    }
+    return { label: 'Export running', detail: lastSuccess ? `Last export ${lastSuccess}` : 'Exporter active', tone: 'success' };
+  }
+
   function tsdbConsoleLines() {
     const type = settingsDraft.db_type || '';
     const now = hhmm(new Date());
-    const lines = [[now, type ? `Target: ${backendLabel(type)}` : 'No target database selected']];
-    if (!settingsDraft.metrics_export_enabled) lines.push([now, 'Export paused']);
-    else if (!type) lines.push([now, 'Waiting for configuration']);
-    else if (!exportReady(type)) lines.push([now, 'Configuration incomplete']);
-    else if (!tsdbRuntimeStatus?.export_enabled) lines.push([now, 'Exporter is not running']);
-    else lines.push([now, tsdbRuntimeStatus.healthy ? 'Exporter running' : 'Waiting for a successful export']);
+    const status = tsdbStatusView();
+    const lines = [[now, type ? `Target: ${backendLabel(type)}` : 'No target database selected'], [now, status.label]];
     if (tsdbRuntimeStatus?.last_success_at) {
       lines.push([hhmm(new Date(tsdbRuntimeStatus.last_success_at)), 'Last successful export']);
     }
     return lines;
+  }
+
+  function renderTsdbStatus() {
+    const badge = $('tsdb-status-badge');
+    if (!badge) return;
+    const status = tsdbStatusView();
+    badge.dataset.tone = status.tone;
+    $('tsdb-status-label').textContent = status.label;
+    $('tsdb-status-detail').textContent = status.detail;
   }
 
   function fillTsdbConsole(consoleNode) {
@@ -3277,52 +3317,104 @@
     }
   }
 
-  async function refreshTsdbRuntimeStatus() {
-    const data = await api('devices');
-    tsdbRuntimeStatus = data.tsdb || null;
+  function syncTsdbStatusSurfaces() {
+    renderTsdbStatus();
     const consoleNode = $('tsdb-mini-console');
     if (consoleNode) fillTsdbConsole(consoleNode);
   }
 
-  // Export fields autosave through the shared queueSettings/flushSettings path, same as every
-  // other settings page; status and backend changes re-render because their visible flow depends on them.
+  async function refreshTsdbRuntimeStatus() {
+    const data = await api('devices');
+    tsdbRuntimeStatus = data.tsdb || null;
+    syncTsdbStatusSurfaces();
+  }
+
+  function tsdbSectionHeading(title, description, icon) {
+    const heading = element('div', 'tsdb-section-heading');
+    const glyph = element('span', 'material-icons tsdb-section-icon', icon);
+    glyph.setAttribute('aria-hidden', 'true');
+    const copy = element('div', 'tsdb-section-copy');
+    copy.append(element('h2', 'h5 mb-0', title), element('p', 'text-secondary mb-0', description));
+    heading.append(glyph, copy);
+    return heading;
+  }
+
+  // Export fields autosave through the shared queueSettings/flushSettings path. This renderer
+  // changes only TSDB composition; controls, validation, secret handling and focus stay shared.
   function renderExportSettings(host) {
     const layout = element('div', 'export-layout');
     host.append(layout);
-    // The Export group never becomes a <section>, so it is not routed through rerenderGroup();
-    // this internal render already replaces only .export-layout's children.
     const rerender = () => preserveFocus(render);
+    const knownField = (key) => exportFields.find((field) => field.key === key && exportFieldKnown(field));
+    const fieldVisible = (field, type) => {
+      if ((field.backend && field.backend !== type) || (field.any && !type)) return false;
+      if (field.key === 'questdb_raw_retention_days' && settingsDraft.questdb_downsampling !== 'manual') return false;
+      if (field.key === 'questdb_retention_days' && settingsDraft.questdb_downsampling === 'manual') return false;
+      return true;
+    };
+    const appendFields = (container, group, type) => {
+      for (const field of exportFields) {
+        if (exportGroup(field.key) === group && exportFieldKnown(field) && fieldVisible(field, type)) {
+          container.append(exportControl(field, rerender));
+        }
+      }
+    };
+    const flowRow = (className, title, description, icon, field) => {
+      const section = element('section', `card tsdb-flow-row ${className}`);
+      const body = element('div', 'card-body');
+      const control = element('div', 'tsdb-flow-control');
+      control.append(exportControl(field, rerender, field.key === 'metrics_export_enabled' ? 'master' : 'field'));
+      body.append(tsdbSectionHeading(title, description, icon), control);
+      section.append(body);
+      return section;
+    };
+    const parameterCard = (group, title, description, icon, type) => {
+      const section = element('section', `card export-card export-card-${group.toLowerCase()}`);
+      const body = element('div', 'card-body');
+      body.append(tsdbSectionHeading(title, description, icon));
+      if (group === 'Connection') {
+        const columns = element('div', 'tsdb-connection-grid');
+        const address = element('div', 'tsdb-control-list');
+        const options = element('div', 'tsdb-toggle-list');
+        for (const field of exportFields) {
+          if (exportGroup(field.key) !== group || !exportFieldKnown(field) || !fieldVisible(field, type)) continue;
+          (field.type === 'toggle' ? options : address).append(exportControl(field, rerender));
+        }
+        columns.append(address, options);
+        body.append(columns);
+      } else appendFields(body, group, type);
+      section.append(body);
+      return section;
+    };
     const render = () => {
-      const grid = element('div', 'export-grid');
       const type = settingsDraft.db_type || '';
       const enabled = Boolean(settingsDraft.metrics_export_enabled);
-      for (const group of EXPORT_GROUPS) {
-        if (!enabled && group !== 'Settings') continue;
-        const body = element('div', 'card-body');
-        body.append(element('h2', 'h5 mb-3', group === 'Settings' ? 'TSDB Settings' : group === 'Target' ? 'Target database' : group === 'Console' ? 'Mini console' : group));
-        for (const field of exportFields) {
-          if (exportGroup(field.key) !== group || !exportFieldKnown(field)) continue;
-          if (!enabled && field.key !== 'metrics_export_enabled') continue;
-          if ((field.backend && field.backend !== type) || (field.any && !type)) continue;
-          if (field.key === 'questdb_raw_retention_days' && settingsDraft.questdb_downsampling !== 'manual') continue;
-          if (field.key === 'questdb_retention_days' && settingsDraft.questdb_downsampling === 'manual') continue;
-          body.append(exportControl(field, rerender));
-        }
-        if (group === 'Console') {
-          const consoleNode = element('div', 'tsdb-console');
-          consoleNode.id = 'tsdb-mini-console';
-          consoleNode.setAttribute('role', 'log');
-          consoleNode.setAttribute('aria-live', 'polite');
-          fillTsdbConsole(consoleNode);
-          body.append(consoleNode);
-        }
-        if (body.children.length < 2) continue;
-        const section = element('section', 'card');
-        section.classList.add(`export-section-${group.toLowerCase()}`);
-        section.append(body);
-        grid.append(section);
+      const flow = element('div', 'tsdb-flow');
+      flow.append(flowRow('tsdb-master-row', 'Export to time-series database', 'Periodically push metrics to the selected target database.', 'power_settings_new', knownField('metrics_export_enabled')));
+      if (enabled) {
+        flow.append(flowRow('tsdb-target-row', 'Target database', 'Select the time-series database to export metrics to.', 'storage', knownField('db_type')));
       }
-      layout.replaceChildren(grid);
+      if (enabled && type) {
+        const grid = element('div', 'export-grid');
+        grid.append(
+          parameterCard('Export', 'Export settings', 'Control how often data is pushed and how much is retained.', 'settings', type),
+          parameterCard('Database', 'Target database settings', `Connection details for ${backendLabel(type)}.`, 'storage', type),
+          parameterCard('Connection', 'Connection', 'Configure how to reach the database.', 'link', type),
+        );
+        const consoleCard = element('section', 'card export-card export-card-console');
+        const consoleBody = element('div', 'card-body');
+        const consoleNode = element('div', 'tsdb-console');
+        consoleNode.id = 'tsdb-mini-console';
+        consoleNode.setAttribute('role', 'log');
+        consoleNode.setAttribute('aria-live', 'polite');
+        fillTsdbConsole(consoleNode);
+        consoleBody.append(tsdbSectionHeading('Status & log', 'Current state and recent events.', 'code'), consoleNode);
+        consoleCard.append(consoleBody);
+        grid.append(consoleCard);
+        flow.append(grid);
+      }
+      layout.replaceChildren(flow);
+      syncTsdbStatusSurfaces();
     };
     render();
   }
