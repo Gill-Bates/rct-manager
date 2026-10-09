@@ -145,11 +145,8 @@ class TransportEndpoint:
         return self._device_counters.setdefault(device_key, DeviceCounters())
 
     def _on_periodic(self, plant_address: int | None, now: float) -> None:
-        # A periodic push is as much proof the device is alive and answering as a transaction is
-        # (Heartbeat.tick() already treats it that way via last_periodic_monotonic); device_status()
-        # only reads last_success_at, so without this a device driven purely by periodic reads shows
-        # a last-connection timestamp frozen at whatever transaction or heartbeat last ran, even
-        # while fresh values keep arriving.
+        # A periodic push proves liveness like a transaction; device_status() reads only
+        # last_success_at, which would otherwise freeze for devices driven purely by periodic reads.
         device = self.counters_for(DeviceKey(self._key, plant_address))
         device.last_periodic_monotonic = now
         device.last_success_monotonic = now
@@ -372,11 +369,8 @@ class TransportEndpoint:
             except TimeoutError:
                 error = DeviceTimeout("response_timeout")
                 if is_write and response_timeout is None:
-                    # No answer to a WRITE is normal for this device; the connection stays so the
-                    # read-back runs on it (Requirement 9.18). This is not a transport failure: the
-                    # caller still sees TransactionResult.ok == False because no frame was received,
-                    # but failure statistics and device state must not be dragged down by a routine
-                    # write.
+                    # An unanswered WRITE is normal for this device: keep the connection for the
+                    # read-back (Requirement 9.18) and leave failure counters untouched; ok stays False.
                     self._demux.pending = None
                     await self._clock.sleep(self._cfg.write_quiet_window_seconds)
                     return TransactionResult(outcome)

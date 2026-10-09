@@ -124,12 +124,8 @@ class Receiver:
             # Taken at the read boundary: good enough for noise rating and window bookkeeping,
             # which only need a coarse, monotonically advancing instant.
             now = self._monotonic()
-            # The real arrival instant of this chunk's bytes, taken from data_received via the
-            # ledger rather than from this read() returning: bytes may have sat buffered since
-            # before the Commit_Point even though read() only drains them afterwards. Frames
-            # extracted from a tail still containing bytes older than this chunk inherit that
-            # older instant, so a frame assembled across several reads keeps its true arrival
-            # time instead of its last chunk's.
+            # Arrival instant from the ledger (see ArrivalLedger); a frame assembled across several
+            # reads keeps the oldest pending instant instead of its last chunk's.
             chunk_earliest = ledger.earliest_arrival(len(data))
             received_monotonic = self._pending_since if self._pending_since is not None else chunk_earliest
             frames = self._parser.feed(data)
