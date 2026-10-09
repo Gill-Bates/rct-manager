@@ -377,7 +377,7 @@
   }
 
   function formatMetric(value, unit) {
-    return metricParts(value, unit).join('');
+    return Number.isFinite(value) ? metricParts(value, unit).join('') : 'n/a';
   }
 
   function showHeroMetrics(devices) {
@@ -3329,13 +3329,11 @@
     syncTsdbStatusSurfaces();
   }
 
-  function tsdbSectionHeading(title, description, icon) {
+  function tsdbSectionHeading(title, description) {
     const heading = element('div', 'tsdb-section-heading');
-    const glyph = element('span', 'material-icons tsdb-section-icon', icon);
-    glyph.setAttribute('aria-hidden', 'true');
     const copy = element('div', 'tsdb-section-copy');
     copy.append(element('h2', 'h5 mb-0', title), element('p', 'text-secondary mb-0', description));
-    heading.append(glyph, copy);
+    heading.append(copy);
     return heading;
   }
 
@@ -3359,19 +3357,19 @@
         }
       }
     };
-    const flowRow = (className, title, description, icon, field) => {
+    const flowRow = (className, title, description, field) => {
       const section = element('section', `card tsdb-flow-row ${className}`);
       const body = element('div', 'card-body');
       const control = element('div', 'tsdb-flow-control');
       control.append(exportControl(field, rerender, field.key === 'metrics_export_enabled' ? 'master' : 'field'));
-      body.append(tsdbSectionHeading(title, description, icon), control);
+      body.append(tsdbSectionHeading(title, description), control);
       section.append(body);
       return section;
     };
-    const parameterCard = (group, title, description, icon, type) => {
+    const parameterCard = (group, title, description, type) => {
       const section = element('section', `card export-card export-card-${group.toLowerCase()}`);
       const body = element('div', 'card-body');
-      body.append(tsdbSectionHeading(title, description, icon));
+      body.append(tsdbSectionHeading(title, description));
       if (group === 'Connection') {
         const columns = element('div', 'tsdb-connection-grid');
         const address = element('div', 'tsdb-control-list');
@@ -3390,16 +3388,17 @@
       const type = settingsDraft.db_type || '';
       const enabled = Boolean(settingsDraft.metrics_export_enabled);
       const flow = element('div', 'tsdb-flow');
-      flow.append(flowRow('tsdb-master-row', 'Export to time-series database', 'Periodically push metrics to the selected target database.', 'power_settings_new', knownField('metrics_export_enabled')));
+      flow.append(flowRow('tsdb-master-row', 'Export to time-series database', 'Periodically push metrics to the selected target database.', knownField('metrics_export_enabled')));
       if (enabled) {
-        flow.append(flowRow('tsdb-target-row', 'Target database', 'Select the time-series database to export metrics to.', 'storage', knownField('db_type')));
+        flow.append(flowRow('tsdb-target-row', 'Target database', 'Select the time-series database to export metrics to.', knownField('db_type')));
       }
       if (enabled && type) {
         const grid = element('div', 'export-grid');
         grid.append(
-          parameterCard('Export', 'Export settings', 'Control how often data is pushed and how much is retained.', 'settings', type),
-          parameterCard('Database', 'Target database settings', `Connection details for ${backendLabel(type)}.`, 'storage', type),
-          parameterCard('Connection', 'Connection', 'Configure how to reach the database.', 'link', type),
+          // Row 1 pairs what belongs together (target and how to reach it); row 2 holds export and log.
+          parameterCard('Database', 'Target database settings', `Connection details for ${backendLabel(type)}.`, type),
+          parameterCard('Connection', 'Connection', 'Configure how to reach the database.', type),
+          parameterCard('Export', 'Export settings', 'Control how often data is pushed and how much is retained.', type),
         );
         const consoleCard = element('section', 'card export-card export-card-console');
         const consoleBody = element('div', 'card-body');
@@ -3408,7 +3407,7 @@
         consoleNode.setAttribute('role', 'log');
         consoleNode.setAttribute('aria-live', 'polite');
         fillTsdbConsole(consoleNode);
-        consoleBody.append(tsdbSectionHeading('Status & log', 'Current state and recent events.', 'code'), consoleNode);
+        consoleBody.append(tsdbSectionHeading('Status & log', 'Current state and recent events.'), consoleNode);
         consoleCard.append(consoleBody);
         grid.append(consoleCard);
         flow.append(grid);

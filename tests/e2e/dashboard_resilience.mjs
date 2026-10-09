@@ -125,7 +125,7 @@ await poll(200);
 const expired = await inventory();
 await shot('resilience-2-expired');
 check('values read n/a once they are older than the next expected poll',
-  expired.pv === '–' && expired.firstCell === 'n/a', JSON.stringify(expired));
+  expired.pv === 'n/a' && expired.firstCell === 'n/a', JSON.stringify(expired));
 check('the layout is unchanged while the values are n/a',
   expired.cards === full.cards && JSON.stringify(expired.subcards) === JSON.stringify(full.subcards)
   && expired.slices === full.slices && expired.flow && expired.cells === full.cells && expired.gridTop === full.gridTop, JSON.stringify(expired));

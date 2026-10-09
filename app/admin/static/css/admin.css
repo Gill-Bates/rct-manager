@@ -615,6 +615,13 @@ body {
     border-top: 1px solid var(--rct-line);
 }
 
+/* On a phone the badges wrap to two rows with live text but fit one row as n/a; keep the row height. */
+@media (max-width: 575.98px) {
+    .device-flow-graphic .flow-badges {
+        min-height: 9.4rem;
+    }
+}
+
 .flow-badge {
     display: flex;
     flex-direction: column;
@@ -1863,20 +1870,6 @@ samp,
     min-width: 0;
 }
 
-.tsdb-section-icon {
-    display: grid;
-    place-items: center;
-    overflow: hidden;
-    width: 2.2rem;
-    height: 2.2rem;
-    flex: 0 0 2.2rem;
-    border-radius: .45rem;
-    color: var(--bs-body-color);
-    background: var(--bs-secondary-bg);
-    font-size: 1.25rem;
-    line-height: 1;
-}
-
 .tsdb-section-copy {
     min-width: 0;
 }
@@ -2002,6 +1995,18 @@ samp,
     gap: 0 .9rem;
 }
 
+/* Fields and toggles sit side by side only when the card itself is wide enough to keep the
+   fields usable; a viewport breakpoint cannot know the card width in a two-column page grid. */
+.export-card {
+    container-type: inline-size;
+}
+
+@container (min-width: 34rem) {
+    .tsdb-connection-grid {
+        grid-template-columns: minmax(0, 5fr) minmax(0, 4fr);
+    }
+}
+
 .tsdb-console {
     padding: .55rem .7rem;
     border: 1px solid var(--rct-line);
@@ -2046,10 +2051,6 @@ samp,
 @media (min-width: 992px) {
     .export-grid {
         grid-template-columns: 1fr 1fr;
-    }
-
-    .tsdb-connection-grid {
-        grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
     }
 }
 

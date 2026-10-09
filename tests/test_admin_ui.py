@@ -890,3 +890,22 @@ def test_hardware_step_text_names_the_missing_profile_and_the_expert_path():
     js = JS.read_text(encoding="utf-8")
     assert "No built-in profile covers this inverter yet" in js
     assert "An experienced administrator can enter them under Expert settings" in js
+
+
+def test_tsdb_connection_fields_stay_wide_and_sit_beside_the_target_settings():
+    css = (ADMIN_DIR / "static/css/admin.css").read_text(encoding="utf-8")
+    js = (ADMIN_DIR / "static/js/admin.js").read_text(encoding="utf-8")
+    # The toggle column only joins the fields when the card can give each at least 22rem.
+    assert re.search(r"\.tsdb-connection-grid\s*\{[^}]*repeat\(auto-fit,\s*minmax\(min\(100%,\s*22rem\),\s*1fr\)\)", css)
+    assert not re.search(r"\.tsdb-connection-grid\s*\{\s*grid-template-columns:\s*minmax\(0,\s*1fr\)\s*minmax\(0,\s*1fr\)", css)
+    # Row 1 of the export grid pairs target settings and connection; export settings and the log follow.
+    order = [js.index(f"parameterCard('{name}'") for name in ("Database", "Connection", "Export")]
+    assert order == sorted(order)
+
+
+def test_tsdb_cards_carry_no_decorative_heading_icons():
+    js = (ADMIN_DIR / "static/js/admin.js").read_text(encoding="utf-8")
+    css = (ADMIN_DIR / "static/css/admin.css").read_text(encoding="utf-8")
+    heading = js[js.index("function tsdbSectionHeading("):js.index("// Export fields autosave")]
+    assert "material-icons" not in heading
+    assert "tsdb-section-icon" not in css
