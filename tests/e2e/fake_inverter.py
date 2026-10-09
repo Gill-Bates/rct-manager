@@ -10,6 +10,7 @@ Usage: python -m tests.e2e.fake_inverter PORT   (binds 127.0.0.1 only)
 """
 
 import asyncio
+import contextlib
 import struct
 import sys
 from pathlib import Path
@@ -19,7 +20,7 @@ from app.protocol.frames import encode_frame
 from app.protocol.slave_data import SLAVE_DATA_SIZE
 from app.protocol.stream import StreamParser
 from app.protocol.types import Command, DataType
-from app.protocol.values import encode_value
+from app.protocol.values import decode_value, encode_value
 from tests.fakes import response_to
 
 VALUES = {"solar_a_power": 1234.5, "solar_b_power": 800.0, "grid_power": -250.0, "battery_soc": 0.55,
@@ -77,12 +78,9 @@ def _by_object_id() -> tuple[dict[int, bytes], dict[int, RegistryEntry]]:
     return payloads, entries
 
 
-PAS_PERIOD = 0x9C8FE559
-
-
 async def _serve(port: int) -> None:
     values, entries = _by_object_id()
-    stored: dict[int, bytes] = {}  # values the gateway wrote (pas.period readback)
+    stored: dict[int, bytes] = {}
 
     async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         parser = StreamParser()
@@ -106,8 +104,11 @@ async def _serve(port: int) -> None:
         try:
             while data := await reader.read(4096):
                 for frame in parser.feed(data):
-                    if frame.command in (Command.WRITE, Command.LONG_WRITE) and frame.object_id == PAS_PERIOD:
-                        stored[frame.object_id] = frame.payload  # the real device never answers WRITE
+                    if frame.command in (Command.WRITE, Command.LONG_WRITE):
+                        entry = entries.get(frame.object_id)
+                        if entry is not None and entry.writable:
+                            decode_value(entry.data_type, frame.payload, byte_width=entry.byte_width)
+                            stored[frame.object_id] = frame.payload  # the real device never answers WRITE
                     elif frame.command in (Command.READ, Command.READ_PERIODICALLY):
                         if frame.command is Command.READ_PERIODICALLY:
                             periodic[frame.object_id] = frame
@@ -115,6 +116,10 @@ async def _serve(port: int) -> None:
                         await writer.drain()
         finally:
             task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            writer.close()
+            with contextlib.suppress(ConnectionError, OSError):
+                await writer.wait_closed()
 
     server = await asyncio.start_server(handle, "127.0.0.1", port)
     async with server:

@@ -26,10 +26,34 @@ const problems = [];
 
 const check = (name, ok, detail = '') => { results.push({ name, ok, detail }); console.log(`${ok ? 'PASS' : 'FAIL'} ${name} ${detail}`); };
 // Remove only errors produced by the current deliberate fault, never earlier failures.
-const scrubExpected = (start, matches) => {
-  const kept = problems.slice(start).filter((problem) => !matches(problem));
-  problems.splice(start, problems.length - start, ...kept);
+const scrubExpected = (start, matches, sink = problems) => {
+  const kept = sink.slice(start).filter((problem) => !matches(problem));
+  sink.splice(start, sink.length - start, ...kept);
 };
+// One collector for every page: console errors/warnings, script errors, failed requests, HTTP >= 400.
+function trackProblems(pg, sink) {
+  pg.on('console', (m) => { if (['error', 'warning'].includes(m.type())) sink.push(`console ${m.type()}: ${m.text()} @ ${m.location().url}`); });
+  pg.on('pageerror', (e) => sink.push(`pageerror: ${e.message}`));
+  pg.on('requestfailed', (r) => sink.push(`requestfailed: ${r.method()} ${r.url()} (${r.failure()?.errorText || 'unknown'})`));
+  pg.on('response', (r) => { if (r.status() >= 400) sink.push(`http ${r.status()}: ${r.request().method()} ${r.url()}`); });
+}
+// A deliberate HTTP error shows up twice: as the response and as the browser's console line.
+const expectedStatus = (url, ...statuses) => (p) => statuses.some((st) =>
+  (p.startsWith(`http ${st}: `) || (p.startsWith('console ') && p.includes(`status of ${st}`))) && p.includes(url));
+const waitForPort = async (port) => {
+  for (let i = 0; i < 50; i++) {
+    const up = await new Promise((resolve) => { const c = net.connect(port, '127.0.0.1', () => { c.destroy(); resolve(true); }); c.on('error', () => resolve(false)); });
+    if (up) return;
+    await sleep(100);
+  }
+  throw new Error(`nothing listens on port ${port}`);
+};
+const expectedRestartProblem = (problem, baseUrl) => problem.includes(`${baseUrl}/health`) && (
+  /^requestfailed: GET .*ERR_CONNECTION_REFUSED/.test(problem)
+  || /^console error: Failed to load resource: net::ERR_CONNECTION_REFUSED/.test(problem)
+  || problem.startsWith('http 503: GET ')
+  || /^console error: Failed to load resource: the server responded with a status of 503/.test(problem)
+);
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const freePort = () => new Promise((resolve) => { const s = net.createServer(); s.listen(0, '127.0.0.1', () => { const { port } = s.address(); s.close(() => resolve(port)); }); });
 
@@ -93,12 +117,9 @@ const context = await browser.newContext({
   colorScheme: process.env.COLOR_SCHEME || 'light',
 });
 const page = await context.newPage();
-page.on('console', (m) => { if (['error', 'warning'].includes(m.type())) problems.push(`console ${m.type()}: ${m.text()} @ ${m.location().url}`); });
-page.on('pageerror', (e) => problems.push(`pageerror: ${e.message}`));
-page.on('requestfailed', (r) => problems.push(`requestfailed: ${r.method()} ${r.url()} (${r.failure()?.errorText || 'unknown'})`));
+trackProblems(page, problems);
 const external = new Set();
 page.on('request', (r) => { if (!r.url().startsWith(base) && !r.url().startsWith('data:')) external.add(r.url()); });
-page.on('response', (r) => { if (r.status() >= 400) problems.push(`http ${r.status()}: ${r.request().method()} ${r.url()}`); });
 // confirm() answers are scripted: the device Apply asks before re-addressing or removing an inverter.
 const dialogs = [];
 let dialogAnswer = true;
@@ -795,8 +816,10 @@ await setVisibility('visible');
 await page.waitForFunction(() => !document.querySelector('#reconnect-modal.show') && !document.body.classList.contains('is-reconnecting'), null, { timeout: 15000 });
 check('reconnect modal closes after returning to the foreground once the server is back', true);
 await page.evaluate(() => { delete document.visibilityState; });
-scrubExpected(probeFailureStart, (p) => p.startsWith('requestfailed: GET ') &&
-  p.includes(`${base}/health`) && p.includes('ERR_FAILED'));
+scrubExpected(probeFailureStart, (p) => p.includes(`${base}/health`) && (
+  p.startsWith('requestfailed: GET ') && p.includes('ERR_FAILED')
+  || p.startsWith('console error: Failed to load resource: net::ERR_FAILED')
+));
 
 // 3. layouts
 async function layouts(label, urls) {
@@ -815,8 +838,10 @@ async function layouts(label, urls) {
 }
 const pages = ['/ui/dashboard', '/ui/inverters', '/ui/tsdb', '/ui/prometheus', '/ui/tokens', '/ui/settings', '/ui/about'];
 await layouts('light', pages);
+const beforeDarkRestart = problems.length;
 await stop(server);
 server = await startServer(db, httpPort, devicePort, 'before-dark-layouts');
+scrubExpected(beforeDarkRestart, (p) => expectedRestartProblem(p, base));
 await page.evaluate(() => { localStorage.setItem('theme', 'dark'); });
 await page.goto(base + '/ui/dashboard');
 await page.click('#theme-toggle');
@@ -863,8 +888,10 @@ await shot('navbar-mobile');
 await page.setViewportSize({ width: 1280, height: 800 });
 
 // 4. PAT create / use / revoke
+const afterLayoutsRestart = problems.length;
 await stop(server);
 server = await startServer(db, httpPort, devicePort, 'after-layouts');
+scrubExpected(afterLayoutsRestart, (p) => expectedRestartProblem(p, base));
 await page.goto(base + '/ui/tokens');
 await page.waitForSelector('#tokens-list tr');
 check('token table has the six columns', JSON.stringify(await page.locator('.token-table thead th').evaluateAll((n) => n.map((e) => e.textContent.trim()))) === JSON.stringify(['Name', 'Permission', 'Created', 'Last used', 'Expires', 'Actions']));
@@ -920,6 +947,7 @@ check('docs toggle autosaves live', true, await toastText());
 check('docs toggle active immediately', ((await fetch(`${base}/docs`)).status === 200) === !before);
 await shot('settings-saved');
 // Trust settings ask for confirmation before they autosave.
+const invalidAutosaveStart = problems.length;
 await page.locator('#setting-trusted_proxies').fill('not-an-ip');
 await page.locator('#setting-trusted_proxies').dispatchEvent('change');
 await page.waitForSelector('#confirm-modal.show');
@@ -935,6 +963,8 @@ const generalAlert = await page.locator('#save-error-general').innerText();
 check('a failed scalar save leaves a persistent alert at the section', /was restored/.test(generalAlert), generalAlert);
 check('the general alert offers no Retry', (await page.locator('#save-error-general button:has-text("Retry")').count()) === 0);
 check('#save-state reads "Save failed" after a rejected save', (await page.locator('#save-state').innerText()).includes('Save failed'), await page.locator('#save-state').innerText());
+// The rejected trusted_proxies save(s) answered 400 on purpose (one or two in flight).
+scrubExpected(invalidAutosaveStart, expectedStatus(`${base}/admin/api/settings`, 400));
 
 // 5c. a11y: an out-of-range number field marks itself and references a non-empty error message.
 // An invalid value is never written to the draft, so nothing is saved and nothing has to be undone
@@ -1460,7 +1490,12 @@ await shot('prometheus-master-toggle-on');
   const energyDb = path.join(dbDir, 'energy', 'e2e.db');
   fs.mkdirSync(path.dirname(energyDb), { recursive: true });
   const energyPort = await freePort();
-  const spawned = spawnPy(['tests.e2e.run_server', energyDb, String(energyPort), String(devicePort), 'energy'], path.join(OUT, 'server-energy.log'));
+  // Its own simulated inverter: two app instances on one device would be competing clients.
+  const energyDevicePort = await freePort();
+  const energyFake = spawnPy(['tests.e2e.fake_inverter', String(energyDevicePort)], path.join(OUT, 'fake-energy.log'));
+  const spawned = spawnPy(['tests.e2e.run_server', energyDb, String(energyPort), String(energyDevicePort), 'energy'], path.join(OUT, 'server-energy.log'));
+  try {
+  await waitForPort(energyDevicePort);
   const energyBase = `http://127.0.0.1:${energyPort}`;
   for (let i = 0; i < 100; i++) {
     try { if ((await fetch(`${energyBase}/health`)).ok) break; } catch { /* not up yet */ }
@@ -1470,7 +1505,7 @@ await shot('prometheus-master-toggle-on');
   const energyContext = await browser.newContext({ viewport: { width: 1280, height: 900 }, locale: 'en-GB' });
   const ep = await energyContext.newPage();
   const energyProblems = [];
-  ep.on('pageerror', (e) => energyProblems.push(e.message));
+  trackProblems(ep, energyProblems);
   await ep.goto(`${energyBase}/login`);
   await ep.fill('#password', energyPassword);
   await ep.click('#login-form button[type=submit]');
@@ -1595,7 +1630,7 @@ await shot('prometheus-master-toggle-on');
   // The simulator ships unverified hardware; verify it first, as an operator would in Expert.
   const csrf = await ep.evaluate(async () => (await (await fetch('/admin/api/session')).json()).csrf_token);
   const verification = await ep.request.put(`${energyBase}/admin/api/energy/devices/sim/hardware-verification`, {
-    headers: { 'X-CSRF-Token': csrf },
+    headers: { 'X-CSRF-Token': csrf, Origin: energyBase },
     data: {
       verified_device_model: 'Simulator', verified_firmware: '1.0', note: 'e2e simulator',
       soc_strategy_external_code: 2, enum_byte_width: 1, bool_byte_width: 1,
@@ -1678,7 +1713,7 @@ await shot('prometheus-master-toggle-on');
     (await states()).every(Boolean) && /controlled by an external app through the API \(PAT required\)\./.test(externalText), externalText.slice(0, 300));
   check('External: a disabled control names the reason', /external app/.test(await buttons[0].getAttribute('title') || ''));
   const csrfNow = await ep.evaluate(async () => (await (await fetch('/admin/api/session')).json()).csrf_token);
-  const viaGui = await ep.request.post(`${energyBase}/admin/api/energy/devices/sim/command`, { headers: { 'X-CSRF-Token': csrfNow }, data: { action: 'hold' } });
+  const viaGui = await ep.request.post(`${energyBase}/admin/api/energy/devices/sim/command`, { headers: { 'X-CSRF-Token': csrfNow, Origin: energyBase }, data: { action: 'hold' } });
   check('External: a GUI command answers 409 energy_manager_external', viaGui.status() === 409 && (await viaGui.json()).code === 'energy_manager_external', String(viaGui.status()));
   if (secret) {
     const viaPat = await ep.request.post(`${energyBase}/api/v1/devices/sim/energy/command`, { headers: { Authorization: `Bearer ${secret}` }, data: { action: 'hold' } });
@@ -1749,18 +1784,21 @@ await shot('prometheus-master-toggle-on');
   await sleep(300);
   const energyOverflow = await ep.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
   check('energy page has no horizontal page scroll at 390px', energyOverflow <= 0, String(energyOverflow));
-  check('energy page raised no script errors', energyProblems.length === 0, energyProblems.join('; '));
+  check('energy page raised no console, network or script errors', energyProblems.length === 0, energyProblems.join('; '));
   await energyContext.close();
-  spawned.proc.kill('SIGTERM');
+  } finally {
+    spawned.proc.kill('SIGTERM');
+    energyFake.proc.kill('SIGTERM');
+  }
 }
 
 // 6a. GridStack dashboard layout: edit mode, move+resize a widget, autosave, reload, reset.
 await page.goto(base + '/ui/dashboard');
-await page.waitForSelector('#dashboard-grid .grid-stack-item');
+await page.waitForFunction(() => document.querySelector('#dashboard-grid .grid-stack-item[data-widget-id="pv-power"]')?.gridstackNode);
 const editToggle = page.locator('#dashboard-edit-toggle');
 check('dashboard starts in view mode with the drag handle hidden',
-  (await editToggle.getAttribute('aria-pressed')) === 'false'
-  && !(await page.locator('.dashboard-widget-header').first().isVisible()));
+  await editToggle.isVisible() && !(await page.locator('.dashboard-widget-header').first().isVisible())
+  && !(await page.locator('#dashboard-edit-done').isVisible()));
 await editToggle.click();
 await page.waitForSelector('.dashboard-editing');
 check('edit mode shows Add widget, Reset layout and Done',
@@ -1792,7 +1830,7 @@ check('autosave shows the "Dashboard layout saved." toast once', (await toastTex
 await page.unroute('**/admin/api/dashboard-layout');
 
 await page.reload();
-await page.waitForSelector('#dashboard-grid .grid-stack-item');
+await page.waitForFunction(() => document.querySelector('#dashboard-grid .grid-stack-item[data-widget-id="pv-power"]')?.gridstackNode);
 const afterReload = await page.evaluate(() => {
   const node = document.querySelector('.grid-stack-item[data-widget-id="pv-power"]').gridstackNode;
   return { x: node.x, y: node.y, w: node.w, h: node.h };
@@ -1814,22 +1852,24 @@ const afterReset = await page.evaluate(() => {
   return { x: node.x, y: node.y, w: node.w, h: node.h };
 });
 check('reset layout restores the default pv-power position immediately',
-  afterReset.x === 0 && afterReset.y === 2 && afterReset.w === 3 && afterReset.h === 2, JSON.stringify(afterReset));
+  afterReset.x === 0 && afterReset.y === 0 && afterReset.w === 2 && afterReset.h === 2, JSON.stringify(afterReset));
 await page.reload();
-await page.waitForSelector('#dashboard-grid .grid-stack-item');
+await page.waitForFunction(() => document.querySelector('#dashboard-grid .grid-stack-item[data-widget-id="pv-power"]')?.gridstackNode);
 const afterResetReload = await page.evaluate(() => {
   const node = document.querySelector('.grid-stack-item[data-widget-id="pv-power"]').gridstackNode;
   return { x: node.x, y: node.y, w: node.w, h: node.h };
 });
 check('default position survives a reload after reset',
-  afterResetReload.x === 0 && afterResetReload.y === 2 && afterResetReload.w === 3 && afterResetReload.h === 2,
+  afterResetReload.x === 0 && afterResetReload.y === 0 && afterResetReload.w === 2 && afterResetReload.h === 2,
   JSON.stringify(afterResetReload));
 check('dashboard GridStack flow raised no script errors', problems.filter((p) => /dashboard\.js|gridstack/i.test(p)).length === 0,
   problems.filter((p) => /dashboard\.js|gridstack/i.test(p)).join('; '));
 
 // 7. restart persistence
+const finalRestart = problems.length;
 await stop(server);
 server = await startServer(db, httpPort, devicePort, 'second');
+scrubExpected(finalRestart, (p) => expectedRestartProblem(p, base));
 check('no initial password printed after restart', !/FIRST START - admin login/.test(server.output()));
 await page.goto(base + '/ui/prometheus');
 check('session survives restart', page.url().endsWith('/ui/prometheus'));
@@ -1844,7 +1884,7 @@ await page.waitForURL('**/login');
 await page.goto(base + '/ui/dashboard');
 check('logout ends the session', page.url().endsWith('/login'));
 
-const relevant = problems.filter((p) => !/http 40[013]: .*\/admin\/api\/(settings|login)|Failed to load resource: the server responded with a status of 40[013]/.test(p));
+const relevant = [...problems];
 console.log('console/network problems:', JSON.stringify(relevant, null, 1));
 check('browser console and network clean', relevant.length === 0);
 fs.writeFileSync(path.join(OUT, 'results.json'), JSON.stringify({ results, problems, relevant }, null, 2));

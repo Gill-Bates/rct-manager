@@ -41,8 +41,8 @@ current value is accepted):
 - `enable_metrics_endpoint` while scrapes would not require a token.
 
 Create named PATs with a `read` or `read/write` role and an expiry of 30 days, 90 days (the
-preselected value), 1 year or never on the **API tokens** page. Copy the secret when it is shown: it cannot be retrieved
-later. Revoke a token on the same page. The list shows when each token was created, last used (at most
+preselected value), 1 year or never on the **API tokens** page. Copy the secret with the **Copy** button when it is shown: it cannot be retrieved
+later, and **Done** and the close button stay disabled until the copy succeeded. The list marks each token's role with a badge. Revoke a token on the same page. The list shows when each token was created, last used (at most
 once per minute; `Never` if unused) and expires. Records are persisted in the encrypted
 SQLite administration database; raw secrets are not stored.
 

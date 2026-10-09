@@ -174,12 +174,12 @@ body {
    .app-shell still reserves only that much — measured 55.375px of footer against 44px of reserve at
    320px, leaving the content/footer gap to chance rather than to the reserve. One variable feeds
    both the reserve and the footer's min-height, so raising it here keeps them in sync by
-   construction. 3.5rem covers the measured wrapped height; the cost is up to 12px of unused space
+   construction. 3.75rem covers the measured wrapped height (56.4px with the build hash); the cost is up to 12px of unused space
    below the content at widths where the text still fits on one line, which is not visible as
    anything other than the content stopping slightly earlier above the footer. */
 @media (max-width: 420px) {
     :root {
-        --rct-footer-height: 3.5rem;
+        --rct-footer-height: 3.75rem; /* the build hash made the wrapped footer 56.4px, above 3.5rem */
     }
 }
 

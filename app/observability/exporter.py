@@ -248,6 +248,12 @@ class MetricsExporter:
                 lambda e: e.counters.crc_errors,
             ),
             (
+                "rct_transport_framing_errors_total",
+                "counter",
+                "Frames dropped for invalid framing or escaping.",
+                lambda e: e.counters.framing_errors,
+            ),
+            (
                 "rct_transport_unexpected_frames_total",
                 "counter",
                 "Unexpected frames.",

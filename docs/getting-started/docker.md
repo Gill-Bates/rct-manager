@@ -35,8 +35,8 @@ are persisted in the `rct-data` volume at `/app/data/rct.db`.
     `8000`). A loopback bind makes the service unreachable through the
     published port; the start logs a warning and the health check fails.
 
-The shell variables `RCT_API_PORT` (host port, default `8000`), `RCT_API_TAG` (image tag, default
-`latest`) and `TZ` (default `Etc/UTC`) are read by `docker/compose.yaml` itself.
+The shell variables `RCT_API_PORT` (host port, default `8000`), `RCT_API_TAG` (image tag, required: Compose stops
+without it) and `TZ` (default `Etc/UTC`) are read by `docker/compose.yaml` itself.
 
 ## Tokens
 
@@ -103,6 +103,6 @@ with a Python one-liner; it contains neither curl nor wget.
 
 Tagged releases ship through `.github/workflows/release.yml` to Docker Hub, not
 through this script. `docker/build.sh` has one job: build for `linux/amd64`,
-feed version, git SHA and build date into the image labels, and push the
+feed version, git SHA and build date into the image labels (the git SHA is also the build hash `(abc1234)` in the admin footer and the startup banner; `dev` outside an image), and push the
 `:dev` tag to `giiibates/rct-manager` on Docker Hub by default (needs
 `docker login`).

@@ -86,4 +86,4 @@ curl -H "Authorization: Bearer <token>" http://127.0.0.1:8000/api/v1/devices
 | Prometheus | Metrics endpoint and the exposed metrics |
 | API tokens | Create and revoke personal access tokens |
 | Settings | Documentation, authentication, server, network and the admin password |
-| About | Version, runtime, project and dependency information |
+| About | Version, runtime, project and dependency information. The footer of every page shows the version and the build hash `(abc1234)` (`dev` outside an image) |

@@ -47,7 +47,7 @@ read succeeds.
   modules…", and a slot pattern that cannot describe a documented tower shows "Module layout
   unclear" instead of a drawing.
 - If the server cannot be reached, the dashboard keeps showing the last data (up to one hour old,
-  dimmed, with a banner) and a "Connection lost" dialog retries in the background.
+  dimmed, with a banner) and a "Connection lost" dialog without buttons probes the server in the background and reloads the page automatically once it answers again.
 - The layout is stored in `data/rct.db`, separate from the device settings, through
   `GET`/`PUT`/`DELETE /admin/api/dashboard-layout` (admin API, not part of the public contract). The
   server accepts only known widget ids, at most 32 widgets and a 12-column grid.
@@ -65,7 +65,7 @@ read succeeds.
   labeled action is not automatically a safe default. The destructive `com_service` codes
   `6 erase_parameters_flash` and `11 erase_datalog` are therefore not shipped as writable; the
   codes `0, 5, 9, 10, 12, 13, 14, 15, 16, 18` are. To allow an erase action anyway, copy the
-  shipped file, add the code to its `allowed_values` and point `write_allowlist_path` at the copy.
+  shipped file, add the code to its `allowed_values` and use that file as the write allowlist (`write_allowlist_path` is not an environment setting).
 - Numeric limits are wire type limits, not safe operating limits or a promise
   that the firmware accepts a write.
 - The **Inverters** page shows a short explanation under a writable parameter where the catalog

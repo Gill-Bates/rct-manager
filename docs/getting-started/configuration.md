@@ -48,7 +48,7 @@ are folded back into `rct.db` on a clean shutdown. Rules:
 ## Device and Network
 
 ### Devices
-Configure inverter endpoints from the **Overview** dashboard with **Add inverter** in the Inverters card; the editor opens in a modal and stores the devices encrypted in `data/rct.db`. Edits stay a draft until **Apply changes**, which rebuilds the inverter connections without a restart; **Discard** drops them. Re-addressing or removing an inverter resets its verification evidence, engineering mode and arming and therefore asks for confirmation. A list the server rejects is rolled back and the previous configuration stays active. A device consists of an IP address or host name and a port; the service assigns the device id (`main` for the first one, then `inverter-2`, `inverter-3`, ...) and keeps it while the device exists, so API paths and exports stay stable. A saved display name takes precedence; otherwise, the dashboard uses the inverter-reported name, then the device id. Editing the host keeps the id; duplicate addresses are rejected. Devices saved earlier keep their ids and custom names. A `DEVICES` environment variable is ignored; the service notes it at startup on INFO level.
+Configure inverter endpoints from the **Overview** dashboard with **Add inverter** in the Inverters card; the editor opens in a modal and stores the devices encrypted in `data/rct.db`. Edits stay a draft until **Apply changes**, which rebuilds the inverter connections without a restart; **Discard** drops them. Re-addressing or removing an inverter resets its verification evidence, engineering mode and Energy Manager mode (back to Off) and therefore asks for confirmation. A list the server rejects is rolled back and the previous configuration stays active. A device consists of an IP address or host name and a port; the service assigns the device id (`main` for the first one, then `inverter-2`, `inverter-3`, ...) and keeps it while the device exists, so API paths and exports stay stable. A saved display name takes precedence; otherwise, the dashboard uses the inverter-reported name, then the device id. Editing the host keeps the id; duplicate addresses are rejected. Devices saved earlier keep their ids and custom names. A `DEVICES` environment variable is ignored; the service notes it at startup on INFO level.
 
 ### BIND_ADDRESS
 Default: `127.0.0.1`
@@ -71,12 +71,12 @@ Default: `8000`
 REST API listen port.
 
 ### Behind reverse proxy
-GUI only. Confirms a TLS-terminating proxy in front of the service (secure cookies, client address handling). A `BEHIND_REVERSE_PROXY` variable is ignored with a warning. A consented non-loopback bind logs a warning until this option is enabled in the GUI.
+GUI only. Confirms a TLS-terminating proxy in front of the service and sets the secure flag on session cookies. It does not trust any forwarded header; that is `TRUSTED_PROXIES` below. A `BEHIND_REVERSE_PROXY` variable is ignored with a warning. A consented non-loopback bind logs a warning until this option is enabled in the GUI.
 
 ### TRUSTED_PROXIES
 Default: empty
 
-Comma-separated list of reverse-proxy networks (CIDR notation, at most 32). Used to extract the real client IP from the header set by the proxy. Without this, all callers share the proxy's address.
+Comma-separated list of reverse-proxy networks (CIDR notation, at most 32). Used to extract the real client IP from the header set by the proxy and to accept `X-Forwarded-Proto` for the administration interface. It is the only proxy trust list. Without it, all callers share the proxy's address. Behind a TLS-terminating proxy that is not listed, administration logins and changes fail with 403.
 
 ### FORWARDED_HEADER
 Default: empty

@@ -62,8 +62,8 @@ curl -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/jso
 - A body that violates the table is rejected with 422 `invalid_request`.
 - `max_power_w` defaults to the limit configured for the inverter and is clamped to it
   (`power_limit_clamped: true`).
-- The target must lie inside `target_soc_window` (7 % to 95 % with the defaults, narrowed by
-  `DISPATCH_MIN_SOC` / `DISPATCH_MAX_SOC`); otherwise 422 `value_out_of_range`. It is never clamped.
+- The target must lie inside `target_soc_window` (7 % to 95 %: the product range 7 % to 97 %, narrowed by the fixed
+  dispatch SoC bounds 5 % and 95 %); otherwise 422 `value_out_of_range`. It is never clamped.
 - Switching "Write access" on the **Inverters** page is live (no restart): off refuses writes, sets every device to mode Off and hands the
   inverters back to automatic operation; on requires choosing a mode again. If a hand-back fails, the response lists
   `write_restore_pending` and the automatic restore retry continues.
@@ -84,14 +84,14 @@ Selecting Manual or External adds the four dispatch register approvals to the wr
 removes any), which also opens them to the generic `PUT /api/v1/devices/{id}/metrics`. Selecting Off
 hands control back first and removes no approval. If the approvals are revoked on the **Inverters**
 page, the actions report `write_not_permitted` and commands answer 409 `energy_action_unavailable`.
-A custom `WRITE_ALLOWLIST_PATH` must contain `power_mng_soc_strategy`, `power_mng_soc_target_set`,
+A custom write allowlist file must contain `power_mng_soc_strategy`, `power_mng_soc_target_set`,
 `power_mng_battery_power_extern` and `power_mng_use_grid_power_enable`.
 
 ### Status readings
 
 `readings` carries `battery_soc_percent`, `grid_power_w` (positive = import), `pv_power_w`,
 `house_load_w` and `battery_power_w`, each with `age_seconds` and `stale`. They come from the
-periodic read cache (`PERIODIC_INTERVAL_SECONDS`, default 30 s), never from a device read, and are
+periodic read cache (periodic interval, fixed at 30 s), never from a device read, and are
 `null` with `stale: true` when unavailable. A missing reading never blocks a command.
 
 `battery_power_w` is **measured**: positive = discharging, negative = charging. `commanded_power_w`
@@ -185,5 +185,5 @@ cycle, a setpoint that stays 0 W for the full TTL, a clean `auto` return, and no
 
 ## Deployment note
 
-The dispatch store adds its Energy Manager tables on first start (schema 3). An older build rejects
-that database; restore a backup to go back.
+The dispatch store adds its Energy Manager tables on first start (schema 3) and the operating mode in schema 4. On the first start a stored `armed=true` becomes mode
+`manual` and `armed=false` becomes `off`. An older build rejects the migrated database; restore a backup to go back.

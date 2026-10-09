@@ -22,6 +22,7 @@ docker compose -f docker/compose.yaml logs rct-api
 docker compose -f docker/compose.yaml run --rm rct-api validate
 ```
 
+Set `RCT_API_TAG` (image tag, required) in the shell or in a `.env` file beside `compose.yaml` before every `docker compose` call.
 Create `settings.env` from `settings.env.example` at the project root before the
 first start. Compose resolves `../settings.env` relative to `docker/compose.yaml`.
 Set a stable random `HMAC_SECRET` of at least 32 characters before starting.
@@ -148,7 +149,8 @@ It refuses to run with an unresolved git SHA, since that would make the
 The `Dockerfile` defaults to the Python 3.13 slim base image in both stages,
 builds the dependencies into a virtual environment in a separate stage,
 removes `pip` from the runtime image and carries no credentials;
-`settings.env` is excluded by `.dockerignore`.
+`settings.env` is excluded by `.dockerignore`. `GIT_SHA` is stored as an environment variable in
+the image; the admin footer and the startup banner show its first 7 hex characters (`dev` when unset or not hex).
 The packaged catalog covers 894 of the 895 IDs (without `wifi_password`) from
 protocol v1.14. The packaged write-policy seed defines wire type limits for 893
 scalar objects, rather than device safety limits. Use **Inverters** to manage
