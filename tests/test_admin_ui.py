@@ -230,7 +230,7 @@ def test_admin_card_spacing_uses_one_token_and_sibling_rule():
     assert len(re.findall(r"--rct-card-gap\s*:", css)) == 1
     assert re.search(
         r"#main-content\s+\.page-heading\s*~\s*:is\(\.card,\s*\.settings-grid,\s*"
-        r"\.energy-grid,\s*#export-actions\),\s*#main-content\s+\.about-top-row\s*~\s*"
+        r"\.energy-grid,\s*#export-actions,\s*\.prometheus-dependent-settings:not\(:empty\)\),\s*#main-content\s+\.about-top-row\s*~\s*"
         r"\.card\s*\{\s*margin-top:\s*var\(--rct-card-gap\);\s*\}", css,
     )
     for selector in ("settings-grid", "energy-grid"):
@@ -988,9 +988,10 @@ def test_tsdb_page_uses_the_shared_page_heading_cards_and_setting_rows():
     css = (ADMIN_DIR / "static/css/admin.css").read_text(encoding="utf-8")
     js = (ADMIN_DIR / "static/js/admin.js").read_text(encoding="utf-8")
     html = (TEMPLATES / "tsdb.html").read_text(encoding="utf-8")
-    # No TSDB-specific layout or typography rules: only the log console keeps its own look.
+    # No TSDB-specific layout or typography rules: only the log console keeps its own look, plus
+    # .export-card, which only tightens the setting-row padding so the page fits one viewport.
     own = set(re.findall(r"\.(tsdb-[a-z-]+|export-[a-z-]+)", css))
-    assert own <= {"tsdb-console", "tsdb-console-line", "tsdb-console-time"}, own
+    assert own <= {"tsdb-console", "tsdb-console-line", "tsdb-console-time", "export-card"}, own
     assert 'class="page-heading"' in html and 'id="save-state" class="save-state' in html
     assert 'class="settings-grid"' in html and "tsdb-status-badge" not in html
     render = js[js.index("function renderExportSettings("):js.index("// Mirrors the server-side host plausibility")]

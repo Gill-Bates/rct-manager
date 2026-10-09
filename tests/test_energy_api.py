@@ -881,6 +881,7 @@ _VERIFIED_FIXTURES = {
     "tests/api_helpers.py",
     "tests/test_dispatch_capabilities.py",
     "tests/test_dispatch_core.py",
+    "tests/test_soc_target_policy.py",  # fixture: a device the operator already verified as percent-attested
     "app/dispatch/capabilities.py",  # the enum member itself
     "app/admin/dispatch_api.py",  # the admin PUT that an operator uses to enter one
     "app/admin/energy_api.py",  # the same operator action as one atomic request

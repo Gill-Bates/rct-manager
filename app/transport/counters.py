@@ -25,7 +25,6 @@ _RETENTION_SECONDS = 3600.0
 class EndpointCounters:
     last_frame_at: datetime | None = None
     last_success_at: datetime | None = None
-    last_send_at: datetime | None = None
     last_success_monotonic: float | None = None
     last_periodic_monotonic: float | None = None
     discarded_bytes: int = 0

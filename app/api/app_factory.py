@@ -1152,6 +1152,7 @@ def create_app(settings: Settings, *, clock: Clock | None = None, connector: Con
         parts.service,
         gateway,
     )
+    runtime.dispatch_control_registers = frozenset(RctDispatchGateway.REQUIRED_WRITES)
     # Built unconditionally and shared with the Energy Manager: it publishes the effective target
     # window from the same bounds the controller validates against, with or without dispatch.
     dispatch_config = DispatchConfig(

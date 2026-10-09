@@ -161,7 +161,7 @@ def test_total_counters_stay_monotonic_across_a_live_view_swap() -> None:
 
     def totals(text: str) -> dict[str, float]:
         return {name: value for name, _labels, value in _parse(text)
-                if name.endswith("_total") or name.endswith(("_count", "_sum"))}
+                if name.endswith(("_total", "_count", "_sum"))}
 
     first = totals(exporter.render())
     assert first["rct_api_cache_hits_total"] == 10 and first["rct_api_cache_misses_total"] == 3

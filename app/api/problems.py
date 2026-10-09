@@ -183,8 +183,10 @@ _TEXT: dict[ErrorCode, tuple[str, str]] = {
     ),
     E.DISPATCH_REGISTER_LOCKED: (
         "Register controlled by dispatch",
-        "This register is a battery-dispatch control register and is locked while the inverter is "
-        "under dispatch or an energy mode other than Off; switch the inverter off to write it directly.",
+        (
+            "This register is a battery-dispatch control register and is locked while the inverter is "
+            "under dispatch or an energy mode other than Off; switch the inverter off to write it directly."
+        ),
     ),
     E.DISPATCH_RECORD_CORRUPT: (
         "Dispatch record corrupt",

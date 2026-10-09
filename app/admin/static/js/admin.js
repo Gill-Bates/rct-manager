@@ -3519,7 +3519,7 @@
     const card = (name, title, nodes, extraClass = '') => {
       const section = element('section', `card export-card export-card-${name} ${extraClass}`.trim());
       const body = element('div', 'card-body');
-      body.append(element('h2', 'h5 mb-3', title), ...nodes);
+      body.append(element('h2', 'h5 mb-2', title), ...nodes);
       section.append(body);
       return section;
     };

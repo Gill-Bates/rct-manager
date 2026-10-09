@@ -87,10 +87,9 @@ class Demultiplexer:
         if kind is FrameKind.TRANSACTION_RESPONSE:
             assert self.pending is not None
             self.pending.future.set_result(frame)
-            if self._is_periodic(frame) and self._on_value:
-                self._on_value(frame, FrameKind.PERIODIC_VALUE)  # additional cache hand-off (3.6)
-            elif self._on_value:
-                self._on_value(frame, kind)
+            if self._on_value:
+                # A response that is also a registered periodic value gets the cache hand-off (3.6).
+                self._on_value(frame, FrameKind.PERIODIC_VALUE if self._is_periodic(frame) else kind)
         elif kind is FrameKind.PERIODIC_VALUE:
             self._counters.last_periodic_monotonic = now
             if self._on_periodic:

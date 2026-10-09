@@ -139,10 +139,9 @@ class Receiver:
                 # Frames extracted this round resolved any earlier partial frame, so a leftover
                 # tail began fresh with this chunk; otherwise the oldest pending instant persists.
                 self._pending_since = chunk_earliest if frames else received_monotonic
-            discarded = self._parser.stats.discarded_bytes
-            self._counters.discarded_bytes += discarded - self._counted_discards
-            self._counted_discards = discarded
             stats = self._parser.stats
+            self._counters.discarded_bytes += stats.discarded_bytes - self._counted_discards
+            self._counted_discards = stats.discarded_bytes
             self._counters.crc_errors += stats.crc_errors - self._counted_crc
             self._counters.framing_errors += stats.framing_errors - self._counted_framing
             self._counted_crc, self._counted_framing = stats.crc_errors, stats.framing_errors

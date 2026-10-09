@@ -54,6 +54,9 @@ class Runtime:
     # Cache-only sign-normalized readings, independent of dispatch/Energy-Manager state, so the
     # dashboard's energy_flow projection works even with write support disabled (design §4.2).
     energy_readings: EnergyReadingsPort | None = None
+    # Register names through which battery dispatch commands the device; injected by the composition
+    # root so routers need not import the vendor adapter that defines them.
+    dispatch_control_registers: frozenset[str] = frozenset()
     export_task: asyncio.Task | None = None  # the running push-exporter task; an explicit handle (not list position)
     # Set when a device reconfiguration failed after the old graph was torn down: the live graph is
     # then partial, so readiness must not report the service as healthy.

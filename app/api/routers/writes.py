@@ -22,7 +22,6 @@ from app.api.runtime import Runtime, RuntimeDep
 from app.dispatch.models import DispatchState
 from app.energy.models import EnergyMode
 from app.errors import DeviceApiError
-from app.gateway.rct_dispatch import RctDispatchGateway
 from app.protocol.values import ScalarValue
 from app.security.dependencies import require_write
 from app.security.tokens import Principal
@@ -30,21 +29,16 @@ from app.security.tokens import Principal
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/devices/{device_id}", tags=["writes"])
 
-# The four registers through which battery dispatch commands the inverter. While a dispatch (or an
-# energy mode) owns a device, the controller holds a consistent view of these registers; a raw
-# write to one of them from the generic PAT endpoint would silently diverge that state. Same source
-# of truth the energy allowlist and the admin revoke guard already use.
-_DISPATCH_CONTROL_REGISTERS = frozenset(RctDispatchGateway.REQUIRED_WRITES)
-
 
 async def _dispatch_owns_register(runtime: Runtime, device_id: str, metric_name: str) -> bool:
     """True when the metric is a dispatch-control register and this device is not switched off/idle.
 
     Fail-closed ownership check for the generic write path: an energy mode other than OFF, or any
     dispatch state that is not a clean IDLE (including a pending restore), means the dispatch layer
-    owns these registers and a parallel raw write must be refused.
+    owns these registers and a parallel raw write must be refused. The register set is the one the
+    energy allowlist and the admin revoke guard use (Runtime.dispatch_control_registers).
     """
-    if metric_name not in _DISPATCH_CONTROL_REGISTERS:
+    if metric_name not in runtime.dispatch_control_registers:
         return False
     if runtime.energy is not None and runtime.energy.mode(device_id) is not EnergyMode.OFF:
         return True

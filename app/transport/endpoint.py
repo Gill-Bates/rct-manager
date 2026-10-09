@@ -12,7 +12,7 @@ import logging
 import socket
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta
 from enum import StrEnum
 
 from app.clock import Clock
@@ -101,7 +101,6 @@ class TransportEndpoint:
         self._device_counters: dict[DeviceKey, DeviceCounters] = {}
         self._demux = Demultiplexer(self.counters, clock.monotonic, on_value, self._on_periodic)
         self._gate = SendGate(config.min_interval, clock, config.send_timeout_seconds)
-        self._reader: asyncio.StreamReader | None = None
         self._writer: asyncio.StreamWriter | None = None
         self._receiver_task: asyncio.Task[None] | None = None
         self._connect_lock = asyncio.Lock()
@@ -191,7 +190,7 @@ class TransportEndpoint:
         task, self._receiver_task = self._receiver_task, None
         if task is not None:
             task.cancel()
-        writer, self._writer, self._reader = self._writer, None, None
+        writer, self._writer = self._writer, None
         self._fail_pending(DeviceUnreachable("connection_closed"))
         if writer is not None:
             transport = getattr(writer, "transport", None)
@@ -228,7 +227,7 @@ class TransportEndpoint:
             # Wrapped synchronously, with no await since obtaining ``reader``, so no chunk that
             # arrives for this connection ever reaches the parser without a ledger entry.
             ledger = ArrivalLedger(reader, self._clock.monotonic)
-            self._reader, self._writer = reader, writer
+            self._writer = writer
             self._epoch += 1
             parser = StreamParser(max_frame_bytes=self._cfg.max_frame_bytes)
             receiver = Receiver(
@@ -292,7 +291,7 @@ class TransportEndpoint:
             pending.future.set_exception(error)
 
     async def _drop_connection(self, error: DeviceApiError) -> None:
-        writer, self._writer, self._reader = self._writer, None, None
+        writer, self._writer = self._writer, None
         self._demux.clear_periodic()
         self._fail_pending(error)
         task = self._receiver_task
@@ -350,8 +349,7 @@ class TransportEndpoint:
         future: asyncio.Future[Frame] = asyncio.get_running_loop().create_future()
         frame = request.frame
 
-        def on_commit(sent_at, sent_monotonic: float) -> None:
-            self.counters.last_send_at = sent_at
+        def on_commit(_sent_at: datetime, sent_monotonic: float) -> None:
             self._demux.pending = PendingTransaction(frame.object_id, frame.plant_address, sent_monotonic, future)
 
         def precheck() -> Exception | None:

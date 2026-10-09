@@ -1005,7 +1005,7 @@ async function stackedGeometry() {
     const visible = (node) => { const r = node.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
     const heading = main.querySelector('.page-heading');
     const container = heading.parentElement;
-    const blocks = [...container.children].filter((node) => node.matches('.card, .settings-grid, .energy-grid, #export-actions, .about-top-row') && visible(node));
+    const blocks = [...container.children].filter((node) => node.matches('.card, .settings-grid, .energy-grid, #export-actions, .about-top-row, .prometheus-dependent-settings') && visible(node));
     // The About row is spaced from its heading by its own mt-1, not by the sibling rule.
     const chain = blocks[0]?.matches('.about-top-row') ? blocks : [heading, ...blocks];
     const gaps = [];

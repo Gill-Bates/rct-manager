@@ -151,8 +151,10 @@ body {
 }
 
 /* Single mechanism for stacked cards: every top-level card, grid or row after the page heading
-   gets the same top margin, collapsible <details> cards included. Never add mt-* to these. */
-#main-content .page-heading~:is(.card, .settings-grid, .energy-grid, #export-actions),
+   gets the same top margin, collapsible <details> cards included. Never add mt-* to these.
+   The Prometheus dependent-settings wrapper counts only while it holds its card: #main-content
+   can be a flex column (no margin collapsing), so an empty wrapper must not add a second gap. */
+#main-content .page-heading~:is(.card, .settings-grid, .energy-grid, #export-actions, .prometheus-dependent-settings:not(:empty)),
 #main-content .about-top-row~.card {
     margin-top: var(--rct-card-gap);
 }
@@ -1362,6 +1364,16 @@ body {
 
 .setting-row label {
     font-weight: 600;
+}
+
+/* The TSDB cards share one grid row with the console and Apply bar below; a tighter row rhythm keeps
+   the page within a 1536x864 viewport without changing the card gap token. */
+.export-card .setting-row {
+    padding: .35rem 0;
+}
+
+.export-card>.card-body {
+    padding-block: .75rem;
 }
 
 .setting-row .form-text {
