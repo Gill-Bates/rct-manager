@@ -6,6 +6,7 @@
 
 """Battery dispatch strategies, persistence and state-machine safety invariants."""
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -990,3 +991,60 @@ async def test_a_successful_restore_clears_the_fault_code(tmp_path: Path) -> Non
     status = await dispatch.tick("main")
     assert status.state is DispatchState.IDLE
     assert status.fault_code is None
+
+
+async def test_run_lets_an_in_flight_tick_finish_before_a_cancellation_takes_effect(
+    tmp_path: Path,
+) -> None:
+    """C1 regression: a device reconfiguration cancelling ``run()`` must not interrupt a ``tick()``
+    that is already mid hardware-write. Without the ``asyncio.shield`` in ``run()``, cancelling the
+    outer task while ``apply_setpoint`` is in flight would propagate ``CancelledError`` out of
+    ``tick()`` and leave the plan step persisted as "sent" forever, with ``last_commanded`` never
+    updated — the record would look CHARGING but the server would no longer know the real setpoint.
+    """
+    clock = ManualClock()
+    gateway = FakeDispatchGateway(clock)
+    dispatch = controller(tmp_path, clock, gateway)
+    await dispatch.submit(
+        "main",
+        DispatchCommand(DispatchMode.DISCHARGE_TO_LOAD, 20, 2000, clock.now() + timedelta(hours=1)),
+    )
+    gateway.calls.clear()
+
+    # tick()'s next telemetry read reports a different grid import than submit() saw, so
+    # calculate_setpoint() derives a new desired setpoint and should_write() takes the write branch.
+    async def _changed_telemetry(device_id: str) -> ControlTelemetry:
+        return telemetry(grid=5000)
+
+    gateway.read_control_telemetry = _changed_telemetry
+
+    # Make the next apply_setpoint() hang until the test releases it, so the cancellation below
+    # lands while tick() is provably inside the hardware write.
+    entered_write = asyncio.Event()
+    release_write = asyncio.Event()
+    original_apply_setpoint = gateway.apply_setpoint
+
+    async def _blocking_apply_setpoint(device_id: str, setpoint):
+        entered_write.set()
+        await release_write.wait()
+        return await original_apply_setpoint(device_id, setpoint)
+
+    gateway.apply_setpoint = _blocking_apply_setpoint
+
+    run_task = asyncio.create_task(dispatch.run("main"))
+    await asyncio.sleep(0)  # let run() reach its first clock.sleep() and register as a sleeper
+    clock.advance(dispatch._config.cycle_interval_seconds)  # wake run()'s sleep, it starts tick()
+    await asyncio.wait_for(entered_write.wait(), timeout=5)
+
+    run_task.cancel()
+    await asyncio.sleep(0)  # let the cancellation reach the shield
+    assert not run_task.done()  # shielded: the in-flight tick must still be running
+
+    release_write.set()
+    with pytest.raises(asyncio.CancelledError):
+        await run_task
+
+    status = await dispatch.status("main")
+    # The write completed and was persisted ("confirmed"), not left stuck at "sent"/half-written.
+    assert status.state is DispatchState.DISCHARGING
+    assert any(call[0] == "setpoint" for call in gateway.calls)

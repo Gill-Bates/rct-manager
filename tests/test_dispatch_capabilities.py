@@ -564,6 +564,22 @@ async def test_admin_api_refuses_verified_sign_convention_without_explicit_flag(
         assert "grid_import_positive" in resp.json()["detail"]
 
 
+async def test_admin_api_refuses_verified_write_path_without_explicit_soc_target_unit(tmp_path: Path) -> None:
+    """V-17: soc_target_unit has a non-None default ("ratio"), so like the sign flags only an
+    explicitly sent value counts as evidence that the register representation was attested.
+    """
+    async with _admin_harness(tmp_path) as (harness, headers):
+        body = _verified_write_path_body()
+        del body["soc_target_unit"]
+        resp = await harness.client.put(
+            "/admin/api/dispatch/devices/main/capabilities/write_path_convention",
+            headers=headers,
+            json=body,
+        )
+        assert resp.status_code == 400
+        assert "soc_target_unit" in resp.json()["detail"]
+
+
 @pytest.mark.parametrize("note", [None, "", "   "])
 async def test_admin_api_requires_a_non_empty_note_for_a_verified_write_path(
     tmp_path: Path, note: str | None

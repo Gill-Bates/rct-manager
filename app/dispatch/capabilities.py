@@ -159,10 +159,6 @@ def _strict_optional_int(value: object) -> int | None:
     return value
 
 
-def _optional_int(value: object) -> int | None:
-    return None if value is None else int(value)  # type: ignore[arg-type]
-
-
 def _optional_float(value: object) -> float | None:
     return None if value is None else float(value)  # type: ignore[arg-type]
 

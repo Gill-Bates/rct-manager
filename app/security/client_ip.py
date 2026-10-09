@@ -17,7 +17,12 @@ UNKNOWN_ADDRESS = "unknown"
 
 def _parse(text: str) -> str | None:
     try:
-        return str(ip_address(text.strip().strip("[]")))
+        text = text.strip()
+        if text.startswith("[") and text.endswith("]"):
+            text = text[1:-1]
+        if "[" in text or "]" in text:
+            return None
+        return str(ip_address(text))
     except ValueError:
         return None
 

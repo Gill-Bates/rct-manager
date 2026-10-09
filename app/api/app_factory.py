@@ -155,7 +155,7 @@ def load_allowlist(settings: Settings, catalog: RegistryCatalog, selected: list[
         available = Allowlist.load(settings.write_allowlist_path, catalog)
         if selected is None:
             return available
-        return Allowlist({name: available.entry(name) for name in selected if available.entry(name)}, catalog)
+        return Allowlist({name: entry for name in selected if (entry := available.entry(name)) is not None}, catalog)
     return Allowlist({}, catalog)
 
 
@@ -1050,7 +1050,7 @@ def _load_default_write_entries(settings: Settings, catalog: RegistryCatalog) ->
     writes are off, a live enable refuses.
     """
     allowlist = load_allowlist(settings.model_copy(update={"enable_write_support": True}), catalog)
-    return {name: allowlist.entry(name) for name in catalog.names() if allowlist.entry(name)}
+    return {name: entry for name in catalog.names() if (entry := allowlist.entry(name)) is not None}
 
 
 def create_app(settings: Settings, *, clock: Clock | None = None, connector: Connector | None = None) -> FastAPI:

@@ -215,6 +215,37 @@ async def test_dispatch_route_is_hidden_when_writes_are_disabled() -> None:
     assert response.json()["code"] == "write_disabled"
 
 
+async def test_readiness_stays_red_while_a_dispatch_record_is_unreadable(tmp_path: Path) -> None:
+    """C2 regression: an unreadable dispatch record means battery settings were NOT automatically
+    restored (controller.recover()'s own contract), so a green readiness must not precede that —
+    even once every device otherwise answers heartbeats fine.
+    """
+    device_settings = settings(tmp_path)
+    from app.dispatch.store import DispatchStore
+
+    store = DispatchStore(device_settings.dispatch_db_path, SECRET)
+    store.initialize()
+    from app.dispatch.models import DispatchRecord, DispatchState
+
+    store.put(DispatchRecord("main", state=DispatchState.PRECHECK))
+    with store.connect() as db:
+        db.execute("UPDATE dispatch_operations SET encrypted=? WHERE device_id='main'", (b"garbage",))
+    store.close()
+
+    async with running_app(device_settings) as harness:
+        response = await harness.client.get("/api/v1/readiness", headers=WRITER)
+        assert response.status_code == 503
+        assert harness.runtime.dispatch_recovery_ready is False
+        assert harness.runtime.dispatch.unreadable_devices == ("main",)
+
+
+async def test_readiness_is_green_once_dispatch_recovery_completes_cleanly(tmp_path: Path) -> None:
+    async with running_app(settings(tmp_path)) as harness:
+        response = await harness.client.get("/api/v1/readiness", headers=WRITER)
+        assert response.status_code == 200
+        assert harness.runtime.dispatch_recovery_ready is True
+
+
 def test_dispatch_fixture_contains_exact_write_registers(tmp_path: Path) -> None:
     paths = dispatch_fixtures(tmp_path)
     allowlist = json.loads(paths["write_allowlist_path"].read_text(encoding="utf-8"))

@@ -1852,7 +1852,7 @@
       statusBox.className = `energy-status ${readyState.ready ? 'is-ready' : 'is-blocked'}`;
       // Nothing when healthy; the Setup block replaces the "needs setup" line.
       statusBox.hidden = readyState.ready || readyState.kind === 'setup';
-      statusIcon.textContent = readyState.kind === 'config' ? 'info' : 'info';
+      statusIcon.textContent = 'info';
       statusMain.textContent = readyState.text;
       statusDetail.textContent = readyState.detail || '';
       statusDetail.hidden = !readyState.detail;

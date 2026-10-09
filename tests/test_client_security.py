@@ -154,6 +154,13 @@ def test_two_forwarding_header_lines_are_joined_in_order() -> None:
     assert resolver.resolve("10.0.0.1", headers) == "203.0.113.9"  # the first line is not lost
 
 
+@pytest.mark.parametrize("hop", ["[203.0.113.9", "203.0.113.9]", "[[203.0.113.9]]"])
+def test_malformed_bracketed_forwarded_hop_uses_unknown_bucket(hop: str) -> None:
+    resolver = ClientIpResolver([ip_network("10.0.0.0/8")], "X-Forwarded-For")
+    headers = Headers({"X-Forwarded-For": hop})
+    assert resolver.resolve("10.0.0.1", headers) == "unknown"
+
+
 def test_fully_trusted_forwarding_chain_yields_the_leftmost_hop() -> None:
     """P3: a chain entirely inside trusted_proxies must not collapse to the immediate peer."""
     resolver = ClientIpResolver([ip_network("10.0.0.0/24")], "X-Forwarded-For")
