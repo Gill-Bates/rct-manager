@@ -48,8 +48,8 @@
       if (box.classList.contains('is-leaving')) return;
       box.classList.remove('is-visible');
       box.classList.add('is-leaving');
-      box.addEventListener('transitionend', remove, { once: true });
-      setTimeout(remove, 400); // fallback if the transition does not fire (e.g. display: none ancestor)
+      box.addEventListener('transitionend', (event) => { if (event.target === box && event.propertyName === 'transform') remove(); });
+      setTimeout(remove, 400); // fallback if the transition does not fire (reduced motion, hidden ancestor)
     };
     const arm = () => { started = Date.now(); timer = setTimeout(leave, remaining); };
     // Hover or keyboard focus pauses the countdown so a message can be read without racing it.
@@ -291,9 +291,6 @@
         location.assign('/login');
       } catch (error) { toast(messageFrom(error), 'danger'); }
     });
-    window.addEventListener('beforeunload', (event) => {
-      if (outstandingWork()) { event.preventDefault(); event.returnValue = ''; }
-    });
   }
 
   // Registered during page parse, before any await: event.preventDefault() is the only thing that
@@ -348,9 +345,12 @@
     return [String(status || 'Unknown'), ''];
   }
 
+  // The one text for a metric without a value, whatever the reason; a reason belongs in a tooltip.
+  const NOT_AVAILABLE = 'n/a';
+
   // Splits a reading into number and unit so the card can render the unit smaller than the number.
   function metricParts(value, unit) {
-    if (!Number.isFinite(value)) return ['–', ''];
+    if (!Number.isFinite(value)) return [NOT_AVAILABLE, ''];
     if (unit === 'ratio') { value *= 100; unit = '%'; }
     // `|| 0` turns a rounded negative zero into 0 so the card never shows "-0 W".
     return [new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 }).format(Math.round(value) || 0), unit ? ` ${unit}` : ''];
@@ -967,7 +967,7 @@
     setText(ref.statusText, status);
     // Name, address, last connection and the connection state share two compact header lines.
     syncChildren(ref.top, connected ? [ref.toggle, ref.title, ref.statusBadge] : [ref.toggle, ref.dot, ref.title, ref.statusText]);
-    setText(ref.address, `${device.host || '–'}${device.port ? `:${device.port}` : ''}`);
+    setText(ref.address, `${device.host || NOT_AVAILABLE}${device.port ? `:${device.port}` : ''}`);
     if (device.last_success_at) setText(ref.last, `Last connection: ${formatDate(device.last_success_at, { time: true })}`);
     syncChildren(ref.meta, device.last_success_at ? [ref.address, ref.last] : [ref.address]);
     syncChildren(ref.head, [ref.top, ref.meta]);
@@ -1176,14 +1176,17 @@
     if (!tsdb || !tsdb.configured) {
       icon.textContent = 'cloud_off';
       icon.classList.add('text-secondary');
-      label.textContent = 'Not configured';
+      label.textContent = NOT_AVAILABLE;
+      label.title = 'Not configured'; // the reason stays secondary; the value reads n/a
       time.textContent = '';
       return;
     }
+    label.title = '';
     if (!tsdb.export_enabled) {
       icon.textContent = 'pause_circle';
       icon.classList.add('text-secondary');
-      label.textContent = '–';
+      label.textContent = NOT_AVAILABLE;
+      label.title = 'Export disabled';
     } else if (tsdb.healthy) {
       icon.textContent = 'cloud_done';
       icon.classList.add('text-success');
@@ -1482,7 +1485,7 @@
   }
 
   function formatPower(watts) {
-    if (!Number.isFinite(watts)) return '–';
+    if (!Number.isFinite(watts)) return NOT_AVAILABLE;
     const abs = Math.abs(watts);
     return abs >= 1000 ? `${(abs / 1000).toFixed(2)} kW` : `${Math.round(abs)} W`;
   }
@@ -1490,13 +1493,13 @@
   // Operate and Setup show power in kW; the backend keeps transmitting/storing watts. Rounding
   // boundary is pinned (design §11): < 10000 W -> two decimals (e.g. "0.90 kW"), >= 10000 W -> one.
   function formatPowerKw(watts) {
-    if (!Number.isFinite(watts)) return '–';
+    if (!Number.isFinite(watts)) return NOT_AVAILABLE;
     const abs = Math.abs(watts);
     return `${(abs / 1000).toFixed(abs < 10000 ? 2 : 1)} kW`;
   }
 
   function formatPercent(value) {
-    return Number.isFinite(value) ? `${Math.round(value)} %` : '–';
+    return Number.isFinite(value) ? `${Math.round(value)} %` : NOT_AVAILABLE;
   }
 
   function energyFlowGraphic() {
@@ -1530,7 +1533,7 @@
       group.append(svgEl('text', { class: 'flow-node-icon', x: cx, y: cy, 'aria-hidden': 'true' }, icon));
       const top = place === 'top';
       group.append(svgEl('text', { class: 'flow-node-label', x: cx, y: top ? 16 : cy + 50 }, label));
-      const value = svgEl('text', { class: 'flow-node-value', x: cx, y: top ? 34 : cy + 68 }, '–');
+      const value = svgEl('text', { class: 'flow-node-value', x: cx, y: top ? 34 : cy + 68 }, NOT_AVAILABLE);
       group.append(value);
       svg.append(group);
       nodes[key] = { group, label: group.querySelector('.flow-node-label'), baseLabel: label, value };
@@ -1606,10 +1609,10 @@
 
       const gridWord = grid === null ? '' : Math.abs(grid) < ENERGY_IDLE_WATTS ? 'Idle' : grid > 0 ? 'Import' : 'Export';
       const batteryWord = battery === null ? '' : Math.abs(battery) < ENERGY_IDLE_WATTS ? 'Idle' : battery > 0 ? 'Discharging' : 'Charging';
-      setNode('pv', pv === null ? '–' : formatPower(pv), !!r.pv_power_w.stale);
-      setNode('grid', grid === null ? '–' : formatPower(grid), !!r.grid_power_w.stale);
-      setNode('house', house === null ? '–' : formatPower(house), !!r.house_load_w.stale);
-      setNode('battery', battery === null ? '–' : formatPower(battery), !!r.battery_power_w.stale,
+      setNode('pv', formatPower(pv), !!r.pv_power_w.stale);
+      setNode('grid', formatPower(grid), !!r.grid_power_w.stale);
+      setNode('house', formatPower(house), !!r.house_load_w.stale);
+      setNode('battery', formatPower(battery), !!r.battery_power_w.stale,
         soc === null ? '' : formatPercent(soc));
       const idle = ENERGY_IDLE_WATTS;
       setBadge('generation', pv === null ? null : pv >= idle ? ['Generating', true] : ['No generation', false], !!r.pv_power_w.stale, !!r.pv_power_w.expired);
@@ -1617,10 +1620,10 @@
       setBadge('grid', grid === null ? null : grid <= -idle ? ['Feed-in', true] : grid < idle ? ['Idle', true] : ['Import', false], !!r.grid_power_w.stale, !!r.grid_power_w.expired);
       setBadge('battery', battery === null ? null : battery <= -idle ? ['Charging', true] : battery >= idle ? ['Discharging', false] : ['Idle', false], !!r.battery_power_w.stale, !!r.battery_power_w.expired);
       svg.setAttribute('aria-label', [
-        `PV ${pv === null ? 'unknown' : formatPower(pv)}`,
-        `grid ${grid === null ? 'unknown' : `${formatPower(grid)} ${gridWord.toLowerCase()}`}`,
-        `battery ${battery === null ? 'unknown' : `${formatPower(battery)} ${batteryWord.toLowerCase()}`}`,
-        `house ${house === null ? 'unknown' : formatPower(house)}`,
+        `PV ${formatPower(pv)}`,
+        `grid ${grid === null ? NOT_AVAILABLE : `${formatPower(grid)} ${gridWord.toLowerCase()}`}`,
+        `battery ${battery === null ? NOT_AVAILABLE : `${formatPower(battery)} ${batteryWord.toLowerCase()}`}`,
+        `house ${formatPower(house)}`,
       ].join(', '));
     }
 
@@ -1829,7 +1832,11 @@
     const setupList = element('ul', 'energy-setup-list');
     const setupStep = element('div', 'energy-setup-step');
     setupStep.setAttribute('aria-live', 'polite');
-    setupBox.append(setupHeading, setupList, setupStep);
+    // States that the selected mode is not in effect yet, so the switch is not read as active.
+    const setupLead = element('p', 'small fw-semibold energy-setup-lead mb-2');
+    setupLead.setAttribute('role', 'status');
+    setupLead.hidden = true;
+    setupBox.append(setupHeading, setupLead, setupList, setupStep);
     control.append(setupBox);
 
     const statusBox = element('div', 'energy-status');
@@ -2045,6 +2052,14 @@
       modeNote.hidden = !(device.write_support_enabled === false && shownMode === 'off');
 
       renderSetup(energyChecklist(device));
+      // Selected but blocked by an unfinished setup: show it as pending, not as effective.
+      const pendingSetup = shownMode !== 'off' && device.connected && !lastPoll503 && energyNeedsSetup(energyChecklist(device));
+      for (const value of modeValues) setClass(modeButtons[value], 'is-pending', pendingSetup && value === shownMode);
+      setupLead.hidden = !pendingSetup;
+      if (pendingSetup) {
+        const modeLabel = ENERGY_MODES.find(([value]) => value === shownMode)[1];
+        setupLead.textContent = `${modeLabel} is selected but not active yet. Battery control stays locked until every step below is done.`;
+      }
 
       statusBox.className = `energy-status ${readyState.ready ? 'is-ready' : 'is-blocked'}`;
       // Nothing when healthy; the Setup block replaces the "needs setup" line.
@@ -2538,7 +2553,7 @@
       freshHost.replaceChildren(simpleTable(
         ['Reading', 'Age (s)', 'Stale'],
         Object.entries(device.readings || {}).map(([name, reading]) => [
-          [name], [Number.isFinite(reading && reading.age_seconds) ? Math.round(reading.age_seconds) : '–'],
+          [name], [Number.isFinite(reading && reading.age_seconds) ? Math.round(reading.age_seconds) : NOT_AVAILABLE],
           [reading && reading.stale ? 'Yes' : 'No', reading && reading.stale ? 'text-danger' : ''],
         ]),
       ));
@@ -2733,14 +2748,12 @@
   // Every anchor is block level, and null when the section has no surface on this page.
   // #exposed-list is a <tbody>, so the parameters anchor on prometheus is its table wrapper.
   function anchorFor(id) {
-    if (id === 'export') return document.querySelector('.export-layout');
-    if (id === 'parameters') return document.querySelector(page === 'prometheus' ? '.prometheus-table-wrap' : '#writable-list');
+    if (id === 'parameters') return document.querySelector('.param-table-wrap');
     return document.getElementById('settings-sections');
   }
 
   // A section notice is a sibling *before* its anchor: aria-live="off" plus that placement avoids
-  // the double announcement a node inside the aria-live="polite" #settings-sections would cause, and
-  // keeps the export notice outside .export-layout, which the e2e "no Save button" checks count in.
+  // the double announcement a node inside the aria-live="polite" #settings-sections would cause.
   // `kind` is 'error' (a rejected save) or 'hint' (an incomplete group that is being withheld).
   const NOTICE_IDS = { error: 'save-error', hint: 'save-hint' };
 
@@ -2769,7 +2782,7 @@
   // nothing left to resend; `parameters` reloaded the server's list, so a retry would re-PUT the
   // server's own state and could overwrite a concurrent change from another session.
   const RETRY_ACTIONS = {
-    export: () => { queueExportSettings(); flushSettings({ sections: ['export'] }).catch(() => { }); },
+    export: () => { applyExport().catch(() => { }); },
   };
 
   function renderSectionAlert(id, message) {
@@ -2812,6 +2825,7 @@
         if (hint) hint.textContent = entry.message;
       } else removeNotice(id, 'hint');
     }
+    refreshExportBar();
     const label = $('save-state');
     if (!label) return; // absent on tokens/about/login/change-password; the alerts above are independent
     let top = 'idle';
@@ -2825,20 +2839,14 @@
     label.classList.add(className);
   }
 
-  // Derived on demand instead of a cached counter four writers had to keep correct. `failed` is
-  // deliberately absent: `general` rolled its value back, and `export` failures keep
-  // their keys queued, so genuine leftover work is already covered by hasPending(null).
-  function outstandingWork() {
-    return hasPending(null) || deviceDirty() || parameterDirty || parameterSending || anySection(['saving', 'incomplete']);
-  }
-
   function reportSaveFailure(section, message) {
     setSectionState(section, 'failed', message); // renders the persistent alert
     toast(message, 'danger');                    // unchanged visibility floor, also when the alert is absent
     return sectionAlert(section);
   }
 
-  function restartDebounce() { clearTimeout(settingsTimer); settingsTimer = setTimeout(() => { flushSettings().catch(() => { }); }, 450); }
+  // Only the autosaving 'general' settings use the debounce; the export group is sent by its Apply button.
+  function restartDebounce() { clearTimeout(settingsTimer); settingsTimer = setTimeout(() => { flushSettings({ sections: ['general'] }).catch(() => { }); }, 450); }
 
   function queueSettings(key) {
     pendingKeys.add(key);
@@ -2966,6 +2974,7 @@
       for (const key of keys) {
         if (pendingKeys.has(key)) continue;  // re-queued during the request: that value wins
         if (isSecretKey(key)) continue;      // the committed view holds no raw secret, only _configured
+        if (sectionOf(key) === 'export') continue; // the Apply form keeps what was typed so it can be corrected
         settingsDraft[key] = structuredClone(settingsCommitted[key]);
         const control = $(`setting-${key}`);
         if (!control) continue;
@@ -2980,7 +2989,7 @@
       settingsInFlight = null;
       sendRevisions.clear();               // the map's lifetime is exactly this request
       renderSaveState();
-      if (hasPending(null)) restartDebounce(); // re-arm the 450 ms timer, no recursion
+      if (hasPending(['general'])) restartDebounce(); // re-arm the 450 ms timer, no recursion
     }
   }
 
@@ -3124,32 +3133,9 @@
     { key: 'questdb_retention_days', label: 'Total retention (days)', help: '0 keeps all data. An existing TTL in QuestDB is not overwritten.', type: 'number', min: 0, max: 36500, backend: 'questdb' },
   ];
 
-  function exportControl(field, onChange, variant = 'field') {
-    const { control, label, help } = buildFieldControl(field, settingsDraft[field.key]);
-    let wrap;
-    if (variant === 'master') {
-      wrap = element('div', 'tsdb-master-action form-check form-switch');
-      label.className = 'tsdb-master-state';
-      label.textContent = control.checked ? 'Enabled' : 'Disabled';
-      wrap.append(control, label);
-    } else if (field.type === 'toggle') {
-      wrap = element('div', 'tsdb-toggle-field');
-      label.className = 'tsdb-toggle-label';
-      help.className = 'tsdb-field-help';
-      const copy = element('div', 'tsdb-toggle-copy');
-      const action = element('div', 'tsdb-toggle-control form-check form-switch');
-      copy.append(label, help);
-      action.append(control);
-      wrap.append(copy, action);
-    } else {
-      wrap = element('div', 'tsdb-field');
-      label.className = 'tsdb-field-label';
-      control.classList.add('tsdb-field-control');
-      help.className = 'tsdb-field-help';
-      const body = element('div', 'tsdb-field-body');
-      body.append(control, help);
-      wrap.append(label, body);
-    }
+  function exportControl(field, onChange) {
+    // The shared setting-row (label, control, .form-text) is used as built, like on every other page.
+    const { wrap, control } = buildFieldControl(field, settingsDraft[field.key]);
     // A secret left empty keeps its current value server-side (the PUT handler drops ""), so an
     // empty box must not overwrite settingsDraft and must not autosave on every blur.
     control.addEventListener('change', async () => {
@@ -3169,7 +3155,7 @@
       } else settingsDraft[field.key] = control.value;
       if (['db_type', 'metrics_export_enabled', 'questdb_downsampling'].includes(field.key)) onChange();
       syncTsdbStatusSurfaces();
-      queueExportSettings(field.key);
+      queueExportSettings();
     });
     return wrap;
   }
@@ -3250,28 +3236,52 @@
     return 'Not saved yet.';
   }
 
-  // Export fields autosave as one coherent group: until the active backend's required fields are
-  // all filled, nothing is sent, so the server never has to reject a half-entered combination.
-  // Becoming incomplete again retracts the whole group *and* stops the debounce timer a complete
-  // state had started, so a configuration that regressed inside the window is never sent.
-  function queueExportSettings(changedKey = '') {
+  // The export group is applied explicitly, as one coherent group: nothing is sent while typing.
+  // Apply stays disabled until the active backend's required fields are filled, and the group is
+  // re-validated again at send time (sendSettings), so the server never sees a half-entered combination.
+  function exportChangedKeys() {
     const type = settingsDraft.db_type || '';
-    if (changedKey === 'metrics_export_enabled' && !settingsDraft.metrics_export_enabled) {
+    return exportPayloadKeys(type).filter((key) => (isSecretKey(key)
+      ? Boolean(settingsDraft[key])
+      : JSON.stringify(blankToNull(settingsDraft[key])) !== JSON.stringify(blankToNull(settingsCommitted[key]))));
+  }
+
+  const blankToNull = (value) => (value === '' || value === undefined ? null : value); // an emptied field equals an unset one
+
+  function exportDirty() { return page === 'tsdb' && exportChangedKeys().length > 0; }
+
+  // Marks the draft state; never starts a timer and never sends.
+  function queueExportSettings() {
+    const type = settingsDraft.db_type || '';
+    if (!exportDirty()) setSectionState('export', 'idle');
+    else if (settingsDraft.metrics_export_enabled && !exportReady(type)) setSectionState('export', 'incomplete', missingExportHint(type));
+    else setSectionState('export', 'unsaved');
+    refreshExportBar();
+  }
+
+  // The button is the only visible element of the form's action bar; its native disabled state
+  // tells assistive technology that there is nothing (valid) to apply.
+  function refreshExportBar() {
+    const apply = $('export-apply');
+    if (!apply) return;
+    const incomplete = Boolean(settingsDraft.metrics_export_enabled) && !exportReady(settingsDraft.db_type || '');
+    apply.disabled = settingsSending || !exportDirty() || incomplete;
+    apply.setAttribute('aria-busy', String(settingsSending));
+  }
+
+  async function applyExport() {
+    if (settingsSending) return;
+    const type = settingsDraft.db_type || '';
+    if (settingsDraft.metrics_export_enabled) {
+      if (!exportReady(type)) { queueExportSettings(); return; }
+      pendingExportGroup = true;
+    } else {
       pendingExportGroup = false;
-      pendingKeys.add(changedKey);
-      setSectionState('export', 'unsaved');
-      restartDebounce();
-      return;
+      pendingKeys.add('metrics_export_enabled'); // a disabled export sends only the switch
     }
-    if (!exportReady(type)) {
-      pendingExportGroup = false;
-      setSectionState('export', 'incomplete', missingExportHint(type));
-      if (!hasPending(null)) clearTimeout(settingsTimer);
-      return;
-    }
-    pendingExportGroup = true;
     setSectionState('export', 'unsaved');
-    restartDebounce();
+    await flushSettings({ sections: ['export'] });
+    refreshExportBar();
   }
 
   function tsdbStatusView() {
@@ -3292,19 +3302,11 @@
     const now = hhmm(new Date());
     const status = tsdbStatusView();
     const lines = [[now, type ? `Target: ${backendLabel(type)}` : 'No target database selected'], [now, status.label]];
+    if (status.detail) lines.push([now, status.detail]);
     if (tsdbRuntimeStatus?.last_success_at) {
       lines.push([hhmm(new Date(tsdbRuntimeStatus.last_success_at)), 'Last successful export']);
     }
     return lines;
-  }
-
-  function renderTsdbStatus() {
-    const badge = $('tsdb-status-badge');
-    if (!badge) return;
-    const status = tsdbStatusView();
-    badge.dataset.tone = status.tone;
-    $('tsdb-status-label').textContent = status.label;
-    $('tsdb-status-detail').textContent = status.detail;
   }
 
   function fillTsdbConsole(consoleNode) {
@@ -3318,7 +3320,6 @@
   }
 
   function syncTsdbStatusSurfaces() {
-    renderTsdbStatus();
     const consoleNode = $('tsdb-mini-console');
     if (consoleNode) fillTsdbConsole(consoleNode);
   }
@@ -3329,19 +3330,9 @@
     syncTsdbStatusSurfaces();
   }
 
-  function tsdbSectionHeading(title, description) {
-    const heading = element('div', 'tsdb-section-heading');
-    const copy = element('div', 'tsdb-section-copy');
-    copy.append(element('h2', 'h5 mb-0', title), element('p', 'text-secondary mb-0', description));
-    heading.append(copy);
-    return heading;
-  }
-
-  // Export fields autosave through the shared queueSettings/flushSettings path. This renderer
-  // changes only TSDB composition; controls, validation, secret handling and focus stay shared.
+  // Export fields autosave through the shared queueSettings/flushSettings path. The cards are plain
+  // settings cards (h2.h5 + setting rows) placed straight into the shared .settings-grid.
   function renderExportSettings(host) {
-    const layout = element('div', 'export-layout');
-    host.append(layout);
     const rerender = () => preserveFocus(render);
     const knownField = (key) => exportFields.find((field) => field.key === key && exportFieldKnown(field));
     const fieldVisible = (field, type) => {
@@ -3350,71 +3341,43 @@
       if (field.key === 'questdb_retention_days' && settingsDraft.questdb_downsampling === 'manual') return false;
       return true;
     };
-    const appendFields = (container, group, type) => {
-      for (const field of exportFields) {
-        if (exportGroup(field.key) === group && exportFieldKnown(field) && fieldVisible(field, type)) {
-          container.append(exportControl(field, rerender));
-        }
-      }
-    };
-    const flowRow = (className, title, description, field) => {
-      const section = element('section', `card tsdb-flow-row ${className}`);
+    const card = (name, title, nodes) => {
+      const section = element('section', `card export-card export-card-${name}`);
       const body = element('div', 'card-body');
-      const control = element('div', 'tsdb-flow-control');
-      control.append(exportControl(field, rerender, field.key === 'metrics_export_enabled' ? 'master' : 'field'));
-      body.append(tsdbSectionHeading(title, description), control);
+      body.append(element('h2', 'h5 mb-3', title), ...nodes);
       section.append(body);
       return section;
     };
-    const parameterCard = (group, title, description, type) => {
-      const section = element('section', `card export-card export-card-${group.toLowerCase()}`);
-      const body = element('div', 'card-body');
-      body.append(tsdbSectionHeading(title, description));
-      if (group === 'Connection') {
-        const columns = element('div', 'tsdb-connection-grid');
-        const address = element('div', 'tsdb-control-list');
-        const options = element('div', 'tsdb-toggle-list');
-        for (const field of exportFields) {
-          if (exportGroup(field.key) !== group || !exportFieldKnown(field) || !fieldVisible(field, type)) continue;
-          (field.type === 'toggle' ? options : address).append(exportControl(field, rerender));
-        }
-        columns.append(address, options);
-        body.append(columns);
-      } else appendFields(body, group, type);
-      section.append(body);
-      return section;
-    };
+    const groupCard = (group, title, type) => card(group.toLowerCase(), title,
+      exportFields.filter((field) => exportGroup(field.key) === group && exportFieldKnown(field) && fieldVisible(field, type))
+        .map((field) => exportControl(field, rerender)));
     const render = () => {
       const type = settingsDraft.db_type || '';
       const enabled = Boolean(settingsDraft.metrics_export_enabled);
-      const flow = element('div', 'tsdb-flow');
-      flow.append(flowRow('tsdb-master-row', 'Export to time-series database', 'Periodically push metrics to the selected target database.', knownField('metrics_export_enabled')));
-      if (enabled) {
-        flow.append(flowRow('tsdb-target-row', 'Target database', 'Select the time-series database to export metrics to.', knownField('db_type')));
-      }
+      const cards = [card('control', 'Export to time-series database',
+        [knownField('metrics_export_enabled'), enabled ? knownField('db_type') : null]
+          .filter(Boolean).map((field) => exportControl(field, rerender)))];
       if (enabled && type) {
-        const grid = element('div', 'export-grid');
-        grid.append(
-          // Row 1 pairs what belongs together (target and how to reach it); row 2 holds export and log.
-          parameterCard('Database', 'Target database settings', `Connection details for ${backendLabel(type)}.`, type),
-          parameterCard('Connection', 'Connection', 'Configure how to reach the database.', type),
-          parameterCard('Export', 'Export settings', 'Control how often data is pushed and how much is retained.', type),
-        );
-        const consoleCard = element('section', 'card export-card export-card-console');
-        const consoleBody = element('div', 'card-body');
         const consoleNode = element('div', 'tsdb-console');
         consoleNode.id = 'tsdb-mini-console';
         consoleNode.setAttribute('role', 'log');
         consoleNode.setAttribute('aria-live', 'polite');
         fillTsdbConsole(consoleNode);
-        consoleBody.append(tsdbSectionHeading('Status & log', 'Current state and recent events.'), consoleNode);
-        consoleCard.append(consoleBody);
-        grid.append(consoleCard);
-        flow.append(grid);
+        cards.push(
+          groupCard('Database', 'Target database settings', type),
+          groupCard('Connection', 'Connection', type),
+          groupCard('Export', 'Export settings', type),
+          card('console', 'Status & Log', [consoleNode]),
+        );
       }
-      layout.replaceChildren(flow);
+      host.replaceChildren(...cards);
       syncTsdbStatusSurfaces();
+      refreshExportBar();
     };
+    $('export-actions')?.replaceChildren(buildApplyBar('export', {
+      onApply: () => { applyExport().catch((error) => toast(messageFrom(error), 'danger')); },
+      compact: true,
+    }));
     render();
   }
 
@@ -3702,30 +3665,46 @@
     refreshDeviceState(card);
   }
 
-  function buildDeviceApplyBar(card) {
-    const bar = element('div', 'device-apply-bar mt-4');
+  // The shared Apply/Discard bar of every explicit-apply form; `prefix` namespaces the element ids.
+  // `compact` renders the button alone (no Discard, change count or status text).
+  function buildApplyBar(prefix, { onApply, onDiscard, applyLabel = 'Apply changes', compact = false }) {
+    const bar = element('div', compact ? 'apply-bar' : 'apply-bar mt-4');
     const actions = element('div', 'd-flex flex-wrap align-items-center gap-2');
-    const apply = element('button', 'btn btn-primary', 'Apply changes');
+    const apply = element('button', 'btn btn-primary', applyLabel);
     apply.type = 'button';
-    apply.id = 'device-apply';
-    apply.setAttribute('aria-describedby', 'device-apply-status');
-    apply.addEventListener('click', () => { applyDevices(card).catch((error) => toast(messageFrom(error), 'danger')); });
+    apply.id = `${prefix}-apply`;
+    if (!compact) apply.setAttribute('aria-describedby', `${prefix}-apply-status`);
+    apply.addEventListener('click', onApply);
+    if (compact) {
+      actions.append(apply);
+      bar.append(actions);
+      return bar;
+    }
     const discard = element('button', 'btn btn-outline-secondary', 'Discard');
     discard.type = 'button';
-    discard.id = 'device-discard';
-    discard.addEventListener('click', discardDeviceChanges);
+    discard.id = `${prefix}-discard`;
+    discard.addEventListener('click', onDiscard);
     const count = element('span', 'badge text-bg-warning');
-    count.id = 'device-change-count';
+    count.id = `${prefix}-change-count`;
     actions.append(apply, discard, count);
-    const warning = element('div', 'alert alert-warning small mt-3 mb-0');
-    warning.id = 'device-reset-warning';
     const status = element('p', 'text-secondary small mt-2 mb-0');
-    status.id = 'device-apply-status';
+    status.id = `${prefix}-apply-status`;
     status.setAttribute('role', 'status'); // polite live region: progress and result are announced
     const error = element('div', 'alert alert-danger mt-3 mb-0');
-    error.id = 'device-apply-error';
+    error.id = `${prefix}-apply-error`;
     error.tabIndex = -1; // focus target after a failed apply; the toast carries the same text
-    bar.append(actions, warning, status, error);
+    bar.append(actions, status, error);
+    return bar;
+  }
+
+  function buildDeviceApplyBar(card) {
+    const bar = buildApplyBar('device', {
+      onApply: () => { applyDevices(card).catch((error) => toast(messageFrom(error), 'danger')); },
+      onDiscard: discardDeviceChanges,
+    });
+    const warning = element('div', 'alert alert-warning small mt-3 mb-0');
+    warning.id = 'device-reset-warning';
+    bar.querySelector('#device-apply-status').before(warning);
     return bar;
   }
 
@@ -3881,7 +3860,9 @@
   let parameterSending = false;
   let parameterTimer = null;
   let exposedPage = 0;
+  let writablePage = 0;
   const addMetricSelection = new Set();
+  const writableSelection = new Set();
   const EXPOSED_PAGE_SIZE = 15;
 
   function renderPrometheusSummary() {
@@ -3906,7 +3887,7 @@
   // Reloads the Writable parameters list and the Energy checklist after the server changed them.
   async function refreshWriteApprovals() {
     try {
-      if ($('write-search') && !parameterDirty && !parameterSending) { parameterData = await api('parameters'); renderParameters(); }
+      if ($('writable-list') && !parameterDirty && !parameterSending) { parameterData = await api('parameters'); renderParameters(); }
       if ($('energy-list')) pollEnergy();
     } catch (error) { toast(messageFrom(error), 'danger'); }
   }
@@ -3938,24 +3919,86 @@
     }
   }
 
+  // Shared by the Prometheus and Inverters parameter tables: the row "..." menu, the 15-row pager
+  // and the checkbox row of the add modals.
+  function parameterActionMenu(name, actions, describedBy) {
+    const cell = element('td', 'col-actions text-end');
+    const menu = element('div', 'dropdown');
+    const toggle = element('button', 'btn btn-outline-secondary btn-sm metric-menu-toggle');
+    toggle.type = 'button'; toggle.dataset.bsToggle = 'dropdown'; toggle.setAttribute('aria-expanded', 'false');
+    toggle.setAttribute('aria-label', `Actions for ${name}`);
+    if (describedBy) toggle.setAttribute('aria-describedby', describedBy);
+    toggle.append(element('span', 'material-icons', 'more_horiz'));
+    const options = element('ul', 'dropdown-menu dropdown-menu-end');
+    for (const { key, label, run, disabled = false } of actions) {
+      const item = element('li');
+      const button = element('button', 'dropdown-item', label);
+      button.type = 'button'; button.disabled = disabled; button.dataset.action = key;
+      button.setAttribute('aria-label', `${label}: ${name}`);
+      button.addEventListener('click', run);
+      item.append(button); options.append(item);
+    }
+    menu.append(toggle, options); cell.append(menu);
+    return cell;
+  }
+
+  // Fills <prefix>-list with one page of `entries`, and drives <prefix>-range/-prev/-next. Returns the page.
+  function renderParameterTable(prefix, entries, page, buildRow, emptyText, columns, noun) {
+    const body = $(`${prefix}-list`);
+    const pages = Math.max(1, Math.ceil(entries.length / EXPOSED_PAGE_SIZE));
+    const current = Math.min(page, pages - 1);
+    entries.slice(current * EXPOSED_PAGE_SIZE, (current + 1) * EXPOSED_PAGE_SIZE).forEach((entry) => body.append(buildRow(entry)));
+    if (!entries.length) {
+      const empty = element('tr');
+      const cell = element('td', 'text-secondary py-4', emptyText);
+      cell.colSpan = columns; empty.append(cell); body.append(empty);
+    }
+    $(`${prefix}-range`).textContent = entries.length ? `${current * EXPOSED_PAGE_SIZE + 1}–${Math.min((current + 1) * EXPOSED_PAGE_SIZE, entries.length)} of ${entries.length}` : `0 ${noun}`;
+    $(`${prefix}-prev`).disabled = current === 0;
+    $(`${prefix}-next`).disabled = current >= pages - 1;
+    return current;
+  }
+
+  // Parameter names have no spaces; <wbr> after each underscore gives them clean break points.
+  function appendBreakableName(cell, name) {
+    const parts = name.split('_');
+    parts.forEach((part, index) => {
+      cell.append(document.createTextNode(index < parts.length - 1 ? `${part}_` : part));
+      if (index < parts.length - 1) cell.append(document.createElement('wbr'));
+    });
+  }
+
+  function parameterCheckRow(parameter, selection, ariaPrefix, onChange) {
+    const label = element('label', 'parameter-item');
+    const box = element('input', 'form-check-input');
+    box.type = 'checkbox'; box.value = parameter.name; box.checked = selection.has(parameter.name);
+    box.setAttribute('aria-label', `${ariaPrefix} ${parameter.name}`);
+    box.addEventListener('change', () => {
+      if (box.checked) selection.add(parameter.name);
+      else selection.delete(parameter.name);
+      onChange();
+    });
+    const main = element('span', 'parameter-main');
+    main.append(element('strong', '', parameter.name));
+    if (parameter.description) main.append(element('small', 'text-secondary', parameter.description));
+    label.append(box, main);
+    return label;
+  }
+
   function exposedMetricRow(parameter, index) {
     const row = element('tr', 'metric-row');
     row.dataset.name = parameter.name;
-    const dragCell = element('td');
+    const dragCell = element('td', 'col-handle');
     const handle = element('span', 'material-icons metric-drag-handle', 'drag_indicator');
     handle.draggable = true;
     handle.title = `Drag to reorder ${parameter.name}`;
     handle.setAttribute('aria-hidden', 'true');
     handle.addEventListener('dragstart', (event) => { event.dataTransfer.setData('text/plain', parameter.name); event.dataTransfer.effectAllowed = 'move'; });
     dragCell.append(handle);
-    const nameCell = element('th', 'metric-name');
+    const nameCell = element('th', 'col-name metric-name');
     nameCell.scope = 'row';
     nameCell.title = parameter.name;
-    const nameParts = parameter.name.split('_');
-    nameParts.forEach((part, partIndex) => {
-      nameCell.append(document.createTextNode(partIndex < nameParts.length - 1 ? `${part}_` : part));
-      if (partIndex < nameParts.length - 1) nameCell.append(document.createElement('wbr'));
-    });
+    appendBreakableName(nameCell, parameter.name);
     // Below 768px the description column is hidden, so the description moves into an expandable
     // native <details> inside the name cell instead of being unavailable there.
     if (parameter.description) {
@@ -3963,32 +4006,18 @@
       mobile.append(element('summary', '', 'Description'), element('span', '', parameter.description));
       nameCell.append(mobile);
     }
-    const descriptionCell = element('td', 'text-secondary');
+    const descriptionCell = element('td', 'col-description text-secondary');
     descriptionCell.append(element('span', 'metric-description', parameter.description || '—'));
     if (parameter.description) descriptionCell.title = parameter.description;
-    const actionCell = element('td', 'text-end');
-    const menu = element('div', 'dropdown');
-    const toggle = element('button', 'btn btn-outline-secondary btn-sm metric-menu-toggle');
-    toggle.type = 'button'; toggle.dataset.bsToggle = 'dropdown'; toggle.setAttribute('aria-expanded', 'false');
-    toggle.setAttribute('aria-label', `Actions for ${parameter.name}`);
-    toggle.append(element('span', 'material-icons', 'more_horiz'));
-    const options = element('ul', 'dropdown-menu dropdown-menu-end');
-    const action = (label, callback, disabled, key) => {
-      const item = element('li');
-      const button = element('button', 'dropdown-item', label);
-      button.type = 'button'; button.disabled = disabled; button.dataset.action = key;
-      button.setAttribute('aria-label', `${label}: ${parameter.name}`);
-      button.addEventListener('click', callback);
-      item.append(button); options.append(item);
-    };
-    action('Move up', () => moveParameter(parameter.name, -1), index === 0, 'up');
-    action('Move down', () => moveParameter(parameter.name, 1), index === parameterData.exposed_names.length - 1, 'down');
-    action('Remove', () => {
-      parameterData.exposed_names = parameterData.exposed_names.filter((name) => name !== parameter.name);
-      queueParameters(); renderParameters();
-      $('exposed-search').focus();
-    }, false, 'remove');
-    menu.append(toggle, options); actionCell.append(menu);
+    const actionCell = parameterActionMenu(parameter.name, [
+      { key: 'up', label: 'Move up', disabled: index === 0, run: () => moveParameter(parameter.name, -1) },
+      { key: 'down', label: 'Move down', disabled: index === parameterData.exposed_names.length - 1, run: () => moveParameter(parameter.name, 1) },
+      { key: 'remove', label: 'Remove', run: () => {
+        parameterData.exposed_names = parameterData.exposed_names.filter((name) => name !== parameter.name);
+        queueParameters(); renderParameters();
+        $('exposed-search').focus();
+      } },
+    ]);
     row.append(dragCell, nameCell, descriptionCell, actionCell);
     row.addEventListener('dragover', (event) => { event.preventDefault(); row.classList.add('drag-over'); });
     row.addEventListener('dragleave', () => row.classList.remove('drag-over'));
@@ -3997,20 +4026,51 @@
   }
 
   function availableMetricRow(parameter) {
-    const label = element('label', 'parameter-item');
-    const box = element('input', 'form-check-input');
-    box.type = 'checkbox'; box.value = parameter.name; box.checked = addMetricSelection.has(parameter.name);
-    box.setAttribute('aria-label', `Add ${parameter.name}`);
-    box.addEventListener('change', () => {
-      if (box.checked) addMetricSelection.add(parameter.name);
-      else addMetricSelection.delete(parameter.name);
-      updateAddMetricsCount();
-    });
-    const main = element('span', 'parameter-main');
-    main.append(element('strong', '', parameter.name));
-    if (parameter.description) main.append(element('small', 'text-secondary', parameter.description));
-    label.append(box, main);
-    return label;
+    return parameterCheckRow(parameter, addMetricSelection, 'Add', updateAddMetricsCount);
+  }
+
+  function writableParameterRow(parameter) {
+    const row = element('tr', 'metric-row');
+    row.dataset.name = parameter.name;
+    const nameCell = element('th', 'col-name metric-name');
+    nameCell.scope = 'row';
+    nameCell.title = parameter.name;
+    appendBreakableName(nameCell, parameter.name);
+    const mobileText = [parameter.description, parameter.help_text].filter(Boolean);
+    // Below 768px the description column is hidden; same disclosure as the Prometheus table.
+    if (mobileText.length) {
+      const mobile = element('details', 'metric-description-mobile');
+      mobile.append(element('summary', '', 'Description'), element('span', '', mobileText.join(' ')));
+      nameCell.append(mobile);
+    }
+    const descriptionCell = element('td', 'col-description text-secondary');
+    descriptionCell.append(element('span', 'metric-description', parameter.description || '—'));
+    let helpId = '';
+    if (parameter.help_text) {
+      // Visible text rather than a tooltip, and tied to the row menu so a screen reader reads it
+      // with the control. Parameter names match [a-z][a-z0-9_]{0,63}, so the id stays unique.
+      const help = element('small', 'parameter-help d-block mt-1', parameter.help_text);
+      help.id = `write-help-${parameter.name}`;
+      helpId = help.id;
+      descriptionCell.append(help);
+    }
+    const actionCell = parameterActionMenu(parameter.name, [
+      { key: 'revoke', label: 'Remove write access', run: () => {
+        parameterData.write_names = parameterData.write_names.filter((name) => name !== parameter.name);
+        queueParameters(); renderParameters();
+        $('writable-search').focus();
+      } },
+    ], helpId);
+    row.append(nameCell, descriptionCell, actionCell);
+    return row;
+  }
+
+  function updateAddWritableCount() {
+    if (page !== 'inverters') return;
+    const count = writableSelection.size;
+    $('add-writable-count').textContent = `${count} selected`;
+    $('confirm-add-writable').textContent = count ? `Add ${count} parameters` : 'Add parameters';
+    $('confirm-add-writable').disabled = !count;
   }
 
   function updateAddMetricsCount() {
@@ -4046,66 +4106,47 @@
 
   function renderParameters() {
     const names = new Map(parameterData.available.map((item) => [item.name, item]));
-    const exposedSearch = ($('exposed-search')?.value || '').trim().toLocaleLowerCase();
-    const availableSearch = ($('parameter-search')?.value || '').trim().toLocaleLowerCase();
-    const writeSearch = ($('write-search')?.value || '').trim().toLocaleLowerCase('en-GB');
+    const normalise = (id) => ($(id)?.value || '').trim().toLocaleLowerCase('en-GB');
     const matches = (item, term) => `${item.name} ${item.description || ''} ${item.help_text || ''}`.toLocaleLowerCase('en-GB').includes(term);
-    const exposed = $('exposed-list') || element('tbody');
+    const exposedSearch = normalise('exposed-search');
+    const availableSearch = normalise('parameter-search');
+    const writeSearch = normalise('writable-search');
+    const writeAvailableSearch = normalise('writable-available-search');
     const available = $('available-list') || element('div');
-    const writable = $('writable-list') || element('div');
-    exposed.replaceChildren(); available.replaceChildren(); writable.replaceChildren();
+    const writableAvailable = $('writable-available-list') || element('div');
+    $('exposed-list')?.replaceChildren(); $('writable-list')?.replaceChildren();
+    available.replaceChildren(); writableAvailable.replaceChildren();
     if ($('exposed-list')) {
       const filtered = parameterData.exposed_names
         .map((name, index) => ({ item: names.get(name), index }))
         .filter(({ item }) => item?.exportable !== false && item && matches(item, exposedSearch));
-      const pages = Math.max(1, Math.ceil(filtered.length / EXPOSED_PAGE_SIZE));
-      exposedPage = Math.min(exposedPage, pages - 1);
-      for (const { item, index } of filtered.slice(exposedPage * EXPOSED_PAGE_SIZE, (exposedPage + 1) * EXPOSED_PAGE_SIZE)) exposed.append(exposedMetricRow(item, index));
-      if (!filtered.length) {
-        const empty = element('tr');
-        const cell = element('td', 'text-secondary py-4', exposedSearch ? 'No matching metrics.' : 'No metrics selected.');
-        cell.colSpan = 4; empty.append(cell); exposed.append(empty);
-      }
-      $('exposed-range').textContent = filtered.length ? `${exposedPage * EXPOSED_PAGE_SIZE + 1}–${Math.min((exposedPage + 1) * EXPOSED_PAGE_SIZE, filtered.length)} of ${filtered.length}` : '0 metrics';
-      $('exposed-prev').disabled = exposedPage === 0;
-      $('exposed-next').disabled = exposedPage >= pages - 1;
+      exposedPage = renderParameterTable('exposed', filtered, exposedPage, ({ item, index }) => exposedMetricRow(item, index),
+        exposedSearch ? 'No matching metrics.' : 'No metrics selected.', 4, 'metrics');
       renderPrometheusSummary();
     }
+    if ($('writable-list')) {
+      const granted = parameterData.write_names.map((name) => names.get(name)).filter((item) => item?.writable && matches(item, writeSearch));
+      writablePage = renderParameterTable('writable', granted, writablePage, writableParameterRow,
+        writeSearch ? 'No matching parameters.' : 'No writable parameters selected.', 3, 'parameters');
+    }
     let availableMatches = 0;
+    let writableMatches = 0;
     for (const item of parameterData.available) {
       if (page === 'prometheus' && item.exportable !== false && !parameterData.exposed_names.includes(item.name) && matches(item, availableSearch)) {
         availableMatches += 1;
         if (availableMatches <= 100) available.append(availableMetricRow(item));
       }
-      if (page !== 'inverters') continue;
-      if (!item.writable || !matches(item, writeSearch)) continue;
-      const row = element('label', 'parameter-item');
-      const box = element('input', 'form-check-input');
-      box.type = 'checkbox';
-      box.checked = parameterData.write_names.includes(item.name);
-      box.setAttribute('aria-label', `Write access for ${item.name}`);
-      box.addEventListener('change', () => {
-        parameterData.write_names = box.checked ? [...parameterData.write_names, item.name] : parameterData.write_names.filter((name) => name !== item.name);
-        queueParameters();
-      });
-      const description = element('span', 'parameter-main');
-      description.append(element('strong', '', item.name));
-      if (item.description) description.append(element('small', 'text-secondary', item.description));
-      if (item.help_text) {
-        // Visible text rather than a tooltip, and tied to the checkbox so a screen reader reads it
-        // with the control. Parameter names match [a-z][a-z0-9_]{0,63}, so the id stays unique.
-        const help = element('small', 'parameter-help', item.help_text);
-        help.id = `write-help-${item.name}`;
-        box.setAttribute('aria-describedby', help.id);
-        description.append(help);
+      if (page === 'inverters' && item.writable && !parameterData.write_names.includes(item.name) && matches(item, writeAvailableSearch)) {
+        writableMatches += 1;
+        if (writableMatches <= 100) writableAvailable.append(parameterCheckRow(item, writableSelection, 'Allow writing', updateAddWritableCount));
       }
-      row.append(box, description);
-      writable.append(row);
     }
     if (availableMatches > 100) available.append(element('p', 'text-secondary small', `${availableMatches - 100} more metrics. Refine the search to select them.`));
+    if (writableMatches > 100) writableAvailable.append(element('p', 'text-secondary small', `${writableMatches - 100} more parameters. Refine the search to select them.`));
     if (page === 'prometheus' && !available.childElementCount) available.append(element('p', 'text-secondary small', availableSearch ? 'No matching metrics.' : 'All metrics are exposed.'));
-    if (page === 'inverters' && !writable.childElementCount) writable.append(element('p', 'text-secondary small', writeSearch ? 'No matching parameters.' : 'No writable parameters available.'));
+    if (page === 'inverters' && !writableAvailable.childElementCount) writableAvailable.append(element('p', 'text-secondary small', writeAvailableSearch ? 'No matching parameters.' : 'All writable parameters are selected.'));
     updateAddMetricsCount();
+    updateAddWritableCount();
   }
 
   async function initParameters() {
@@ -4119,7 +4160,20 @@
     $('exposed-search')?.addEventListener('input', () => { exposedPage = 0; renderParameters(); });
     $('exposed-prev')?.addEventListener('click', () => { exposedPage -= 1; renderParameters(); });
     $('exposed-next')?.addEventListener('click', () => { exposedPage += 1; renderParameters(); });
-    $('write-search')?.addEventListener('input', renderParameters);
+    $('writable-search')?.addEventListener('input', () => { writablePage = 0; renderParameters(); });
+    $('writable-prev')?.addEventListener('click', () => { writablePage -= 1; renderParameters(); });
+    $('writable-next')?.addEventListener('click', () => { writablePage += 1; renderParameters(); });
+    $('writable-available-search')?.addEventListener('input', renderParameters);
+    $('confirm-add-writable')?.addEventListener('click', () => {
+      const additions = parameterData.available.filter((item) => writableSelection.has(item.name) && item.writable && !parameterData.write_names.includes(item.name)).map((item) => item.name);
+      if (!additions.length) return;
+      parameterData.write_names.push(...additions);
+      writableSelection.clear();
+      queueParameters(); renderParameters();
+      window.bootstrap.Modal.getInstance($('add-writable-modal'))?.hide();
+    });
+    $('add-writable-modal')?.addEventListener('shown.bs.modal', () => $('writable-available-search').focus());
+    $('add-writable-modal')?.addEventListener('hidden.bs.modal', () => { writableSelection.clear(); $('writable-available-search').value = ''; renderParameters(); });
     $('confirm-add-metrics')?.addEventListener('click', () => {
       const additions = parameterData.available.filter((item) => addMetricSelection.has(item.name) && item.exportable !== false && !parameterData.exposed_names.includes(item.name)).map((item) => item.name);
       if (!additions.length) return;

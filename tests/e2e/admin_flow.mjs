@@ -1083,7 +1083,7 @@ check('the Apply button has an accessible name and a described status region',
   (await page.locator('#device-apply').innerText()).trim() === 'Apply changes'
   && (await page.locator('#device-apply').getAttribute('aria-describedby')) === 'device-apply-status'
   && (await page.locator('#device-apply-status').getAttribute('role')) === 'status');
-check('a clean draft does not trigger the unload warning', !(await unloadWarns()));
+check('a clean draft shows no browser warning', !(await unloadWarns()));
 
 // (b)-(d) invalid rows: field-level errors as before, Apply stays disabled, nothing is sent
 const putsBefore = devicePuts.length;
@@ -1118,7 +1118,7 @@ bar = await barState();
 check('the changed row is marked as unsaved', state.flag.includes('New') && state.flag.includes('unsaved'), JSON.stringify(state));
 check('the draft is counted and Apply is enabled', bar.apply && bar.discard && bar.count === '1 unsaved change' && bar.status.includes('Unsaved changes'), JSON.stringify(bar));
 check('a new inverter needs no reset warning', bar.warning === '', bar.warning);
-check('leaving with an unsaved draft triggers the unload warning', await unloadWarns());
+check('leaving with an unsaved draft shows no browser warning', !(await unloadWarns()));
 await deviceField(1, 'port').fill('18899');
 await clearToasts();
 await page.click('#device-apply');
@@ -1130,7 +1130,7 @@ check('the PUT carries nothing but the device list', Object.keys(devicePuts.at(-
 check('Apply keeps the dialog open and the server has the new inverter', (await modalOpen()) === 1 && (await serverDevices()).some((d) => d.host === '192.0.2.10' && Number(d.port) === 18899));
 bar = await barState();
 check('after a successful apply the draft is the server state', !bar.apply && !bar.discard && bar.count === '' && /^Applied \d\d:\d\d/.test(bar.status) && (await deviceRows()) === 3, JSON.stringify(bar));
-check('no unload warning after apply', !(await unloadWarns()));
+check('no browser warning after apply', !(await unloadWarns()));
 await shot('inverter-added');
 
 // (f) Discard drops the draft without a request
@@ -1294,36 +1294,59 @@ check('inverters page retains write access', (await page.locator('#setting-enabl
 check('inverter editor moved to the dashboard', (await page.locator('.device-settings').count()) === 0);
 check('inverters page has the writable list', (await page.locator('#writable-list').count()) === 1);
 check('exposed list is not on the inverters page', (await page.locator('#exposed-list').count()) === 0);
+// The writable parameters use the same table, search, pager and row menu as the Prometheus page.
+await page.waitForSelector('#writable-list .metric-row, #writable-list td');
+check('writable table has the Prometheus pager wording', /^(\d+–\d+ of \d+|0 parameters)$/.test((await page.locator('#writable-range').innerText()).trim()));
+check('writable table shows at most 15 rows', (await page.locator('#writable-list .metric-row').count()) <= 15);
+await page.click('#open-add-writable');
+await page.waitForSelector('#add-writable-modal.show #writable-available-list input[type="checkbox"]');
+const grantee = await page.locator('#writable-available-list input[type="checkbox"]').first().getAttribute('value');
+await page.locator('#writable-available-list input[type="checkbox"]').first().check();
+await page.click('#confirm-add-writable');
+await page.waitForSelector('#add-writable-modal', { state: 'hidden' });
+await page.fill('#writable-search', grantee);
+await page.waitForSelector(`#writable-list .metric-row[data-name="${grantee}"]`);
+check('added parameter appears in the writable table', true);
+await page.click(`#writable-list .metric-row[data-name="${grantee}"] .metric-menu-toggle`);
+await page.click(`#writable-list button[aria-label="Remove write access: ${grantee}"]`);
+await page.waitForFunction((name) => !document.querySelector(`#writable-list .metric-row[data-name="${name}"]`), grantee);
+check('row menu removes write access', (await page.locator('#writable-list td.text-secondary').count()) === 1);
 await page.goto(base + '/ui/tsdb');
 await page.waitForSelector('#setting-db_type');
 await page.locator('#setting-metrics_export_enabled').click({ force: true });
 check('disabled export hides every dependent TSDB section',
-  (await page.locator('.export-grid').count()) === 0
+  (await page.locator('.export-card').count()) === 1
   && (await page.locator('#setting-db_type, #setting-metrics_export_interval_seconds, #tsdb-mini-console').count()) === 0);
-await page.waitForFunction(async () => !(await (await fetch('/admin/api/settings')).json()).settings.metrics_export_enabled);
+await sleep(900);
+check('the enable switch is not saved without Apply',
+  (await (await context.request.get(base + '/admin/api/settings')).json()).settings.metrics_export_enabled === true
+  && (await page.isEnabled('#export-apply')));
 await page.locator('#setting-metrics_export_enabled').click({ force: true });
 await page.waitForSelector('#setting-db_type');
+check('switching back to the saved state leaves nothing to apply', await page.isDisabled('#export-apply'));
 await page.locator('#setting-db_type').selectOption('questdb');
 check('tsdb page shows backend fields', (await page.locator('#setting-questdb_hostname').count()) === 1);
 check('docs toggle lives on settings only', (await page.locator('#setting-docs_public').count()) === 0);
 
-// 6c. TSDB export cards: all cards visible, two-column grid on large screens, autosave (no Save button)
+// 6c. TSDB export cards: all cards visible in the shared grid; changes are sent by Apply only
+const tsdbPuts = [];
+page.on('request', (r) => { if (r.method() === 'PUT' && r.url().endsWith('/admin/api/settings')) tsdbPuts.push(r.postData()); });
 await sleep(200);
-check('questdb backend shows all four export cards', (await page.locator('.export-grid > .card').count()) === 4);
+check('questdb backend shows all five export cards', (await page.locator('#settings-sections > .export-card').count()) === 5);
 check('retention lives in Export settings', (await page.locator('.export-card-export #setting-questdb_downsampling').count()) === 1);
 check('TSDB page has a runtime mini console', (await page.locator('#tsdb-mini-console').count()) === 1);
-check('TSDB status badge and console share the runtime state',
-  (await page.locator('#tsdb-status-label').innerText()).trim().length > 0
-  && (await page.locator('#tsdb-mini-console').innerText()).includes((await page.locator('#tsdb-status-label').innerText()).trim()));
-check('no explicit Save button on the TSDB page', (await page.locator('.export-layout button, #settings-sections button:has-text("Save")').count()) === 0);
-const questdbColumns = await page.evaluate(() => new Set([...document.querySelectorAll('.export-grid > .card')].map((c) => Math.round(c.getBoundingClientRect().left))).size);
-check('export grid is two columns on large screens', questdbColumns === 2, String(questdbColumns));
-const exportRows = await page.evaluate(() => [...document.querySelectorAll('.export-grid > .card')].map((card) => ({
-  top: Math.round(card.getBoundingClientRect().top), height: Math.round(card.getBoundingClientRect().height),
-})));
-check('export cards align by row without forced equal heights', exportRows.length === 4
-  && exportRows[0].top === exportRows[1].top
-  && exportRows[2].top === exportRows[3].top,
+check('TSDB status lives in the Status & Log console, which announces it politely',
+  (await page.locator('#tsdb-mini-console').innerText()).trim().length > 0
+  && (await page.locator('#tsdb-mini-console').getAttribute('role')) === 'log'
+  && (await page.locator('#tsdb-status-badge').count()) === 0);
+check('no explicit Save button on the TSDB page', (await page.locator('.export-card button, #settings-sections button:has-text("Save")').count()) === 0);
+// The cards sit in the shared settings grid: cards of one row end at the same height.
+const exportRows = await page.evaluate(() => [...document.querySelectorAll('#settings-sections > .export-card')].map((card) => {
+  const box = card.getBoundingClientRect();
+  return { top: Math.round(box.top), bottom: Math.round(box.bottom) };
+}));
+check('export cards of one grid row share top and bottom edge',
+  exportRows.length === 5 && exportRows.every((row) => row.top !== exportRows[0].top || row.bottom === exportRows[0].bottom),
   JSON.stringify(exportRows));
 await page.locator('#setting-questdb_downsampling').selectOption('manual');
 check('manual retention shows raw days but hides total days',
@@ -1334,21 +1357,36 @@ check('off retention shows total days but hides raw days',
   (await page.locator('#setting-questdb_retention_days').count()) === 1
   && (await page.locator('#setting-questdb_raw_retention_days').count()) === 0);
 
-// Autosave is withheld until the backend's required fields are complete (questdb needs only the hostname).
+// Nothing is sent while typing; Apply is disabled until the backend's required fields are complete
+// (questdb needs only the hostname).
 await sleep(500);
-check('incomplete backend config is not sent yet', (await (await context.request.get(base + '/admin/api/settings')).json()).settings.db_type !== 'questdb');
+check('incomplete backend config is not sent', (await (await context.request.get(base + '/admin/api/settings')).json()).settings.db_type !== 'questdb' && tsdbPuts.length === 0);
+check('Apply stays disabled while a required field is missing', await page.isDisabled('#export-apply'));
 await page.locator('#setting-questdb_hostname').fill('questdb.example.org');
 await page.locator('#setting-questdb_hostname').dispatchEvent('change');
-await page.waitForFunction(() => document.getElementById('toast-region').textContent.includes('saved') || document.getElementById('toast-region').textContent.includes('restart'), null, { timeout: 8000 }).catch(() => { });
-await sleep(600);
+await sleep(900);
 let settingsNow = (await (await context.request.get(base + '/admin/api/settings')).json()).settings;
-check('text field autosaves on blur (change event)', settingsNow.db_type === 'questdb' && settingsNow.questdb_hostname === 'questdb.example.org', JSON.stringify(settingsNow.questdb_hostname));
-await page.locator('#setting-questdb_tls_enabled').click({ force: true });
-await page.waitForFunction(() => document.getElementById('toast-region').textContent.includes('saved') || document.getElementById('toast-region').textContent.includes('restart'), null, { timeout: 8000 }).catch(() => { });
-await sleep(600);
+check('a complete form is still not saved automatically', settingsNow.questdb_hostname !== 'questdb.example.org' && tsdbPuts.length === 0, JSON.stringify(settingsNow.questdb_hostname));
+check('Apply is enabled and is the only element of the action bar',
+  (await page.isEnabled('#export-apply'))
+  && (await page.locator('#export-actions button').count()) === 1
+  && (await page.locator('#export-apply').innerText()).trim() === 'Apply changes'
+  && (await page.locator('#export-actions .badge, #export-actions p, #export-discard').count()) === 0);
+await page.click('#export-apply');
+await page.waitForFunction(() => document.getElementById('save-state').dataset.state === 'saved', null, { timeout: 8000 });
 settingsNow = (await (await context.request.get(base + '/admin/api/settings')).json()).settings;
-check('toggle autosaves immediately', settingsNow.questdb_tls_enabled === true);
+check('Apply sends the whole group exactly once', tsdbPuts.length === 1 && settingsNow.db_type === 'questdb' && settingsNow.questdb_hostname === 'questdb.example.org', JSON.stringify(settingsNow.questdb_hostname) + ` puts=${tsdbPuts.length}`);
+check('Apply is disabled again once the draft equals the server state', await page.isDisabled('#export-apply'));
+await page.locator('#setting-questdb_tls_enabled').click({ force: true });
+await sleep(900);
+settingsNow = (await (await context.request.get(base + '/admin/api/settings')).json()).settings;
+check('a toggle is not saved until Apply', settingsNow.questdb_tls_enabled !== true && tsdbPuts.length === 1);
+await page.click('#export-apply');
+await page.waitForFunction(() => document.getElementById('save-state').dataset.state === 'saved', null, { timeout: 8000 });
+settingsNow = (await (await context.request.get(base + '/admin/api/settings')).json()).settings;
+check('Apply saves the toggle', settingsNow.questdb_tls_enabled === true);
 await page.locator('#setting-questdb_downsampling').selectOption('low');
+await page.click('#export-apply');
 await page.waitForFunction(() => document.getElementById('save-state').dataset.state === 'saved', null, { timeout: 8000 });
 if ((await page.locator('html').getAttribute('data-bs-theme')) !== 'dark') await page.locator('#theme-toggle').click();
 for (const [width, height] of [[1920, 1080], [1536, 864]]) {
@@ -1361,38 +1399,39 @@ for (const [width, height] of [[1920, 1080], [1536, 864]]) {
 }
 await page.setViewportSize({ width: 1280, height: 800 });
 
-// 6c-2. finding 4: a configuration that becomes incomplete again inside the 450 ms debounce window
-// must not be sent, and the already-queued export fields must be dropped as a group.
+// 6c-2. a configuration that becomes incomplete again can neither be applied nor leak out: Apply is
+// disabled, the hint names what is missing, and the saved value stays untouched.
 const dbTypeBefore = (await (await context.request.get(base + '/admin/api/settings')).json()).settings.db_type;
+const putsBeforeIncomplete = tsdbPuts.length;
 await page.locator('#setting-questdb_hostname').fill('');
 await page.locator('#setting-questdb_hostname').dispatchEvent('change');
 await sleep(900);
 let exportState = (await (await context.request.get(base + '/admin/api/settings')).json()).settings;
-check('an export config that became incomplete again is not sent', exportState.questdb_hostname === 'questdb.example.org', JSON.stringify(exportState.questdb_hostname));
+check('an export config that became incomplete again is not sent', exportState.questdb_hostname === 'questdb.example.org' && tsdbPuts.length === putsBeforeIncomplete, JSON.stringify(exportState.questdb_hostname));
+check('Apply is disabled for an incomplete export group', await page.isDisabled('#export-apply'));
 check('#save-state reports the incomplete export group', (await page.locator('#save-state').innerText()).includes('Incomplete'), await page.locator('#save-state').innerText());
 check('the export group names what is missing', /Hostname or URL/.test(await page.locator('#save-hint-export').innerText()));
 // The pairing branch: every required key is present, so the message has to name the pair instead.
 await page.locator('#setting-questdb_hostname').fill('questdb.example.org');
 await page.locator('#setting-questdb_hostname').dispatchEvent('change');
-await page.waitForFunction(() => document.getElementById('save-state').dataset.state === 'saved', null, { timeout: 8000 });
 await page.locator('#setting-questdb_username').fill('metrics');
 await page.locator('#setting-questdb_username').dispatchEvent('change');
 await sleep(900);
 exportState = (await (await context.request.get(base + '/admin/api/settings')).json()).settings;
-check('an unpaired username is withheld instead of producing a server 400', !exportState.questdb_username, JSON.stringify(exportState.questdb_username));
-check('the incomplete hint names the pair, not a missing required field', /must be set together or left empty/.test(await page.locator('#save-state').innerText()) || (await page.locator('#save-state').innerText()).includes('Incomplete'), await page.locator('#save-state').innerText());
+check('an unpaired username is withheld instead of producing a server 400', !exportState.questdb_username && await page.isDisabled('#export-apply'), JSON.stringify(exportState.questdb_username));
+check('the incomplete hint names the pair, not a missing required field', /must be set together or left empty/.test(await page.locator('#save-hint-export').innerText()), await page.locator('#save-hint-export').innerText());
 await page.locator('#setting-questdb_username').fill('');
 await page.locator('#setting-questdb_username').dispatchEvent('change');
-await sleep(700);
-check('db_type survived the withheld export saves', (await (await context.request.get(base + '/admin/api/settings')).json()).settings.db_type === dbTypeBefore, dbTypeBefore);
-
+await sleep(400);
+check('Apply has nothing to send once the draft is back at the saved state', await page.isDisabled('#export-apply'));
+check('db_type survived the withheld export changes', (await (await context.request.get(base + '/admin/api/settings')).json()).settings.db_type === dbTypeBefore, dbTypeBefore);
 await page.locator('#setting-db_type').selectOption('influxdb_v2');
 await sleep(200);
-check('influxdb backend shows all four export cards', (await page.locator('.export-grid > .card').count()) === 4);
-check('still no Save button after switching backend', (await page.locator('.export-layout button').count()) === 0);
+check('influxdb backend shows all five export cards', (await page.locator('#settings-sections > .export-card').count()) === 5);
+check('still no Save button after switching backend', (await page.locator('.export-card button').count()) === 0);
 
-// 6c-3. finding 5: a value typed while the save is in flight must survive the response, which
-// clears only the secret revision it actually confirmed.
+// 6c-3. a value typed while the apply is in flight must survive the response, which clears only the
+// secret revision it actually confirmed.
 await page.fill('#setting-influxdb_hostname', 'influx.example.org');
 await page.locator('#setting-influxdb_hostname').dispatchEvent('change');
 await page.fill('#setting-influxdb_organization', 'rct');
@@ -1401,88 +1440,56 @@ await page.fill('#setting-influxdb_bucket', 'metrics');
 await page.locator('#setting-influxdb_bucket').dispatchEvent('change');
 // Settings._check_export() counts an InfluxDB token as credentials that are always present, so
 // _guard_plaintext() rejects the entire save for a non-loopback host without TLS unless plaintext
-// credentials are explicitly allowed. 'influx.example.org' is not loopback and TLS is off here, so
-// without this the token PUT came back 400 "Invalid setting" (measured), the draft fell back to the
-// previous backend, and the clear-on-confirm behaviour the two checks below assert never ran at all.
+// credentials are explicitly allowed.
 await page.locator('#setting-influxdb_allow_plaintext_credentials').check();
 await page.waitForSelector('#confirm-modal.show');
 await page.click('#confirm-accept');
-await sleep(600);                          // let that toggle's own autosave settle before holding PUTs
-// Only the FIRST PUT is held. Holding every PUT meant the follow-up save was still inside the route
-// handler when the old `page.unroute()` below ran, so that request was dropped and the field it was
-// supposed to clear kept the stale value forever — the failure looked like a missing clear in the app
-// when it was the harness discarding the save. Holding once keeps the intent (a second value is typed
-// while the first response is outstanding) and lets the follow-up through untouched.
+// Only the first PUT is held, so a second value can be typed while its response is outstanding.
 let settingsPuts = 0;
 await page.route('**/admin/api/settings', async (route) => {
   if (route.request().method() !== 'PUT') return route.continue();
   settingsPuts += 1;
-  if (settingsPuts === 1) await sleep(1200);      // hold so a second value can be typed meanwhile
-  else if (settingsPuts === 2) await sleep(800);  // a window in which the older response has landed
-  return route.continue();                        // never unrouted mid-flight: that dropped the save
+  if (settingsPuts === 1) await sleep(1200);
+  return route.continue();
 });
 await page.fill('#setting-influxdb_token', 'token-one');
 await page.locator('#setting-influxdb_token').dispatchEvent('change');
+check('an incomplete-free group with a token can be applied', await page.isEnabled('#export-apply'));
+await page.click('#export-apply');
 await sleep(600);                          // the request is in flight, its response is still held
 await page.fill('#setting-influxdb_token', 'token-two');
 await page.locator('#setting-influxdb_token').dispatchEvent('change');
-// Anchor on the second PUT having started rather than on #save-state: flushSettings() only sends the
-// follow-up after the first request resolves, so "the second PUT is in flight" proves the older
-// response was already processed — which is exactly the moment this check is about. Waiting for
-// "Saved" instead matched the label left over from an earlier save and sampled the wrong instant.
-const secondPutStarted = await (async () => {
-  for (let waited = 0; waited < 15000; waited += 50) {
-    if (settingsPuts >= 2) return true;
-    await sleep(50);
-  }
-  return false;
-})();
-check('a token typed during the save is not cleared by the older response', secondPutStarted
-  && (await page.inputValue('#setting-influxdb_token')) === 'token-two', `puts=${settingsPuts} value=${await page.inputValue('#setting-influxdb_token')}`);
-// No extra `change` is dispatched here: typing token-two already queued the follow-up save while the
-// first request was outstanding, and that is the save this check is about. Re-dispatching `change`
-// only bumped the secret revision again and masked whether the queued save ever landed.
-// #save-state already has data-state="saved" from the save that just confirmed, so waiting for that
-// label again returns immediately and a fixed sleep then samples the field before the follow-up save
-// (450ms debounce + round trip) has confirmed. Wait for the end state this check is about instead:
-// the revision the follow-up save confirmed is the one in the box, so the box empties and falls back
-// to the "set" placeholder. The expectation is unchanged, only the moment it is measured at.
+await page.waitForFunction(() => !/Applying/.test(document.getElementById('export-apply-status').textContent), null, { timeout: 15000 });
+check('a token typed during the apply is not cleared by the older response',
+  (await page.inputValue('#setting-influxdb_token')) === 'token-two' && await page.isEnabled('#export-apply'),
+  `puts=${settingsPuts} value=${await page.inputValue('#setting-influxdb_token')}`);
+await page.click('#export-apply');
 const tokenCleared = await page.waitForFunction(() => {
   const field = document.getElementById('setting-influxdb_token');
   return field.value === '' && field.placeholder.endsWith('(stored)');
 }, null, { timeout: 8000 }).then(() => true).catch(() => false);
-check('the newer token is sent by the follow-up save and then cleared', tokenCleared
-  && (await page.inputValue('#setting-influxdb_token')) === '' && (await page.getAttribute('#setting-influxdb_token', 'placeholder')).endsWith('(stored)'), await page.inputValue('#setting-influxdb_token'));
+check('the newer token is sent by the second apply and then cleared', tokenCleared && settingsPuts === 2
+  && (await page.getAttribute('#setting-influxdb_token', 'placeholder')).endsWith('(stored)'), `puts=${settingsPuts}`);
+check('a blank token keeps the stored one: nothing left to apply', await page.isDisabled('#export-apply'));
 await page.unroute('**/admin/api/settings');
 
-// Measured geometry, not a computed-style string: below the 992px breakpoint .export-grid declares
-// no grid-template-columns at all (admin.css), so counting tokens of the computed value proves
-// nothing about the layout — it reports one track for an implicit single column just as it would for
-// `none`. The collapse is asserted from the cards instead: one distinct left edge, and every card as
-// wide as the grid's content box (measured 358px at 390px, 288px at 320px). Both narrow viewports
-// are covered, like the device-image and footer checks above.
-const measureExportGrid = () => page.evaluate(() => {
-  const grid = document.querySelector('.export-grid');
-  const gridBox = grid.getBoundingClientRect();
-  const style = getComputedStyle(grid);
-  const contentWidth = gridBox.width - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
-  const cards = [...grid.querySelectorAll(':scope > .card')].map((card) => card.getBoundingClientRect());
-  return {
-    display: style.display,
-    gridTemplateColumns: style.gridTemplateColumns,
-    contentWidth,
-    cardCount: cards.length,
-    columns: new Set(cards.map((card) => Math.round(card.left))).size,
-    widestDelta: Math.max(...cards.map((card) => Math.abs(card.width - contentWidth))),
-  };
-});
+// Measured geometry: on a phone the shared settings grid collapses to one column and every card
+// is as wide as the grid.
 for (const width of [390, 320]) {
   await page.setViewportSize({ width, height: 844 });
   await sleep(200);
-  const mobileGrid = await measureExportGrid();
-  check(`export grid collapses to one column on small screens at ${width}px`,
-    mobileGrid.display === 'grid' && mobileGrid.cardCount >= 2 && mobileGrid.columns === 1 && mobileGrid.widestDelta <= 1,
-    JSON.stringify(mobileGrid));
+  const mobileGrid = await page.evaluate(() => {
+    const grid = document.querySelector('#settings-sections');
+    const gridBox = grid.getBoundingClientRect();
+    const cards = [...grid.querySelectorAll(':scope > .export-card')].map((card) => card.getBoundingClientRect());
+    return {
+      cardCount: cards.length,
+      columns: new Set(cards.map((card) => Math.round(card.left))).size,
+      widestDelta: Math.max(...cards.map((card) => Math.abs(card.width - gridBox.width))),
+    };
+  });
+  check(`export cards collapse to one column on small screens at ${width}px`,
+    mobileGrid.cardCount >= 2 && mobileGrid.columns === 1 && mobileGrid.widestDelta <= 1, JSON.stringify(mobileGrid));
 }
 await page.setViewportSize({ width: 1280, height: 800 });
 

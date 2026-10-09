@@ -74,6 +74,11 @@ async def test_pages_render_with_the_new_menu(tmp_path):
         assert "Inverters" in (await client.get("/ui/inverters")).text
         assert 'id="exposed-list"' in (await client.get("/ui/prometheus")).text
         assert 'id="writable-list"' in (await client.get("/ui/inverters")).text
+        # Both pages render the same table, search and pager through one shared macro.
+        for html, prefix in (((await client.get("/ui/prometheus")).text, "exposed"), ((await client.get("/ui/inverters")).text, "writable")):
+            for suffix in ("search", "list", "range", "prev", "next"):
+                assert f'id="{prefix}-{suffix}"' in html
+            assert "param-table-wrap" in html and 'data-bs-toggle="modal"' in html
         removed = await client.get("/ui/parameters")
         assert removed.status_code == 303
 
@@ -192,6 +197,14 @@ def test_parameter_reorder_focus_uses_stable_action_hooks():
     assert not re.search(r'\[title="[^"]*"\]', js)
 
 
+def test_inverters_and_prometheus_share_the_parameter_table_helpers():
+    js = (ADMIN_DIR / "static/js/admin.js").read_text(encoding="utf-8")
+    assert js.count("renderParameterTable(") == 3  # definition and both tables
+    assert js.count("parameterActionMenu(") == 3
+    assert "renderParameterTable('writable'" in js and "renderParameterTable('exposed'" in js
+    assert js.count("EXPOSED_PAGE_SIZE = 15") == 1
+
+
 def test_navbar_shows_the_short_label_and_an_enlarged_logo():
     base = (ADMIN_DIR / "templates/base.html").read_text(encoding="utf-8")
     css = (ADMIN_DIR / "static/css/admin.css").read_text(encoding="utf-8")
@@ -203,12 +216,11 @@ def test_navbar_shows_the_short_label_and_an_enlarged_logo():
     assert re.search(r"\.navbar\s\.btn\s*\{[^}]*height:\s*2\.3rem", css)
 
 
-def test_settings_grid_stretches_but_tsdb_cards_keep_natural_height():
+def test_settings_grid_stretches_its_cards_on_every_page_including_tsdb():
     css = (ADMIN_DIR / "static/css/admin.css").read_text(encoding="utf-8")
     assert re.search(r"\.settings-grid\s*\{[^}]*align-items:\s*stretch", css)
     assert re.search(r"\.settings-grid>\.card>\.card-body\s*\{\s*flex:\s*1 1 auto;\s*\}", css)
-    assert re.search(r"\.export-grid\s*\{[^}]*align-items:\s*start", css)
-    assert not re.search(r"\.export-grid>\.card>\.card-body\s*\{\s*flex:\s*1 1 auto;\s*\}", css)
+    assert ".export-grid" not in css
 
 
 def test_metrics_fields_hide_behind_the_master_toggle():
@@ -299,14 +311,18 @@ def test_export_secret_is_cleared_from_the_draft_after_a_successful_save():
 
 
 def test_export_group_is_withheld_as_a_group_and_revalidated_at_send_time():
-    """Finding 4 (MEDIUM): an incomplete export configuration must drop the already-queued fields
-    *and* stop the debounce timer, and the group must be re-checked immediately before sending."""
+    """An incomplete export configuration is never sent, nothing is sent while typing, and the group
+    is re-checked immediately before sending."""
     js = (ADMIN_DIR / "static/js/admin.js").read_text(encoding="utf-8")
     assert "let pendingExportGroup = false;" in js
-    queue = js[js.index("function queueExportSettings()"):js.index("function renderExportSettings(")]
-    assert "pendingExportGroup = false;" in queue
+    queue = js[js.index("function queueExportSettings()"):js.index("function refreshExportBar()")]
     assert "setSectionState('export', 'incomplete', missingExportHint(type));" in queue
-    assert "if (!hasPending(null)) clearTimeout(settingsTimer);" in queue
+    assert "restartDebounce" not in queue and "flushSettings" not in queue  # no autosave for the export form
+    apply = js[js.index("async function applyExport()"):js.index("function tsdbStatusView()")]
+    assert "if (!exportReady(type)) { queueExportSettings(); return; }" in apply
+    assert "pendingExportGroup = true;" in apply and "flushSettings({ sections: ['export'] })" in apply
+    # The debounced autosave only covers the general settings, never the export group.
+    assert "flushSettings({ sections: ['general'] })" in js
     # The send-time re-check sits in the synchronous wrapper, before any key is computed.
     send = js[js.index("function sendSettings(sections = null)"):js.index("function secretKeysIn(")]
     assert "if (pendingExportGroup && !exportReady(type)) {" in send
@@ -314,11 +330,39 @@ def test_export_group_is_withheld_as_a_group_and_revalidated_at_send_time():
     assert send.index("if (pendingExportGroup && !exportReady(type)) {") < send.index("const keys = keysFor(sections);")
 
 
+def test_tsdb_form_has_a_button_only_apply_bar_and_does_not_autosave():
+    js = (ADMIN_DIR / "static/js/admin.js").read_text(encoding="utf-8")
+    html = (TEMPLATES / "tsdb.html").read_text(encoding="utf-8")
+    assert 'id="export-actions"' in html and "align-items-end" in html
+    # The shared bar is parameterised, not overridden: TSDB asks for the button alone.
+    assert "buildApplyBar('export', {" in js and "compact: true," in js
+    builder = js[js.index("function buildApplyBar("):js.index("function buildDeviceApplyBar(")]
+    compact = builder[builder.index("if (compact) {"):builder.index("const discard = element(")]
+    assert "actions.append(apply);" in compact and "'Discard'" not in compact and "badge" not in compact
+    assert "'Apply changes'" in builder  # the default label, kept for the compact variant
+    bar = js[js.index("function refreshExportBar()"):js.index("async function applyExport()")]
+    assert "apply.disabled = settingsSending || !exportDirty() || incomplete;" in bar
+    assert "export-discard" not in js and "export-change-count" not in js and "discardExport" not in js
+    # Export fields are marked dirty on change but never queued for the debounce timer.
+    control = js[js.index("function exportControl("):js.index("// _settings_view() never exposes")]
+    assert "queueExportSettings();" in control and "queueSettings(" not in control
+    # A rejected apply keeps what was typed.
+    assert "if (sectionOf(key) === 'export') continue;" in js
+    # An empty secret is never sent, so a blank token keeps the stored one.
+    assert "filter((key) => !(isSecretKey(key) && !settingsDraft[key]))" in js
+
+
+def test_admin_scripts_never_open_the_native_leave_page_dialog():
+    for script in (ADMIN_DIR / "static/js").glob("*.js"):
+        text = script.read_text(encoding="utf-8")
+        assert "beforeunload" not in text and "onbeforeunload" not in text, script.name
+
+
 def test_missing_export_hint_names_both_failure_causes():
     """Review item 8 (MEDIUM): exportReady() also fails for an unpaired username/password, where
     every required key is present — a single "… is required" message would name nothing missing."""
     js = (ADMIN_DIR / "static/js/admin.js").read_text(encoding="utf-8")
-    hint = js[js.index("function missingExportHint(type)"):js.index("// Export fields autosave as one")]
+    hint = js[js.index("function missingExportHint(type)"):js.index("// The export group is applied explicitly")]
     assert "required for ${backendLabel(type)}" in hint
     assert "must be set together or left empty" in hint
     assert "return 'Not saved yet.';" in hint
@@ -359,8 +403,9 @@ def test_device_list_has_no_autosave_path():
 
 def test_device_apply_bar_is_explicit_accessible_and_guards_reset_and_unload():
     js = (ADMIN_DIR / "static/js/admin.js").read_text(encoding="utf-8")
-    bar = js[js.index("function buildDeviceApplyBar("):js.index("function addDeviceRow(")]
-    assert "'Apply changes'" in bar and "apply.id = 'device-apply'" in bar and "'Discard'" in bar
+    bar = js[js.index("function buildApplyBar("):js.index("function addDeviceRow(")]
+    assert "'Apply changes'" in bar and "apply.id = `${prefix}-apply`" in bar and "'Discard'" in bar
+    assert "buildApplyBar('device'" in bar
     assert "status.setAttribute('role', 'status')" in bar  # polite live region for the result
     assert "error.tabIndex = -1" in bar
     state = js[js.index("function refreshDeviceState(card)"):js.index("function rebuildDeviceSection()")]
@@ -370,9 +415,8 @@ def test_device_apply_bar_is_explicit_accessible_and_guards_reset_and_unload():
     assert "confirmAction({" in run and "message: `${RESET_NOTE}" in run and "changes.risky.length" in run
     assert "document.getElementById('device-apply-error')?.focus()" in run
     assert "error?.status === 409" in js and "error?.status === 504" in js
-    # The unload guard only fires while the draft differs from the server state.
-    outstanding = js[js.index("function outstandingWork()"):js.index("function reportSaveFailure(")]
-    assert "deviceDirty()" in outstanding
+    # Leaving the page with an unsaved draft is silent: no native beforeunload dialog anywhere.
+    assert "beforeunload" not in js and "onbeforeunload" not in js and "returnValue" not in js
 
 
 def test_questdb_username_and_password_must_be_filled_together():
@@ -453,14 +497,11 @@ def test_the_settings_request_is_scoped_to_the_keys_it_carries():
     assert "isSecretKey(key) && !settingsDraft[key]" in keys_for
     # The finally re-arms the debounce instead of recursing.
     finally_block = js[js.index("sendRevisions.clear();"):js.index("// Shared by settingControl() and exportControl(): builds")]
-    assert "if (hasPending(null)) restartDebounce();" in finally_block
+    assert "if (hasPending(['general'])) restartDebounce();" in finally_block
     assert "flushSettings(" not in finally_block
     # Exactly one declaration, re-shaped from a bare promise rather than declared a second time.
     assert js.count("let settingsInFlight") == 1
     assert "await settingsInFlight?.catch" not in js
-    # The beforeunload guard is derived, and a rolled-back failure does not warn forever.
-    outstanding = js[js.index("function outstandingWork()"):js.index("function reportSaveFailure(")]
-    assert "anySection(['saving', 'incomplete'])" in outstanding and "failed" not in outstanding
 
 
 def test_secret_keys_mirror_the_server_secret_list():
@@ -485,7 +526,7 @@ def test_secret_keys_mirror_the_server_secret_list():
 def test_save_state_has_one_writer_and_five_distinguishable_states():
     js = JS.read_text(encoding="utf-8")
     assert "const SAVE_STATES = { idle: 0, saved: 1, incomplete: 2, unsaved: 3, saving: 4, failed: 5 };" in js
-    render = js[js.index("function renderSaveState()"):js.index("// Derived on demand")]
+    render = js[js.index("function renderSaveState()"):js.index("function reportSaveFailure(")]
     for text in ("Save failed", "Saving …", "Unsaved changes", "Incomplete — not saved yet"):
         assert text in js, text
     # A successful save shows no label text (the toast reports it); the state stays readable as data-state.
@@ -782,6 +823,9 @@ def test_energy_poll_is_bounded_keeps_panels_and_never_overwrites_a_running_acti
     assert "energyPanels.clear()" not in poll.split("const ordered")[0]
     assert "panel.acceptsPoll(requestedAt)" in poll
     assert "pendingMode ?? device.mode" in js
+    # A selected mode that the unfinished setup blocks is shown as pending, never as active.
+    assert "setupLead.hidden = !pendingSetup" in js and "'is-pending'" in js
+    assert ".energy-mode-option.is-selected.is-pending" in (ADMIN_DIR / "static/css/admin.css").read_text(encoding="utf-8")
     # The Setup step names the required writes that are not approved yet.
     assert "(device.required_write_names || []).filter((name) => !approved.has(name))" in js
 
@@ -892,20 +936,71 @@ def test_hardware_step_text_names_the_missing_profile_and_the_expert_path():
     assert "An experienced administrator can enter them under Expert settings" in js
 
 
-def test_tsdb_connection_fields_stay_wide_and_sit_beside_the_target_settings():
+def test_tsdb_page_uses_the_shared_page_heading_cards_and_setting_rows():
     css = (ADMIN_DIR / "static/css/admin.css").read_text(encoding="utf-8")
     js = (ADMIN_DIR / "static/js/admin.js").read_text(encoding="utf-8")
-    # The toggle column only joins the fields when the card can give each at least 22rem.
-    assert re.search(r"\.tsdb-connection-grid\s*\{[^}]*repeat\(auto-fit,\s*minmax\(min\(100%,\s*22rem\),\s*1fr\)\)", css)
-    assert not re.search(r"\.tsdb-connection-grid\s*\{\s*grid-template-columns:\s*minmax\(0,\s*1fr\)\s*minmax\(0,\s*1fr\)", css)
-    # Row 1 of the export grid pairs target settings and connection; export settings and the log follow.
-    order = [js.index(f"parameterCard('{name}'") for name in ("Database", "Connection", "Export")]
-    assert order == sorted(order)
+    html = (TEMPLATES / "tsdb.html").read_text(encoding="utf-8")
+    # No TSDB-specific layout or typography rules: only the log console keeps its own look.
+    own = set(re.findall(r"\.(tsdb-[a-z-]+|export-[a-z-]+)", css))
+    assert own <= {"tsdb-console", "tsdb-console-line", "tsdb-console-time"}, own
+    assert 'class="page-heading"' in html and 'id="save-state" class="save-state' in html
+    assert 'class="settings-grid"' in html and "tsdb-status-badge" not in html
+    render = js[js.index("function renderExportSettings("):js.index("// Mirrors the server-side host plausibility")]
+    assert "element('h2', 'h5 mb-3', title)" in render and "'Status & Log'" in render
+    assert "role', 'log'" in render and "aria-live', 'polite'" in render
+    assert "Status & log" not in js
 
 
-def test_tsdb_cards_carry_no_decorative_heading_icons():
-    js = (ADMIN_DIR / "static/js/admin.js").read_text(encoding="utf-8")
+
+def test_a_missing_metric_value_reads_n_a_in_every_formatter_and_placeholder():
+    js = JS.read_text(encoding="utf-8")
+    dash = (TEMPLATES / "dashboard.html").read_text(encoding="utf-8")
+    # One spelling for "no value", whatever the reason; the unit is never attached to it.
+    assert "const NOT_AVAILABLE = 'n/a';" in js
+    for fn in ("function metricParts(", "function formatPower(", "function formatPowerKw(", "function formatPercent("):
+        body = js[js.index(fn):js.index("\n  }\n", js.index(fn))]
+        assert "NOT_AVAILABLE" in body and "'–'" not in body, fn
+    assert "'–'" not in js[js.index("function energyFlowGraphic("):js.index("function energyAvailability(")]
+    # The first paint before any data is the same text as a missing value.
+    for tile in ("pv-power", "grid-power", "house-power", "battery-soc", "tsdb-status-label", "metric-count",
+                 "device-count", "connected-count", "days-to-calibration"):
+        assert f'<strong id="{tile}">n/a</strong>' in dash, tile
+
+
+def test_tsdb_tile_shows_n_a_without_an_export_value_and_keeps_the_reason_secondary():
+    js = JS.read_text(encoding="utf-8")
+    tile = js[js.index("function renderTsdbTile("):js.index("function renderDashboard(")]
+    assert "label.textContent = 'Not configured'" not in tile and "'–'" not in tile
+    assert tile.count("label.textContent = NOT_AVAILABLE") == 2
+    # The reason survives as a tooltip / accessible name, never as the primary value.
+    assert "Not configured" in tile and "label.title" in tile
+    # A real state of the running export stays a value.
+    assert "'Sending'" in tile and "'Failing'" in tile
+
+
+def test_all_status_badges_share_one_component_with_fixed_tones():
+    js = JS.read_text(encoding="utf-8")
     css = (ADMIN_DIR / "static/css/admin.css").read_text(encoding="utf-8")
-    heading = js[js.index("function tsdbSectionHeading("):js.index("// Export fields autosave")]
-    assert "material-icons" not in heading
-    assert "tsdb-section-icon" not in css
+    tones = ("success", "neutral", "warning", "danger")
+    # Every tone is defined once, light and dark through Bootstrap's theme-aware variables.
+    for tone in tones:
+        rule = re.search(rf"\.status-badge-{tone}\s*{{([^}}]*)}}", css)
+        assert rule and "--status-badge-fg" in rule[1] and "--status-badge-bg" in rule[1], tone
+        assert "#" not in rule[1] and "rgb(" not in rule[1], f"{tone} must use theme variables, not hardcoded colours"
+    base = re.search(r"\n\.status-badge\s*{([^}]*)}", css)
+    assert base and all(prop in base[1] for prop in ("padding", "border-radius", "font-size", "font-weight"))
+    assert re.search(r"\.status-badge::before\s*{[^}]*width[^}]*height", css), "the status dot is part of the component"
+    # The page-head badge, the card-head chips, the flow states and the token pills all use it.
+    for creation in ("'status-badge status-badge-success'", "element('span', 'status-badge status-badge-neutral')",
+                     "'flow-badge-state status-badge status-badge-neutral'", "status-badge ${write ? 'status-badge-warning' : 'status-badge-success'}"):
+        assert creation in js, creation
+    assert "'status-badge-warning', Boolean(notice)" in js and "'status-badge-neutral', !notice" in js
+    assert "'status-badge-success', ok === true" in js and "'status-badge-danger', ok === false" in js
+    # The old per-badge variants are gone; no other rule sets a badge's font or padding.
+    for legacy in ("device-status-badge", "device-chip", "token-role-", "flow-badge-state.is-", "badge text-bg-warning"):
+        assert legacy not in css and legacy not in js, legacy
+    for selector, body in re.findall(r"([^{}]*status-badge[^{}]*){([^}]*)}", css):
+        if selector.strip().startswith((".status-badge-", "[data-bs-theme")) or "::before" in selector or "forced" in selector:
+            continue
+        if selector.strip() != ".status-badge":
+            assert not re.search(r"(?:^|;)\s*(?:font-|padding|height|border-radius)", body), selector

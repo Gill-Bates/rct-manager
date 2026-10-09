@@ -146,6 +146,20 @@ body {
     /* The one knob for the content scale of every admin page (0.9 = the look of a 90% browser zoom).
        Navbar, sidebar and footer stay at 100%; login and password pages have no #main-content. */
     --content-zoom: .9;
+    /* The one vertical/horizontal gap between cards and tiles on every admin page. */
+    --rct-card-gap: 1.25rem;
+}
+
+/* Single mechanism for stacked cards: every top-level card, grid or row after the page heading
+   gets the same top margin, collapsible <details> cards included. Never add mt-* to these. */
+#main-content .page-heading~:is(.card, .settings-grid, .energy-grid, #export-actions),
+#main-content .about-top-row~.card {
+    margin-top: var(--rct-card-gap);
+}
+
+#main-content .about-top-row {
+    --bs-gutter-x: var(--rct-card-gap);
+    --bs-gutter-y: var(--rct-card-gap);
 }
 
 #main-content {
@@ -1025,12 +1039,12 @@ body {
 }
 
 /* Cards in one grid row share the row height (stretch), and the body fills that height so the
-   card border ends where the row ends. Scoped to .settings-grid: .export-grid has its own rules
-   below and .device-item cards on the dashboard must keep their natural height. */
+   card border ends where the row ends. Scoped to .settings-grid: .device-item cards on the
+   dashboard must keep their natural height. */
 .settings-grid {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(min(19rem, 100%), 1fr));
-    gap: 1.25rem;
+    gap: var(--rct-card-gap);
     align-items: stretch;
 }
 
@@ -1048,7 +1062,7 @@ body {
 .energy-grid {
     display: grid;
     grid-template-columns: minmax(0, 1fr);
-    gap: 1.25rem;
+    gap: var(--rct-card-gap);
 }
 
 .energy-panel {
@@ -1108,6 +1122,17 @@ body {
 .energy-mode-option.is-selected {
     background: var(--bs-primary);
     color: var(--bs-white);
+}
+
+/* Selected, but blocked by an unfinished setup: outlined instead of solid. */
+.energy-mode-option.is-selected.is-pending {
+    background: var(--bs-warning-bg-subtle);
+    color: var(--bs-warning-text-emphasis);
+    box-shadow: inset 0 0 0 2px var(--bs-warning-border-subtle);
+}
+
+.energy-setup-lead {
+    color: var(--bs-warning-text-emphasis);
 }
 
 .energy-mode-option:focus-visible {
@@ -1476,28 +1501,28 @@ body {
     padding: 0;
 }
 
-.prometheus-table {
+.param-table {
     table-layout: fixed;
 }
 
-.prometheus-table th:first-child {
+.param-table .col-handle {
     width: 3rem;
 }
 
-.prometheus-table th:nth-child(2) {
+.param-table th.col-name {
     width: 28%;
 }
 
-.prometheus-table th:last-child {
+.param-table .col-actions {
     width: 4rem;
 }
 
-.prometheus-table td,
-.prometheus-table th {
+.param-table td,
+.param-table th {
     overflow-wrap: anywhere;
 }
 
-.prometheus-table .metric-name {
+.param-table .metric-name {
     overflow-wrap: normal;
 }
 
@@ -1552,12 +1577,11 @@ body {
         grid-template-columns: repeat(2, minmax(0, 1fr));
     }
 
-    .prometheus-table th:nth-child(3),
-    .prometheus-table td:nth-child(3) {
+    .param-table .col-description {
         display: none;
     }
 
-    .prometheus-table th:nth-child(2) {
+    .param-table th.col-name {
         width: auto;
     }
 }
@@ -1704,9 +1728,10 @@ samp,
     margin: 0;
     box-shadow: 0 5px 20px rgb(0 0 0 / 12%);
     pointer-events: auto;
-    opacity: 0;
-    transform: translateY(1rem);
-    transition: opacity .25s ease, transform .25s ease;
+    /* Every toast enters and leaves through the right edge; no fade, so none looks half-visible. */
+    transform: translateX(calc(100% + 2rem));
+    visibility: hidden;
+    transition: transform .3s ease, visibility 0s linear .3s;
 }
 
 .toast-region .btn-close {
@@ -1715,13 +1740,9 @@ samp,
 }
 
 .toast-region .alert.is-visible {
-    opacity: 1;
-    transform: translateY(0);
-}
-
-.toast-region .alert.is-leaving {
-    opacity: 0;
-    transform: translateY(1rem);
+    transform: translateX(0);
+    visibility: visible;
+    transition: transform .3s ease, visibility 0s;
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -1775,236 +1796,11 @@ samp,
     }
 }
 
-.export-layout {
-    grid-column: 1 / -1;
-    min-width: 0;
-}
-
 /* A persistent save error for one section, inserted as a sibling before that section's anchor
-   (never inside it, so an aria-live container cannot double-announce it and the TSDB "no Save
-   button" checks that count buttons inside .export-layout stay unaffected). */
+   (never inside it, so an aria-live container cannot double-announce it). */
 .save-alert {
     grid-column: 1 / -1;
     margin-bottom: 1rem;
-}
-
-.tsdb-heading-status {
-    display: grid;
-    justify-items: end;
-    gap: .25rem;
-}
-
-.tsdb-status-badge {
-    display: flex;
-    align-items: center;
-    gap: .65rem;
-    width: fit-content;
-    max-width: 14rem;
-    min-width: 10.5rem;
-    padding: .55rem .75rem;
-    border: 1px solid var(--rct-line);
-    border-radius: .5rem;
-    background: var(--bs-body-bg);
-}
-
-.tsdb-status-badge>span:last-child {
-    display: grid;
-}
-
-.tsdb-status-badge strong {
-    font-size: .875rem;
-    line-height: 1.2;
-}
-
-.tsdb-status-badge small,
-.tsdb-save-state {
-    font-size: .75rem;
-}
-
-.tsdb-status-indicator {
-    width: .65rem;
-    height: .65rem;
-    flex: 0 0 .65rem;
-    border: 2px solid currentColor;
-    border-radius: 50%;
-    background: currentColor;
-}
-
-.tsdb-status-badge[data-tone="success"] {
-    color: var(--bs-success-text-emphasis);
-    border-color: var(--bs-success-border-subtle);
-    background: var(--bs-success-bg-subtle);
-}
-
-.tsdb-status-badge[data-tone="warning"] {
-    color: var(--bs-warning-text-emphasis);
-    border-color: var(--bs-warning-border-subtle);
-    background: var(--bs-warning-bg-subtle);
-}
-
-.tsdb-status-badge[data-tone="danger"] {
-    color: var(--bs-danger-text-emphasis);
-    border-color: var(--bs-danger-border-subtle);
-    background: var(--bs-danger-bg-subtle);
-}
-
-.tsdb-status-badge[data-tone="muted"] {
-    color: var(--bs-secondary-color);
-}
-
-.tsdb-flow {
-    display: grid;
-    gap: .75rem;
-}
-
-.tsdb-flow-row>.card-body {
-    display: grid;
-    gap: .75rem;
-    padding: .75rem 1rem;
-}
-
-.tsdb-section-heading {
-    display: flex;
-    align-items: center;
-    gap: .7rem;
-    min-width: 0;
-}
-
-.tsdb-section-copy {
-    min-width: 0;
-}
-
-.tsdb-section-copy h2 {
-    font-weight: 700;
-}
-
-.tsdb-section-copy p {
-    margin-top: .12rem;
-    font-size: .8rem;
-}
-
-.tsdb-flow-control {
-    min-width: 0;
-}
-
-.tsdb-master-action {
-    display: flex;
-    align-items: center;
-    justify-content: flex-end;
-    gap: .65rem;
-    min-height: 2rem;
-    margin: 0;
-    padding: 0;
-    white-space: nowrap;
-}
-
-.tsdb-master-action .form-check-input,
-.tsdb-toggle-control .form-check-input {
-    float: none;
-    margin: 0;
-}
-
-.tsdb-master-state,
-.tsdb-toggle-label,
-.tsdb-field-label {
-    min-width: 0;
-    width: auto;
-    margin: 0;
-    white-space: normal;
-    word-break: normal;
-    overflow-wrap: normal;
-    font-weight: 600;
-}
-
-.tsdb-master-state {
-    white-space: nowrap;
-}
-
-.tsdb-field {
-    display: grid;
-    grid-template-columns: minmax(7rem, 8.5rem) minmax(0, 1fr);
-    align-items: start;
-    gap: 0 .65rem;
-    min-width: 0;
-    padding: .38rem 0;
-}
-
-.tsdb-field-body,
-.tsdb-field-control {
-    min-width: 0;
-    width: 100%;
-}
-
-.tsdb-field-help {
-    margin-top: .12rem;
-    color: var(--bs-secondary-color);
-    font-size: .8rem;
-    line-height: 1.3;
-    overflow-wrap: anywhere;
-}
-
-.tsdb-toggle-field {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
-    align-items: center;
-    gap: .65rem;
-    min-width: 0;
-    padding: .38rem 0;
-}
-
-.tsdb-toggle-copy {
-    min-width: 0;
-}
-
-.tsdb-toggle-control {
-    margin: 0;
-    padding: 0;
-}
-
-.export-grid {
-    display: grid;
-    gap: .75rem;
-    align-items: start;
-}
-
-.export-card {
-    min-width: 0;
-}
-
-.export-card>.card-body {
-    padding: .7rem .8rem;
-}
-
-.export-card .tsdb-section-heading {
-    margin-bottom: .35rem;
-}
-
-.tsdb-target-row .tsdb-field {
-    display: block;
-    padding: 0;
-}
-
-.tsdb-target-row .tsdb-field-label {
-    display: block;
-    margin-bottom: .22rem;
-    font-size: .875rem;
-}
-
-.tsdb-connection-grid {
-    display: grid;
-    gap: 0 .9rem;
-}
-
-/* Fields and toggles sit side by side only when the card itself is wide enough to keep the
-   fields usable; a viewport breakpoint cannot know the card width in a two-column page grid. */
-.export-card {
-    container-type: inline-size;
-}
-
-@container (min-width: 34rem) {
-    .tsdb-connection-grid {
-        grid-template-columns: minmax(0, 5fr) minmax(0, 4fr);
-    }
 }
 
 .tsdb-console {
@@ -2029,7 +1825,6 @@ samp,
 }
 
 @media (forced-colors: active) {
-    .tsdb-status-badge,
     .tsdb-console {
         border: 1px solid CanvasText;
         background: Canvas;
@@ -2038,50 +1833,6 @@ samp,
 
     .tsdb-console-time {
         color: CanvasText;
-    }
-}
-
-@media (min-width: 768px) {
-    .tsdb-flow-row>.card-body {
-        grid-template-columns: minmax(0, 1fr) minmax(18rem, 46%);
-        align-items: center;
-    }
-}
-
-@media (min-width: 992px) {
-    .export-grid {
-        grid-template-columns: 1fr 1fr;
-    }
-}
-
-@media (max-width: 1199.98px) and (min-width: 992px) {
-    .tsdb-field {
-        grid-template-columns: minmax(6.5rem, 7.5rem) minmax(0, 1fr);
-    }
-}
-
-@media (max-width: 767.98px) {
-    .tsdb-page-heading,
-    .tsdb-heading-status {
-        align-items: stretch;
-    }
-
-    .tsdb-heading-status,
-    .tsdb-status-badge {
-        width: 100%;
-    }
-
-    .tsdb-heading-status {
-        justify-items: stretch;
-    }
-
-    .tsdb-field {
-        grid-template-columns: minmax(0, 1fr);
-        gap: .22rem;
-    }
-
-    .tsdb-master-action {
-        justify-content: flex-start;
     }
 }
 

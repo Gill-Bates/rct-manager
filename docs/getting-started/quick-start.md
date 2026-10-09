@@ -79,7 +79,7 @@ curl -H "Authorization: Bearer <token>" http://127.0.0.1:8000/api/v1/devices
 
 | Page | Purpose |
 | --- | --- |
-| Overview | Configurable widgets with live values (solar, house consumption, grid, battery, TSDB export) and one card per inverter with its energy-flow graphic, online and operating state, and one card per battery tower; add, edit and remove inverters from the Inverters dialog. Values are shown as whole numbers, with the decimal and thousands separators of the browser locale |
+| Overview | Configurable widgets with live values (solar, house consumption, grid, battery, TSDB export) and one card per inverter with its energy-flow graphic, online and operating state, and one card per battery tower; add, edit and remove inverters from the Inverters dialog. Values are shown as whole numbers, with the decimal and thousands separators of the browser locale. A value that is missing for any reason (not configured, inverter unreachable, no reading yet, export off) reads `n/a` |
 | Inverters | Write access and the writable parameters |
 | Energy Manager | Manual battery control (charge, keep idle, discharge, return to automatic) per inverter, see [Energy Manager](../energy-manager.md) |
 | TSDB | InfluxDB 2 / QuestDB export |

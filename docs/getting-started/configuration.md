@@ -5,8 +5,9 @@ Copy `settings.env.example` to `settings.env`. It only holds the start parameter
 Other settings are managed in the administration GUI and persisted in `data/rct.db`; the
 [optional environment variables](../configuration/environment.md) only seed the very first start
 (for example in automated deployments).
-Changes autosave and show a toast; only the inverter list is applied explicitly (see
-[Devices](#devices)). Settings requiring a server restart are marked in the GUI.
+Changes autosave and show a toast; only the inverter list and the TSDB export form are applied
+explicitly with **Apply changes** (see [Devices](#devices)). Leaving a page with unapplied changes
+discards them without a browser warning. Settings requiring a server restart are marked in the GUI.
 Internal tuning (timeouts, retries, cache, limits and intervals) remains fixed in code.
 
 ## Administration storage

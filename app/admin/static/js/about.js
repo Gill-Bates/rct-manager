@@ -65,8 +65,8 @@
       }
       if (!response.ok) throw new Error(`Update check failed (${response.status}).`);
       const data = await response.json();
-      $('update-current-version').textContent = data.current_version || '–';
-      $('update-latest-version').textContent = data.latest_version || '–';
+      $('update-current-version').textContent = data.current_version || 'n/a';
+      $('update-latest-version').textContent = data.latest_version || 'n/a';
 
       const published = data.published_at ? new Date(data.published_at) : null;
       $('update-published-row').classList.toggle('d-none', !published || Number.isNaN(published.getTime()));

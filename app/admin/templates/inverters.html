@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_param_table.html" import param_table %}
 {% block title %}Inverters – RCT Administration{% endblock %}
 {% block content %}
 <div class="page-heading">
@@ -8,20 +9,28 @@
             To add, change or remove inverters, use <a href="/ui/dashboard?manage=inverters">Manage inverters</a>.</p>
     </div><span id="save-state" class="save-state text-secondary small" aria-live="polite"></span>
 </div>
-<div id="settings-sections" class="settings-grid mt-4">
+<div id="settings-sections" class="settings-grid">
     <p class="text-secondary">Loading settings …</p>
 </div>
-<section class="card mt-4">
-    <div class="card-body">
-        <h2 class="h5">Writable parameters</h2>
-        <p class="text-secondary small">Only the selected writable parameters accept write requests, and only while
-            write access is enabled. Where the catalog documents a parameter, its explanation appears under the name.
-            Numeric limits are wire type limits, not safe operating limits.</p><label for="write-search"
-            class="form-label">Search writable parameters</label><input id="write-search" class="form-control mb-3"
-            type="search" autocomplete="off" placeholder="Name, description or explanation">
-        <div id="writable-list" class="parameter-list parameter-scroll" role="region" aria-label="Writable parameters"
-            tabindex="0">
+{{ param_table('writable', 'Writable parameters', 'Only the listed parameters accept write requests, and only while write access is enabled. Where the catalog documents a parameter, its explanation appears under the description. Numeric limits are wire type limits, not safe operating limits.', 'Add parameters', 'open-add-writable', 'add-writable-modal', 'Search writable parameters', 'Parameter pages') }}
+<div id="add-writable-modal" class="modal fade" tabindex="-1" aria-labelledby="add-writable-title" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-scrollable">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2 id="add-writable-title" class="modal-title h5">Add writable parameters</h2><button type="button"
+                    class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body"><label for="writable-available-search" class="form-label">Search by name or
+                    description</label><input id="writable-available-search" class="form-control mb-3" type="search"
+                    autocomplete="off" placeholder="Search parameters">
+                <div id="writable-available-list" class="parameter-list parameter-scroll"
+                    aria-label="Available writable parameters"></div>
+            </div>
+            <div class="modal-footer"><span id="add-writable-count" class="text-secondary small me-auto"
+                    aria-live="polite">0 selected</span><button type="button" class="btn btn-outline-secondary"
+                    data-bs-dismiss="modal">Cancel</button><button id="confirm-add-writable" type="button"
+                    class="btn btn-primary" disabled>Add parameters</button></div>
         </div>
     </div>
-</section>
+</div>
 {% endblock %}

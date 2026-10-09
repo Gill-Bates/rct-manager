@@ -130,6 +130,14 @@ check('the layout is unchanged while the values are n/a',
   expired.cards === full.cards && JSON.stringify(expired.subcards) === JSON.stringify(full.subcards)
   && expired.slices === full.slices && expired.flow && expired.cells === full.cells && expired.gridTop === full.gridTop, JSON.stringify(expired));
 
+// The TSDB tile follows the same rule: no export value reads n/a, the reason is only a tooltip.
+const tsdbTile = await page.evaluate(() => {
+  const label = document.getElementById('tsdb-status-label');
+  return { text: label.textContent, title: label.title };
+});
+check('the TSDB tile reads n/a without an export value, the reason is secondary',
+  tsdbTile.text === 'n/a' && tsdbTile.title !== '', JSON.stringify(tsdbTile));
+
 // 3. a server error: the note replaces the subtitle, so nothing moves.
 await page.unroute('**/admin/api/devices', emptyPayload);
 await page.route('**/admin/api/devices', (route) => route.fulfill({ status: 503, contentType: 'application/json', body: '{"detail":"unavailable"}' }));

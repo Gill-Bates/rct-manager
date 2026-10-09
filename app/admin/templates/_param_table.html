@@ -1,0 +1,37 @@
+{# Shared card for a searchable, paginated parameter table (Prometheus metrics, inverter write access).
+   Element ids derive from `prefix`: <prefix>-list (tbody), -search, -range, -prev, -next. #}
+{% macro param_table(prefix, title, hint, add_label, add_id, modal_id, search_label, pager_label, reorder=false) %}
+<section class="card" aria-labelledby="{{ prefix }}-title">
+    <div class="card-body">
+        <div class="d-flex flex-wrap align-items-center justify-content-between gap-3 mb-3">
+            <div>
+                <h2 id="{{ prefix }}-title" class="h5 mb-1">{{ title }}</h2>
+                <p class="text-secondary small mb-0">{{ hint }}</p>
+            </div><button id="{{ add_id }}" class="btn btn-primary d-inline-flex align-items-center gap-1"
+                type="button" data-bs-toggle="modal" data-bs-target="#{{ modal_id }}"><span class="material-icons"
+                    aria-hidden="true">add</span>{{ add_label }}</button>
+        </div><label for="{{ prefix }}-search" class="visually-hidden">{{ search_label }}</label><input
+            id="{{ prefix }}-search" class="form-control mb-3" type="search" autocomplete="off"
+            placeholder="{{ search_label }}">
+        <div class="param-table-wrap">
+            <table class="table table-hover align-middle mb-0 param-table{% if reorder %} param-table-reorder{% endif %}">
+                <thead>
+                    <tr>
+                        {% if reorder %}<th scope="col" class="col-handle"><span class="visually-hidden">Reorder</span></th>{% endif %}
+                        <th scope="col" class="col-name">{{ 'Metric' if reorder else 'Parameter' }}</th>
+                        <th scope="col" class="col-description">Description</th>
+                        <th scope="col" class="col-actions"><span class="visually-hidden">Actions</span></th>
+                    </tr>
+                </thead>
+                <tbody id="{{ prefix }}-list"></tbody>
+            </table>
+        </div>
+        <div class="d-flex align-items-center justify-content-between gap-2 mt-3"><span id="{{ prefix }}-range"
+                class="text-secondary small" aria-live="polite"></span>
+            <div class="btn-group btn-group-sm" role="group" aria-label="{{ pager_label }}"><button id="{{ prefix }}-prev"
+                    type="button" class="btn btn-outline-secondary">Previous</button><button id="{{ prefix }}-next"
+                    type="button" class="btn btn-outline-secondary">Next</button></div>
+        </div>
+    </div>
+</section>
+{% endmacro %}
