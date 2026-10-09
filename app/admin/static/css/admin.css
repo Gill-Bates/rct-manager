@@ -326,6 +326,10 @@ body {
     --bs-btn-hover-border-color: var(--rct-brand-hover);
     --bs-btn-active-bg: var(--rct-brand-hover);
     --bs-btn-active-border-color: var(--rct-brand-hover);
+    /* Bootstrap hard-codes its own blue for the disabled state and the focus glow of .btn-primary. */
+    --bs-btn-disabled-bg: var(--rct-brand);
+    --bs-btn-disabled-border-color: var(--rct-brand);
+    --bs-btn-focus-shadow-rgb: var(--bs-primary-rgb);
 }
 
 .btn-outline-primary {
@@ -494,58 +498,56 @@ body {
     }
 }
 
-.device-status-badge {
+/* One status badge for every page: a pill with a leading dot and the status text. Only the tone
+   changes the colours (success, neutral, warning, danger); the dot is the non-colour cue. The
+   theme-aware Bootstrap variables keep the contrast in light and dark mode. */
+.status-badge {
     display: inline-flex;
     align-items: center;
     gap: .4rem;
-    padding: .25rem .6rem;
+    flex: 0 1 auto;
+    min-width: 0;
+    max-width: 100%;
+    padding: calc(.25rem - 1px) calc(.6rem - 1px);
+    border: 1px solid transparent;
     border-radius: 1rem;
     font-size: .75rem;
     font-weight: 600;
+    line-height: 1.5;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    color: var(--status-badge-fg);
+    background: var(--status-badge-bg);
 }
 
-.device-status-badge::before {
+.status-badge::before {
     content: '';
+    flex: 0 0 auto;
     width: .5rem;
     height: .5rem;
     border-radius: 50%;
+    background: currentColor;
 }
 
-.device-status-badge-online {
-    color: #198754;
-    background: rgb(25 135 84 / 12%);
+.status-badge-success {
+    --status-badge-fg: var(--bs-success-text-emphasis);
+    --status-badge-bg: var(--bs-success-bg-subtle);
 }
 
-.device-status-badge-online::before {
-    background: #198754;
-    animation: device-status-pulse 2s ease-in-out infinite;
+.status-badge-neutral {
+    --status-badge-fg: var(--bs-secondary-color);
+    --status-badge-bg: var(--bs-secondary-bg);
 }
 
-[data-bs-theme="dark"] .device-status-badge-online {
-    color: #4ade80;
-    background: rgb(74 222 128 / 14%);
+.status-badge-warning {
+    --status-badge-fg: var(--bs-warning-text-emphasis);
+    --status-badge-bg: var(--bs-warning-bg-subtle);
 }
 
-[data-bs-theme="dark"] .device-status-badge-online::before {
-    background: #4ade80;
-}
-
-@keyframes device-status-pulse {
-
-    0%,
-    100% {
-        box-shadow: 0 0 0 0 rgb(25 135 84 / 55%);
-    }
-
-    50% {
-        box-shadow: 0 0 0 .3rem rgb(25 135 84 / 0%);
-    }
-}
-
-@media (prefers-reduced-motion: reduce) {
-    .device-status-badge-online::before {
-        animation: none;
-    }
+.status-badge-danger {
+    --status-badge-fg: var(--bs-danger-text-emphasis);
+    --status-badge-bg: var(--bs-danger-bg-subtle);
 }
 
 .device-item {
@@ -615,7 +617,7 @@ body {
     max-width: 34rem;
 }
 
-/* State badges below the graphic: same pill look as .device-status-badge, green or red only.
+/* State badges below the graphic: the shared .status-badge, tone by state.
    A hairline separates them from the graphic above; the parent's gap keeps the line clear of the
    SVG, and the top padding keeps it clear of the badges. */
 .flow-badges {
@@ -647,10 +649,6 @@ body {
     display: none;
 }
 
-.flow-badge.is-stale {
-    opacity: .55;
-}
-
 .flow-badge-icon {
     font-size: 1.1rem;
     line-height: 1;
@@ -660,34 +658,6 @@ body {
 .flow-badge-caption {
     font-size: .7rem;
     color: var(--bs-secondary-color);
-}
-
-.flow-badge-state {
-    padding: .25rem .6rem;
-    border-radius: 1rem;
-    font-size: .75rem;
-    font-weight: 600;
-    white-space: nowrap;
-}
-
-.flow-badge-state.is-ok {
-    color: #198754;
-    background: rgb(25 135 84 / 12%);
-}
-
-.flow-badge-state.is-bad {
-    color: #dc3545;
-    background: rgb(220 53 69 / 12%);
-}
-
-[data-bs-theme="dark"] .flow-badge-state.is-ok {
-    color: #4ade80;
-    background: rgb(74 222 128 / 14%);
-}
-
-[data-bs-theme="dark"] .flow-badge-state.is-bad {
-    color: #f87171;
-    background: rgb(248 113 113 / 14%);
 }
 
 /* Power card, then the battery grid. Mobile: both are plain grid items of this panel. */
@@ -802,42 +772,6 @@ body {
 .device-subcard-title .material-icons {
     font-size: 1.05rem;
     color: var(--bs-secondary-color);
-}
-
-/* Compact status chip: label plus a colored dot. The long explanation of a status such as
-   "Balancing required" lives in the title tooltip, not as permanent prose in the card. */
-.device-chip {
-    display: inline-flex;
-    align-items: center;
-    gap: .35rem;
-    flex: 0 1 auto;
-    min-width: 0;
-    padding: .18rem .5rem;
-    border-radius: 1rem;
-    font-size: .7rem;
-    font-weight: 600;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    background: var(--bs-secondary-bg);
-    color: var(--bs-secondary-color);
-}
-
-.device-chip-dot {
-    flex: 0 0 auto;
-    width: .4rem;
-    height: .4rem;
-    border-radius: 50%;
-    background: var(--bs-secondary-color);
-}
-
-.device-chip-warning {
-    background: rgb(var(--bs-warning-rgb) / 16%);
-    color: var(--bs-warning-text-emphasis);
-}
-
-.device-chip-warning .device-chip-dot {
-    background: var(--bs-warning);
 }
 
 /* Image left, readings right. The two subcards size their image track separately: the inverter is
@@ -1043,9 +977,15 @@ body {
    dashboard must keep their natural height. */
 .settings-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(min(19rem, 100%), 1fr));
+    /* At most four columns: a track is never narrower than a quarter of the row. */
+    grid-template-columns: repeat(auto-fit, minmax(max(min(19rem, 100%), calc((100% - 3 * var(--rct-card-gap)) / 4)), 1fr));
     gap: var(--rct-card-gap);
     align-items: stretch;
+}
+
+/* A card that takes a whole row of the settings grid. */
+.settings-grid>.card-span-all {
+    grid-column: 1 / -1;
 }
 
 .settings-grid>.card {
@@ -1499,6 +1439,16 @@ body {
 
 .prometheus-settings #settings-sections>.card>.card-body {
     padding: 0;
+}
+
+/* A long hint wraps inside its own column, so the primary action stays top right on every page. */
+.param-card-head>div {
+    flex: 1 1 18rem;
+    min-width: 0;
+}
+
+.param-card-head>.btn {
+    flex: none;
 }
 
 .param-table {
@@ -2020,20 +1970,14 @@ body.is-reconnecting #reconnect-modal.show .reconnect-pulse {
    border plus a Highlight fill since its coloured fill level is otherwise invisible (CSS-02). */
 @media (forced-colors: active) {
 
-    /* Status chips: a border and a system foreground keep the chip readable once the custom
-       background and text colours are overridden. The dot inside falls back to the text colour. */
-    .device-status-badge-online,
-    .flow-badge-state.is-ok,
-    .flow-badge-state.is-bad,
-    .device-chip,
-    .device-chip-warning {
-        border: 1px solid currentColor;
+    /* Status badges: the transparent border becomes visible and a system foreground replaces the
+       tone colours. The dot follows the text colour; the status text carries the meaning. */
+    .status-badge {
+        border-color: currentColor;
         color: CanvasText;
     }
 
-    .device-status-badge-online::before,
-    .device-chip-dot,
-    .device-chip-warning .device-chip-dot,
+    .status-badge::before,
     .status-dot,
     .status-dot.online,
     .status-dot.offline {
@@ -2054,34 +1998,4 @@ body.is-reconnecting #reconnect-modal.show .reconnect-pulse {
         background: Highlight;
         forced-color-adjust: none;
     }
-}
-/* Permission pills in the token table: same pill shape as .device-status-badge. */
-.token-role-badge {
-    display: inline-flex;
-    align-items: center;
-    padding: .25rem .6rem;
-    border-radius: 1rem;
-    font-size: .75rem;
-    font-weight: 600;
-    white-space: nowrap;
-}
-
-.token-role-read {
-    color: #198754;
-    background: rgb(25 135 84 / 12%);
-}
-
-.token-role-write {
-    color: #b45309;
-    background: rgb(245 158 11 / 16%);
-}
-
-[data-bs-theme="dark"] .token-role-read {
-    color: #4ade80;
-    background: rgb(74 222 128 / 14%);
-}
-
-[data-bs-theme="dark"] .token-role-write {
-    color: #fbbf24;
-    background: rgb(251 191 36 / 14%);
 }

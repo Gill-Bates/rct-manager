@@ -999,8 +999,117 @@ def test_all_status_badges_share_one_component_with_fixed_tones():
     # The old per-badge variants are gone; no other rule sets a badge's font or padding.
     for legacy in ("device-status-badge", "device-chip", "token-role-", "flow-badge-state.is-", "badge text-bg-warning"):
         assert legacy not in css and legacy not in js, legacy
-    for selector, body in re.findall(r"([^{}]*status-badge[^{}]*){([^}]*)}", css):
-        if selector.strip().startswith((".status-badge-", "[data-bs-theme")) or "::before" in selector or "forced" in selector:
-            continue
-        if selector.strip() != ".status-badge":
+    for selector, body in re.findall(r"([^{}]+){([^}]*)}", re.sub(r"/\*.*?\*/", "", css, flags=re.DOTALL)):
+        if "status-badge" in selector and selector.strip() != ".status-badge" and "::before" not in selector:
             assert not re.search(r"(?:^|;)\s*(?:font-|padding|height|border-radius)", body), selector
+    # A stale reading must not dim the flow badges: that made their contrast flicker between polls.
+    assert ".flow-badge.is-stale" not in css and "opacity" not in css[css.index(".flow-badge {"):css.index(".flow-badge-caption {")]
+    set_badge = js[js.index("function setBadge("):js.index("function setLine(")]
+    assert "is-stale" not in set_badge
+
+
+# --- Layout contract: one card gap, one stacking rule, one shared parameter table -------------------
+
+CSS = ADMIN_DIR / "static/css/admin.css"
+
+# Pages whose cards, grids or export row stack below a .page-heading.
+STACKED_PAGES = ("prometheus", "tokens", "inverters", "settings", "tsdb", "energy", "about")
+
+
+def _css_rules() -> list[tuple[str, str]]:
+    """(selector, body) of every innermost rule, comments removed, whitespace collapsed."""
+    css = re.sub(r"/\*.*?\*/", "", CSS.read_text(encoding="utf-8"), flags=re.DOTALL)
+    return [(" ".join(sel.split()), " ".join(body.split())) for sel, body in re.findall(r"([^{}]+)\{([^{}]*)\}", css)]
+
+
+def test_card_gap_token_is_declared_once_in_root_as_twenty_pixels():
+    css = CSS.read_text(encoding="utf-8")
+    assert len(re.findall(r"--rct-card-gap\s*:", css)) == 1
+    root = [body for sel, body in _css_rules() if sel == ":root" and "--rct-card-gap" in body]
+    assert len(root) == 1 and re.search(r"--rct-card-gap:\s*1\.25rem\s*;", root[0])
+
+
+def test_one_sibling_rule_spaces_every_top_level_card_below_the_page_heading():
+    spacing = [(sel, body) for sel, body in _css_rules() if "page-heading~" in sel.replace(" ", "")]
+    assert len(spacing) == 1, spacing
+    selector, body = spacing[0]
+    for block in (".card", ".settings-grid", ".energy-grid", "#export-actions"):
+        assert block in selector, block
+    assert ".about-top-row~.card" in selector.replace(" ", "")
+    assert body.rstrip(";").strip() == "margin-top: var(--rct-card-gap)"
+    # No second rule may re-space the same blocks: that is how the pages drifted apart before.
+    blocks = {".card", ".settings-grid", ".energy-grid", "#export-actions", ".about-top-row", ".page-heading"}
+    for sel, body in _css_rules():
+        parts = {part.strip() for part in sel.split(",")}
+        if parts & blocks and sel != selector and "page-heading~" not in sel.replace(" ", ""):
+            assert not re.search(r"(?:^|;)\s*margin(?:-top|-block-start)?\s*:", body), sel
+
+
+def test_grid_gaps_and_about_gutters_come_from_the_card_gap_token():
+    rules = _css_rules()
+    for grid in (".settings-grid", ".energy-grid"):
+        bodies = [body for sel, body in rules if grid in {part.strip() for part in sel.split(",")}]
+        gaps = [value for body in bodies for value in re.findall(r"(?:^|;)\s*((?:row-|column-)?gap)\s*:\s*([^;]+)", body)]
+        assert gaps, grid
+        assert all(value.strip() == "var(--rct-card-gap)" for _, value in gaps), (grid, gaps)
+    row = [body for sel, body in rules if sel.endswith(".about-top-row")]
+    assert row and "--bs-gutter-x: var(--rct-card-gap)" in row[0] and "--bs-gutter-y: var(--rct-card-gap)" in row[0]
+
+
+def test_stacked_page_templates_carry_no_margin_utilities_on_top_level_blocks():
+    block_class = re.compile(r"(?:^|\s)(?:card|settings-grid|energy-grid)(?:\s|$)")
+    for page in STACKED_PAGES:
+        html = (TEMPLATES / f"{page}.html").read_text(encoding="utf-8")
+        for tag in re.findall(r"<(?:section|div|details|header)\b[^>]*>", html):
+            classes = re.search(r'class="([^"]*)"', tag)
+            blocks = bool(classes and block_class.search(classes[1])) or 'id="export-actions"' in tag
+            if blocks:
+                assert not re.search(r"(?:^|[\s\"])(?:mt|my)-[34](?:\s|\")", tag), (page, tag)
+
+
+def test_prometheus_and_inverters_build_their_table_from_the_one_shared_macro():
+    macro = (TEMPLATES / "_param_table.html").read_text(encoding="utf-8")
+    for page in ("prometheus", "inverters"):
+        html = (TEMPLATES / f"{page}.html").read_text(encoding="utf-8")
+        assert '{% from "_param_table.html" import param_table %}' in html, page
+        assert html.count("{{ param_table(") == 1, page
+        # The table, search and pager exist only inside the macro.
+        assert "<table" not in html and "btn-group" not in html, page
+    for suffix in ("title", "search", "list", "range", "prev", "next"):
+        assert f'id="{{{{ prefix }}}}-{suffix}"' in macro, suffix
+    for shared in ("param-table-wrap", "param-table", "btn btn-primary", "btn-group btn-group-sm"):
+        assert shared in macro, shared
+    js = JS.read_text(encoding="utf-8")
+    assert "const EXPOSED_PAGE_SIZE = 15;" in js
+    assert "renderParameterTable('exposed'" in js and "renderParameterTable('writable'" in js
+
+
+@pytest.mark.asyncio
+async def test_prometheus_and_inverters_render_the_same_table_card_structure(tmp_path):
+    def card_classes(html: str, prefix: str) -> set[str]:
+        section = re.search(rf'<section class="card" aria-labelledby="{prefix}-title">.*?</section>', html, re.DOTALL)
+        assert section, prefix
+        return {name for value in re.findall(r'class="([^"]*)"', section[0]) for name in value.split()}
+
+    async with _logged_in(tmp_path) as client:
+        exposed = card_classes((await client.get("/ui/prometheus")).text, "exposed")
+        writable = card_classes((await client.get("/ui/inverters")).text, "writable")
+    # Only the drag handle column is Prometheus-specific.
+    assert exposed - {"col-handle", "param-table-reorder"} == writable
+    assert {"param-table", "param-table-wrap", "btn-primary", "btn-group-sm"} <= writable
+
+
+def test_incomplete_export_group_is_reported_by_toast_and_on_the_field_not_by_a_banner():
+    js = (ADMIN_DIR / "static/js/admin.js").read_text(encoding="utf-8")
+    render = js[js.index("function renderSaveState()"):js.index("function reportSaveFailure(")]
+    assert "toast(entry.message, 'warning')" in render and "lastIncompleteToast.get(id) !== entry.message" in render
+    assert "sectionNotice(id, 'hint')" not in render  # no persistent yellow banner
+    mark = js[js.index("function markMissingExportFields()"):js.index("function queueExportSettings()")]
+    assert "aria-invalid" in mark and "control.dataset.touched === '1'" in mark
+
+
+def test_primary_button_themes_its_disabled_and_focus_state():
+    css = CSS.read_text(encoding="utf-8")
+    rule = css[css.index(".btn-primary {"):css.index(".btn-outline-primary {")]
+    assert "--bs-btn-disabled-bg: var(--rct-brand);" in rule and "--bs-btn-focus-shadow-rgb: var(--bs-primary-rgb);" in rule
+

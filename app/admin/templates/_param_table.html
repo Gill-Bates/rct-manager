@@ -3,7 +3,7 @@
 {% macro param_table(prefix, title, hint, add_label, add_id, modal_id, search_label, pager_label, reorder=false) %}
 <section class="card" aria-labelledby="{{ prefix }}-title">
     <div class="card-body">
-        <div class="d-flex flex-wrap align-items-center justify-content-between gap-3 mb-3">
+        <div class="param-card-head d-flex flex-wrap align-items-center justify-content-between gap-3 mb-3">
             <div>
                 <h2 id="{{ prefix }}-title" class="h5 mb-1">{{ title }}</h2>
                 <p class="text-secondary small mb-0">{{ hint }}</p>

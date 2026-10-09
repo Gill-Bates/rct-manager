@@ -624,11 +624,9 @@
     iconNode.setAttribute('aria-hidden', 'true');
     const titleText = element('span', null, title);
     titleNode.append(iconNode, titleText);
-    const chip = element('span', 'device-chip');
-    const dot = element('span', 'device-chip-dot');
-    dot.setAttribute('aria-hidden', 'true');
+    const chip = element('span', 'status-badge status-badge-neutral');
     const text = element('span');
-    chip.append(dot, text);
+    chip.append(text);
     chip.hidden = true;
     head.append(titleNode, chip);
     // titleText is exposed separately so a renamed tower ("Battery 1" -> "Battery 2") can be patched
@@ -740,7 +738,8 @@
     const notice = BATTERY_NOTICES.find(([pattern]) => pattern.test(text));
     const title = notice ? `${text} — ${notice[1]}` : text;
     if (head.chip.title !== title) head.chip.title = title;
-    setClass(head.chip, 'device-chip-warning', Boolean(notice));
+    setClass(head.chip, 'status-badge-warning', Boolean(notice));
+    setClass(head.chip, 'status-badge-neutral', !notice);
     head.chip.hidden = false;
   }
 
@@ -934,7 +933,7 @@
       toggle,
       card: element('article', 'device-item'),
       head: element('div', 'device-head'),
-      statusBadge: element('span', 'device-status-badge device-status-badge-online'),
+      statusBadge: element('span', 'status-badge status-badge-success'),
       top: element('div', 'device-head-main'),
       meta: element('div', 'device-head-meta'),
       dot: element('span', 'status-dot'),
@@ -1288,7 +1287,7 @@
   function tokenRoleCell(role) {
     const write = role !== 'read';
     const cell = element('td');
-    cell.append(element('span', `token-role-badge ${write ? 'token-role-write' : 'token-role-read'}`, write ? 'Read and write' : 'Read'));
+    cell.append(element('span', `status-badge ${write ? 'status-badge-warning' : 'status-badge-success'}`, write ? 'Read and write' : 'Read'));
     return cell;
   }
 
@@ -1552,7 +1551,7 @@
       node.hidden = true;
       const iconNode = element('span', 'material-icons flow-badge-icon', icon);
       iconNode.setAttribute('aria-hidden', 'true');
-      const state = element('span', 'flow-badge-state');
+      const state = element('span', 'flow-badge-state status-badge status-badge-neutral');
       node.append(iconNode, element('span', 'flow-badge-caption', caption), state);
       badges.append(node);
       badgeNodes[key] = { node, state, caption };
@@ -1567,9 +1566,9 @@
       if (!shown) return;
       const [text, ok] = state || ['n/a', null];
       setText(badge.state, text);
-      setClass(badge.state, 'is-ok', ok === true);
-      setClass(badge.state, 'is-bad', ok === false);
-      setClass(badge.node, 'is-stale', stale || !state);
+      setClass(badge.state, 'status-badge-success', ok === true);
+      setClass(badge.state, 'status-badge-danger', ok === false);
+      setClass(badge.state, 'status-badge-neutral', ok === null);
       const label = `${badge.caption}: ${text}`;
       if (badge.node.getAttribute('aria-label') !== label) badge.node.setAttribute('aria-label', label);
     }
@@ -2731,6 +2730,7 @@
     idle: ['', 'text-secondary'],
   };
   const SAVE_STATE_CLASSES = ['text-danger', 'text-secondary', 'text-warning-emphasis', 'text-success'];
+  const lastIncompleteToast = new Map();  // id -> last incomplete message already toasted (no repeats)
   const saveSections = new Map();         // id -> { state, message, failure }
   const anySection = (states) => [...saveSections.values()].some((entry) => states.includes(entry.state));
 
@@ -2820,10 +2820,11 @@
     for (const [id, entry] of saveSections) {
       if (entry.failure) renderSectionAlert(id, entry.failure);
       else document.getElementById(`save-error-${id}`)?.remove();
+      // An incomplete group is reported once per distinct message, as a warning toast; the fields
+      // themselves carry aria-invalid and their "Required." help text.
       if (entry.state === 'incomplete' && entry.message) {
-        const hint = sectionNotice(id, 'hint');
-        if (hint) hint.textContent = entry.message;
-      } else removeNotice(id, 'hint');
+        if (lastIncompleteToast.get(id) !== entry.message) { lastIncompleteToast.set(id, entry.message); toast(entry.message, 'warning'); }
+      } else lastIncompleteToast.delete(id);
     }
     refreshExportBar();
     const label = $('save-state');
@@ -3155,6 +3156,7 @@
       } else settingsDraft[field.key] = control.value;
       if (['db_type', 'metrics_export_enabled', 'questdb_downsampling'].includes(field.key)) onChange();
       syncTsdbStatusSurfaces();
+      control.dataset.touched = '1';
       queueExportSettings();
     });
     return wrap;
@@ -3250,12 +3252,26 @@
 
   function exportDirty() { return page === 'tsdb' && exportChangedKeys().length > 0; }
 
+  // A required field that was edited and is still empty is flagged on the field itself.
+  function markMissingExportFields() {
+    const type = settingsDraft.db_type || '';
+    const missing = new Set(settingsDraft.metrics_export_enabled ? exportRequiredKeys(type).filter((key) => !exportFieldFilled(key)) : []);
+    for (const key of exportRequiredKeys(type)) {
+      const control = $(`setting-${key}`);
+      if (!control) continue;
+      const flagged = missing.has(key) && control.dataset.touched === '1';
+      control.classList.toggle('is-invalid', flagged);
+      if (flagged) control.setAttribute('aria-invalid', 'true'); else control.removeAttribute('aria-invalid');
+    }
+  }
+
   // Marks the draft state; never starts a timer and never sends.
   function queueExportSettings() {
     const type = settingsDraft.db_type || '';
     if (!exportDirty()) setSectionState('export', 'idle');
     else if (settingsDraft.metrics_export_enabled && !exportReady(type)) setSectionState('export', 'incomplete', missingExportHint(type));
     else setSectionState('export', 'unsaved');
+    markMissingExportFields();
     refreshExportBar();
   }
 
@@ -3341,8 +3357,8 @@
       if (field.key === 'questdb_retention_days' && settingsDraft.questdb_downsampling === 'manual') return false;
       return true;
     };
-    const card = (name, title, nodes) => {
-      const section = element('section', `card export-card export-card-${name}`);
+    const card = (name, title, nodes, extraClass = '') => {
+      const section = element('section', `card export-card export-card-${name} ${extraClass}`.trim());
       const body = element('div', 'card-body');
       body.append(element('h2', 'h5 mb-3', title), ...nodes);
       section.append(body);
@@ -3367,7 +3383,7 @@
           groupCard('Database', 'Target database settings', type),
           groupCard('Connection', 'Connection', type),
           groupCard('Export', 'Export settings', type),
-          card('console', 'Status & Log', [consoleNode]),
+          card('console', 'Status & Log', [consoleNode], 'card-span-all'),
         );
       }
       host.replaceChildren(...cards);
@@ -3618,7 +3634,7 @@
       // The trailing empty row has nothing to remove; it is re-created on every render anyway.
       if (!isBlankNewRow(device)) removeCol.append(remove);
       grid.append(hostCol, portCol, networkCol, removeCol);
-      const flag = element('span', 'device-row-flag badge text-bg-warning mt-1');
+      const flag = element('span', 'device-row-flag status-badge status-badge-warning mt-1');
       flag.hidden = true;
       const feedback = element('div', 'invalid-feedback');
       feedback.id = `device-${device._uid}-feedback`;
@@ -3684,7 +3700,7 @@
     discard.type = 'button';
     discard.id = `${prefix}-discard`;
     discard.addEventListener('click', onDiscard);
-    const count = element('span', 'badge text-bg-warning');
+    const count = element('span', 'status-badge status-badge-warning');
     count.id = `${prefix}-change-count`;
     actions.append(apply, discard, count);
     const status = element('p', 'text-secondary small mt-2 mb-0');

@@ -154,20 +154,20 @@ await page.waitForURL('**/ui/dashboard');
 check('password change lands on dashboard', true);
 
 // 2. dashboard with cached values only
-await page.waitForFunction(() => document.querySelector('.device-item .device-status-badge-online, .device-item .status-dot.online'), null, { timeout: 20000 }).catch(() => { });
+await page.waitForFunction(() => document.querySelector('.device-item .status-badge-success, .device-item .status-dot.online'), null, { timeout: 20000 }).catch(() => { });
 const badgeInfo = await page.evaluate(() => {
   const card = document.querySelector('.device-item');
-  const badge = card?.querySelector('.device-status-badge-online');
+  const badge = card?.querySelector('.status-badge-success');
   if (!badge) return null;
   const cardRect = card.getBoundingClientRect();
   const badgeRect = badge.getBoundingClientRect();
   return {
     text: badge.textContent.trim(),
     nearTopRight: badgeRect.top - cardRect.top < 40 && cardRect.right - badgeRect.right < 40,
-    pulses: getComputedStyle(badge, '::before').animationName !== 'none',
+    hasDot: getComputedStyle(badge, '::before').content !== 'none',
   };
 });
-check('connected device shows a top-right pulsing badge', Boolean(badgeInfo && badgeInfo.text === 'Connected' && badgeInfo.nearTopRight && badgeInfo.pulses), JSON.stringify(badgeInfo));
+check('connected device shows a top-right status badge with a dot', Boolean(badgeInfo && badgeInfo.text === 'Connected' && badgeInfo.nearTopRight && badgeInfo.hasDot), JSON.stringify(badgeInfo));
 
 try {
   await page.waitForFunction(() => document.getElementById('grid-power')?.textContent.includes('250') && document.getElementById('pv-power')?.textContent.includes('2,035'), null, { timeout: 40000 });
@@ -232,7 +232,7 @@ const statusBadges = await page.evaluate(() => {
   return {
     count: badges.length,
     states: badges.map((b) => b.querySelector('.flow-badge-state').textContent),
-    colored: badges.every((b) => b.querySelector('.flow-badge-state').matches('.is-ok, .is-bad')),
+    colored: badges.every((b) => b.querySelector('.flow-badge-state').matches('.status-badge-success, .status-badge-danger')),
   };
 });
 check('dashboard flow graphic shows status badges, each green or red', statusBadges.count > 0 && statusBadges.colored, JSON.stringify(statusBadges));
@@ -313,10 +313,31 @@ check('battery slice stack is ordered top, middle(s), bottom',
   stackOrder[0] === 'battery_top.svg' && stackOrder[stackOrder.length - 1] === 'battery_bottom.svg'
   && stackOrder.slice(1, -1).every((name) => name === 'battery_middle.svg'),
   JSON.stringify(stackOrder));
-await page.waitForFunction(() => [...document.querySelectorAll('.device-chip')].some((b) => b.textContent.trim().length > 0), null, { timeout: 20000 }).catch(() => { });
-const badgeTexts = await page.$$eval('.device-chip', (list) => list.map((b) => b.textContent.trim()));
+await page.waitForFunction(() => [...document.querySelectorAll('.device-subcard-head .status-badge')].some((b) => b.textContent.trim().length > 0), null, { timeout: 20000 }).catch(() => { });
+const badgeTexts = await page.$$eval('.device-subcard-head .status-badge', (list) => list.map((b) => b.textContent.trim()));
 check('inverter status badge is fully readable (feed_in test value)', badgeTexts.some((t) => /feed in/i.test(t)), JSON.stringify(badgeTexts));
 check('battery status badge is fully readable (balancing active test value)', badgeTexts.some((t) => /balancing active/i.test(t)), JSON.stringify(badgeTexts));
+// Every status badge shares one component: identical metrics, only the tone colours differ, and each
+// tone keeps WCAG AA text contrast (4.5:1) against the badge background composited on the page.
+const badgeMetrics = await page.evaluate(() => {
+  const parse = (c) => (c.match(/[\d.]+/g) || []).map(Number);
+  const lum = ([r, g, b]) => { const v = [r, g, b].map((x) => { x /= 255; return x <= .03928 ? x / 12.92 : ((x + .055) / 1.055) ** 2.4; }); return .2126 * v[0] + .7152 * v[1] + .0722 * v[2]; };
+  const under = (n) => { for (let e = n.parentElement; e; e = e.parentElement) { const c = parse(getComputedStyle(e).backgroundColor); if (c.length < 4 || c[3] > 0) return c; } return [255, 255, 255, 1]; };
+  return [...document.querySelectorAll('.device-item .status-badge')].map((n) => {
+    const cs = getComputedStyle(n), dot = getComputedStyle(n, '::before');
+    const fg = parse(cs.color), bg = parse(cs.backgroundColor), page = under(n);
+    const a = bg.length > 3 ? bg[3] : 1;
+    const mix = [0, 1, 2].map((k) => bg[k] * a + page[k] * (1 - a));
+    const [hi, lo] = [lum(fg), lum(mix)].sort((x, y) => y - x);
+    return { text: n.textContent.trim(), size: [cs.fontSize, cs.fontWeight, cs.padding, cs.borderRadius, cs.lineHeight, dot.width, dot.height].join('|'),
+      height: Math.round(n.getBoundingClientRect().height * 10) / 10, opacity: getComputedStyle(n.closest('.flow-badge') || n).opacity, contrast: (hi + .05) / (lo + .05) };
+  });
+});
+check('status badges share size, padding, radius, typography and dot (colour aside)',
+  badgeMetrics.length >= 3 && new Set(badgeMetrics.map((b) => b.size)).size === 1 && new Set(badgeMetrics.map((b) => b.height)).size === 1,
+  JSON.stringify(badgeMetrics.map((b) => [b.text, b.size, b.height])));
+check('status badges are never dimmed and keep text contrast of at least 4.5:1',
+  badgeMetrics.every((b) => b.opacity === '1' && b.contrast >= 4.5), JSON.stringify(badgeMetrics.map((b) => [b.text, b.opacity, +b.contrast.toFixed(2)])));
 check('no external requests', external.size === 0, [...external].join(','));
 
 // Two simulated battery towers (primary + battery_placeholder_0, tests/e2e/fake_inverter.py) must
@@ -352,7 +373,7 @@ await page.route('**/admin/api/devices', async (route) => {
 });
 await page.reload();
 await page.waitForFunction(() => document.getElementById('grid-power')?.textContent.includes('250')
-  && [...document.querySelectorAll('.device-chip')].some((badge) => badge.textContent.trim().length > 0));
+  && [...document.querySelectorAll('.device-subcard-head .status-badge')].some((badge) => badge.textContent.trim().length > 0));
 const staleUi = await page.locator('#dashboard-grid, .device-visual').evaluateAll((nodes) =>
   nodes.map((node) => `${node.textContent} ${[...node.querySelectorAll('[title]')].map((child) => child.title).join(' ')}`).join(' '));
 check('stale API readings display values without stale labels or titles', staleReadings > 0 && !/\bstale\b/i.test(staleUi), `stale readings: ${staleReadings}; UI: ${staleUi}`);
@@ -375,7 +396,7 @@ const readLayout = () => page.evaluate(() => {
   const labels = (node) => [...node.querySelectorAll('dt')].map((dt) => dt.textContent.trim());
   const title = (card) => text(card.querySelector('.device-subcard-title span:last-of-type'));
   const chip = (card) => {
-    const node = card.querySelector('.device-chip');
+    const node = card.querySelector('.device-subcard-head .status-badge');
     return node && !node.hidden ? text(node) : null;
   };
   const card = document.querySelector('.device-item');
@@ -741,22 +762,32 @@ await page.route('**/admin/api/devices', (route) => route.fulfill({ status: 429,
 await forcePoll();
 await page.waitForFunction(() => document.querySelector('#toast-region .alert-danger'), null, { timeout: 8000 });
 check('no stale-data banner element exists on the page', (await page.locator('#dashboard-staleness').count()) === 0);
-// 300ms, not 150ms: the slide-in transition itself takes 250ms (admin.css), and the opacity/transform
+// 350ms, not 150ms: the slide-in transition itself takes 300ms (admin.css), and the transform
 // assertion below must land after it settles, not mid-transition.
-await page.waitForTimeout(300);
+await page.waitForTimeout(350);
 const dupToasts = await page.$$eval('#toast-region .alert-danger', (nodes) => nodes.filter((n) => n.textContent.includes('rate or the failed-authentication limit')).length);
 check('a failed poll produces exactly one toast', dupToasts === 1, String(dupToasts));
 const toastAnim = await page.evaluate(() => {
   const node = [...document.querySelectorAll('#toast-region .alert-danger')].find((n) => n.textContent.includes('rate or the failed-authentication limit'));
   if (!node) return null;
   const style = getComputedStyle(node);
-  return { visible: node.classList.contains('is-visible'), opacity: style.opacity, transform: style.transform };
+  return { visible: node.classList.contains('is-visible'), visibility: style.visibility, transform: style.transform };
 });
-check('surviving toast gained the slide-in class and is fully opaque', Boolean(toastAnim?.visible && toastAnim.opacity === '1'), JSON.stringify(toastAnim));
+// Slide-in: every toast enters from the right edge, so the settled transform must be a zero X offset.
+const settledX = (matrix) => (matrix === 'none' ? 0 : Number(matrix.match(/matrix\(([^)]*)\)/)?.[1].split(',')[4] ?? NaN));
+check('surviving toast slid in from the right and is visible',
+  Boolean(toastAnim?.visible && toastAnim.visibility === 'visible' && Math.abs(settledX(toastAnim.transform)) < 1), JSON.stringify(toastAnim));
 await forcePoll();
-await page.waitForTimeout(300);
+await page.waitForTimeout(350);
 const dupToastsAfter = await page.$$eval('#toast-region .alert-danger', (nodes) => nodes.filter((n) => n.textContent.includes('rate or the failed-authentication limit')).length);
 check('a second consecutive automatic failure does not stack another toast', dupToastsAfter === 1, String(dupToastsAfter));
+// Slide-out: dismissing the toast marks it leaving, moves it back to the right edge, then removes it.
+const leavingToast = page.locator('#toast-region .alert-danger', { hasText: 'rate or the failed-authentication limit' }).first();
+await leavingToast.locator('.btn-close').click();
+const leaveState = await leavingToast.evaluate((node) => ({ leaving: node.classList.contains('is-leaving'), transform: getComputedStyle(node).transform }))
+  .catch(() => null);
+check('dismissed toast is marked leaving and slides out to the right', Boolean(leaveState?.leaving && settledX(leaveState.transform) > 0), JSON.stringify(leaveState));
+await page.waitForFunction(() => ![...document.querySelectorAll('#toast-region .alert-danger')].some((n) => n.textContent.includes('rate or the failed-authentication limit')), null, { timeout: 2000 });
 await page.unroute('**/admin/api/devices');
 await forcePoll();
 await page.waitForTimeout(300);
@@ -886,6 +917,110 @@ nav = await navbar();
 check('hamburger shares the smaller header button height', nav.menu && Math.abs(nav.menu.h - nav.theme.h) < 1, JSON.stringify([nav.menu, nav.theme]));
 check('logo still fits the header at mobile width', nav.logo.h <= nav.header.h, `${nav.logo.h} <= ${nav.header.h}`);
 await shot('navbar-mobile');
+await page.setViewportSize({ width: 1280, height: 800 });
+
+// 3d. Layout contract: one card gap token, shared Prometheus/Inverters geometry, no horizontal scroll.
+// #main-content is zoomed (--content-zoom), so rect distances are divided by that zoom to get CSS px.
+const GAP_TOLERANCE = 1;
+const STACKED_PAGES = [
+  ['/ui/prometheus', '#exposed-list tr'], ['/ui/inverters', '#settings-sections .card, #writable-list tr'],
+  ['/ui/tsdb', '#settings-sections .card'], ['/ui/tokens', '#tokens-title'],
+  ['/ui/settings', '#settings-sections .card'], ['/ui/energy', '#energy-list > *'], ['/ui/about', '.about-top-row .card'],
+];
+async function stackedGeometry() {
+  return page.evaluate(() => {
+    const main = document.querySelector('#main-content');
+    const zoom = parseFloat(getComputedStyle(main).zoom) || 1;
+    // Resolve the token through a probe outside the zoomed content, so the unit never matters.
+    const probe = document.body.appendChild(document.createElement('div'));
+    probe.style.cssText = 'position:absolute;visibility:hidden;width:var(--rct-card-gap)';
+    const token = parseFloat(getComputedStyle(probe).width);
+    probe.remove();
+    const visible = (node) => { const r = node.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+    const heading = main.querySelector('.page-heading');
+    const container = heading.parentElement;
+    const blocks = [...container.children].filter((node) => node.matches('.card, .settings-grid, .energy-grid, #export-actions, .about-top-row') && visible(node));
+    // The About row is spaced from its heading by its own mt-1, not by the sibling rule.
+    const chain = blocks[0]?.matches('.about-top-row') ? blocks : [heading, ...blocks];
+    const gaps = [];
+    chain.slice(1).forEach((node, i) => gaps.push({ where: `${chain[i].className || chain[i].id} -> ${node.className || node.id}`, gap: (node.getBoundingClientRect().top - chain[i].getBoundingClientRect().bottom) / zoom }));
+    // Tiles inside a grid or the About row: the nearest neighbour below and to the right.
+    const tiles = [...container.querySelectorAll(':scope > .settings-grid > *, :scope > .energy-grid > *, :scope > .about-top-row .card')].filter(visible);
+    const rects = tiles.map((node) => node.getBoundingClientRect());
+    const overlap = (a0, a1, b0, b1) => Math.min(a1, b1) - Math.max(a0, b0);
+    rects.forEach((a, i) => {
+      const below = rects.filter((b, j) => j !== i && b.top >= a.bottom - 0.5 && overlap(a.left, a.right, b.left, b.right) > 1);
+      if (below.length) gaps.push({ where: `tile ${i} below`, gap: (Math.min(...below.map((b) => b.top)) - a.bottom) / zoom });
+      const beside = rects.filter((b, j) => j !== i && b.left >= a.right - 0.5 && overlap(a.top, a.bottom, b.top, b.bottom) > 1);
+      if (beside.length) gaps.push({ where: `tile ${i} beside`, gap: (Math.min(...beside.map((b) => b.left)) - a.right) / zoom });
+    });
+    const grid = container.querySelector(':scope > .settings-grid, :scope > .energy-grid');
+    const gridGap = grid ? { row: parseFloat(getComputedStyle(grid).rowGap), column: parseFloat(getComputedStyle(grid).columnGap) } : null;
+    return { zoom, token, gaps, gridGap, blocks: blocks.length, tiles: tiles.length, overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth };
+  });
+}
+for (const scheme of ['light', 'dark']) {
+  await page.evaluate((value) => localStorage.setItem('rct-admin-theme', value), scheme);
+  for (const width of [1280, 390]) {
+    await page.setViewportSize({ width, height: 844 });
+    for (const [url, ready] of STACKED_PAGES) {
+      const label = `${url} @${width} ${scheme}`;
+      await page.goto(base + url);
+      await page.waitForSelector(ready, { state: 'attached' });
+      await page.waitForLoadState('networkidle');
+      await sleep(300);
+      const geometry = await stackedGeometry();
+      if (url === '/ui/prometheus' && width === 1280) {
+        check(`theme ${scheme} is active for the layout contract`, (await page.evaluate(() => document.documentElement.getAttribute('data-bs-theme'))) === scheme);
+        check('card gap token is 20px', geometry.token === 20, String(geometry.token));
+      }
+      check(`content zoom is applied to ${label}`, geometry.zoom > 0 && geometry.zoom < 1, String(geometry.zoom));
+      check(`stacked blocks are present on ${label}`, geometry.blocks >= 1, String(geometry.blocks));
+      const off = geometry.gaps.filter((g) => Math.abs(g.gap - geometry.token) > GAP_TOLERANCE);
+      check(`every card gap equals the token on ${label}`, geometry.gaps.length > 0 && off.length === 0,
+        JSON.stringify(off.length ? off : geometry.gaps.map((g) => Math.round(g.gap * 10) / 10)));
+      if (geometry.gridGap) {
+        check(`grid row and column gap equal the token on ${label}`,
+          Math.abs(geometry.gridGap.row - geometry.token) <= 0.5 && Math.abs(geometry.gridGap.column - geometry.token) <= 0.5, JSON.stringify(geometry.gridGap));
+      }
+      check(`no horizontal page scroll on ${label}`, geometry.overflow <= 0, `overflow=${geometry.overflow}`);
+    }
+    // Prometheus and Inverters are one layout: same container edges, same card width, same Add action corner.
+    const frames = {};
+    for (const [url, prefix] of [['/ui/prometheus', 'exposed'], ['/ui/inverters', 'writable']]) {
+      await page.goto(base + url);
+      await page.waitForSelector(`#${prefix}-list tr`, { state: 'attached' });
+      await page.waitForLoadState('networkidle');
+      await sleep(300);
+      frames[prefix] = await page.evaluate((pfx) => {
+        const edges = (node) => { const r = node.getBoundingClientRect(); return { left: r.left, right: r.right, top: r.top, width: r.width }; };
+        const card = document.getElementById(`${pfx}-list`).closest('.card');
+        const container = document.querySelector('.page-heading').parentElement;
+        const add = card.querySelector('.btn-primary');
+        return {
+          container: edges(container), heading: edges(document.querySelector('.page-heading')), card: edges(card),
+          wrap: edges(card.querySelector('.param-table-wrap')), search: edges(document.getElementById(`${pfx}-search`)),
+          addFromRight: card.getBoundingClientRect().right - add.getBoundingClientRect().right, addFromLeft: add.getBoundingClientRect().left - card.getBoundingClientRect().left,
+          addFromTop: add.getBoundingClientRect().top - card.getBoundingClientRect().top, cardHeight: card.getBoundingClientRect().height,
+          zoom: parseFloat(getComputedStyle(document.querySelector('#main-content')).zoom),
+        };
+      }, prefix);
+    }
+    const [pm, inv] = [frames.exposed, frames.writable];
+    const label = `@${width} ${scheme}`;
+    const near = (a, b) => Math.abs(a - b) <= 1;
+    check(`Prometheus and Inverters share the container edges ${label}`, near(pm.container.left, inv.container.left) && near(pm.container.right, inv.container.right), JSON.stringify([pm.container, inv.container]));
+    check(`Prometheus and Inverters headings align ${label}`, near(pm.heading.left, inv.heading.left) && near(pm.heading.right, inv.heading.right));
+    check(`Prometheus and Inverters table cards have the same edges and width ${label}`,
+      near(pm.card.left, inv.card.left) && near(pm.card.right, inv.card.right) && near(pm.card.width, inv.card.width), JSON.stringify([pm.card, inv.card]));
+    check(`table wrapper and search share their edges ${label}`, near(pm.wrap.left, inv.wrap.left) && near(pm.wrap.right, inv.wrap.right) && near(pm.search.left, inv.search.left) && near(pm.search.width, inv.search.width));
+    // Centered against a title block of different height, so only the horizontal corner and the header band are compared.
+    const addInside = (f) => f.addFromRight >= 0 && f.addFromLeft >= 0 && f.addFromTop >= 0 && f.addFromTop < f.cardHeight / 2;
+    check(`the primary Add action sits in the card header band ${label}`, addInside(pm) && addInside(inv), JSON.stringify([pm, inv].map((f) => [f.addFromLeft, f.addFromRight, f.addFromTop])));
+    if (width >= 768) check(`the primary Add action is top right on both pages ${label}`, near(pm.addFromRight, inv.addFromRight) && pm.addFromRight < 40, JSON.stringify([pm.addFromRight, inv.addFromRight]));
+  }
+}
+await page.evaluate(() => localStorage.setItem('rct-admin-theme', 'light'));
 await page.setViewportSize({ width: 1280, height: 800 });
 
 // 4. PAT create / use / revoke
@@ -1311,6 +1446,68 @@ await page.click(`#writable-list .metric-row[data-name="${grantee}"] .metric-men
 await page.click(`#writable-list button[aria-label="Remove write access: ${grantee}"]`);
 await page.waitForFunction((name) => !document.querySelector(`#writable-list .metric-row[data-name="${name}"]`), grantee);
 check('row menu removes write access', (await page.locator('#writable-list td.text-secondary').count()) === 1);
+// Pager parity: Prometheus and Inverters share one table, so the same walk must hold on both
+// (15 rows per page, "x–y of N", Previous disabled on the first and Next on the last page).
+const PAGE_SIZE = 15;
+async function pagerWalk(prefix) {
+  const read = async () => ({
+    range: (await page.locator(`#${prefix}-range`).innerText()).trim(),
+    rows: await page.locator(`#${prefix}-list .metric-row`).count(),
+    prevDisabled: await page.locator(`#${prefix}-prev`).isDisabled(),
+    nextDisabled: await page.locator(`#${prefix}-next`).isDisabled(),
+  });
+  const forward = [await read()];
+  while (!forward.at(-1).nextDisabled && forward.length < 100) { await page.click(`#${prefix}-next`); forward.push(await read()); }
+  const backward = [forward.at(-1)];
+  while (!backward.at(-1).prevDisabled && backward.length < 100) { await page.click(`#${prefix}-prev`); backward.push(await read()); }
+  const total = Number(/ of (\d+)$/.exec(forward[0].range)?.[1]);
+  const pages = Math.ceil(total / PAGE_SIZE);
+  const expected = (k) => ({
+    range: `${k * PAGE_SIZE + 1}–${Math.min((k + 1) * PAGE_SIZE, total)} of ${total}`, rows: Math.min(PAGE_SIZE, total - k * PAGE_SIZE),
+    prevDisabled: k === 0, nextDisabled: k === pages - 1,
+  });
+  const walked = (states, order) => states.length === pages && states.every((s, i) => JSON.stringify(s) === JSON.stringify(expected(order(i))));
+  return { total, pages, forwardOk: walked(forward, (i) => i), backwardOk: walked(backward, (i) => pages - 1 - i), forward };
+}
+await page.goto(base + '/ui/prometheus');
+await page.waitForSelector('#exposed-list .metric-row');
+const exposedPager = await pagerWalk('exposed');
+check('Prometheus has more than one page of metrics', exposedPager.pages > 1, String(exposedPager.total));
+check('Prometheus pager walks forward with the x–y of N wording and disabled ends', exposedPager.forwardOk, JSON.stringify(exposedPager.forward));
+check('Prometheus pager walks back to the first page', exposedPager.backwardOk);
+await page.goto(base + '/ui/inverters');
+await page.waitForSelector('#writable-list td');
+const initialGrants = await page.evaluate(async () => (await (await fetch('/admin/api/parameters', { credentials: 'same-origin' })).json()).write_names);
+const initialRange = (await page.locator('#writable-range').innerText()).trim();
+await page.click('#open-add-writable');
+await page.waitForSelector('#add-writable-modal.show #writable-available-list input[type="checkbox"]');
+const grantable = await page.locator('#writable-available-list input[type="checkbox"]').count();
+const wanted = Math.min(grantable, 2 * PAGE_SIZE + 2);
+for (let i = 0; i < wanted; i++) await page.locator('#writable-available-list input[type="checkbox"]').nth(i).check();
+const grantSaved = page.waitForResponse((r) => r.url().endsWith('/admin/api/parameters') && r.request().method() === 'PUT');
+await page.click('#confirm-add-writable');
+await page.waitForSelector('#add-writable-modal', { state: 'hidden' });
+await grantSaved;
+// The "Parameters saved" toast sits over the pager until it leaves.
+await page.waitForFunction(() => !document.getElementById('toast-region').children.length, null, { timeout: 15000 });
+const writablePager = await pagerWalk('writable');
+check('Inverters pager has enough parameters for three pages', writablePager.pages >= 3, `${writablePager.total} parameters`);
+check('Inverters pager walks forward with the same wording and disabled ends as Prometheus', writablePager.forwardOk, JSON.stringify(writablePager.forward));
+check('Inverters pager walks back to the first page', writablePager.backwardOk);
+check('Prometheus and Inverters use the same page size', exposedPager.forward[0].rows === PAGE_SIZE && writablePager.forward[0].rows === PAGE_SIZE);
+// Restore the grants this walk started with so later checks see the state they expect.
+const restored = await page.evaluate(async (grants) => {
+  const { csrf_token: csrf } = await (await fetch('/admin/api/session', { credentials: 'same-origin' })).json();
+  const current = await (await fetch('/admin/api/parameters', { credentials: 'same-origin' })).json();
+  return (await fetch('/admin/api/parameters', {
+    method: 'PUT', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrf },
+    body: JSON.stringify({ exposed_names: current.exposed_names, write_names: grants }),
+  })).status;
+}, initialGrants);
+check('write grants restored after the pager walk', restored === 200, String(restored));
+await page.goto(base + '/ui/inverters');
+await page.waitForFunction(() => document.getElementById('writable-range')?.textContent.trim());
+check('Inverters pager shows its original range after the restore', (await page.locator('#writable-range').innerText()).trim() === initialRange, initialRange);
 await page.goto(base + '/ui/tsdb');
 await page.waitForSelector('#setting-db_type');
 await page.locator('#setting-metrics_export_enabled').click({ force: true });
@@ -1410,7 +1607,10 @@ let exportState = (await (await context.request.get(base + '/admin/api/settings'
 check('an export config that became incomplete again is not sent', exportState.questdb_hostname === 'questdb.example.org' && tsdbPuts.length === putsBeforeIncomplete, JSON.stringify(exportState.questdb_hostname));
 check('Apply is disabled for an incomplete export group', await page.isDisabled('#export-apply'));
 check('#save-state reports the incomplete export group', (await page.locator('#save-state').innerText()).includes('Incomplete'), await page.locator('#save-state').innerText());
-check('the export group names what is missing', /Hostname or URL/.test(await page.locator('#save-hint-export').innerText()));
+check('a warning toast names what is missing, once', /Not saved yet: Hostname or URL is required/.test(await page.locator('#toast-region').innerText())
+  && (await page.locator('#toast-region .alert-warning').count()) === 1);
+check('the emptied required field is flagged on the field', (await page.getAttribute('#setting-questdb_hostname', 'aria-invalid')) === 'true'
+  && (await page.locator('#save-hint-export').count()) === 0);
 // The pairing branch: every required key is present, so the message has to name the pair instead.
 await page.locator('#setting-questdb_hostname').fill('questdb.example.org');
 await page.locator('#setting-questdb_hostname').dispatchEvent('change');
@@ -1419,7 +1619,7 @@ await page.locator('#setting-questdb_username').dispatchEvent('change');
 await sleep(900);
 exportState = (await (await context.request.get(base + '/admin/api/settings')).json()).settings;
 check('an unpaired username is withheld instead of producing a server 400', !exportState.questdb_username && await page.isDisabled('#export-apply'), JSON.stringify(exportState.questdb_username));
-check('the incomplete hint names the pair, not a missing required field', /must be set together or left empty/.test(await page.locator('#save-hint-export').innerText()), await page.locator('#save-hint-export').innerText());
+check('the incomplete hint names the pair, not a missing required field', /must be set together or left empty/.test(await page.locator('#toast-region').innerText()), await page.locator('#toast-region').innerText());
 await page.locator('#setting-questdb_username').fill('');
 await page.locator('#setting-questdb_username').dispatchEvent('change');
 await sleep(400);
@@ -1459,7 +1659,7 @@ await page.click('#export-apply');
 await sleep(600);                          // the request is in flight, its response is still held
 await page.fill('#setting-influxdb_token', 'token-two');
 await page.locator('#setting-influxdb_token').dispatchEvent('change');
-await page.waitForFunction(() => !/Applying/.test(document.getElementById('export-apply-status').textContent), null, { timeout: 15000 });
+await page.waitForFunction(() => document.getElementById('export-apply').getAttribute('aria-busy') === 'false', null, { timeout: 15000 });
 check('a token typed during the apply is not cleared by the older response',
   (await page.inputValue('#setting-influxdb_token')) === 'token-two' && await page.isEnabled('#export-apply'),
   `puts=${settingsPuts} value=${await page.inputValue('#setting-influxdb_token')}`);
@@ -1592,6 +1792,25 @@ await shot('prometheus-master-toggle-on');
     /Write access|Power limits|Hardware verification/.test(shownStep) && !/Engineering mode/.test(shownStep), shownStep.slice(0, 300));
   check('no raw capability names leak onto the Operate surface',
     !/write_path_convention|battery_power_sign_convention|grid_power_sign_convention/.test(setupText), setupText.slice(0, 500));
+
+  // Manual may be selected while the setup is open, but it must read as pending, not as active.
+  const manualAnswered = ep.waitForResponse((r) => r.request().method() === 'PUT' && r.url().endsWith('/mode'), { timeout: 15000 }).catch(() => null);
+  await ep.locator('.energy-mode-switch [role=radio]').nth(1).click();
+  const manualResponse = await manualAnswered;
+  if (manualResponse && manualResponse.ok()) {
+    await ep.waitForSelector('.energy-mode-option.is-selected.is-pending', { timeout: 15000 }).catch(() => { });
+    const lead = ep.locator('.energy-setup-lead:not([hidden])');
+    check('Manual with an open setup is marked pending and says it is not active yet',
+      (await ep.locator('.energy-mode-option.is-selected.is-pending').count()) === 1
+      && /not active yet/.test(await lead.first().innerText().catch(() => '')));
+    const offAnswered = ep.waitForResponse((r) => r.request().method() === 'PUT' && r.url().endsWith('/mode'), { timeout: 15000 });
+    await ep.locator('.energy-mode-switch [role=radio]').first().click();
+    await offAnswered;
+    await ep.waitForSelector('.energy-mode-option.is-selected:not(.is-pending)', { timeout: 15000 });
+    check('Off is never shown as pending', (await ep.locator('.energy-setup-lead:not([hidden])').count()) === 0);
+  } else {
+    check('Manual can be selected while the setup is open', false, String(manualResponse && manualResponse.status()));
+  }
 
   // The verification form must never pre-select the sign conventions or the evidence checkboxes.
   const verifyPuts = [];
