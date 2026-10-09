@@ -995,7 +995,7 @@ def test_tsdb_page_uses_the_shared_page_heading_cards_and_setting_rows():
     assert 'class="page-heading"' in html and 'id="save-state" class="save-state' in html
     assert 'class="settings-grid"' in html and "tsdb-status-badge" not in html
     render = js[js.index("function renderExportSettings("):js.index("// Mirrors the server-side host plausibility")]
-    assert "element('h2', 'h5 mb-3', title)" in render and "'Status & Log'" in render
+    assert "element('h2', 'h5 mb-2', title)" in render and "'Status & Log'" in render
     assert "role', 'log'" in render and "aria-live', 'polite'" in render
     assert "Status & log" not in js
 

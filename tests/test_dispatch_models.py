@@ -113,6 +113,25 @@ def test_control_telemetry_rejects_nan_household_fields_when_present() -> None:
         )
 
 
+@pytest.mark.parametrize("soc", [-0.1, 100.1, 8000.0])
+def test_control_telemetry_rejects_an_out_of_range_soc(soc: float) -> None:
+    """SoC is a percentage by contract; a value outside 0..100 is a unit/decoding fault and must
+    not reach a discharge guard as if it were a real charge level (the ratio/percent finding).
+    """
+    with pytest.raises(ValueError, match="soc_percent"):
+        ControlTelemetry(
+            soc_percent=soc,
+            soc_age_seconds=0.0,
+            soc_source="device",
+            grid_import_w=0.0,
+            grid_age_seconds=0.0,
+            grid_source="device",
+            battery_setpoint=PowerSetpoint(),
+            battery_age_seconds=0.0,
+            battery_source="device",
+        )
+
+
 def test_from_dict_rejects_a_non_finite_persisted_power_setpoint() -> None:
     with pytest.raises(DispatchRecordCorrupt):
         DispatchRecord.from_dict(

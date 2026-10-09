@@ -1366,13 +1366,13 @@ body {
     font-weight: 600;
 }
 
-/* The TSDB cards share one grid row with the console and Apply bar below; a tighter row rhythm keeps
-   the page within a 1536x864 viewport without changing the card gap token. */
-.export-card .setting-row {
+/* Cards in the settings grid use a tighter row rhythm, so the TSDB page (cards, console and Apply bar)
+   fits a 1536x864 viewport without touching the card gap token. */
+.settings-grid .setting-row {
     padding: .35rem 0;
 }
 
-.export-card>.card-body {
+.settings-grid>.card>.card-body {
     padding-block: .75rem;
 }
 

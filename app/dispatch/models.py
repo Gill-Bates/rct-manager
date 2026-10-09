@@ -163,6 +163,13 @@ class ControlTelemetry:
         )
         if not all(math.isfinite(value) for value in required):
             raise ValueError("control telemetry values must be finite")
+        # SoC is a percentage by this type's contract: the adapter has already converted the raw
+        # reading by its catalog unit, so a value outside 0..100 here is a unit/decoding fault, not
+        # a plausible charge level. Rejecting it at the domain boundary makes the range unambiguous
+        # for every producer (not only the RCT adapter) so a discharge guard cannot act on a SoC the
+        # firmware never meant (the ratio/percent safety finding).
+        if not 0.0 <= self.soc_percent <= 100.0:
+            raise ValueError("control telemetry soc_percent must be within 0..100")
         optional = (self.household_load_w, self.household_age_seconds)
         if any(value is not None and not math.isfinite(value) for value in optional):
             raise ValueError("household telemetry values must be finite when present")
