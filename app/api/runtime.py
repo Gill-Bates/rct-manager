@@ -58,10 +58,6 @@ class Runtime:
     # Set when a device reconfiguration failed after the old graph was torn down: the live graph is
     # then partial, so readiness must not report the service as healthy.
     graph_failed: bool = False
-    # True once the startup/live-enable dispatch recovery sweep has completed with no unreadable or
-    # restore-pending device left behind. Readiness stays false until then (C2); a deployment with
-    # no dispatch configured is never held hostage by this flag (see Runtime.readiness callers).
-    dispatch_recovery_ready: bool = False
 
     def shutting_down(self) -> bool:
         return self.shutdown is not None and self.shutdown.plan is not None

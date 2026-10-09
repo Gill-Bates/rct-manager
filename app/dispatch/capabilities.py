@@ -20,6 +20,7 @@ This module stays vendor-neutral: it must not import ``app.gateway.rct``,
 ``app.gateway.rct_dispatch`` or ``app.gateway.conventions``.
 """
 
+import math
 from collections.abc import Iterable
 from dataclasses import dataclass, fields
 from datetime import datetime
@@ -80,22 +81,37 @@ class CapabilityRecord:
 
     def __post_init__(self) -> None:
         check_printable_ascii(self.note, "note", NOTE_MAX_LENGTH)
+        # Capability-specific value ranges are enforced here regardless of status, so the admin API
+        # is only an additional input bound, never the single safe one (H6): a directly constructed
+        # or historically mis-persisted record must not carry an out-of-range code or byte width.
+        # The bounds mirror app.admin.dispatch_api.CapabilityUpdate's own Field() limits.
+        if self.soc_strategy_external_code is not None and not 0 <= self.soc_strategy_external_code <= 255:
+            raise ValueError("soc_strategy_external_code must be within 0..255")
+        for width_name in ("enum_byte_width", "bool_byte_width"):
+            width = getattr(self, width_name)
+            if width is not None and not 1 <= width <= 4:
+                raise ValueError(f"{width_name} must be within 1..4")
+        if self.refresh_interval_seconds is not None and (
+            not math.isfinite(self.refresh_interval_seconds) or not 0.0 <= self.refresh_interval_seconds <= 86_400.0
+        ):
+            raise ValueError("refresh_interval_seconds must be finite and within 0..86400")
         # Mirrors app.admin.dispatch_api's own _REQUIRED_FOR_VERIFIED/_missing_evidence gate, but
         # enforces it at the dataclass boundary too (H6): a directly constructed/copied record, or
         # a future caller that bypasses the admin API, must not be able to carry a VERIFIED
-        # WRITE_PATH record without the evidence that status claims.
-        if (
-            self.status is CapabilityStatus.VERIFIED
-            and self.name is CapabilityName.WRITE_PATH
-            and (
+        # capability record without the evidence that status claims. The dispatch gate decides on
+        # status alone (CapabilityRegistry.unverified_for), so a VERIFIED record with the safety
+        # evidence missing would otherwise pass the gate.
+        if self.status is CapabilityStatus.VERIFIED:
+            if self.name is CapabilityName.WRITE_PATH and (
                 self.soc_strategy_external_code is None
                 or self.enum_byte_width is None
                 or self.bool_byte_width is None
                 or not self.write_frame_layout_verified
                 or not self.apply_sequence_verified
-            )
-        ):
-            raise ValueError("WRITE_PATH cannot be verified without write-path evidence")
+            ):
+                raise ValueError("WRITE_PATH cannot be verified without write-path evidence")
+            if self.name is CapabilityName.EXPORT_LIMIT and self.export_limit_zero_blocks_export is None:
+                raise ValueError("EXPORT_LIMIT cannot be verified without export_limit_zero_blocks_export")
 
     def to_dict(self) -> dict:
         """JSON-capable projection for the encrypted part of ``dispatch_capabilities``."""

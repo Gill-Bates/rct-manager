@@ -1,3 +1,9 @@
+#!/usr/bin/env python3
+#
+# tests/test_admin_design_rules_badges.py
+# Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
+#
+
 """Static design rules for the admin status badges (one component, fixed tones, stable contrast).
 
 Each rule is a function over the CSS/JS text so a mutation test can prove that it rejects a violation.

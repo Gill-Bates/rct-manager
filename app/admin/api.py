@@ -539,7 +539,7 @@ class _ReconfigureFailed(HTTPException):
         self.rollback = rollback
 
 
-def _reconfigure_devices(request: Request) -> None:
+def _reconfigure_devices(request: Request, updated: Settings, previous: Settings) -> None:
     """Rebuild the device/endpoint/scheduling graph in place from the just-saved device list.
 
     Same cross-thread scheduling as ``_restart_export``: ``put_settings`` runs in a worker thread,
@@ -570,6 +570,12 @@ def _reconfigure_devices(request: Request) -> None:
         ) from exc
     except TimeoutError as exc:
         log.error("Reconfiguring devices did not finish within %.0f s", _RECONFIGURE_TIMEOUT_SECONDS)
+        # The waiter gives up but the coroutine keeps running; keep central ownership of its future
+        # so a later rollback-capable failure (build/restore phase, old graph still live) still
+        # reverts the persisted device list. Without this the saved list would stay on the new
+        # configuration while the untouched live graph runs the old one, with no caller left to
+        # revert it.
+        _defer_devices_rollback(request, updated, previous)
         raise _ReconfigureFailed(
             504, "Applying the device list is still in progress; check the device status before saving again.",
             rollback=False,
@@ -697,7 +703,7 @@ def put_settings(body: dict[str, Any], request: Request) -> dict:
     if devices_changed:
         with _RECONFIGURE_LOCK:
             try:
-                _reconfigure_devices(request)
+                _reconfigure_devices(request, updated, previous)
             except _ReconfigureFailed as exc:
                 if exc.rollback:
                     _revert_devices(request, updated, previous)
@@ -814,23 +820,68 @@ def _approve_default_writes(request: Request) -> None:
         state.runtime.gateway.set_allowlist(allowlist)
 
 
-def _revert_devices(request: Request, updated: Settings, previous: Settings) -> None:
-    """Put the old device list back after the live graph rejected the new one.
+def _revert_devices_on_state(state, store, updated: Settings, previous: Settings) -> None:
+    """Core device-list rollback, independent of a live HTTP request.
 
     Only the devices field is rolled back so the admin store, admin_desired_settings and
     runtime.settings agree with what the gateway has loaded; other fields of the same request stay
-    applied. A newer save that already replaced the list is left alone.
+    applied. A newer save that already replaced the list is left alone. Takes ``state``/``store``
+    rather than a request so the deferred post-timeout rollback (see ``_reconfigure_devices``) can
+    run it without a caller still holding the request.
     """
-    runtime = request.app.state.runtime
+    runtime = state.runtime
     with _SETTINGS_LOCK:
-        current = request.app.state.admin_desired_settings
+        current = state.admin_desired_settings
         if current.devices != updated.devices:
             return
-        reverted = _store(request).merge_operator_settings(
+        reverted = store.merge_operator_settings(
             current, {"devices": [d.model_dump(mode="json") for d in previous.devices]}
         )
-        request.app.state.admin_desired_settings = reverted
+        state.admin_desired_settings = reverted
         runtime.settings = runtime.settings.model_copy(update={"devices": previous.devices})
+
+
+def _revert_devices(request: Request, updated: Settings, previous: Settings) -> None:
+    """Put the old device list back after the live graph rejected the new one."""
+    _revert_devices_on_state(request.app.state, _store(request), updated, previous)
+
+
+# Exceptions for which the old graph is still the live one, so reverting the saved device list
+# keeps store and live state consistent (same classification as the synchronous rollback above).
+_DEVICE_ROLLBACK_EXCEPTIONS = (ReconfigurationRejected, ReconfigurationBuildError)
+
+
+def _defer_devices_rollback(request: Request, updated: Settings, previous: Settings) -> None:
+    """After a reconfiguration timed out, keep ownership of its still-running future centrally.
+
+    The HTTP waiter is gone, but the coroutine runs on. If it eventually fails in the pre-teardown
+    build/restore phase (old graph still live), revert the persisted device list so the store does
+    not stay on the new configuration while the live graph runs the old one. A clean completion or
+    a post-teardown failure needs no revert (the new graph is live, or readiness is already red).
+    """
+    state = request.app.state
+    future = getattr(state, "live_transition", None)
+    loop = getattr(state, "loop", None)
+    store = getattr(state, "admin_store", None)
+    if future is None or loop is None or store is None:
+        return
+
+    def _on_done(fut) -> None:
+        try:
+            exc = fut.exception()
+        except asyncio.CancelledError:  # the coroutine was cancelled: nothing to roll back
+            return
+        if not isinstance(exc, _DEVICE_ROLLBACK_EXCEPTIONS):
+            return
+        log.error(
+            "A device reconfiguration that outlived its HTTP wait failed rollback-capable; "
+            "reverting the saved device list to the previous configuration"
+        )
+        # Offloaded: _revert_devices_on_state takes _SETTINGS_LOCK and writes SQLite, which must
+        # not run on the event loop thread the done-callback fires on.
+        loop.run_in_executor(None, _revert_devices_on_state, state, store, updated, previous)
+
+    future.add_done_callback(_on_done)
 
 
 def _exposed_names(runtime, store) -> list[str]:

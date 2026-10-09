@@ -932,10 +932,14 @@ def test_hardware_verification_form_is_expert_only_and_the_basic_step_only_point
     # strategy code or byte widths.
     assert "verifyExpertSlot.append(verifyForm)" in advanced
     assert "verifySetupSlot" not in advanced and "place(verifyForm" not in advanced
-    # The Basic step offers a button; Expert mode is only switched on by that click, never by the step itself.
+    # The Basic step offers a button that opens the guided assistant; it never switches Expert mode on.
     button = advanced[advanced.index("const openVerifyButton"):advanced.index("const renderHardwareText")]
     assert "'Verify hardware'" in button and "addEventListener('click'" in button
-    assert "expertSwitch.checked = true" in button and "setExpert(true)" not in advanced
+    assert "openVerificationAssistant(" in button and "expertSwitch" not in button and "setExpert(true)" not in advanced
+    # The assistant stores nothing itself: it calls the server steps and commits only on the explicit save click.
+    assistant = js[js.index("function openVerificationAssistant("):js.index("function energyAdvanced(")]
+    assert "post('control-test', { confirm: true })" in assistant and "post('commit', { confirm: true })" in assistant
+    assert "innerHTML" not in assistant and "hardware-verification" not in assistant
 
 
 @pytest.mark.parametrize(

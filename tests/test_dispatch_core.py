@@ -963,6 +963,44 @@ async def test_recover_reports_an_unreadable_record_as_critical(tmp_path: Path, 
     assert any(r.levelname == "CRITICAL" and "ghost" in r.getMessage() for r in caplog.records)
 
 
+async def test_recovery_ready_unlatches_after_an_automatic_restore_heals(tmp_path: Path) -> None:
+    """C2 self-heal: a failed restore at the startup sweep keeps readiness red, but an automatic
+    tick() retry that reaches IDLE must flip recovery_ready() back to green without a restart —
+    the regression the former latched snapshot caused.
+    """
+    clock = ManualClock()
+    gateway = FakeDispatchGateway(clock)
+    dispatch = controller(tmp_path, clock, gateway)
+    await dispatch.submit(
+        "main",
+        DispatchCommand(DispatchMode.CHARGE_FROM_GRID, 80, 2000, clock.now() + timedelta(hours=1)),
+    )
+    # The startup sweep finds the active record and tries to restore it, but the device is
+    # unreachable, so the restore lands in FAULT_RESTORE_PENDING and readiness must stay red.
+    gateway.fail_restore = True
+    await dispatch.recover()
+    assert dispatch.restore_pending_devices == ("main",)
+    assert dispatch.recovery_ready() is False
+
+    # The inverter comes back; the automatic retry in tick() heals it.
+    gateway.fail_restore = False
+    clock.advance(1)
+    status = await dispatch.tick("main")
+    assert status.state is DispatchState.IDLE
+    assert dispatch.restore_pending_devices == ()
+    assert dispatch.recovery_ready() is True
+
+
+async def test_recovery_ready_is_false_until_the_sweep_runs(tmp_path: Path) -> None:
+    """A green readiness must never precede the startup recovery sweep, even with nothing pending."""
+    clock = ManualClock()
+    gateway = FakeDispatchGateway(clock)
+    dispatch = controller(tmp_path, clock, gateway)
+    assert dispatch.recovery_ready() is False
+    await dispatch.recover()
+    assert dispatch.recovery_ready() is True
+
+
 def test_export_cut_bypasses_deadband_and_interval_for_a_reduction() -> None:
     now = datetime(2026, 1, 1, tzinfo=UTC)
     config = DispatchConfig()

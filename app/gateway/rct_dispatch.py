@@ -6,6 +6,8 @@
 
 """RCT adapter for the vendor-neutral battery dispatch port (REQ-054/055)."""
 
+from typing import Literal
+
 from app.dispatch.capabilities import CapabilityName, CapabilityRegistry
 from app.dispatch.models import (
     ControlTelemetry,
@@ -31,6 +33,20 @@ class RctDispatchGateway:
         "power_mng_battery_power_extern",
         "power_mng_use_grid_power_enable",
     )
+
+    SOC_TARGET_REGISTER = "power_mng_soc_target_set"
+
+    @staticmethod
+    def soc_target_unit(value: float) -> Literal["ratio", "percent"] | None:
+        """The unit a live register value is written in, or ``None`` when it cannot be told.
+
+        1.0 and 0.0 read the same as 1 % / 0 % and 100 % / 0 %, so they decide nothing.
+        """
+        if 0.02 <= value <= 0.98:
+            return "ratio"
+        if 2.0 <= value <= 100.0:
+            return "percent"
+        return None
 
     def __init__(
         self,

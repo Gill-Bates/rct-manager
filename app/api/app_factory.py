@@ -30,6 +30,7 @@ from app.admin.api import (
 from app.admin.api import router as admin_router
 from app.admin.dispatch_api import router as admin_dispatch_router
 from app.admin.energy_api import router as admin_energy_router
+from app.admin.energy_verification import router as admin_energy_verification_router
 from app.admin.store import AdminStore
 from app.admin.ui import install_ui
 from app.allowlist import Allowlist
@@ -618,9 +619,6 @@ def _lifespan(
             outcome into readiness: a green readiness must never precede recovery (C2).
             """
             await runtime.dispatch.recover()
-            runtime.dispatch_recovery_ready = not (
-                runtime.dispatch.unreadable_devices or runtime.dispatch.restore_pending_devices
-            )
             start_dispatch_tasks(runtime.devices)
 
         def start_device_jobs() -> None:
@@ -865,45 +863,79 @@ def _lifespan(
             async with reconfigure_lock:  # concurrent settings saves must not interleave teardown/rebuild
                 await _reconfigure_devices_unlocked()
 
+        # One shared async state for the write-support transitions. enable_dispatch() and
+        # disable_dispatch() run on the event loop but across several awaits each; the admin API
+        # already serializes transitions on the worker side (one live_transition at a time), yet a
+        # settings save flips enable_write_support under its own lock, independent of that guard. A
+        # single transition lock plus a generation that every switch flip bumps lets enable_dispatch
+        # recognize, after its slow build, that write support was turned off meanwhile and refuse to
+        # bring up the write-active recovery/dispatch loops (single-owner serialized transition
+        # rather than a thread-side lock).
+        dispatch_transition_lock = asyncio.Lock()
+
+        def _write_support_live() -> bool:
+            return _dispatch_enabled(runtime.settings) and not is_closing()
+
         async def enable_dispatch() -> None:
             """Build the dispatch controller and Energy Manager backing when write access is switched on
-            after boot, and start its tasks the way the boot path does. A no-op when already built.
+            after boot, and start its tasks the way the boot path does. Idempotent: a controller that
+            already exists is only (re)activated, and nothing is activated while write support is off.
             """
-            if runtime.dispatch is not None or is_closing() or not _dispatch_enabled(runtime.settings):
-                return
-            # _create_dispatch() does several synchronous DB inits/reads (DispatchStore.initialize(),
-            # get_capabilities(), get_soc_target_policies(), get_energy_states(), get_device_configs());
-            # called directly here it would block the event loop on a live write-support enable.
-            dispatch_store_new, modes = await asyncio.to_thread(
-                _create_dispatch, runtime, app.state.dispatch_config
-            )
-            app.state.dispatch_store = dispatch_store_new
-            if runtime.energy is not None:
-                runtime.energy.attach_dispatch(
-                    port=runtime.dispatch, store=dispatch_store_new, readings=runtime.energy_readings, modes=modes
-                )
-            # While the bootstrap password is pending, start_device_jobs() will start them later.
-            if store is None or not await asyncio.to_thread(store.password_change_pending):
-                tasks.append(asyncio.create_task(_recover_dispatch()))
+            async with dispatch_transition_lock:
+                if is_closing() or not _dispatch_enabled(runtime.settings):
+                    return
+                if runtime.dispatch is None:
+                    # _create_dispatch() does several synchronous DB inits/reads (DispatchStore.initialize(),
+                    # get_capabilities(), get_soc_target_policies(), get_energy_states(), get_device_configs());
+                    # called directly here it would block the event loop on a live write-support enable.
+                    dispatch_store_new, modes = await asyncio.to_thread(
+                        _create_dispatch, runtime, app.state.dispatch_config
+                    )
+                    app.state.dispatch_store = dispatch_store_new
+                    if runtime.energy is not None:
+                        runtime.energy.attach_dispatch(
+                            port=runtime.dispatch, store=dispatch_store_new,
+                            readings=runtime.energy_readings, modes=modes,
+                        )
+                # Re-checked after the slow build/await: a concurrent settings save may have turned
+                # write support off meanwhile. The controller object is harmless on its own (only the
+                # per-device run() loops write), so it stays built, but its write-active loops are not
+                # started against an operator who just asked for writes off.
+                if not _write_support_live():
+                    return
+                active = any(not t.done() for t in dispatch_tasks)
+                if active:
+                    return  # loops already running: nothing to (re)start
+                # While the bootstrap password is pending, start_device_jobs() will start them later.
+                if store is None or not await asyncio.to_thread(store.password_change_pending):
+                    if not _write_support_live():
+                        return
+                    tasks.append(asyncio.create_task(_recover_dispatch()))
             log.info("Battery dispatch enabled at runtime")
 
         async def disable_dispatch() -> list[str]:
             """Hand every device back to automatic operation and switch it off after write access was
             switched off. The controller and its loops stay up so an unfinished restore keeps being
-            retried; returns the devices whose restore is still pending.
+            retried; a loop ticking an IDLE record with no intent writes nothing, and new intent is
+            refused by the write gate. Returns the devices whose restore is still pending.
+
+            Shares ``dispatch_transition_lock`` with enable_dispatch so the two cannot interleave on
+            the event loop (the admin API already serializes them worker-side; this closes the gap
+            for any other on-loop caller and makes the ordering explicit).
             """
-            pending: list[str] = []
-            if runtime.dispatch is None:
+            async with dispatch_transition_lock:
+                pending: list[str] = []
+                if runtime.dispatch is None:
+                    return pending
+                for device_id in list(runtime.devices):
+                    try:
+                        await runtime.dispatch.force_restore_or_raise(device_id, StopReason.WRITE_NOT_ALLOWED)
+                        if runtime.energy is not None and runtime.energy.mode(device_id) is not EnergyMode.OFF:
+                            await runtime.energy.set_mode(device_id, EnergyMode.OFF, actor=None)
+                    except Exception:
+                        log.exception("Restore after disabling write access is pending for device %s", device_id)
+                        pending.append(device_id)
                 return pending
-            for device_id in list(runtime.devices):
-                try:
-                    await runtime.dispatch.force_restore_or_raise(device_id, StopReason.WRITE_NOT_ALLOWED)
-                    if runtime.energy is not None and runtime.energy.mode(device_id) is not EnergyMode.OFF:
-                        await runtime.energy.set_mode(device_id, EnergyMode.OFF, actor=None)
-                except Exception:
-                    log.exception("Restore after disabling write access is pending for device %s", device_id)
-                    pending.append(device_id)
-            return pending
 
         app.state.enable_dispatch = enable_dispatch
         app.state.disable_dispatch = disable_dispatch
@@ -1223,6 +1255,7 @@ def create_app(settings: Settings, *, clock: Clock | None = None, connector: Con
         app.include_router(admin_router)
         app.include_router(admin_dispatch_router)
         app.include_router(admin_energy_router)
+        app.include_router(admin_energy_verification_router)
         install_ui(app)
     read_auth = [Depends(_bearer)]
     for router in (health.business, catalog_router.router, values.router):

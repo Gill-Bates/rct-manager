@@ -42,7 +42,7 @@ async def readiness(runtime: RuntimeDep, _: Annotated[Principal, Depends(require
     ready = (
         not runtime.shutting_down()
         and not runtime.graph_failed
-        and (runtime.dispatch is None or runtime.dispatch_recovery_ready)
+        and (runtime.dispatch is None or runtime.dispatch.recovery_ready())
         and all(d.state in READY_STATES for d in devices)
     )
     if not ready:

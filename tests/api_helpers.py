@@ -227,6 +227,9 @@ DISPATCH_READ_NAMES = (
     # not read them, so no existing expectation changes.
     "solar_a_power",
     "solar_b_power",
+    # Read by the guided hardware verification to identify the inverter; never written.
+    "android_description",
+    "svnversion",
 )
 
 

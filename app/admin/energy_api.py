@@ -305,25 +305,12 @@ async def put_mode(
     return await _status_after_action(request, device_id)
 
 
-@router.put("/devices/{device_id}/hardware-verification")
-async def put_hardware_verification(
-    request: Request,
-    device_id: str,
-    body: HardwareVerificationBody,
-    admin: Annotated[dict | None, Depends(_require_admin_write)],
-) -> AdminEnergyDeviceStatus:
-    """Verify the write path and both sign conventions in one transaction (all or none)."""
-    del admin
-    _device_or_404(request, device_id)
-    dispatch = _dispatch_or_503(request)
-    missing = [
-        flag for flag in ("write_frame_layout_verified", "apply_sequence_verified") if not getattr(body, flag)
-    ]
-    if not body.note.strip():
-        missing.append("note")
-    if missing:
-        raise HTTPException(400, f"missing evidence for write_path_convention: {', '.join(missing)}")
-    now = request.app.state.runtime.clock.now()
+def verification_records(
+    dispatch, device_id: str, body: HardwareVerificationBody, now: datetime
+) -> list[CapabilityRecord]:
+    """The three records one hardware verification writes; shared by the Expert form and the
+    guided assistant so both produce exactly the same attestation.
+    """
     # A sign record's note is evidence this endpoint has no input field for; carry it over instead
     # of dropping it when the records are rewritten. body.note documents the write path only.
     # Carried only when it cannot be mis-attributed: either it was never stamped under a specific
@@ -345,35 +332,57 @@ async def put_hardware_verification(
         "verified_at": now,
         "verified_by": _ADMIN_ACTOR,
     }
+    return [
+        CapabilityRecord(
+            device_id=device_id,
+            name=CapabilityName.WRITE_PATH,
+            soc_strategy_external_code=body.soc_strategy_external_code,
+            enum_byte_width=body.enum_byte_width,
+            bool_byte_width=body.bool_byte_width,
+            write_frame_layout_verified=body.write_frame_layout_verified,
+            apply_sequence_verified=body.apply_sequence_verified,
+            soc_target_unit=body.soc_target_unit,
+            note=body.note,
+            **stamp,
+        ),
+        CapabilityRecord(
+            device_id=device_id,
+            name=CapabilityName.BATTERY_POWER_SIGN,
+            battery_discharge_positive=body.battery_discharge_positive,
+            note=kept_notes.get(CapabilityName.BATTERY_POWER_SIGN),
+            **stamp,
+        ),
+        CapabilityRecord(
+            device_id=device_id,
+            name=CapabilityName.GRID_POWER_SIGN,
+            grid_import_positive=body.grid_import_positive,
+            note=kept_notes.get(CapabilityName.GRID_POWER_SIGN),
+            **stamp,
+        ),
+    ]
+
+
+@router.put("/devices/{device_id}/hardware-verification")
+async def put_hardware_verification(
+    request: Request,
+    device_id: str,
+    body: HardwareVerificationBody,
+    admin: Annotated[dict | None, Depends(_require_admin_write)],
+) -> AdminEnergyDeviceStatus:
+    """Verify the write path and both sign conventions in one transaction (all or none)."""
+    del admin
+    _device_or_404(request, device_id)
+    dispatch = _dispatch_or_503(request)
+    missing = [
+        flag for flag in ("write_frame_layout_verified", "apply_sequence_verified") if not getattr(body, flag)
+    ]
+    if not body.note.strip():
+        missing.append("note")
+    if missing:
+        raise HTTPException(400, f"missing evidence for write_path_convention: {', '.join(missing)}")
+    now = request.app.state.runtime.clock.now()
     try:
-        records = [
-            CapabilityRecord(
-                device_id=device_id,
-                name=CapabilityName.WRITE_PATH,
-                soc_strategy_external_code=body.soc_strategy_external_code,
-                enum_byte_width=body.enum_byte_width,
-                bool_byte_width=body.bool_byte_width,
-                write_frame_layout_verified=body.write_frame_layout_verified,
-                apply_sequence_verified=body.apply_sequence_verified,
-                soc_target_unit=body.soc_target_unit,
-                note=body.note,
-                **stamp,
-            ),
-            CapabilityRecord(
-                device_id=device_id,
-                name=CapabilityName.BATTERY_POWER_SIGN,
-                battery_discharge_positive=body.battery_discharge_positive,
-                note=kept_notes.get(CapabilityName.BATTERY_POWER_SIGN),
-                **stamp,
-            ),
-            CapabilityRecord(
-                device_id=device_id,
-                name=CapabilityName.GRID_POWER_SIGN,
-                grid_import_positive=body.grid_import_positive,
-                note=kept_notes.get(CapabilityName.GRID_POWER_SIGN),
-                **stamp,
-            ),
-        ]
+        records = verification_records(dispatch, device_id, body, now)
         await dispatch.set_capabilities(device_id, records)
     except CapabilityConflict as exc:
         raise _conflict(exc) from exc

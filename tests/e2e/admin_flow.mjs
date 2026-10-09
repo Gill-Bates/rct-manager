@@ -1563,6 +1563,13 @@ await page.locator('#setting-db_type').selectOption('questdb');
 check('tsdb page shows backend fields', (await page.locator('#setting-questdb_hostname').count()) === 1);
 check('docs toggle lives on settings only', (await page.locator('#setting-docs_public').count()) === 0);
 
+// A success toast sits bottom right, over the Apply button, and a pointer resting on it pauses its countdown;
+// so release the pointer and let earlier toasts leave before clicking, as a user would.
+const clickExportApply = async () => {
+  await page.mouse.move(0, 0);
+  await page.waitForFunction(() => document.querySelectorAll('#toast-region .alert').length === 0, null, { timeout: 8000 });
+  await page.click('#export-apply');
+};
 // 6c. TSDB export cards: all cards visible in the shared grid; changes are sent by Apply only
 const tsdbPuts = [];
 page.on('request', (r) => { if (r.method() === 'PUT' && r.url().endsWith('/admin/api/settings')) tsdbPuts.push(r.postData()); });
@@ -1607,7 +1614,7 @@ check('Apply is enabled and is the only element of the action bar',
   && (await page.locator('#export-actions button').count()) === 1
   && (await page.locator('#export-apply').innerText()).trim() === 'Apply changes'
   && (await page.locator('#export-actions .badge, #export-actions p, #export-discard').count()) === 0);
-await page.click('#export-apply');
+await clickExportApply();
 await page.waitForFunction(() => document.getElementById('save-state').dataset.state === 'saved', null, { timeout: 8000 });
 settingsNow = (await (await context.request.get(base + '/admin/api/settings')).json()).settings;
 check('Apply sends the whole group exactly once', tsdbPuts.length === 1 && settingsNow.db_type === 'questdb' && settingsNow.questdb_hostname === 'questdb.example.org', JSON.stringify(settingsNow.questdb_hostname) + ` puts=${tsdbPuts.length}`);
@@ -1616,12 +1623,12 @@ await page.locator('#setting-questdb_tls_enabled').click({ force: true });
 await sleep(900);
 settingsNow = (await (await context.request.get(base + '/admin/api/settings')).json()).settings;
 check('a toggle is not saved until Apply', settingsNow.questdb_tls_enabled !== true && tsdbPuts.length === 1);
-await page.click('#export-apply');
+await clickExportApply();
 await page.waitForFunction(() => document.getElementById('save-state').dataset.state === 'saved', null, { timeout: 8000 });
 settingsNow = (await (await context.request.get(base + '/admin/api/settings')).json()).settings;
 check('Apply saves the toggle', settingsNow.questdb_tls_enabled === true);
 await page.locator('#setting-questdb_downsampling').selectOption('low');
-await page.click('#export-apply');
+await clickExportApply();
 await page.waitForFunction(() => document.getElementById('save-state').dataset.state === 'saved', null, { timeout: 8000 });
 if ((await page.locator('html').getAttribute('data-bs-theme')) !== 'dark') await page.locator('#theme-toggle').click();
 for (const [width, height] of [[1920, 1080], [1536, 864]]) {
@@ -1693,7 +1700,7 @@ await page.route('**/admin/api/settings', async (route) => {
 await page.fill('#setting-influxdb_token', 'token-one');
 await page.locator('#setting-influxdb_token').dispatchEvent('change');
 check('an incomplete-free group with a token can be applied', await page.isEnabled('#export-apply'));
-await page.click('#export-apply');
+await clickExportApply();
 await sleep(600);                          // the request is in flight, its response is still held
 await page.fill('#setting-influxdb_token', 'token-two');
 await page.locator('#setting-influxdb_token').dispatchEvent('change');
@@ -1701,7 +1708,7 @@ await page.waitForFunction(() => document.getElementById('export-apply').getAttr
 check('a token typed during the apply is not cleared by the older response',
   (await page.inputValue('#setting-influxdb_token')) === 'token-two' && await page.isEnabled('#export-apply'),
   `puts=${settingsPuts} value=${await page.inputValue('#setting-influxdb_token')}`);
-await page.click('#export-apply');
+await clickExportApply();
 const tokenCleared = await page.waitForFunction(() => {
   const field = document.getElementById('setting-influxdb_token');
   return field.value === '' && field.placeholder.endsWith('(stored)');
@@ -1858,12 +1865,30 @@ await shot('prometheus-master-toggle-on');
   check('Basic mode shows no hardware verification form or protocol fields',
     (await ep.locator('.energy-setup-step form').count()) === 0 && !/Strategy code|Byte width/.test(shownStep), shownStep.slice(0, 300));
   if (/Hardware verification/.test(shownStep)) {
-    check('the Basic hardware step offers "Verify hardware" and leaves Expert mode off until it is clicked',
+    check('the Basic hardware step offers "Verify hardware" and leaves Expert mode off',
       (await ep.locator('.energy-setup-step button', { hasText: 'Verify hardware' }).count()) === 1
       && (await ep.locator('#energy-expert-mode').isChecked()) === false, shownStep.slice(0, 300));
+    // Guided assistant: cancelling at the consent step stores nothing and keeps the gate closed.
     await ep.locator('.energy-setup-step button', { hasText: 'Verify hardware' }).click();
-    check('clicking "Verify hardware" opens Expert mode with the form', await ep.locator('#energy-expert-mode').isChecked()
-      && (await ep.locator('.energy-expert form', { hasText: 'Device model' }).count()) === 1);
+    const dialog = ep.locator('.energy-assistant.show');
+    await dialog.waitFor({ timeout: 5000 });
+    check('"Verify hardware" opens the guided assistant without switching Expert mode on',
+      (await ep.locator('#energy-expert-mode').isChecked()) === false && /Before you start/.test(await dialog.innerText()));
+    await dialog.getByRole('button', { name: 'Start check' }).click();
+    await dialog.getByRole('button', { name: 'Yes, continue' }).click();
+    await dialog.getByRole('button', { name: /The battery is discharging/ }).click();
+    await dialog.getByRole('button', { name: /feeding power into the grid/ }).click();
+    check('the assistant reaches the test step and offers no register names',
+      /Run the short test/.test(await dialog.innerText()) && !/power_mng|Strategy code|Byte width/.test(await dialog.innerText()));
+    const runButton = dialog.getByRole('button', { name: 'Run test' });
+    check('the test button stays disabled until the operator consents', await runButton.isDisabled());
+    await dialog.getByRole('button', { name: 'Cancel' }).click();
+    await ep.waitForSelector('.energy-assistant', { state: 'detached', timeout: 5000 });
+    check('cancelling the assistant leaves the hardware unverified',
+      (await ep.locator('.energy-setup-step button', { hasText: 'Verify hardware' }).count()) === 1
+      && (await ep.locator('.energy-actions button').count()) >= 0 && (await ep.locator('.energy-setup:not([hidden])').count()) >= 1);
+    // The Expert form checks below need the Expert section.
+    await ep.locator('#energy-expert-mode').check();
   }
   const uiForm = ep.locator('.energy-expert form').filter({ hasText: 'Device model' });
   if (await uiForm.count()) {
@@ -1888,6 +1913,28 @@ await shot('prometheus-master-toggle-on');
       verifyPuts.length === 0 && (await uiForm.locator('.is-invalid').count()) >= 1, JSON.stringify(verifyPuts));
   }
 
+  // Complete guided run, back in Basic mode so the Expert form state does not interfere.
+  await ep.locator('#energy-expert-mode').uncheck();
+  {
+    const dialog = ep.locator('.energy-assistant.show');
+    // Consent, test, save; the banner goes away and the manual actions appear.
+    await ep.locator('.energy-setup-step button', { hasText: 'Verify hardware' }).click();
+    await dialog.waitFor({ timeout: 5000 });
+    await dialog.getByRole('button', { name: 'Start check' }).click();
+    await dialog.getByRole('button', { name: 'Yes, continue' }).click();
+    await dialog.getByRole('button', { name: /The battery is discharging/ }).click();
+    await dialog.getByRole('button', { name: /feeding power into the grid/ }).click();
+    await dialog.getByLabel(/I understand the battery will pause/).check();
+    await dialog.getByRole('button', { name: 'Run test' }).click();
+    await dialog.getByRole('button', { name: 'Save verification' }).waitFor({ timeout: 60000 });
+    await dialog.getByRole('button', { name: 'Save verification' }).click();
+    await ep.waitForSelector('.energy-assistant', { state: 'detached', timeout: 10000 });
+    await ep.waitForSelector('.energy-setup', { state: 'hidden', timeout: 15000 });
+    check('after the guided verification the setup banner is gone and Expert mode is still off',
+      (await ep.locator('.energy-setup:not([hidden])').count()) === 0 && (await ep.locator('#energy-expert-mode').isChecked()) === false);
+    check('the manual actions are visible after the guided verification',
+      (await ep.locator('.energy-actions button:visible').count()) >= 3);
+  }
   // A fresh dispatch store ships unverified hardware; verify it through the atomic admin endpoint.
   const verified = await ep.evaluate(async () => {
     const { csrf_token: csrf } = await (await fetch('/admin/api/session', { credentials: 'same-origin' })).json();

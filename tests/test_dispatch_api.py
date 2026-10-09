@@ -235,7 +235,7 @@ async def test_readiness_stays_red_while_a_dispatch_record_is_unreadable(tmp_pat
     async with running_app(device_settings) as harness:
         response = await harness.client.get("/api/v1/readiness", headers=WRITER)
         assert response.status_code == 503
-        assert harness.runtime.dispatch_recovery_ready is False
+        assert harness.runtime.dispatch.recovery_ready() is False
         assert harness.runtime.dispatch.unreadable_devices == ("main",)
 
 
@@ -243,7 +243,7 @@ async def test_readiness_is_green_once_dispatch_recovery_completes_cleanly(tmp_p
     async with running_app(settings(tmp_path)) as harness:
         response = await harness.client.get("/api/v1/readiness", headers=WRITER)
         assert response.status_code == 200
-        assert harness.runtime.dispatch_recovery_ready is True
+        assert harness.runtime.dispatch.recovery_ready() is True
 
 
 def test_dispatch_fixture_contains_exact_write_registers(tmp_path: Path) -> None:

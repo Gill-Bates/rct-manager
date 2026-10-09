@@ -121,7 +121,15 @@ class DispatchController:
         self._soc_target_policies = soc_target_policies
         self._locks: dict[str, asyncio.Lock] = {}
         self.unreadable_devices: tuple[str, ...] = ()
-        self.restore_pending_devices: tuple[str, ...] = ()
+        # Live set of devices whose restore is outstanding (ended in FAULT_RESTORE_PENDING). Kept
+        # current by _restore_guarded on every success/failure, so an automatic tick() retry that
+        # heals a device clears it here too; readiness derives from this instead of a latched
+        # startup snapshot (so a post-startup self-heal is not stuck red until restart).
+        self._restore_pending: set[str] = set()
+        # The startup recovery sweep has to run before readiness may turn green (C2): until then a
+        # possibly half-written hardware state has not been reconciled, even though no device sits
+        # in _restore_pending yet.
+        self._recovery_complete = False
 
     def _lock(self, device_id: str) -> asyncio.Lock:
         return self._locks.setdefault(device_id, asyncio.Lock())
@@ -168,7 +176,20 @@ class DispatchController:
     async def status(self, device_id: str) -> DispatchStatus:
         return self._status(await self._get(device_id))
 
-    async def submit(self, device_id: str, command: DispatchCommand) -> DispatchStatus:
+    async def submit_verification_probe(self, device_id: str, command: DispatchCommand) -> DispatchStatus:
+        """Run one short HOLD on unverified hardware for the guided verification.
+
+        Only a HOLD (0 W, no SoC goal) qualifies: it moves no energy on purpose, and it goes through
+        the same snapshot, durable intent, TTL cap and restore path as any dispatch. The gate is
+        passed as if engineering mode were on, without persisting that switch.
+        """
+        if command.mode is not DispatchMode.HOLD:
+            raise DispatchRejected("invalid_request")
+        return await self.submit(device_id, command, _verification_probe=True)
+
+    async def submit(
+        self, device_id: str, command: DispatchCommand, *, _verification_probe: bool = False
+    ) -> DispatchStatus:
         async with self._lock(device_id):
             if command.mode is DispatchMode.EXPORT_TO_GRID:
                 raise DispatchRejected("dispatch_mode_unavailable")
@@ -198,7 +219,7 @@ class DispatchController:
                 command.mode,
                 self._capabilities,
                 device_id=device_id,
-                device_engineering_mode=limits.engineering_mode,
+                device_engineering_mode=limits.engineering_mode or _verification_probe,
                 limit_export=self._config.limit_export_during_discharge,
             )
             if not gate.allowed:
@@ -210,6 +231,18 @@ class DispatchController:
                     reason=gate.reject_detail,
                 )
             current = await self._get(device_id)
+            if current.state in (
+                DispatchState.APPLYING,
+                DispatchState.REPLACING,
+                DispatchState.PRECHECK,
+            ):
+                # An interrupted apply/replace left hardware possibly half-written; tick()/recover()
+                # treat exactly these as "restore first". submit() must not accept a new order on top
+                # of that half-written state while recovery has not run yet (its correctness must not
+                # depend on the startup sweep winning the CPU race). Drive the restore under this
+                # lock, then reject so the caller retries against a clean record.
+                await self._restore(current, StopReason.DEVICE_ERROR, "recovery_required")
+                raise DispatchRejected("dispatch_restore_required")
             if current.state in (
                 DispatchState.RESTORING,
                 DispatchState.FAULT,
@@ -509,6 +542,7 @@ class DispatchController:
             record.next_restore_at = None
             record.restore_attempts = 0
             await self._put(record)
+            self._restore_pending.discard(record.device_id)
             return
         record.state = DispatchState.RESTORING
         record.restore_required = True
@@ -546,6 +580,7 @@ class DispatchController:
                 delay,
             )
             await self._put(record)
+            self._restore_pending.add(record.device_id)
             return
         record.state = DispatchState.IDLE
         record.intent = None
@@ -557,6 +592,7 @@ class DispatchController:
         record.next_restore_at = None
         record.restore_attempts = 0
         await self._put(record)
+        self._restore_pending.discard(record.device_id)
 
     async def cancel(self, device_id: str) -> DispatchStatus:
         async with self._lock(device_id):
@@ -676,7 +712,6 @@ class DispatchController:
         # only candidates: each one is re-read under its device lock, because a tick may have
         # advanced it since, and a stale object would fail the store's CAS check.
         candidates = await self._read_candidates()
-        restore_pending: list[str] = []
         for candidate in candidates:
             if candidate.state is DispatchState.IDLE and not candidate.restore_required:
                 continue
@@ -693,19 +728,34 @@ class DispatchController:
                         record.state = DispatchState.IDLE
                         record.intent = None
                         await self._put(record)
+                        self._restore_pending.discard(device_id)
                     else:
                         # Normal post-crash case (APPLYING/REPLACING with snapshot) and, defensively,
-                        # PRECHECK with a snapshot.
+                        # PRECHECK with a snapshot. _restore_guarded() maintains self._restore_pending
+                        # (add on FAULT_RESTORE_PENDING, discard on a clean restore), so a device that
+                        # a later tick() heals clears itself without a restart (readiness unlatched).
                         await self._restore(record, StopReason.DEVICE_ERROR, "recovery_required")
-                        if record.state is DispatchState.FAULT_RESTORE_PENDING:
-                            # A failed restore leaves battery settings under external control; the
-                            # caller must not report readiness while this is unresolved (C2).
-                            restore_pending.append(device_id)
             except Exception:
-                # One failing device must not abort the sweep for every other device.
+                # One failing device must not abort the sweep for every other device. A device whose
+                # restore raised outright is treated as still restore-pending until it heals.
                 log.exception("Dispatch recovery failed for device %s", device_id)
-                restore_pending.append(device_id)
-        self.restore_pending_devices = tuple(restore_pending)
+                self._restore_pending.add(device_id)
+        self._recovery_complete = True
+
+    @property
+    def restore_pending_devices(self) -> tuple[str, ...]:
+        """Devices whose battery restore is still outstanding, derived live from the controller
+        rather than a one-off startup snapshot: an automatic tick() retry that heals a device drops
+        it here, so readiness recovers without an application restart (C2 self-heal).
+        """
+        return tuple(sorted(self._restore_pending))
+
+    def recovery_ready(self) -> bool:
+        """True once the startup sweep has run and no device is left unreadable or with an
+        outstanding restore. Read live by /readiness so a post-startup self-heal flips readiness
+        back to green on its own, while a sweep that has not completed yet keeps it red (C2).
+        """
+        return self._recovery_complete and not (self.unreadable_devices or self._restore_pending)
 
     async def shutdown_restore(self) -> None:
         """Best-effort restore while serializers still accept device work."""

@@ -2124,6 +2124,151 @@
     return panel;
   }
 
+  // Guided hardware verification (Basic mode). Every value the server stores comes from the inverter
+  // or from a confirmed test; this dialog only collects the operator's consent and observations.
+  function openVerificationAssistant({ id, deviceName, onDone, opener }) {
+    const base = `energy/devices/${encodeURIComponent(id)}/verification-assistant`;
+    const post = (action, body) => api(`${base}/${action}`, { method: 'POST', body: JSON.stringify(body || {}) });
+    const LABELS = ['Check', 'Battery', 'Grid', 'Test', 'Save'];
+    const uid = `energy-assistant-${++deviceCardCount}`;
+    let state = null;
+    let identified = false;
+    let running = false;
+    let problem = null;
+    let finished = false;
+    const power = (value) => (Number.isFinite(value) ? `${Math.round(Math.abs(value)).toLocaleString('en-GB')} W` : 'unknown');
+
+    const modalEl = element('div', 'modal fade energy-assistant');
+    modalEl.tabIndex = -1;
+    modalEl.setAttribute('aria-labelledby', `${uid}-title`);
+    modalEl.dataset.bsBackdrop = 'static';
+    modalEl.dataset.bsKeyboard = 'false';
+    const content = element('div', 'modal-content');
+    modalEl.append(element('div', 'modal-dialog modal-dialog-centered modal-dialog-scrollable'));
+    modalEl.firstChild.append(content);
+    const header = element('div', 'modal-header');
+    const title = element('h2', 'modal-title h5', `Verify hardware: ${deviceName}`);
+    title.id = `${uid}-title`;
+    header.append(title);
+    const body = element('div', 'modal-body');
+    body.setAttribute('aria-live', 'polite');
+    const footer = element('div', 'modal-footer');
+    content.append(header, body, footer);
+    document.body.append(modalEl);
+    const modal = window.bootstrap.Modal.getOrCreateInstance(modalEl);
+
+    const stageOf = () => {
+      if (!state || !state.started || state.blockers.length) return 0;
+      if (!identified) return 0;
+      const [battery, grid, test] = state.steps;
+      if (battery.status !== 'done') return 1;
+      if (grid.status !== 'done') return 2;
+      if (test.status !== 'done') return 3;
+      return 4;
+    };
+    const button = (label, className, onClick) => {
+      const node = element('button', `btn ${className}`, label);
+      node.type = 'button';
+      node.addEventListener('click', onClick);
+      return node;
+    };
+    const guarded = (task) => async () => {
+      problem = null;
+      running = true;
+      render();
+      try { await task(); } catch (error) { problem = messageFrom(error); } finally { running = false; render(); }
+    };
+    const note = (text, kind) => { const n = element('div', `alert alert-${kind} small`, text); n.setAttribute('role', kind === 'danger' ? 'alert' : 'status'); return n; };
+    const choice = (kind, options, lead) => {
+      const wrap = element('div', 'd-grid gap-2');
+      wrap.append(element('p', null, lead));
+      for (const [answer, label] of options) wrap.append(button(label, 'btn-outline-primary text-start', guarded(async () => { state = await post('direction', { kind, answer }); })));
+      wrap.append(button("I can't tell", 'btn-link', () => { problem = 'Without a reliable observation the check cannot continue. Nothing was saved. Try again when you can see the inverter display or app.'; render(); }));
+      return wrap;
+    };
+
+    function render() {
+      const stage = stageOf();
+      const steps = element('ol', 'energy-assistant-steps list-unstyled d-flex flex-wrap gap-2 small mb-3');
+      LABELS.forEach((label, index) => {
+        const item = element('li', `energy-assistant-step ${index < stage ? 'is-done' : ''} ${index === stage ? 'is-current' : ''}`, `${index + 1}. ${label}`);
+        if (index === stage) item.setAttribute('aria-current', 'step');
+        steps.append(item);
+      });
+      const main = element('div');
+      const heading = (text) => { const h = element('h3', 'h6', text); h.tabIndex = -1; return h; };
+      const stepMessage = (index) => (state && state.steps[index].message ? note(state.steps[index].message, 'warning') : null);
+      const footerButtons = [];
+      const cancel = button(finished ? 'Close' : 'Cancel', 'btn-outline-secondary', () => modal.hide());
+      cancel.disabled = running;
+      if (state && state.blockers.length) {
+        main.append(heading('This cannot be checked yet'), element('p', 'small', 'Fix the following, then start again:'));
+        const list = element('ul', 'small');
+        for (const text of state.blockers) list.append(element('li', null, text));
+        main.append(list);
+        footerButtons.push(button('Check again', 'btn-primary', guarded(async () => { state = await post('start'); identified = false; })));
+      } else if (stage === 0 && !(state && state.started)) {
+        main.append(heading('Before you start'),
+          element('p', 'small', 'This guided check reads your inverter, asks you two simple questions about what the battery and the grid are doing right now, and runs one short test. Nothing is saved until the end, and you can cancel at any time.'),
+          element('p', 'small', 'The test briefly tells the inverter to hold the battery at 0 W (up to about 30 seconds) and then returns it to its previous state. The house keeps running; it may draw from the grid for that moment. The battery must be visibly charging or discharging when the test starts.'));
+        footerButtons.push(button('Start check', 'btn-primary', guarded(async () => { state = await post('start'); identified = false; })));
+      } else if (stage === 0) {
+        main.append(heading('Is this your inverter?'),
+          element('p', 'small', `The inverter reports itself as "${state.model}" with software "${state.firmware}".`));
+        footerButtons.push(button('Yes, continue', 'btn-primary', () => { identified = true; render(); }));
+      } else if (stage === 1) {
+        main.append(heading('What is the battery doing?'), stepMessage(0) || '',
+          element('p', 'small', `The inverter currently reports about ${power(state.readings?.battery_power_w)} of battery power. Check the inverter display or app.`),
+          choice('battery', [['discharging', 'The battery is discharging (supplying the house)'], ['charging', 'The battery is charging (taking power in)']], 'Right now, the battery is:'));
+      } else if (stage === 2) {
+        const r = state.readings || {};
+        main.append(heading('Grid: import or export?'), stepMessage(1) || '',
+          element('p', 'small', `Grid reading about ${power(r.grid_power_w)}, house about ${power(r.household_load_w)}, solar about ${power(r.solar_power_w)}. Check the inverter display or app.`),
+          choice('grid', [['importing', 'The house is taking power from the grid (import)'], ['exporting', 'The house is feeding power into the grid (export)']], 'Right now, the house is:'));
+      } else if (stage === 3) {
+        main.append(heading('Run the short test'), stepMessage(2) || '',
+          element('p', 'small', 'The inverter will be told to hold the battery at 0 W for a few seconds, the result will be read back, and the previous state will be restored. Keep this window open until it finishes.'));
+        const consent = element('div', 'form-check mb-2');
+        const box = element('input', 'form-check-input'); box.type = 'checkbox'; box.id = `${uid}-consent`;
+        const label = element('label', 'form-check-label small', 'I understand the battery will pause briefly and want to run the test now.'); label.htmlFor = box.id;
+        consent.append(box, label);
+        main.append(consent);
+        const run = button(running ? 'Testing…' : 'Run test', 'btn-primary', guarded(async () => { state = await post('control-test', { confirm: true }); }));
+        run.disabled = true;
+        box.addEventListener('change', () => { run.disabled = !box.checked || running; });
+        footerButtons.push(run);
+      } else {
+        main.append(heading('Save the verification'),
+          element('p', 'small', `Verified: ${state.model}, software ${state.firmware}; battery and grid directions confirmed; control test passed and the inverter was restored.`),
+          element('p', 'small text-warning-emphasis', 'Limit of this check: it holds the battery at 0 W and does not move it in either direction. The first charge or discharge you start is the first real movement, so watch the battery then.'));
+        footerButtons.push(button('Save verification', 'btn-primary', guarded(async () => {
+          const status = await post('commit', { confirm: true });
+          finished = true;
+          onDone(status);
+          modal.hide();
+          toast('Hardware verified. Manual battery control is available.');
+        })));
+      }
+      if (running) main.append(element('p', 'small text-secondary', 'Working… do not close this window.'));
+      if (problem) main.append(note(problem, 'danger'));
+      for (const node of footerButtons) node.disabled = node.disabled || running;
+      body.replaceChildren(steps, main);
+      footer.replaceChildren(cancel, ...footerButtons);
+    }
+
+    modalEl.addEventListener('hide.bs.modal', (event) => { if (running) event.preventDefault(); });
+    modalEl.addEventListener('keydown', (event) => { if (event.key === 'Escape' && !running) modal.hide(); });
+    modalEl.addEventListener('shown.bs.modal', () => body.querySelector('h3')?.focus());
+    modalEl.addEventListener('hidden.bs.modal', () => {
+      if (!finished) api(base, { method: 'DELETE' }).catch(() => {});
+      modal.dispose();
+      modalEl.remove();
+      opener?.focus();
+    });
+    render();
+    modal.show();
+  }
+
   // Expert mode is a page-wide display switch, never persisted and never a backend setting. The
   // required setup steps (write access, power limits, hardware verification) live in the guided
   // Setup block; this function builds their editors plus the Expert-only section. The Expert section
@@ -2451,24 +2596,18 @@
     // The values come from a real hardware and firmware verification, so the form is Expert-only; the
     // Basic step says so and never guesses or pre-fills them.
     const hardwareText = steps.hardware.querySelector('p');
-    // Opens the Expert form on an explicit click only; nothing is switched on by the setup step itself.
+    // Opens the guided check on an explicit click only; nothing is written by the setup step itself.
     const openVerifyButton = element('button', 'btn btn-sm btn-primary energy-step-link', 'Verify hardware');
     openVerifyButton.type = 'button';
     hardwareText.after(openVerifyButton);
     openVerifyButton.addEventListener('click', () => {
-      const expertSwitch = $('energy-expert-mode');
-      if (expertSwitch && !expertSwitch.checked) {
-        expertSwitch.checked = true;
-        expertSwitch.dispatchEvent(new Event('change')); // the page handler renders every panel
-      }
-      model.scrollIntoView({ block: 'center' });
-      model.focus();
+      openVerificationAssistant({ id, deviceName: getDevice().device_name, onDone: onChange, opener: openVerifyButton });
     });
     const renderHardwareText = (expertOn) => {
       hardwareText.textContent = 'Hardware control must be verified on this inverter before it can be controlled. '
-        + (expertOn ? 'Enter the values you measured under Expert settings below.'
-          : 'No built-in profile covers this inverter yet, so its values must be measured on the hardware. An experienced administrator can enter them under Expert settings (this button opens them). Do not guess them.');
-      openVerifyButton.hidden = expertOn;
+        + (expertOn ? 'Use the guided check below or enter the values you measured under Expert settings.'
+          : 'A guided check reads the inverter, asks two simple questions and runs one short, safe test. Nothing is guessed. Experienced administrators can instead enter measured values under Expert settings.');
+      openVerifyButton.hidden = false;
     };
     // Plain wording first; the raw register names stay one click away for people who need them.
     const technicalNames = element('details', 'small mb-2');

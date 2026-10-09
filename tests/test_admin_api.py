@@ -515,15 +515,66 @@ def test_reconfigure_failures_are_reported_and_only_a_build_failure_rolls_back(b
     loop = asyncio.new_event_loop()
     thread = threading.Thread(target=loop.run_forever, daemon=True)
     thread.start()
-    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(reconfigure_devices=reconfigure, loop=loop)))
+    state = SimpleNamespace(reconfigure_devices=reconfigure, loop=loop, admin_store=None)
+    request = SimpleNamespace(app=SimpleNamespace(state=state))
+    sentinel = Settings(_env_file=None, hmac_secret="s" * 48)
     try:
         with patch.object(api, "_RECONFIGURE_TIMEOUT_SECONDS", 0.05), pytest.raises(HTTPException) as excinfo:
-            api._reconfigure_devices(request)
+            api._reconfigure_devices(request, sentinel, sentinel)
     finally:
         loop.call_soon_threadsafe(loop.stop)
         thread.join(timeout=2)
     assert excinfo.value.status_code == status
     assert excinfo.value.rollback is rollback
+
+
+def test_reconfigure_timeout_defers_rollback_when_the_running_coroutine_fails_rollback_capable():
+    """A reconfiguration that outlives its HTTP wait (504) and then fails in the pre-teardown phase
+    must still revert the saved device list, with no caller left to do it (finding 3)."""
+    import asyncio
+    import threading
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from fastapi import HTTPException
+
+    from app.admin import api
+    from app.errors import ReconfigurationBuildError
+
+    async def reconfigure():
+        # Outlive the 0.05 s HTTP wait, then fail rollback-capable (old graph still live).
+        await asyncio.sleep(0.2)
+        raise ReconfigurationBuildError("bad address")
+
+    reverted: list[tuple] = []
+    done = threading.Event()
+
+    def fake_revert(state, store, updated, previous):
+        reverted.append((updated, previous))
+        done.set()
+
+    loop = asyncio.new_event_loop()
+    thread = threading.Thread(target=loop.run_forever, daemon=True)
+    thread.start()
+    state = SimpleNamespace(reconfigure_devices=reconfigure, loop=loop, admin_store=object())
+    request = SimpleNamespace(app=SimpleNamespace(state=state))
+    updated = Settings(_env_file=None, hmac_secret="s" * 48)
+    previous = Settings(_env_file=None, hmac_secret="s" * 48)
+    try:
+        with (
+            patch.object(api, "_RECONFIGURE_TIMEOUT_SECONDS", 0.05),
+            patch.object(api, "_revert_devices_on_state", fake_revert),
+        ):
+            with pytest.raises(HTTPException) as excinfo:
+                api._reconfigure_devices(request, updated, previous)
+            assert excinfo.value.status_code == 504
+            # Still inside the patch so the deferred executor runs the fake: the coroutine fails
+            # ~0.2 s from now, the done-callback reverts, then this unblocks.
+            assert done.wait(2), "deferred rollback did not run after the timed-out reconfiguration failed"
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+        thread.join(timeout=2)
+    assert reverted == [(updated, previous)]
 
 
 @pytest.mark.parametrize("value", [float("inf"), float("nan"), 50_001.0])

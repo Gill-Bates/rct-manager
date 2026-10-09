@@ -25,6 +25,9 @@ from tests.fakes import response_to
 
 VALUES = {"solar_a_power": 1234.5, "solar_b_power": 800.0, "grid_power": -250.0, "battery_soc": 0.55,
           "battery_temperature": 28.5,
+          # Control registers and a moving battery, so the guided hardware verification can run: the
+          # battery follows the written setpoint once the external strategy (code 2) is active.
+          "power_mng_soc_target_set": 0.5, "battery_power": 400.0,
           # The second battery tower reports its own SoC and temperature. The values differ from the
           # first tower's on purpose: a card that falls back to the shared battery_* names would then
           # show two identical towers, which the browser test asserts against.
@@ -41,6 +44,7 @@ INT_VALUES = {"inverter_state": 13, "battery_status2": 2304, "battery_cycles": 1
 # string an unpopulated slot really returns - so the derived counts are 5 and 4 (6 and 5 populated slots minus one). Seven slots
 # exist in the catalog; at most 6 modules exist in the documented hardware.
 STRING_VALUES = {
+    "android_description": "RCT Power DC 10.0 SIM", "svnversion": "2.3.5687",
     **{f"battery_module_sn_{i}": f"SIM-{i:03d}" for i in range(6)},
     **{f"battery_placeholder_0_module_sn_{i}": f"SIM-B{i:03d}" for i in range(5)},
 }
@@ -81,12 +85,17 @@ def _by_object_id() -> tuple[dict[int, bytes], dict[int, RegistryEntry]]:
 async def _serve(port: int) -> None:
     values, entries = _by_object_id()
     stored: dict[int, bytes] = {}
+    ids = {name: object_id for object_id, entry in entries.items() for name in [entry.name]}
+    battery_power_id, strategy_id, extern_id = (
+        ids["battery_power"], ids["power_mng_soc_strategy"], ids["power_mng_battery_power_extern"])
 
     async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         parser = StreamParser()
         periodic: dict[int, object] = {}
 
         def payload_for(object_id: int) -> bytes:
+            if object_id == battery_power_id and stored.get(strategy_id) == b"\x02" and extern_id in stored:
+                return stored[extern_id]  # external control active: the battery follows the setpoint
             if object_id in stored:
                 return stored[object_id]
             if object_id in values:

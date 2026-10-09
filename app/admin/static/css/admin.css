@@ -1999,3 +1999,8 @@ body.is-reconnecting #reconnect-modal.show .reconnect-pulse {
         forced-color-adjust: none;
     }
 }
+
+/* Guided hardware verification dialog (Energy page, Basic mode) */
+.energy-assistant-step { padding: 0.125rem 0.5rem; border-radius: var(--bs-border-radius); color: var(--bs-secondary-color); }
+.energy-assistant-step.is-done { color: var(--bs-success-text-emphasis); }
+.energy-assistant-step.is-current { color: var(--bs-body-color); font-weight: 600; background: var(--bs-tertiary-bg); }

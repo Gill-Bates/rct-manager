@@ -11,6 +11,7 @@ business semantics only — no register name, no raw strategy code, no byte widt
 the one GET serves the whole card, readings included, without costing a device transaction per poll.
 """
 
+import asyncio
 import json
 import re
 from pathlib import Path
@@ -27,6 +28,7 @@ from app.api.app_factory import (
 from app.api.problems import _is_write_path
 from app.catalog.base import is_numeric
 from app.catalog.registry import RegistryCatalog
+from app.protocol.values import encode_value
 from app.scheduling.shutdown import ShutdownPlan
 from tests.api_helpers import (
     DISPATCH_WRITE_NAMES,
@@ -1087,3 +1089,156 @@ async def test_the_mode_decides_which_surface_may_command(tmp_path: Path) -> Non
         await arm(harness, mode="off")
         assert (await command(harness, body)).json()["code"] == "energy_manager_off"
         assert (await harness.client.get("/api/v1/devices/main/energy", headers=WRITER)).json()["armed"] is False
+
+
+# --- guided hardware verification (Basic mode assistant) -------------------------------------------
+
+ASSIST = "/admin/api/energy/devices/main/verification-assistant"
+
+
+def seed_identity(harness, *, battery_w: float = 400.0, target: float = 0.5) -> None:
+    catalog = RegistryCatalog.from_file(harness.runtime.settings.object_registry_path)
+    for name, text in (("android_description", "RCT Power DC 10.0"), ("svnversion", "2.3.5687")):
+        entry = catalog.object_entry(name)
+        harness.net.payloads[entry.object_id] = encode_value(entry.data_type, text, byte_width=entry.byte_width)
+    harness.net.payloads[catalog.object_entry("battery_power").object_id] = float_payload(battery_w)
+    harness.net.payloads[catalog.object_entry("power_mng_soc_target_set").object_id] = float_payload(target)
+
+
+async def follow_the_setpoint(harness, stop: asyncio.Event) -> None:
+    """Stand-in for the inverter's own control: with the external strategy active, battery power
+    follows the written setpoint."""
+    catalog = RegistryCatalog.from_file(harness.runtime.settings.object_registry_path)
+    strategy = catalog.object_entry("power_mng_soc_strategy").object_id
+    extern = catalog.object_entry("power_mng_battery_power_extern").object_id
+    power = catalog.object_entry("battery_power").object_id
+    while not stop.is_set():
+        if harness.net.payloads.get(strategy) == b"\x01":
+            harness.net.payloads[power] = harness.net.payloads[extern]
+        await asyncio.sleep(0.005)
+
+
+@pytest.fixture
+def fast_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("app.admin.energy_verification.PROBE_POLL_S", 0.02)
+    monkeypatch.setattr("app.admin.energy_verification.PROBE_TIMEOUT_S", 0.5)
+
+
+async def assistant_ready(harness) -> dict[str, str]:
+    seed_payloads(harness)
+    seed_identity(harness)
+    await harness.client.delete(VERIFICATION_URL, headers=await admin_session(harness))  # shipping state
+    await arm(harness, mode="manual")
+    return await admin_session(harness)  # arm() logged in again, so the earlier CSRF token is stale
+
+
+async def unverified_command_status(harness, headers: dict[str, str]) -> tuple[int, str | None]:
+    refused = await harness.client.post(
+        "/admin/api/energy/devices/main/command", headers=headers, json={"action": "hold"}
+    )
+    return refused.status_code, refused.json().get("code")
+
+
+async def test_the_guided_verification_stores_only_what_it_proved(tmp_path: Path, fast_probe: None) -> None:
+    async with running_app(energy_settings(tmp_path)) as harness:
+        headers = await assistant_ready(harness)
+        before = await unverified_command_status(harness, headers)
+        assert before[0] != 200  # the gate is closed until the assistant has committed
+
+        started = (await harness.client.post(f"{ASSIST}/start", headers=headers)).json()
+        assert started["blockers"] == [] and started["started"] is True
+        assert (started["model"], started["firmware"]) == ("RCT Power DC 10.0", "2.3.5687")
+        assert not started["can_commit"]
+        early = await harness.client.post(f"{ASSIST}/commit", headers=headers, json={"confirm": True})
+        assert early.status_code == 409  # nothing proven yet, so nothing can be stored
+
+        for kind, answer in (("battery", "discharging"), ("grid", "importing")):
+            state = (await harness.client.post(
+                f"{ASSIST}/direction", headers=headers, json={"kind": kind, "answer": answer}
+            )).json()
+        assert [s["status"] for s in state["steps"]] == ["done", "done", "pending"]
+
+        refused = await harness.client.post(f"{ASSIST}/control-test", headers=headers, json={"confirm": False})
+        assert refused.status_code == 400  # the active step needs explicit consent
+
+        stop = asyncio.Event()
+        follower = asyncio.create_task(follow_the_setpoint(harness, stop))
+        try:
+            tested = await harness.client.post(f"{ASSIST}/control-test", headers=headers, json={"confirm": True})
+        finally:
+            stop.set()
+            await follower
+        assert tested.status_code == 200, tested.text
+        assert tested.json()["can_commit"] is True, tested.json()
+        catalog = RegistryCatalog.from_file(harness.runtime.settings.object_registry_path)
+        restored = {name: harness.net.payloads[catalog.object_entry(name).object_id] for name in DISPATCH_WRITE_NAMES}
+        assert restored["power_mng_soc_strategy"] == b"\x00"  # handed back, not left under external control
+        assert restored["power_mng_use_grid_power_enable"] == b"\x00"
+
+        done = await harness.client.post(f"{ASSIST}/commit", headers=headers, json={"confirm": True})
+        assert done.status_code == 200, done.text
+        caps = _capabilities(done.json())
+        assert {caps[name]["status"] for name in _VERIFICATION_NAMES} == {"verified"}
+        write = caps["write_path_convention"]
+        assert (write["verified_device_model"], write["verified_firmware"]) == ("RCT Power DC 10.0", "2.3.5687")
+        assert write["enum_byte_width"] == 1 and write["bool_byte_width"] == 1
+        assert write["write_frame_layout_verified"] and write["apply_sequence_verified"]
+        assert write["note"].startswith("Guided:")
+        assert caps["battery_power_sign_convention"]["battery_discharge_positive"] is True
+        assert caps["grid_power_sign_convention"]["grid_import_positive"] is True
+        assert (await unverified_command_status(harness, headers))[0] == 200  # now the gate is open
+
+
+async def test_a_failed_control_test_keeps_the_gate_closed_and_restores_the_inverter(
+    tmp_path: Path, fast_probe: None
+) -> None:
+    async with running_app(energy_settings(tmp_path)) as harness:
+        headers = await assistant_ready(harness)
+        await harness.client.post(f"{ASSIST}/start", headers=headers)
+        await harness.client.post(f"{ASSIST}/direction", headers=headers, json={"kind": "battery", "answer": "discharging"})
+        await harness.client.post(f"{ASSIST}/direction", headers=headers, json={"kind": "grid", "answer": "importing"})
+        # Nobody mirrors the setpoint: the battery keeps its 400 W, so external control is not proven.
+        tested = (await harness.client.post(f"{ASSIST}/control-test", headers=headers, json={"confirm": True})).json()
+        step = next(item for item in tested["steps"] if item["id"] == "control_test")
+        assert step["status"] == "failed" and "did not follow" in step["message"]
+        assert tested["can_commit"] is False
+        catalog = RegistryCatalog.from_file(harness.runtime.settings.object_registry_path)
+        assert harness.net.payloads[catalog.object_entry("power_mng_soc_strategy").object_id] == b"\x00"
+        commit = await harness.client.post(f"{ASSIST}/commit", headers=headers, json={"confirm": True})
+        assert commit.status_code == 409
+        entry = (await harness.client.get("/admin/api/energy/devices", headers=headers)).json()[0]
+        assert {c["status"] for n, c in _capabilities(entry).items() if n in _VERIFICATION_NAMES} == {"unverified"}
+        assert (await unverified_command_status(harness, headers))[0] != 200
+
+
+async def test_the_assistant_refuses_readings_it_cannot_interpret(tmp_path: Path, fast_probe: None) -> None:
+    async with running_app(energy_settings(tmp_path)) as harness:
+        headers = await assistant_ready(harness)
+        seed_identity(harness, battery_w=40.0)  # almost idle
+        await harness.client.post(f"{ASSIST}/start", headers=headers)
+        weak = (await harness.client.post(
+            f"{ASSIST}/direction", headers=headers, json={"kind": "battery", "answer": "charging"}
+        )).json()
+        assert weak["steps"][0]["status"] == "failed" and "too little" in weak["steps"][0]["message"]
+        mismatched = await harness.client.post(
+            f"{ASSIST}/direction", headers=headers, json={"kind": "battery", "answer": "importing"}
+        )
+        assert mismatched.status_code == 422
+        await harness.client.post(f"{ASSIST}/direction", headers=headers, json={"kind": "grid", "answer": "importing"})
+        # An idle battery cannot show that the hold took effect, so the test must not pass.
+        seed_identity(harness, battery_w=400.0)
+        await harness.client.post(f"{ASSIST}/direction", headers=headers, json={"kind": "battery", "answer": "charging"})
+        seed_identity(harness, battery_w=0.0)
+        idle = (await harness.client.post(f"{ASSIST}/control-test", headers=headers, json={"confirm": True})).json()
+        step = next(item for item in idle["steps"] if item["id"] == "control_test")
+        assert step["status"] == "failed" and "almost idle" in step["message"]
+        assert idle["can_commit"] is False
+
+
+async def test_an_unreadable_target_unit_blocks_the_commit(tmp_path: Path, fast_probe: None) -> None:
+    async with running_app(energy_settings(tmp_path)) as harness:
+        headers = await assistant_ready(harness)
+        seed_identity(harness, target=1.0)  # 100 % in ratio units reads like 1 % in percent units
+        state = (await harness.client.post(f"{ASSIST}/start", headers=headers)).json()
+        assert state["started"] is True and state["can_commit"] is False
+        assert any("unit cannot be determined" in blocker for blocker in state["blockers"])
