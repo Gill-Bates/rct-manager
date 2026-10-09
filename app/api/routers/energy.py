@@ -30,9 +30,11 @@ from app.energy.models import (
     TARGET_SOC_MAX_PERCENT,
     TARGET_SOC_MIN_PERCENT,
     ActionReason,
+    CommandSource,
     EnergyAction,
     EnergyCommand,
     EnergyDeviceStatus,
+    EnergyMode,
     EnergyState,
 )
 from app.energy.readings import DeviceReading, EnergyReadings
@@ -59,7 +61,8 @@ _COMMON = (
     ErrorCode.DISPATCH_SNAPSHOT_STALE,
     ErrorCode.DISPATCH_STORE_UNAVAILABLE,
     ErrorCode.DISPATCH_UNVERIFIED,
-    ErrorCode.ENERGY_MANAGER_DISARMED,
+    ErrorCode.ENERGY_MANAGER_OFF,
+    ErrorCode.ENERGY_MANAGER_NOT_EXTERNAL,
     ErrorCode.ENERGY_WRITE_SUPPORT_REQUIRED,
     ErrorCode.ENERGY_ACTION_UNAVAILABLE,
 )
@@ -135,7 +138,9 @@ class ActionAvailabilityResponse(BaseModel):
 
 class EnergyStatusResponse(BaseModel):
     device_id: str
-    armed: bool
+    mode: EnergyMode
+    armed: bool  # compatibility: mode != "off"
+    accepts_commands_from: CommandSource  # which surface the current mode accepts commands from
     state: EnergyState
     action: EnergyAction | None
     target_soc_percent: float | None
@@ -154,7 +159,9 @@ class EnergyStatusResponse(BaseModel):
     def from_domain(cls, status: EnergyDeviceStatus) -> "EnergyStatusResponse":
         return cls(
             device_id=status.device_id,
+            mode=status.mode,
             armed=status.armed,
+            accepts_commands_from=status.accepts_commands_from,
             state=status.state,
             action=status.action,
             target_soc_percent=status.target_soc_percent,

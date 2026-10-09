@@ -767,6 +767,8 @@ class RctGateway:
             counters.failures,
             binding.cache_hits,
             binding.cache_misses,
+            None if binding.periodic is None else binding.periodic.live,
+            0 if binding.periodic is None else binding.periodic.consecutive_failures,
         )
 
     # ---- vendor diagnostics (Requirement 18, 30) ---------------------------------------------
@@ -789,12 +791,17 @@ class RctGateway:
                     tuple(b.entry.device_id for b in bindings),
                     tuple(b.entry.network_id for b in bindings if b.entry.network_id is not None),
                     status.counters.discarded_bytes,
+                    status.counters.crc_errors,
+                    status.counters.framing_errors,
+                    status.connection_epoch,
                     status.counters.unexpected_frames,
                     status.lock_reason is not None,
                     status.lock_reason,
                     status.counters.last_frame_at,
                     {b.entry.device_id: b.periodic.registrations if b.periodic else 0 for b in bindings},
                     {b.entry.device_id: bool(b.periodic and b.periodic.available) for b in bindings},
+                    {b.entry.device_id: b.periodic.consecutive_failures if b.periodic else 0 for b in bindings},
+                    {b.entry.device_id: b.periodic.last_failure if b.periodic else None for b in bindings},
                 )
             )
         return result

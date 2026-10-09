@@ -242,6 +242,12 @@ class MetricsExporter:
                 lambda e: e.counters.discarded_bytes,
             ),
             (
+                "rct_transport_crc_errors_total",
+                "counter",
+                "Frames dropped for a CRC mismatch.",
+                lambda e: e.counters.crc_errors,
+            ),
+            (
                 "rct_transport_unexpected_frames_total",
                 "counter",
                 "Unexpected frames.",

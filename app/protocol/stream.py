@@ -182,6 +182,17 @@ class StreamParser:
             raise _Resync(pos, oversize=True)
         raise _Incomplete
 
+    def _ends_inside_escape(self, pos: int) -> bool:
+        """True when the buffer ends between a stop byte and its data byte, walking from ``pos``.
+
+        Looking only at the last byte is wrong: ``0x2D 0x2D`` is a complete pair that ends in a
+        stop byte, and a CRC low byte of 0x2D produces exactly that at the end of a frame.
+        """
+        buf = self._buf
+        while pos < len(buf):
+            pos += 2 if buf[pos] == STOP_BYTE else 1
+        return pos > len(buf)
+
     def _unescape_until(self, pos: int, raw_end: int) -> bytes:
         """Unescape the raw bytes from ``pos`` up to ``raw_end``, which holds no unmasked start byte."""
         out = bytearray()
@@ -227,7 +238,7 @@ class StreamParser:
         except _Incomplete:
             boundary = len(self._buf)
             provisional = True
-            if boundary > pos and self._buf[boundary - 1] == STOP_BYTE:
+            if self._ends_inside_escape(pos):
                 # A lone escape byte at the current buffer end has no pair yet; its candidate
                 # body cannot be unescaped until the next byte arrives.
                 if not wait:

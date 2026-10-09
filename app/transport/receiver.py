@@ -99,6 +99,8 @@ class Receiver:
         self._chunk = chunk_size
         self._magic_handled = False
         self._counted_discards = 0
+        self._counted_crc = 0
+        self._counted_framing = 0
         self._counted_unknown = 0
         self.noise = StreamNoiseMonitor(unexpected_window_seconds)
         self.unexpected_samples: deque[tuple[int, int, int | None]] = deque(maxlen=4)
@@ -140,6 +142,10 @@ class Receiver:
             discarded = self._parser.stats.discarded_bytes
             self._counters.discarded_bytes += discarded - self._counted_discards
             self._counted_discards = discarded
+            stats = self._parser.stats
+            self._counters.crc_errors += stats.crc_errors - self._counted_crc
+            self._counters.framing_errors += stats.framing_errors - self._counted_framing
+            self._counted_crc, self._counted_framing = stats.crc_errors, stats.framing_errors
             self._report_unknown_commands(now)
             self.noise.frames(now, len(frames))
             self.noise.evaluate(now)

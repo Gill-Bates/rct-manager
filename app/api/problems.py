@@ -72,7 +72,9 @@ class ErrorCode(StrEnum):
     DISPATCH_CAPABILITY_CONFLICT = "dispatch_capability_conflict"
     DISPATCH_RECORD_CORRUPT = "dispatch_record_corrupt"
     DISPATCH_SNAPSHOT_STALE = "dispatch_snapshot_stale"
-    ENERGY_MANAGER_DISARMED = "energy_manager_disarmed"
+    ENERGY_MANAGER_OFF = "energy_manager_off"
+    ENERGY_MANAGER_NOT_EXTERNAL = "energy_manager_not_external"
+    ENERGY_MANAGER_EXTERNAL = "energy_manager_external"
     ENERGY_WRITE_SUPPORT_REQUIRED = "energy_write_support_required"
     ENERGY_ACTION_UNAVAILABLE = "energy_action_unavailable"
     # Field-level keys: they appear only inside ``errors``, never as a top-level code.
@@ -125,7 +127,9 @@ STATUS: dict[ErrorCode, int] = {
     E.DISPATCH_CAPABILITY_CONFLICT: 409,
     E.DISPATCH_RECORD_CORRUPT: 503,
     E.DISPATCH_SNAPSHOT_STALE: 503,
-    E.ENERGY_MANAGER_DISARMED: 409,
+    E.ENERGY_MANAGER_OFF: 409,
+    E.ENERGY_MANAGER_NOT_EXTERNAL: 409,
+    E.ENERGY_MANAGER_EXTERNAL: 409,
     E.ENERGY_WRITE_SUPPORT_REQUIRED: 409,
     E.ENERGY_ACTION_UNAVAILABLE: 409,
 }
@@ -183,13 +187,24 @@ _TEXT: dict[ErrorCode, tuple[str, str]] = {
         "Dispatch snapshot stale",
         "The device state could not be read freshly enough to start a new dispatch; retry.",
     ),
-    E.ENERGY_MANAGER_DISARMED: (
+    E.ENERGY_MANAGER_OFF: (
         "Energy Manager is off",
-        "Energy Manager is off - switch it on for this inverter first.",
+        "Energy Manager is off for this inverter - an operator must switch it to Manual or External first.",
+    ),
+    E.ENERGY_MANAGER_NOT_EXTERNAL: (
+        "Inverter is not in External mode",
+        (
+            "This inverter is in Manual mode, which only accepts commands from the admin GUI - an "
+            "operator must switch it to External to let an app control it through the API."
+        ),
+    ),
+    E.ENERGY_MANAGER_EXTERNAL: (
+        "Controlled by an external app",
+        "This inverter is controlled by an external app through the API - switch it to Manual to operate it here.",
     ),
     E.ENERGY_WRITE_SUPPORT_REQUIRED: (
         "Write access required",
-        "Write access must be enabled before the Energy Manager can be switched on.",
+        "Write access must be enabled before the Energy Manager can be set to Manual or External.",
     ),
     E.ENERGY_ACTION_UNAVAILABLE: (
         "Action unavailable",

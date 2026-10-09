@@ -54,7 +54,7 @@ from app.dispatch.models import DeviceLimits, DispatchConfig, StopReason
 from app.dispatch.soc_policy import SocTargetPolicy, SocTargetPolicyRegistry
 from app.dispatch.store import DispatchStore
 from app.energy.manager import EnergyManager
-from app.energy.models import ArmedRecord
+from app.energy.models import EnergyMode, ModeRecord
 from app.errors import ConfigError, DeviceApiError, ReconfigurationBuildError
 from app.gateway.energy_readings import RctEnergyReadings
 from app.gateway.rct import DeviceBinding, RctGateway
@@ -767,8 +767,8 @@ def _lifespan(
                         await runtime.dispatch.set_device_limits(
                             device_id, replace(old_limits, engineering_mode=False)
                         )
-                    if runtime.energy is not None and runtime.energy.armed(device_id):
-                        await runtime.energy.set_armed(device_id, armed=False, actor=None)
+                    if runtime.energy is not None and runtime.energy.mode(device_id) is not EnergyMode.OFF:
+                        await runtime.energy.set_mode(device_id, EnergyMode.OFF, actor=None)
                     # SocTargetPolicy is per-device/firmware (design doc), so it is an identity-bound
                     # claim exactly like the capability evidence above and must not survive onto
                     # whatever device now answers at this device_id.
@@ -874,13 +874,13 @@ def _lifespan(
             # _create_dispatch() does several synchronous DB inits/reads (DispatchStore.initialize(),
             # get_capabilities(), get_soc_target_policies(), get_energy_states(), get_device_configs());
             # called directly here it would block the event loop on a live write-support enable.
-            dispatch_store_new, armed = await asyncio.to_thread(
+            dispatch_store_new, modes = await asyncio.to_thread(
                 _create_dispatch, runtime, app.state.dispatch_config
             )
             app.state.dispatch_store = dispatch_store_new
             if runtime.energy is not None:
                 runtime.energy.attach_dispatch(
-                    port=runtime.dispatch, store=dispatch_store_new, readings=runtime.energy_readings, armed=armed
+                    port=runtime.dispatch, store=dispatch_store_new, readings=runtime.energy_readings, modes=modes
                 )
             # While the bootstrap password is pending, start_device_jobs() will start them later.
             if store is None or not await asyncio.to_thread(store.password_change_pending):
@@ -888,7 +888,7 @@ def _lifespan(
             log.info("Battery dispatch enabled at runtime")
 
         async def disable_dispatch() -> list[str]:
-            """Hand every device back to automatic operation and disarm it after write access was
+            """Hand every device back to automatic operation and switch it off after write access was
             switched off. The controller and its loops stay up so an unfinished restore keeps being
             retried; returns the devices whose restore is still pending.
             """
@@ -898,8 +898,8 @@ def _lifespan(
             for device_id in list(runtime.devices):
                 try:
                     await runtime.dispatch.force_restore_or_raise(device_id, StopReason.WRITE_NOT_ALLOWED)
-                    if runtime.energy is not None and runtime.energy.armed(device_id):
-                        await runtime.energy.set_armed(device_id, armed=False, actor=None)
+                    if runtime.energy is not None and runtime.energy.mode(device_id) is not EnergyMode.OFF:
+                        await runtime.energy.set_mode(device_id, EnergyMode.OFF, actor=None)
                 except Exception:
                     log.exception("Restore after disabling write access is pending for device %s", device_id)
                     pending.append(device_id)
@@ -998,10 +998,10 @@ def _add_docs(app: FastAPI, settings: Settings) -> None:
         log.info("API documentation disabled (DOCS_PUBLIC=false)")
 
 
-def _create_dispatch(runtime: Runtime, config: DispatchConfig) -> tuple[DispatchStore, dict[str, ArmedRecord]]:
+def _create_dispatch(runtime: Runtime, config: DispatchConfig) -> tuple[DispatchStore, dict[str, ModeRecord]]:
     """Build the dispatch controller and its store onto ``runtime``; used at boot and on a live enable.
 
-    Returns the store and the persisted armed states. The caller starts the controller's tasks.
+    Returns the store and the persisted energy modes. The caller starts the controller's tasks.
     """
     settings = runtime.settings
     gateway = runtime.gateway
@@ -1020,7 +1020,7 @@ def _create_dispatch(runtime: Runtime, config: DispatchConfig) -> tuple[Dispatch
     # The live capability registry, so a verification reaches the published grid sign without a
     # restart. The readings are cache-only and never queue a device transaction.
     runtime.energy_readings = RctEnergyReadings(gateway, capabilities=dispatch_capabilities)
-    energy_armed = dispatch_store.get_energy_states()
+    energy_modes = dispatch_store.get_energy_states()
     # The store is the truth for the per-device limits and the engineering switch: they are an
     # operator setting, made through the admin dispatch API, and must survive a restart. The
     # environment values are only a bootstrap seed for a device that has no record yet.
@@ -1040,7 +1040,7 @@ def _create_dispatch(runtime: Runtime, config: DispatchConfig) -> tuple[Dispatch
         await runtime.dispatch.shutdown_restore()
 
     runtime.shutdown.set_dispatch_restore(restore_for_shutdown)
-    return dispatch_store, energy_armed
+    return dispatch_store, energy_modes
 
 
 def _load_default_write_entries(settings: Settings, catalog: RegistryCatalog) -> dict:
@@ -1107,13 +1107,13 @@ def create_app(settings: Settings, *, clock: Clock | None = None, connector: Con
         ),
     )
     dispatch_store = None
-    energy_armed: dict[str, ArmedRecord] = {}
+    energy_modes: dict[str, ModeRecord] = {}
     # Built unconditionally so the dashboard's energy_flow projection (app/admin/api.py::devices())
     # reads cache-only, sign-normalized figures even with write support/dispatch disabled; the
     # dispatch-enabled branch below replaces this with the live capability registry.
     runtime.energy_readings = RctEnergyReadings(gateway, capabilities=CapabilityRegistry())
     if _dispatch_enabled(settings):
-        dispatch_store, energy_armed = _create_dispatch(runtime, dispatch_config)
+        dispatch_store, energy_modes = _create_dispatch(runtime, dispatch_config)
     app = FastAPI(
         title="RCT Manager",
         version=__version__,
@@ -1182,7 +1182,7 @@ def create_app(settings: Settings, *, clock: Clock | None = None, connector: Con
             approved_writes=_approved_writes,
             allowlist_candidates=lambda: frozenset(app.state.default_write_entries),
             required_writes=RctDispatchGateway.REQUIRED_WRITES,
-            armed=energy_armed,
+            modes=energy_modes,
         )
     app.state.security = SecurityContext(
         TokenStore(auth_required=settings.auth_required, admin_store=admin_store),

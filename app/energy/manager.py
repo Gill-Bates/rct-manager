@@ -41,17 +41,19 @@ from app.energy.models import (
     _ACTION_FOR_MODE,
     _STATE_FOR_DISPATCH_STATE,
     _STOP_REASON_PUBLIC,
-    ARMED_BY_MAX_LENGTH,
+    ADMIN_ACTOR,
+    CHANGED_BY_MAX_LENGTH,
     COMMAND_TTL_SECONDS,
     TARGET_SOC_MAX_PERCENT,
     TARGET_SOC_MIN_PERCENT,
     ActionAvailability,
     ActionReason,
-    ArmedRecord,
     EnergyAction,
     EnergyCommand,
     EnergyDeviceStatus,
+    EnergyMode,
     EnergyState,
+    ModeRecord,
     TargetSocWindow,
 )
 from app.energy.readings import EnergyReadingsPort, absent_readings
@@ -71,14 +73,14 @@ MAX_POWER_W = 50_000.0
 
 
 def _actor_name(actor: str | None) -> str | None:
-    """A caller-supplied name reduced to what ``ArmedRecord`` accepts: printable ASCII, bounded.
+    """A caller-supplied name reduced to what ``ModeRecord`` accepts: printable ASCII, bounded.
 
-    Dropping the unusable characters is deliberate — an odd token name must not turn an arming into
-    a 500 through ``ArmedRecord``'s validation.
+    Dropping the unusable characters is deliberate — an odd token name must not turn a mode change
+    into a 500 through ``ModeRecord``'s validation.
     """
     if actor is None:
         return None
-    printable = "".join(char for char in actor if 32 <= ord(char) <= 126)[:ARMED_BY_MAX_LENGTH]
+    printable = "".join(char for char in actor if 32 <= ord(char) <= 126)[:CHANGED_BY_MAX_LENGTH]
     return printable or None
 
 
@@ -97,7 +99,7 @@ class EnergyManager:
         approved_writes: Callable[[], Awaitable[tuple[str, ...]]] | None,
         allowlist_candidates: Callable[[], frozenset[str]] | None,
         required_writes: tuple[str, ...],
-        armed: Mapping[str, ArmedRecord] | None = None,
+        modes: Mapping[str, ModeRecord] | None = None,
     ) -> None:
         self._port = port
         self._store = store
@@ -116,7 +118,7 @@ class EnergyManager:
         self._approved_writes = approved_writes
         self._allowlist_candidates = allowlist_candidates
         self._required_writes = required_writes
-        self._armed_states: dict[str, ArmedRecord] = dict(armed or {})
+        self._mode_states: dict[str, ModeRecord] = dict(modes or {})
         # Strictly outside the controller's per-device lock: the manager calls the port, never the
         # other way round, so the one-directional order rules a lock cycle out.
         self._locks: dict[str, asyncio.Lock] = {}
@@ -128,13 +130,13 @@ class EnergyManager:
         port: BatteryDispatchPort,
         store: DispatchStore,
         readings: EnergyReadingsPort,
-        armed: Mapping[str, ArmedRecord],
+        modes: Mapping[str, ModeRecord],
     ) -> None:
         """Bind the dispatch objects built after boot, when write access is enabled live."""
         self._port = port
         self._store = store
         self._readings = readings
-        self._armed_states = dict(armed)
+        self._mode_states = dict(modes)
 
     # --- state ------------------------------------------------------------------------------
 
@@ -147,22 +149,22 @@ class EnergyManager:
             raise UnknownDevice(device_id=device_id)
         return entry
 
-    def _record(self, device_id: str) -> ArmedRecord:
-        return self._armed_states.get(device_id) or ArmedRecord(device_id)
+    def _record(self, device_id: str) -> ModeRecord:
+        return self._mode_states.get(device_id) or ModeRecord(device_id)
 
-    def armed(self, device_id: str) -> bool:
-        return self._record(device_id).armed
+    def mode(self, device_id: str) -> EnergyMode:
+        return self._record(device_id).mode
 
-    def armed_record(self, device_id: str) -> ArmedRecord:
-        """The armed row of one device, for the admin surface's display-only fields."""
+    def mode_record(self, device_id: str) -> ModeRecord:
+        """The mode row of one device, for the admin surface's display-only fields."""
         return self._record(device_id)
 
     async def approved_write_names(self) -> tuple[str, ...]:
         """The live write allowlist, state-independent, for the admin Setup checklist.
 
         This is the same reader ``_missing_write_names`` consults, so it is authoritative in every
-        arm state — unlike ``ArmedRecord.added_write_names``, which only records what arming itself
-        contributed. A never-armed or disarmed device whose required writes were approved on the
+        mode — unlike ``ModeRecord.added_write_names``, which only records what a mode switch itself
+        contributed. A device in mode ``off`` whose required writes were approved on the
         Inverters page still reports them here.
         """
         return tuple(await self._approved_writes()) if self._approved_writes is not None else ()
@@ -232,16 +234,12 @@ class EnergyManager:
             if self._port is None:
                 log.warning("Energy command refused: dispatch is not configured (device=%s)", device_id)
                 raise EnergyRejected("dispatch_store_unavailable", device_id=device_id)
-            if not self.armed(device_id):
-                # No exception for `auto`: disarming performs the handback itself, so a disarmed
-                # device has nothing left to hand back.
-                log.info("Energy command refused: device %s is not armed", device_id)
-                raise EnergyRejected("energy_manager_disarmed", device_id=device_id)
+            self._authorize(device_id, actor)
             # AUTO only ends our operation and replays the stored snapshot; it never submits a new
             # write command, so this preflight does not apply. The restore itself still passes the
             # gateway write allowlist (system=True skips only the request budget). The admin
             # Parameters endpoint refuses to revoke a required dispatch write name while any device
-            # is armed or has an unfinished dispatch; if not, the handback fails closed below.
+            # is in a mode other than off or has an unfinished dispatch; if not, the handback fails closed below.
             if command.action is not EnergyAction.AUTO and not self._write_support_enabled():
                 log.warning("Energy command refused: write support is disabled (device=%s)", device_id)
                 raise EnergyRejected("energy_write_support_required", device_id=device_id)
@@ -263,6 +261,23 @@ class EnergyManager:
                 _actor_name(actor),
             )  # fmt: skip
             return await self._project(device_id, status)
+
+    def _authorize(self, device_id: str, actor: str | None) -> None:
+        """The mode decides which surface may command: the admin session in ``manual``, the public
+        API in ``external``, nobody in ``off``. ``auto`` is no exception: leaving a mode performs
+        the handback itself, so a device in ``off`` has nothing left to hand back.
+        """
+        mode = self.mode(device_id)
+        from_admin = actor == ADMIN_ACTOR
+        if mode is EnergyMode.OFF:
+            log.info("Energy command refused: device %s is switched off", device_id)
+            raise EnergyRejected("energy_manager_off", device_id=device_id)
+        if mode is EnergyMode.MANUAL and not from_admin:
+            log.info("Energy command refused: device %s is in manual mode (actor=%s)", device_id, _actor_name(actor))
+            raise EnergyRejected("energy_manager_not_external", device_id=device_id)
+        if mode is EnergyMode.EXTERNAL and from_admin:
+            log.info("Energy command refused: device %s is controlled by an external app", device_id)
+            raise EnergyRejected("energy_manager_external", device_id=device_id)
 
     def _validate(self, command: EnergyCommand) -> None:
         """The field rules of design 2.10.1, repeated here so an in-process caller (the future
@@ -339,23 +354,27 @@ class EnergyManager:
             raise EnergyRejected("dispatch_restore_required", device_id=device_id)
         return status
 
-    # --- arming ------------------------------------------------------------------------------
+    # --- mode --------------------------------------------------------------------------------
 
-    async def set_armed(self, device_id: str, *, armed: bool, actor: str | None) -> EnergyDeviceStatus:
+    async def set_mode(
+        self, device_id: str, mode: EnergyMode, *, actor: str | None
+    ) -> EnergyDeviceStatus:
         self._entry(device_id)
         async with self._lock(device_id):
-            if armed:
-                await self._arm(device_id, actor)
+            if mode is EnergyMode.OFF:
+                await self._switch_off(device_id)
             else:
-                await self._disarm(device_id)
+                await self._switch_on(device_id, mode, actor)
             status = None if self._port is None else await self._port.status(device_id)
             return await self._project(device_id, status)
 
-    async def _arm(self, device_id: str, actor: str | None) -> None:
-        """Design 2.6.1: read-only preflight, then the add-only approval, then the commit."""
+    async def _switch_on(self, device_id: str, mode: EnergyMode, actor: str | None) -> None:
+        """Design 2.6.1: read-only preflight, hand back when the owner changes, then the add-only
+        approval and the commit.
+        """
         if not self._write_support_enabled():
             # Deliberately not flipped here: it is a global security switch the operator sets in Settings.
-            log.warning("Arming refused: write support is disabled (device=%s)", device_id)
+            log.warning("Mode %s refused: write support is disabled (device=%s)", mode.value, device_id)
             raise EnergyRejected("energy_write_support_required", device_id=device_id)
         if (
             self._port is None
@@ -364,11 +383,11 @@ class EnergyManager:
             or self._approved_writes is None
             or self._allowlist_candidates is None
         ):
-            log.error("Arming refused: the dispatch store or the write allowlist is unavailable")
+            log.error("Mode %s refused: the dispatch store or the write allowlist is unavailable", mode.value)
             raise EnergyRejected("dispatch_store_unavailable", device_id=device_id)
         limits: DeviceLimits | None = self._port.device_limits(device_id)
         if limits is None:
-            log.warning("Arming refused: no power limits configured for device %s", device_id)
+            log.warning("Mode %s refused: no power limits configured for device %s", mode.value, device_id)
             raise EnergyRejected("dispatch_limits_missing", device_id=device_id)
         candidates = self._allowlist_candidates()
         unavailable = [name for name in self._required_writes if name not in candidates]
@@ -377,12 +396,17 @@ class EnergyManager:
             # Refuse before approving anything: without this the allowlist build raises a KeyError
             # and the operator gets a 500 instead of a refusal.
             log.error(
-                "Arming refused: the configured write allowlist lacks %s (device=%s)",
-                ", ".join(unavailable), device_id,
+                "Mode %s refused: the configured write allowlist lacks %s (device=%s)",
+                mode.value, ", ".join(unavailable), device_id,
             )  # fmt: skip
             raise EnergyRejected(
                 "energy_write_support_required", device_id=device_id, missing=unavailable
             )
+        current = self._record(device_id)
+        if current.armed and current.mode is not mode:
+            # manual <-> external: an operation started by the previous owner must not outlive its
+            # authorization. Fails closed (dispatch_restore_required) and keeps the old mode.
+            await self._release(device_id)
         async with self._approval_lock:
             existing = list(await self._approved_writes())  # order as stored
             missing = [name for name in self._required_writes if name not in existing]
@@ -390,16 +414,16 @@ class EnergyManager:
                 # Add-only and order-preserving: the operator's own selection keeps its order, nothing
                 # is removed, nothing is reordered, and duplicates are impossible.
                 await self._approve_writes(existing + missing)
-            current = self._record(device_id)
-            record = ArmedRecord(
+            same = current.mode is mode
+            record = ModeRecord(
                 device_id=device_id,
-                armed=True,
+                mode=mode,
                 added_write_names=tuple(dict.fromkeys((*current.added_write_names, *missing))),
-                armed_at=current.armed_at if current.armed else self._clock.now(),
-                armed_by=current.armed_by if current.armed else _actor_name(actor),
+                changed_at=current.changed_at if same else self._clock.now(),
+                changed_by=current.changed_by if same else _actor_name(actor),
             )
             if record == current:
-                return  # arming twice is idempotent: no approval, no commit, no new timestamp
+                return  # selecting the same mode twice is idempotent: no approval, no commit, no new timestamp
             try:
                 await asyncio.to_thread(self._store.put_energy_state, record)
             except Exception:
@@ -408,36 +432,41 @@ class EnergyManager:
                     still_approved = await self._approved_writes()
                     await self._approve_writes([n for n in still_approved if n not in missing])
                 raise
-        self._armed_states[device_id] = record  # memory only after the commit returned
+        self._mode_states[device_id] = record  # memory only after the commit returned
         log.warning(
-            "Energy Manager armed: device=%s added_writes=%s actor=%s",
-            device_id, ",".join(missing) or "-", record.armed_by,
+            "Energy Manager mode set: device=%s mode=%s added_writes=%s actor=%s",
+            device_id, mode.value, ",".join(missing) or "-", record.changed_by,
         )  # fmt: skip
 
-    async def _disarm(self, device_id: str) -> None:
+    async def _release(self, device_id: str) -> None:
+        """Hand the inverter back to automatic operation if our operation still controls it."""
+        if self._port is None:
+            return
+        status = await self._port.status(device_id)
+        if status.state is not DispatchState.IDLE or status.restore_required:
+            await self._handback(device_id)  # raises dispatch_restore_required, mode stays as it was
+
+    async def _switch_off(self, device_id: str) -> None:
         """Design 2.6.2: hand back first, refuse while the device is still controlled, remove no
         write approval — another feature, another device or the operator's own selection may depend
         on those registers.
         """
         current = self._record(device_id)
         if not current.armed:
-            return  # a never-armed device is a true no-op: an expert-API dispatch stays untouched
-        if self._port is not None:
-            status = await self._port.status(device_id)
-            if status.state is not DispatchState.IDLE or status.restore_required:
-                await self._handback(device_id)  # raises dispatch_restore_required, stays armed
+            return  # off from off is a true no-op: an expert-API dispatch stays untouched
+        await self._release(device_id)
         if self._store is None:
             raise EnergyRejected("dispatch_store_unavailable", device_id=device_id)
-        record = ArmedRecord(
+        record = ModeRecord(
             device_id=device_id,
-            armed=False,
-            # Kept for display: it records what arming once contributed, and disarming revokes none
-            # of it.
+            mode=EnergyMode.OFF,
+            # Kept for display: it records what a mode switch once contributed, and switching off
+            # revokes none of it.
             added_write_names=current.added_write_names,
         )
         await asyncio.to_thread(self._store.put_energy_state, record)
-        self._armed_states[device_id] = record
-        log.warning("Energy Manager disarmed: device=%s (write approvals left untouched)", device_id)
+        self._mode_states[device_id] = record
+        log.warning("Energy Manager switched off: device=%s (write approvals left untouched)", device_id)
 
     # --- status ------------------------------------------------------------------------------
 
@@ -485,7 +514,7 @@ class EnergyManager:
             readings = absent_readings()
         return EnergyDeviceStatus(
             device_id=device_id,
-            armed=self.armed(device_id),
+            mode=self.mode(device_id),
             state=state,
             action=action,
             target_soc_percent=status.target_soc_percent if status is not None else None,
@@ -530,7 +559,7 @@ class EnergyManager:
 
         ``auto`` is never blocked by the capability gate — handing control back must not depend on a
         verification — and a pending restore makes it the retry, so it stays available there too.
-        Its availability is exactly ``armed``, which is what keeps a GUI from offering a button that
+        Its availability is exactly "mode is not off", which is what keeps a GUI from offering a button that
         answers 409.
         """
         reason = await self._blocking_reason(device_id)
@@ -544,8 +573,8 @@ class EnergyManager:
 
     async def _blocking_reason(self, device_id: str) -> ActionReason | None:
         """The reason that blocks every action of this device, ``None`` when none does."""
-        if not self.armed(device_id) or self._port is None:
-            return ActionReason.NOT_ARMED
+        if self.mode(device_id) is EnergyMode.OFF or self._port is None:
+            return ActionReason.MODE_OFF
         if await self._missing_write_names():
             return ActionReason.WRITE_NOT_PERMITTED
         return None

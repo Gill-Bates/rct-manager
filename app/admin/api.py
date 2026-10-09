@@ -26,6 +26,7 @@ from app.catalog.base import is_numeric
 from app.config import DISPLAY_NAME_MAX, Settings
 from app.dispatch.controller import ReconfigurationRejected
 from app.dispatch.models import DispatchState
+from app.energy.models import EnergyMode
 from app.energy.readings import EnergyReadings, absent_readings
 from app.errors import ConfigError, ReconfigurationBuildError
 from app.gateway.rct_dispatch import RctDispatchGateway
@@ -1214,7 +1215,7 @@ def get_parameters(request: Request) -> dict:
 def _dispatch_in_use(request: Request) -> bool:
     runtime = request.app.state.runtime
     energy = runtime.energy
-    if energy is not None and any(energy.armed(device_id) for device_id in tuple(runtime.devices)):
+    if energy is not None and any(energy.mode(device_id) is not EnergyMode.OFF for device_id in tuple(runtime.devices)):
         return True
     dispatch_store = getattr(request.app.state, "dispatch_store", None)
     if dispatch_store is None:
@@ -1247,7 +1248,7 @@ def put_parameters(body: ParameterSelection, request: Request) -> dict:
         if revoked and _dispatch_in_use(request):
             # A restore writes these registers; revoking them now would leave it rejected forever.
             raise HTTPException(
-                409, "Required dispatch writes cannot be revoked while a device is armed or dispatching"
+                409, "Required dispatch writes cannot be revoked while a device is not switched off or is dispatching"
             )
         _parameter_view(request)  # pins the selection the running collector started with
         return body.write_names

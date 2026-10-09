@@ -77,6 +77,20 @@ class PeriodicManager:
         )
 
     @property
+    def live(self) -> bool:
+        """Registration complete and still bound to the current connection (False after a reconnect)."""
+        return (
+            self.available
+            and self._endpoint.state is EndpointState.CONNECTED
+            and self._endpoint.connection_epoch == self._epoch
+        )
+
+    @property
+    def consecutive_failures(self) -> int:
+        """Failed setup rounds since the last success; 0 while the registration holds."""
+        return self._consecutive_failures
+
+    @property
     def interval_seconds(self) -> int:
         return self._interval
 

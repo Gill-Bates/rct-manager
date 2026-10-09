@@ -15,7 +15,7 @@ from app.catalog.registry import RegistryCatalog
 from app.config import DeviceKey, EndpointKey, FreshPeriodicMode
 from app.errors import DeviceUnreachable, FreshNotAvailable, QueueFullError
 from app.observability.names import prometheus_name
-from app.protocol.frames import Frame
+from app.protocol.frames import Frame, encode_frame
 from app.protocol.types import Command, DataType, FrameKind
 from app.protocol.values import encode_value
 from app.scheduling.periodic import (
@@ -412,3 +412,27 @@ async def test_unanswered_register_is_confirmed_after_repeated_failed_refreshes_
         await asyncio.sleep(1.1)
         await gateway.refresh_stale_periodic("main", limit=64)
         assert not gateway.read_failed("main", entry.name)
+
+
+async def test_readiness_and_diagnostics_show_a_lost_periodic_registration_and_crc_drops() -> None:
+    async with running_app() as h:
+        await _registered(h)
+        binding = h.runtime.gateway._device("main")
+        body = (await h.client.get("/api/v1/readiness")).json()
+        main = next(d for d in body["devices"] if d["device_id"] == "main")
+        assert main["periodic_available"] is True and main["periodic_setup_failures"] == 0
+
+        # A CRC-damaged frame is dropped and counted, never delivered.
+        wire = bytearray(encode_frame(Frame(Command.RESPONSE, 0x1111, b"\x01\x02\x03\x04")))
+        wire[-3] ^= 0x01
+        for writer in h.net.writers:
+            writer.deliver(bytes(wire))
+        await asyncio.sleep(0.05)
+        assert binding.endpoint.counters.crc_errors == 1
+
+        await binding.endpoint._drop_connection(DeviceUnreachable())
+        status = h.runtime.gateway.device_status("main")
+        assert status.periodic_available is False  # the registration died with the connection
+        transport = h.runtime.gateway.transports()[0]
+        assert transport.crc_errors == 1
+        assert transport.connection_epoch >= 1

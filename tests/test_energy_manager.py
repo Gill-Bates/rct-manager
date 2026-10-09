@@ -18,14 +18,16 @@ from app.energy.models import (
     _ACTION_FOR_MODE,
     _STATE_FOR_DISPATCH_STATE,
     _STOP_REASON_PUBLIC,
-    ARMED_BY_MAX_LENGTH,
+    ADMIN_ACTOR,
+    CHANGED_BY_MAX_LENGTH,
     COMMAND_TTL_SECONDS,
     TARGET_SOC_MAX_PERCENT,
     TARGET_SOC_MIN_PERCENT,
-    ArmedRecord,
     EnergyAction,
     EnergyCommand,
+    EnergyMode,
     EnergyState,
+    ModeRecord,
 )
 
 # The ten published values, written out here so a change to the contract has to be made twice.
@@ -96,7 +98,7 @@ def test_no_internal_stop_reason_name_leaks_into_the_public_vocabulary() -> None
     assert all(_STOP_REASON_PUBLIC[reason] != reason.value for reason in leaking)
 
 
-# --- the command model and the armed record ------------------------------------------------------
+# --- the command model and the mode record ------------------------------------------------------
 
 
 def test_the_command_model_carries_business_values_only() -> None:
@@ -108,19 +110,19 @@ def test_the_command_model_carries_business_values_only() -> None:
     assert COMMAND_TTL_SECONDS == 3600.0
 
 
-def test_an_armed_record_defaults_to_not_armed() -> None:
-    record = ArmedRecord("main")
-    assert record.armed is False
+def test_a_mode_record_defaults_to_off() -> None:
+    record = ModeRecord("main")
+    assert record.mode is EnergyMode.OFF and record.armed is False
     assert record.added_write_names == ()
-    assert record.armed_at is None and record.armed_by is None
+    assert record.changed_at is None and record.changed_by is None
 
 
-def test_armed_by_is_bounded_printable_ascii() -> None:
-    ArmedRecord("main", armed=True, armed_by="a" * ARMED_BY_MAX_LENGTH)
+def test_changed_by_is_bounded_printable_ascii() -> None:
+    ModeRecord("main", mode=EnergyMode.MANUAL, changed_by="a" * CHANGED_BY_MAX_LENGTH)
     with pytest.raises(ValueError, match="at most"):
-        ArmedRecord("main", armed=True, armed_by="a" * (ARMED_BY_MAX_LENGTH + 1))
+        ModeRecord("main", mode=EnergyMode.MANUAL, changed_by="a" * (CHANGED_BY_MAX_LENGTH + 1))
     with pytest.raises(ValueError, match="printable ASCII"):
-        ArmedRecord("main", armed=True, armed_by="admin\n")
+        ModeRecord("main", mode=EnergyMode.MANUAL, changed_by="admin\n")
 
 
 # --- the service: translation, validation, arming, availability -----------------------------------
@@ -278,16 +280,16 @@ class ApprovalSpy:
 
 class RecordingStore:
     def __init__(self) -> None:
-        self.records: list[ArmedRecord] = []
+        self.records: list[ModeRecord] = []
 
-    def put_energy_state(self, record: ArmedRecord) -> None:
+    def put_energy_state(self, record: ModeRecord) -> None:
         self.records.append(record)
 
 
 def manager(
     port,
     *,
-    armed: bool = True,
+    mode: EnergyMode = EnergyMode.EXTERNAL,
     store=None,
     approvals: ApprovalSpy | None = None,
     write_support: bool = True,
@@ -312,12 +314,12 @@ def manager(
         approved_writes=spy.read if approved_writes else None,
         allowlist_candidates=lambda: frozenset(offered),
         required_writes=REQUIRED_WRITES,
-        armed={"main": ArmedRecord("main", armed=True)} if armed else None,
+        modes={"main": ModeRecord("main", mode=mode)},
     )
 
 
-def armed_manager(port, **kwargs) -> EnergyManager:
-    """An armed device whose required register names are approved — the normal case."""
+def active_manager(port, **kwargs) -> EnergyManager:
+    """A device in external mode whose required register names are approved — the normal case."""
     spy = kwargs.pop("approvals", ApprovalSpy(EXISTING_WRITES + REQUIRED_WRITES))
     return manager(port, approvals=spy, **kwargs)
 
@@ -328,7 +330,7 @@ def armed_manager(port, **kwargs) -> EnergyManager:
 async def test_charge_translates_to_a_grid_charge_with_the_configured_power_limit() -> None:
     clock = ManualClock()
     port = SpyPort()
-    status = await armed_manager(port, clock=clock).command(
+    status = await active_manager(port, clock=clock).command(
         "main", EnergyCommand(EnergyAction.CHARGE, 80.0), actor="tester"
     )
     command = port.submitted[0]
@@ -342,7 +344,7 @@ async def test_charge_translates_to_a_grid_charge_with_the_configured_power_limi
 
 async def test_discharge_defaults_to_the_discharge_limit() -> None:
     port = SpyPort()
-    await armed_manager(port).command(
+    await active_manager(port).command(
         "main", EnergyCommand(EnergyAction.DISCHARGE, 30.0), actor=None
     )
     command = port.submitted[0]
@@ -354,7 +356,7 @@ async def test_discharge_defaults_to_the_discharge_limit() -> None:
 async def test_an_explicit_power_is_handed_down_unchanged() -> None:
     """Clamping is the dispatch layer's job; the manager must not pre-empt it."""
     port = SpyPort()
-    await armed_manager(port).command(
+    await active_manager(port).command(
         "main", EnergyCommand(EnergyAction.CHARGE, 80.0, 1500.0), actor=None
     )
     assert port.submitted[0].max_power_w == 1500.0
@@ -362,7 +364,7 @@ async def test_an_explicit_power_is_handed_down_unchanged() -> None:
 
 async def test_hold_carries_no_target_and_no_power_budget() -> None:
     port = SpyPort()
-    status = await armed_manager(port).command("main", EnergyCommand(EnergyAction.HOLD), actor=None)
+    status = await active_manager(port).command("main", EnergyCommand(EnergyAction.HOLD), actor=None)
     command = port.submitted[0]
     assert command.mode is DispatchMode.HOLD
     assert command.target_soc_percent is None
@@ -376,7 +378,7 @@ async def test_hold_carries_no_target_and_no_power_budget() -> None:
 
 async def test_auto_cancels_instead_of_submitting() -> None:
     port = SpyPort()
-    status = await armed_manager(port).command("main", EnergyCommand(EnergyAction.AUTO), actor=None)
+    status = await active_manager(port).command("main", EnergyCommand(EnergyAction.AUTO), actor=None)
     assert port.calls == ["cancel"]
     assert port.submitted == []
     assert status.state is EnergyState.AUTOMATIC
@@ -386,7 +388,7 @@ async def test_auto_cancels_instead_of_submitting() -> None:
 async def test_auto_on_an_idle_device_is_not_an_error() -> None:
     """cancel() raises dispatch_not_found on an idle device; the handback is idempotent."""
     port = SpyPort(cancel_raises=DispatchRejected("dispatch_not_found"))
-    status = await armed_manager(port).command("main", EnergyCommand(EnergyAction.AUTO), actor=None)
+    status = await active_manager(port).command("main", EnergyCommand(EnergyAction.AUTO), actor=None)
     assert port.calls == ["cancel", "status"]
     assert status.state is EnergyState.AUTOMATIC
 
@@ -394,7 +396,7 @@ async def test_auto_on_an_idle_device_is_not_an_error() -> None:
 async def test_a_dispatch_refusal_passes_through_unchanged() -> None:
     port = SpyPort(cancel_raises=DispatchRejected("dispatch_record_corrupt"))
     with pytest.raises(DispatchRejected) as info:
-        await armed_manager(port).command("main", EnergyCommand(EnergyAction.AUTO), actor=None)
+        await active_manager(port).command("main", EnergyCommand(EnergyAction.AUTO), actor=None)
     assert info.value.code == "dispatch_record_corrupt"
 
 
@@ -413,18 +415,18 @@ async def test_a_clamped_power_limit_is_reported_as_clamped() -> None:
             commanded_power_w=3000.0,
         )
     )
-    status = await armed_manager(port).status("main")
+    status = await active_manager(port).status("main")
     assert status.power_limit_w == 3000.0
     assert status.power_limit_clamped is True
 
 
 async def test_the_published_window_is_the_narrower_of_the_hard_and_configured_bounds() -> None:
-    status = await armed_manager(SpyPort(), config=DispatchConfig(min_soc=10.0, max_soc=90.0)).status("main")
+    status = await active_manager(SpyPort(), config=DispatchConfig(min_soc=10.0, max_soc=90.0)).status("main")
     assert (status.target_soc_window.min, status.target_soc_window.max) == (10.0, 90.0)
 
 
 async def test_a_reading_that_cannot_be_read_does_not_fail_the_status() -> None:
-    status = await armed_manager(SpyPort(), readings=StubReadings(raises=True)).status("main")
+    status = await active_manager(SpyPort(), readings=StubReadings(raises=True)).status("main")
     assert status.readings.battery_soc_percent.value is None
     assert status.readings.battery_soc_percent.stale is True
 
@@ -436,7 +438,7 @@ async def test_the_readings_block_is_carried_through_verbatim() -> None:
         DeviceReading(2400.0, 1.0, False),
         DeviceReading(800.0, 4.0, True),
     )
-    status = await armed_manager(SpyPort(), readings=StubReadings(readings)).status("main")
+    status = await active_manager(SpyPort(), readings=StubReadings(readings)).status("main")
     assert status.readings is readings
 
 
@@ -468,40 +470,40 @@ async def test_every_validation_row_refuses_before_any_device_access(
 ) -> None:
     port = SpyPort()
     with pytest.raises(EnergyRejected) as info:
-        await armed_manager(port).command("main", command, actor=None)
+        await active_manager(port).command("main", command, actor=None)
     assert info.value.code == code
     assert port.calls == []  # not even a status read
 
 
-async def test_an_unknown_device_is_refused_before_the_armed_check() -> None:
+async def test_an_unknown_device_is_refused_before_the_mode_check() -> None:
     port = SpyPort()
     with pytest.raises(UnknownDevice):
-        await armed_manager(port).command("nope", EnergyCommand(EnergyAction.AUTO), actor=None)
+        await active_manager(port).command("nope", EnergyCommand(EnergyAction.AUTO), actor=None)
     assert port.calls == []
 
 
 async def test_a_command_without_a_dispatch_port_is_a_service_refusal() -> None:
     with pytest.raises(EnergyRejected) as info:
-        await armed_manager(None).command("main", EnergyCommand(EnergyAction.AUTO), actor=None)
+        await active_manager(None).command("main", EnergyCommand(EnergyAction.AUTO), actor=None)
     assert info.value.code == "dispatch_store_unavailable"
 
 
-async def test_a_disarmed_device_refuses_every_action_including_auto() -> None:
+async def test_a_device_in_mode_off_refuses_every_action_including_auto() -> None:
     port = SpyPort()
-    service = manager(port, armed=False)
+    service = manager(port, mode=EnergyMode.OFF)
     for action in EnergyAction:
         with pytest.raises(EnergyRejected) as info:
             await service.command("main", EnergyCommand(
                 action, 80.0 if action in (EnergyAction.CHARGE, EnergyAction.DISCHARGE) else None
             ), actor=None)
-        assert info.value.code == "energy_manager_disarmed"
+        assert info.value.code == "energy_manager_off"
     assert port.calls == []
 
 
 async def test_a_missing_device_limit_is_refused_before_the_submit() -> None:
     port = SpyPort(limits=None)
     with pytest.raises(EnergyRejected) as info:
-        await armed_manager(port).command("main", EnergyCommand(EnergyAction.CHARGE, 80.0), actor=None)
+        await active_manager(port).command("main", EnergyCommand(EnergyAction.CHARGE, 80.0), actor=None)
     assert info.value.code == "dispatch_limits_missing"
     assert port.calls == []
 
@@ -509,88 +511,88 @@ async def test_a_missing_device_limit_is_refused_before_the_submit() -> None:
 # --- item 6: arming -------------------------------------------------------------------------------
 
 
-async def test_arming_adds_the_required_names_and_keeps_the_existing_order() -> None:
+async def test_switching_on_adds_the_required_names_and_keeps_the_existing_order() -> None:
     spy = ApprovalSpy(EXISTING_WRITES)
     store = RecordingStore()
-    service = manager(SpyPort(), armed=False, approvals=spy, store=store)
-    status = await service.set_armed("main", armed=True, actor="tester")
+    service = manager(SpyPort(), mode=EnergyMode.OFF, approvals=spy, store=store)
+    status = await service.set_mode("main", EnergyMode.MANUAL, actor="tester")
     assert spy.calls == [["zulu_write", "alpha_write", "write_alpha", "write_beta"]]
     assert status.armed is True
     assert store.records[-1].added_write_names == REQUIRED_WRITES
-    assert store.records[-1].armed_by == "tester"
-    assert store.records[-1].armed_at is not None
+    assert store.records[-1].changed_by == "tester"
+    assert store.records[-1].changed_at is not None
 
 
-async def test_arming_twice_changes_nothing() -> None:
+async def test_switching_on_twice_changes_nothing() -> None:
     spy = ApprovalSpy(EXISTING_WRITES)
     store = RecordingStore()
-    service = manager(SpyPort(), armed=False, approvals=spy, store=store)
-    await service.set_armed("main", armed=True, actor="tester")
+    service = manager(SpyPort(), mode=EnergyMode.OFF, approvals=spy, store=store)
+    await service.set_mode("main", EnergyMode.MANUAL, actor="tester")
     first = store.records[-1]
-    await service.set_armed("main", armed=True, actor="someone-else")
+    await service.set_mode("main", EnergyMode.MANUAL, actor="someone-else")
     assert len(spy.calls) == 1  # no second approval
     assert store.records[-1] is first  # no second commit, no new timestamp, no new actor
-    assert service.armed("main") is True
+    assert service.mode("main") is not EnergyMode.OFF
 
 
-async def test_arming_with_write_support_off_approves_nothing() -> None:
+async def test_switching_on_with_write_support_off_approves_nothing() -> None:
     spy = ApprovalSpy(EXISTING_WRITES)
-    service = manager(SpyPort(), armed=False, approvals=spy, write_support=False)
+    service = manager(SpyPort(), mode=EnergyMode.OFF, approvals=spy, write_support=False)
     with pytest.raises(EnergyRejected) as info:
-        await service.set_armed("main", armed=True, actor="tester")
+        await service.set_mode("main", EnergyMode.MANUAL, actor="tester")
     assert info.value.code == "energy_write_support_required"
     assert spy.calls == []
     assert spy.names == list(EXISTING_WRITES)  # the recorded names are untouched
-    assert service.armed("main") is False
+    assert service.mode("main") is EnergyMode.OFF
 
 
-async def test_arming_is_refused_when_the_allowlist_file_lacks_a_required_register() -> None:
+async def test_switching_on_is_refused_when_the_allowlist_file_lacks_a_required_register() -> None:
     """A custom WRITE_ALLOWLIST_PATH is operator-settable, so the shipped default is no guarantee.
     Without this check the allowlist build raises a KeyError and the operator gets a 500."""
     spy = ApprovalSpy(EXISTING_WRITES)
     service = manager(
-        SpyPort(), armed=False, approvals=spy, candidates=("write_alpha",)  # write_beta missing
+        SpyPort(), mode=EnergyMode.OFF, approvals=spy, candidates=("write_alpha",)  # write_beta missing
     )
     with pytest.raises(EnergyRejected) as info:
-        await service.set_armed("main", armed=True, actor="tester")
+        await service.set_mode("main", EnergyMode.MANUAL, actor="tester")
     assert info.value.code == "energy_write_support_required"
     assert info.value.context["missing"] == ["write_beta"]
     assert spy.calls == []  # nothing approved
-    assert service.armed("main") is False
+    assert service.mode("main") is EnergyMode.OFF
 
 
-async def test_arming_without_device_limits_is_refused() -> None:
-    service = manager(SpyPort(limits=None), armed=False)
+async def test_switching_on_without_device_limits_is_refused() -> None:
+    service = manager(SpyPort(limits=None), mode=EnergyMode.OFF)
     with pytest.raises(EnergyRejected) as info:
-        await service.set_armed("main", armed=True, actor="tester")
+        await service.set_mode("main", EnergyMode.MANUAL, actor="tester")
     assert info.value.code == "dispatch_limits_missing"
 
 
-async def test_disarming_removes_no_write_approval() -> None:
+async def test_switching_off_removes_no_write_approval() -> None:
     spy = ApprovalSpy(EXISTING_WRITES)
     store = RecordingStore()
-    service = manager(SpyPort(), armed=False, approvals=spy, store=store)
-    await service.set_armed("main", armed=True, actor="tester")
+    service = manager(SpyPort(), mode=EnergyMode.OFF, approvals=spy, store=store)
+    await service.set_mode("main", EnergyMode.MANUAL, actor="tester")
     approved_after_arming = list(spy.names)
-    status = await service.set_armed("main", armed=False, actor="tester")
+    status = await service.set_mode("main", EnergyMode.OFF, actor="tester")
     assert status.armed is False
     assert spy.names == approved_after_arming  # the four registers stay approved
     assert len(spy.calls) == 1
     assert store.records[-1].armed is False
 
 
-async def test_armed_by_is_truncated_and_cleaned_instead_of_raising() -> None:
+async def test_changed_by_is_truncated_and_cleaned_instead_of_raising() -> None:
     store = RecordingStore()
-    service = manager(SpyPort(), armed=False, store=store)
-    await service.set_armed("main", armed=True, actor="t\nken-" + "x" * 200)
-    assert store.records[-1].armed_by == ("tken-" + "x" * 200)[:64]
+    service = manager(SpyPort(), mode=EnergyMode.OFF, store=store)
+    await service.set_mode("main", EnergyMode.MANUAL, actor="t\nken-" + "x" * 200)
+    assert store.records[-1].changed_by == ("tken-" + "x" * 200)[:64]
 
 
 async def test_an_actor_without_a_usable_name_is_recorded_as_none() -> None:
     store = RecordingStore()
-    service = manager(SpyPort(), armed=False, store=store)
-    await service.set_armed("main", armed=True, actor=None)
-    assert store.records[-1].armed_by is None
+    service = manager(SpyPort(), mode=EnergyMode.OFF, store=store)
+    await service.set_mode("main", EnergyMode.MANUAL, actor=None)
+    assert store.records[-1].changed_by is None
 
 
 # --- item 6b: a revoked approval ------------------------------------------------------------------
@@ -630,12 +632,12 @@ async def test_without_a_reader_the_approval_check_is_skipped() -> None:
 # --- item 6c: availability on a disarmed device ----------------------------------------------------
 
 
-async def test_a_disarmed_device_reports_all_four_actions_as_not_armed() -> None:
-    """The AC-7/AC-8 consistency pin: no enabled button may answer 409 energy_manager_disarmed."""
-    status = await manager(SpyPort(), armed=False).status("main")
+async def test_a_device_in_mode_off_reports_all_four_actions_as_mode_off() -> None:
+    """The AC-7/AC-8 consistency pin: no enabled button may answer 409 energy_manager_off."""
+    status = await manager(SpyPort(), mode=EnergyMode.OFF).status("main")
     assert [item.action for item in status.actions] == list(EnergyAction)
     assert all(item.available is False for item in status.actions)
-    assert all(item.reason is ActionReason.NOT_ARMED for item in status.actions)
+    assert all(item.reason is ActionReason.MODE_OFF for item in status.actions)
 
 
 async def test_auto_stays_available_on_an_armed_device_with_unverified_hardware() -> None:
@@ -643,7 +645,7 @@ async def test_auto_stays_available_on_an_armed_device_with_unverified_hardware(
     blocked = CapabilityRegistry(
         [CapabilityRecord(device_id="main", name=name) for name in CapabilityName]
     )
-    status = await armed_manager(SpyPort(capabilities=blocked)).status("main")
+    status = await active_manager(SpyPort(capabilities=blocked)).status("main")
     offered = {item.action: item for item in status.actions}
     assert offered[EnergyAction.AUTO].available is True
     assert offered[EnergyAction.CHARGE].available is False
@@ -652,7 +654,7 @@ async def test_auto_stays_available_on_an_armed_device_with_unverified_hardware(
 
 
 async def test_missing_limits_block_the_three_control_actions_but_not_auto() -> None:
-    status = await armed_manager(SpyPort(limits=None)).status("main")
+    status = await active_manager(SpyPort(limits=None)).status("main")
     offered = {item.action: item for item in status.actions}
     assert offered[EnergyAction.AUTO].available is True
     assert offered[EnergyAction.DISCHARGE].reason is ActionReason.LIMITS_MISSING
@@ -669,7 +671,7 @@ async def test_a_pending_restore_leaves_auto_as_the_retry() -> None:
             restore_required=True,
         )
     )
-    status = await armed_manager(port).status("main")
+    status = await active_manager(port).status("main")
     offered = {item.action: item for item in status.actions}
     assert status.state is EnergyState.FAULT
     assert offered[EnergyAction.AUTO].available is True
@@ -679,7 +681,7 @@ async def test_a_pending_restore_leaves_auto_as_the_retry() -> None:
 # --- items 17 and 17b: a failing restore, against the real controller -----------------------------
 
 
-def live_manager(port, store: DispatchStore, clock: ManualClock, armed: bool = True) -> EnergyManager:
+def live_manager(port, store: DispatchStore, clock: ManualClock, mode: EnergyMode = EnergyMode.EXTERNAL) -> EnergyManager:
     spy = ApprovalSpy(EXISTING_WRITES + REQUIRED_WRITES)
     return EnergyManager(
         port=port,
@@ -693,12 +695,12 @@ def live_manager(port, store: DispatchStore, clock: ManualClock, armed: bool = T
         approved_writes=spy.read,
         allowlist_candidates=lambda: frozenset(REQUIRED_WRITES),
         required_writes=REQUIRED_WRITES,
-        armed={"main": ArmedRecord("main", armed=armed)},
+        modes={"main": ModeRecord("main", mode=mode)},
     )
 
 
 async def charge_then_break_the_restore(tmp_path: Path):
-    """An armed, charging device whose next restore write fails at the device."""
+    """A charging device in external mode whose next restore write fails at the device."""
     clock = ManualClock()
     gateway = FakeDispatchGateway(clock)
     port = controller(tmp_path, clock, gateway)
@@ -749,18 +751,18 @@ async def test_auto_with_a_succeeding_restore_answers_the_automatic_state(tmp_pa
     assert status.stop_reason == "stopped_by_operator"
 
 
-async def test_disarming_with_a_failing_restore_stays_armed(tmp_path: Path) -> None:
+async def test_switching_off_with_a_failing_restore_keeps_the_mode(tmp_path: Path) -> None:
     """Reporting "off" while the device is still under external control would hide exactly the
     state an operator has to act on."""
     service, port, _gateway, _clock = await charge_then_break_the_restore(tmp_path)
     with pytest.raises(EnergyRejected) as info:
-        await service.set_armed("main", armed=False, actor="tester")
+        await service.set_mode("main", EnergyMode.OFF, actor="tester")
     assert info.value.code == "dispatch_restore_required"
-    assert service.armed("main") is True
+    assert service.mode("main") is not EnergyMode.OFF
     assert port._store.get("main").state is DispatchState.FAULT_RESTORE_PENDING
 
 
-async def test_disarming_a_never_armed_device_leaves_an_expert_dispatch_alone(tmp_path: Path) -> None:
+async def test_switching_off_a_device_that_is_off_leaves_an_expert_dispatch_alone(tmp_path: Path) -> None:
     clock = ManualClock()
     gateway = FakeDispatchGateway(clock)
     port = controller(tmp_path, clock, gateway)
@@ -768,8 +770,8 @@ async def test_disarming_a_never_armed_device_leaves_an_expert_dispatch_alone(tm
         "main", EnergyCommand(EnergyAction.CHARGE, 80.0), actor="tester"
     )
     calls = list(gateway.calls)
-    unarmed = live_manager(port, port._store, clock, armed=False)
-    await unarmed.set_armed("main", armed=False, actor="tester")
+    off_manager = live_manager(port, port._store, clock, mode=EnergyMode.OFF)
+    await off_manager.set_mode("main", EnergyMode.OFF, actor="tester")
     assert port._store.get("main").state is not DispatchState.IDLE
     assert gateway.calls == calls  # no cancel, no restore write
 
@@ -788,23 +790,23 @@ async def test_an_already_reached_target_is_accepted_without_a_device_write(tmp_
     assert gateway.calls == [("read_soc", "main")]  # no write at all
 
 
-async def test_the_armed_state_is_committed_before_memory_changes(tmp_path: Path) -> None:
-    """A failed commit must leave the device disarmed, the way set_capability() does it."""
+async def test_the_mode_is_committed_before_memory_changes(tmp_path: Path) -> None:
+    """A failed commit must leave the device in mode off, the way set_capability() does it."""
 
     class FailingStore:
-        def put_energy_state(self, record: ArmedRecord) -> None:
+        def put_energy_state(self, record: ModeRecord) -> None:
             raise DeviceApiError("dispatch_store_unavailable")
 
-    service = manager(SpyPort(), armed=False, store=FailingStore())
+    service = manager(SpyPort(), mode=EnergyMode.OFF, store=FailingStore())
     with pytest.raises(DeviceApiError):
-        await service.set_armed("main", armed=True, actor="tester")
-    assert service.armed("main") is False
+        await service.set_mode("main", EnergyMode.MANUAL, actor="tester")
+    assert service.mode("main") is EnergyMode.OFF
 
 
-async def test_arming_and_a_command_of_one_device_are_serialised() -> None:
+async def test_switching_on_and_a_command_of_one_device_are_serialised() -> None:
     """One lock per device, strictly outside the controller's: the two must not interleave."""
     port = SpyPort()
-    service = armed_manager(port)
+    service = active_manager(port)
     await asyncio.gather(
         service.command("main", EnergyCommand(EnergyAction.CHARGE, 80.0), actor=None),
         service.command("main", EnergyCommand(EnergyAction.HOLD), actor=None),
@@ -814,7 +816,7 @@ async def test_arming_and_a_command_of_one_device_are_serialised() -> None:
 
 def test_the_status_type_carries_exactly_the_published_fields() -> None:
     published = {
-        "device_id", "armed", "state", "action", "target_soc_percent", "power_limit_w",
+        "device_id", "mode", "state", "action", "target_soc_percent", "power_limit_w",
         "power_limit_clamped", "commanded_power_w", "commanded_direction", "until", "stop_reason",
         "time_limited", "target_soc_window", "readings", "actions",
     }  # fmt: skip
@@ -832,12 +834,115 @@ async def test_a_failed_arming_commit_rolls_back_only_its_own_approvals() -> Non
     spy = ApprovalSpy(EXISTING_WRITES)
 
     class FailingStore:
-        def put_energy_state(self, record: ArmedRecord) -> None:
+        def put_energy_state(self, record: ModeRecord) -> None:
             spy.names.append("approved_meanwhile")
             raise OSError("disk full")
 
-    service = manager(SpyPort(), armed=False, approvals=spy, store=FailingStore())
+    service = manager(SpyPort(), mode=EnergyMode.OFF, approvals=spy, store=FailingStore())
     with pytest.raises(OSError):
-        await service.set_armed("main", armed=True, actor="tester")
+        await service.set_mode("main", EnergyMode.MANUAL, actor="tester")
     assert spy.names == [*EXISTING_WRITES, "approved_meanwhile"]
-    assert service.armed("main") is False
+    assert service.mode("main") is EnergyMode.OFF
+
+
+# --- operating modes: who may command ------------------------------------------------------------
+
+PAT_ACTOR = "0123456789abcdef0123456789abcdef"
+
+
+@pytest.mark.parametrize(
+    ("mode", "actor", "code"),
+    [
+        (EnergyMode.OFF, ADMIN_ACTOR, "energy_manager_off"),
+        (EnergyMode.OFF, PAT_ACTOR, "energy_manager_off"),
+        (EnergyMode.MANUAL, ADMIN_ACTOR, None),
+        (EnergyMode.MANUAL, PAT_ACTOR, "energy_manager_not_external"),
+        (EnergyMode.MANUAL, None, "energy_manager_not_external"),
+        (EnergyMode.EXTERNAL, ADMIN_ACTOR, "energy_manager_external"),
+        (EnergyMode.EXTERNAL, PAT_ACTOR, None),
+        (EnergyMode.EXTERNAL, None, None),
+    ],
+)
+@pytest.mark.parametrize("action", [EnergyAction.HOLD, EnergyAction.AUTO])
+async def test_the_mode_decides_which_actor_may_command(mode, actor, code, action) -> None:
+    port = SpyPort()
+    service = active_manager(port, mode=mode)
+    command = EnergyCommand(action)
+    if code is None:
+        await service.command("main", command, actor=actor)
+        return
+    with pytest.raises(EnergyRejected) as info:
+        await service.command("main", command, actor=actor)
+    assert info.value.code == code
+    assert port.submitted == [] and "cancel" not in port.calls  # refused before any device access
+
+
+@pytest.mark.parametrize("mode", list(EnergyMode))
+async def test_a_status_read_works_in_every_mode_and_reports_it(mode: EnergyMode) -> None:
+    status = await active_manager(SpyPort(), mode=mode).status("main")
+    assert status.mode is mode
+    assert status.armed is (mode is not EnergyMode.OFF)
+    assert status.accepts_commands_from.value == {"off": "none", "manual": "admin", "external": "api"}[mode.value]
+
+
+async def test_switching_between_manual_and_external_hands_the_inverter_back_first(tmp_path: Path) -> None:
+    clock = ManualClock()
+    gateway = FakeDispatchGateway(clock)
+    port = controller(tmp_path, clock, gateway)
+    service = live_manager(port, port._store, clock, mode=EnergyMode.MANUAL)
+    await service.command("main", EnergyCommand(EnergyAction.CHARGE, 80.0), actor=ADMIN_ACTOR)
+    assert port._store.get("main").state is not DispatchState.IDLE
+
+    status = await service.set_mode("main", EnergyMode.EXTERNAL, actor=ADMIN_ACTOR)
+    assert status.mode is EnergyMode.EXTERNAL
+    assert status.state is EnergyState.AUTOMATIC  # the operation of the previous owner is gone
+    assert port._store.get("main").state is DispatchState.IDLE
+    with pytest.raises(EnergyRejected) as info:
+        await service.command("main", EnergyCommand(EnergyAction.HOLD), actor=ADMIN_ACTOR)
+    assert info.value.code == "energy_manager_external"
+
+
+async def test_a_failed_handback_keeps_the_previous_mode(tmp_path: Path) -> None:
+    clock = ManualClock()
+    gateway = FakeDispatchGateway(clock)
+    port = controller(tmp_path, clock, gateway)
+    service = live_manager(port, port._store, clock, mode=EnergyMode.MANUAL)
+    await service.command("main", EnergyCommand(EnergyAction.CHARGE, 80.0), actor=ADMIN_ACTOR)
+    gateway.fail_restore = True
+    with pytest.raises(EnergyRejected) as info:
+        await service.set_mode("main", EnergyMode.EXTERNAL, actor=ADMIN_ACTOR)
+    assert info.value.code == "dispatch_restore_required"
+    assert service.mode("main") is EnergyMode.MANUAL
+
+
+async def test_switching_off_hands_back_an_operation_of_either_mode(tmp_path: Path) -> None:
+    clock = ManualClock()
+    gateway = FakeDispatchGateway(clock)
+    port = controller(tmp_path, clock, gateway)
+    service = live_manager(port, port._store, clock, mode=EnergyMode.EXTERNAL)
+    await service.command("main", EnergyCommand(EnergyAction.CHARGE, 80.0), actor=PAT_ACTOR)
+    status = await service.set_mode("main", EnergyMode.OFF, actor=ADMIN_ACTOR)
+    assert status.mode is EnergyMode.OFF and status.state is EnergyState.AUTOMATIC
+
+
+async def test_selecting_the_current_mode_again_changes_nothing() -> None:
+    store = RecordingStore()
+    service = manager(SpyPort(), mode=EnergyMode.OFF, store=store, approvals=ApprovalSpy(EXISTING_WRITES))
+    await service.set_mode("main", EnergyMode.EXTERNAL, actor="first")
+    await service.set_mode("main", EnergyMode.EXTERNAL, actor="second")
+    assert len(store.records) == 1 and store.records[0].changed_by == "first"
+
+
+@pytest.mark.parametrize("mode", [EnergyMode.MANUAL, EnergyMode.EXTERNAL])
+async def test_both_active_modes_share_the_prerequisites(mode: EnergyMode) -> None:
+    spy = ApprovalSpy(EXISTING_WRITES)
+    off = manager(SpyPort(), mode=EnergyMode.OFF, approvals=spy, write_support=False)
+    with pytest.raises(EnergyRejected) as info:
+        await off.set_mode("main", mode, actor=ADMIN_ACTOR)
+    assert info.value.code == "energy_write_support_required"
+    assert tuple(spy.names) == EXISTING_WRITES  # nothing approved
+    no_limits = manager(SpyPort(limits=None), mode=EnergyMode.OFF)
+    with pytest.raises(EnergyRejected) as info:
+        await no_limits.set_mode("main", mode, actor=ADMIN_ACTOR)
+    assert info.value.code == "dispatch_limits_missing"
+    assert off.mode("main") is EnergyMode.OFF and no_limits.mode("main") is EnergyMode.OFF

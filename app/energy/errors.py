@@ -15,9 +15,9 @@ from app.errors import DeviceApiError
 
 
 class EnergyRejected(DeviceApiError):
-    """Codes: energy_manager_disarmed, energy_write_support_required, energy_action_unavailable,
-    and the dispatch codes the manager re-raises on behalf of the dispatch layer
-    (dispatch_store_unavailable, dispatch_restore_required).
+    """Codes: energy_manager_off, energy_manager_not_external, energy_manager_external,
+    energy_write_support_required, energy_action_unavailable, and the dispatch codes the manager
+    re-raises on behalf of the dispatch layer (dispatch_store_unavailable, dispatch_restore_required).
     """
 
     code = "energy_action_unavailable"

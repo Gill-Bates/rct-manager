@@ -23,7 +23,7 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from app.dispatch.capabilities import CapabilityRecord
 from app.dispatch.models import DeviceLimits, DispatchRecord, DispatchRecordCorrupt
 from app.dispatch.soc_policy import SocTargetMode, SocTargetPolicy
-from app.energy.models import ArmedRecord
+from app.energy.models import EnergyMode, ModeRecord
 
 log = logging.getLogger(__name__)
 
@@ -69,6 +69,19 @@ _SCHEMA_V3 = """
     PRAGMA user_version = 3;
 """
 
+# user_version 4 adds the Energy Manager's operating mode. The old `armed` column stays (SQLite
+# cannot drop its CHECK) and is kept as the derived flag `mode != 'off'`; the upgrade maps an armed
+# device to `manual`, which is what arming meant before the mode existed. One transaction, so a
+# crash cannot leave the column without its version bump.
+_SCHEMA_V4 = """
+    BEGIN;
+    ALTER TABLE energy_manager_state
+        ADD COLUMN mode TEXT NOT NULL DEFAULT 'off' CHECK(mode IN ('off','manual','external'));
+    UPDATE energy_manager_state SET mode = CASE WHEN armed = 1 THEN 'manual' ELSE 'off' END;
+    PRAGMA user_version = 4;
+    COMMIT;
+"""
+
 
 class DispatchStore:
     def __init__(self, path: Path, secret: str) -> None:
@@ -107,7 +120,7 @@ class DispatchStore:
         with self.connect() as db:
             db.execute("PRAGMA journal_mode = WAL")
             version = int(db.execute("PRAGMA user_version").fetchone()[0])
-            if version not in (0, 1, 2, 3):
+            if version not in (0, 1, 2, 3, 4):
                 raise ValueError("unsupported dispatch database version")
             if version == 0:
                 db.executescript("""
@@ -127,9 +140,12 @@ class DispatchStore:
                 db.executescript(_SCHEMA_V2)
             if version in (0, 1, 2):
                 # Upgrade 2 -> 3: two new tables and the version bump, nothing else. A code
-                # downgrade afterwards is not supported — the older initialize() rejects version 3,
+                # downgrade afterwards is not supported — the older initialize() rejects the newer version,
                 # so a rollback means restoring the dispatch database from a backup.
                 db.executescript(_SCHEMA_V3)
+            if version in (0, 1, 2, 3):
+                # Upgrade 3 -> 4: the mode column, filled from `armed`. No downgrade, as above.
+                db.executescript(_SCHEMA_V4)
 
     def _encode(self, device_id: str, record: DispatchRecord, *, version: int | None = None) -> bytes:
         # `version` lets `put()` encode the pending next version without first writing it onto the
@@ -306,50 +322,52 @@ class DispatchStore:
                 (device_id, int(limits.engineering_mode), encrypted),
             )
 
-    def get_energy_states(self) -> dict[str, ArmedRecord]:
-        """Every readable armed record. A row that cannot be decrypted is skipped and reported, so
-        the device reads as *not armed* — fail closed, never silently defaulted to armed.
+    def get_energy_states(self) -> dict[str, ModeRecord]:
+        """Every readable mode record. A row that cannot be decrypted or carries an unknown mode is
+        skipped and reported, so the device reads as mode ``off`` — fail closed, never silently
+        defaulted to a mode that accepts commands.
         """
         with self.connect() as db:
-            rows = db.execute("SELECT device_id,armed,encrypted FROM energy_manager_state").fetchall()
-        states: dict[str, ArmedRecord] = {}
+            rows = db.execute("SELECT device_id,mode,encrypted FROM energy_manager_state").fetchall()
+        states: dict[str, ModeRecord] = {}
         for row in rows:
             device_id = row["device_id"]
             try:
                 data = self._decrypt(device_id, row["encrypted"])
-                armed_at = data.get("armed_at")
-                states[device_id] = ArmedRecord(
+                # `armed_at`/`armed_by` are the keys the pre-mode code wrote.
+                changed_at = data.get("changed_at") or data.get("armed_at")
+                states[device_id] = ModeRecord(
                     device_id=device_id,
-                    armed=bool(row["armed"]),
+                    mode=EnergyMode(row["mode"]),
                     added_write_names=tuple(data.get("added_write_names") or ()),
-                    armed_at=datetime.fromisoformat(armed_at) if armed_at else None,
-                    armed_by=data.get("armed_by"),
+                    changed_at=datetime.fromisoformat(changed_at) if changed_at else None,
+                    changed_by=data.get("changed_by") or data.get("armed_by"),
                 )
             except (ValueError, TypeError):
                 log.error(
                     "Energy manager state for device %s is unreadable and was skipped; the device "
-                    "reads as not armed",
+                    "reads as mode off",
                     device_id,
                 )
         return states
 
-    def put_energy_state(self, record: ArmedRecord) -> None:
+    def put_energy_state(self, record: ModeRecord) -> None:
         encrypted = self._encrypt(
             record.device_id,
             {
                 "added_write_names": list(record.added_write_names),
-                "armed_at": record.armed_at.isoformat() if record.armed_at is not None else None,
-                "armed_by": record.armed_by,
+                "changed_at": record.changed_at.isoformat() if record.changed_at is not None else None,
+                "changed_by": record.changed_by,
             },
         )
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             db.execute(
-                """INSERT INTO energy_manager_state(device_id,armed,encrypted)
-                   VALUES(?,?,?)
-                   ON CONFLICT(device_id) DO UPDATE SET armed=excluded.armed,
+                """INSERT INTO energy_manager_state(device_id,armed,mode,encrypted)
+                   VALUES(?,?,?,?)
+                   ON CONFLICT(device_id) DO UPDATE SET armed=excluded.armed, mode=excluded.mode,
                        encrypted=excluded.encrypted""",
-                (record.device_id, int(record.armed), encrypted),
+                (record.device_id, int(record.armed), record.mode.value, encrypted),
             )
 
     def get_soc_target_policies(self) -> dict[str, SocTargetPolicy]:

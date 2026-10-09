@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+from app.protocol.crc import crc16_ccitt
 from app.protocol.escaping import escape_body, unescape_body
 from app.protocol.frames import Frame, encode_frame
 from app.protocol.stream import StreamParser
@@ -366,3 +367,33 @@ def test_lasting_noise_is_reminded_rarely(caplog: pytest.LogCaptureFixture) -> N
         while now < 2 * REMIND_SECONDS + 10:  # first warning after 3 bursts, then +900 s each
             now = _bursts(monitor, now, 1, 10)
     assert _levels(caplog) == ["WARNING"] * 3  # start, plus one reminder per REMIND_SECONDS
+
+
+def _underdeclared_long_frame(payload: bytes, object_id: int = 0x22334455, deficit: int = 16) -> bytes:
+    """A long response as the device sends it: declared length too small, CRC over the sent bytes."""
+    declared = 4 + len(payload) - deficit
+    body = bytes([Command.LONG_RESPONSE]) + declared.to_bytes(2, "big") + object_id.to_bytes(4, "big") + payload
+    crc = crc16_ccitt(body).to_bytes(2, "big")
+    return b"\x2b" + escape_body(body) + escape_body(crc)
+
+
+def _payload_with_escaped_crc_tail(stop_byte: int) -> bytes:
+    """Deterministic 32-byte payload whose frame ends in an escape pair (low CRC byte 0x2B or 0x2D)."""
+    for counter in range(4096):
+        payload = counter.to_bytes(2, "big") + bytes(30)
+        wire = _underdeclared_long_frame(payload)
+        if wire[-2:] == bytes([0x2D, stop_byte]):
+            return payload
+    raise AssertionError("no payload found")
+
+
+@pytest.mark.parametrize("stop_byte", [0x2B, 0x2D])
+def test_underdeclared_long_frame_ending_in_an_escape_pair_is_delivered_without_a_follower(stop_byte: int) -> None:
+    """A complete escape pair at the buffer end is no dangling escape byte; waiting for a follower would time out."""
+    payload = _payload_with_escaped_crc_tail(stop_byte)
+    wire = _underdeclared_long_frame(payload)
+    for cut in (len(wire), len(wire) - 1):
+        parser = StreamParser()
+        frames = parser.feed(wire[:cut]) + parser.feed(wire[cut:])
+        assert [f.payload for f in frames] == [payload], cut
+        assert parser.stats.crc_errors == 0

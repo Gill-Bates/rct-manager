@@ -81,6 +81,9 @@ class DeviceStatus:
     failures: int
     cache_hits: int
     cache_misses: int
+    # None: no periodic reads configured. False plus failures > 0: registration is failing.
+    periodic_available: bool | None = None
+    periodic_setup_failures: int = 0
 
 
 class DeviceGateway(Protocol):

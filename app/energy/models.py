@@ -12,7 +12,7 @@ sign convention ever appears in this module — those stay inside ``app/gateway/
 
 Import direction (plan.md Decision 2): this module may import ``app.dispatch.models`` and
 ``app.dispatch.soc_policy`` and must never import ``app.dispatch.store``, which imports
-``ArmedRecord`` from here.
+``ModeRecord`` from here.
 """
 
 from dataclasses import dataclass
@@ -34,7 +34,33 @@ TARGET_SOC_MAX_PERCENT = 97.0
 # safety bound, and the operator-tunable cap already exists one layer down (DispatchConfig).
 COMMAND_TTL_SECONDS = 3600.0
 
-ARMED_BY_MAX_LENGTH = 64
+CHANGED_BY_MAX_LENGTH = 64
+# The actor name the admin session surface passes to the manager. Public API callers pass their PAT
+# id (32 hex characters) or None, so this string cannot be produced by a token.
+ADMIN_ACTOR = "admin"
+
+
+class EnergyMode(StrEnum):
+    """Who may command one inverter: nobody, the operator in the admin GUI, or an external app."""
+
+    OFF = "off"
+    MANUAL = "manual"
+    EXTERNAL = "external"
+
+
+class CommandSource(StrEnum):
+    """Which surface the manager accepts commands from in the current mode."""
+
+    NONE = "none"
+    ADMIN = "admin"  # the signed-in admin GUI session
+    API = "api"  # the public REST API with a PAT
+
+
+COMMAND_SOURCE_FOR_MODE: dict[EnergyMode, CommandSource] = {
+    EnergyMode.OFF: CommandSource.NONE,
+    EnergyMode.MANUAL: CommandSource.ADMIN,
+    EnergyMode.EXTERNAL: CommandSource.API,
+}
 
 
 class EnergyAction(StrEnum):
@@ -51,7 +77,7 @@ class ActionReason(StrEnum):
     log; the public status says that the hardware is not verified, not which register is in doubt.
     """
 
-    NOT_ARMED = "not_armed"
+    MODE_OFF = "mode_off"
     WRITE_NOT_PERMITTED = "write_not_permitted"
     LIMITS_MISSING = "limits_missing"
     HARDWARE_NOT_VERIFIED = "hardware_not_verified"
@@ -82,21 +108,25 @@ class EnergyCommand:
 
 
 @dataclass(frozen=True, slots=True)
-class ArmedRecord:
-    """Whether one device accepts Energy Manager commands, plus what arming contributed.
+class ModeRecord:
+    """The operating mode of one device, plus what entering a mode contributed.
 
-    ``added_write_names`` is for display only: it records which register approvals arming added, so
-    an operator can see what was granted. Disarming removes none of them.
+    ``added_write_names`` is for display only: it records which register approvals a mode switch
+    added, so an operator can see what was granted. Switching the mode off removes none of them.
     """
 
     device_id: str
-    armed: bool = False
+    mode: EnergyMode = EnergyMode.OFF
     added_write_names: tuple[str, ...] = ()
-    armed_at: datetime | None = None  # UTC
-    armed_by: str | None = None
+    changed_at: datetime | None = None  # UTC, last mode change
+    changed_by: str | None = None
 
     def __post_init__(self) -> None:
-        check_printable_ascii(self.armed_by, "armed_by", ARMED_BY_MAX_LENGTH)
+        check_printable_ascii(self.changed_by, "changed_by", CHANGED_BY_MAX_LENGTH)
+
+    @property
+    def armed(self) -> bool:
+        return self.mode is not EnergyMode.OFF
 
 
 # The three projection tables below are the published contract. They are dicts, and a test asserts
@@ -154,7 +184,7 @@ class EnergyDeviceStatus:
     """
 
     device_id: str
-    armed: bool
+    mode: EnergyMode
     state: EnergyState
     action: EnergyAction | None  # null whenever the device runs its own automatic operation
     target_soc_percent: float | None
@@ -168,6 +198,15 @@ class EnergyDeviceStatus:
     target_soc_window: TargetSocWindow
     readings: EnergyReadings
     actions: tuple[ActionAvailability, ...]
+
+    @property
+    def armed(self) -> bool:
+        """Compatibility flag: any mode but ``off``."""
+        return self.mode is not EnergyMode.OFF
+
+    @property
+    def accepts_commands_from(self) -> CommandSource:
+        return COMMAND_SOURCE_FOR_MODE[self.mode]
 
 
 _STOP_REASON_PUBLIC: dict[StopReason, str] = {

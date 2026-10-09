@@ -23,12 +23,17 @@ class TransportInfo:
     device_ids: tuple[str, ...]
     network_ids: tuple[int, ...]
     discarded_bytes: int
+    crc_errors: int
+    framing_errors: int
+    connection_epoch: int
     unexpected_frames: int
     locked: bool
     lock_reason: LockReason | None
     last_frame_at: datetime | None
     periodic_registrations: dict[str, int]
     periodic_available: dict[str, bool]
+    periodic_setup_failures: dict[str, int]
+    periodic_last_failure: dict[str, str | None]
 
 
 @dataclass(frozen=True, slots=True)

@@ -39,7 +39,7 @@ from app.dispatch.capabilities import CapabilityName, CapabilityRecord, Capabili
 from app.dispatch.controller import CapabilityConflict
 from app.dispatch.soc_policy import NOTE_MAX_LENGTH, SocTargetMode, SocTargetPolicy
 from app.energy.base import EnergyAdminPort
-from app.energy.models import EnergyAction, EnergyCommand
+from app.energy.models import ADMIN_ACTOR, EnergyAction, EnergyCommand, EnergyMode
 from app.gateway.base import DeviceState
 
 router = APIRouter(prefix="/admin/api/energy", include_in_schema=False)
@@ -65,12 +65,12 @@ def _energy_or_503(request: Request) -> EnergyAdminPort:
     return runtime.energy
 
 
-class ArmedBody(BaseModel):
-    """Arming exists on the admin surface only: the public API cannot switch a device on."""
+class ModeBody(BaseModel):
+    """The mode exists on the admin surface only: the public API cannot switch a device on."""
 
     model_config = ConfigDict(extra="forbid")
 
-    armed: StrictBool  # no coercion from "true"/1: switching an inverter on is not a guess
+    mode: EnergyMode  # an unknown value is a 422, never a guess
 
 
 class GateView(BaseModel):
@@ -165,11 +165,11 @@ class AdminEnergyDeviceStatus(EnergyStatusResponse):
     soc_target_policy: SocTargetPolicyView
     limits: LimitsView | None
     capabilities: list[CapabilityView]
-    added_write_names: list[str]  # what arming contributed, display only
+    added_write_names: list[str]  # what mode switches contributed, display only
     approved_write_names: list[str]  # the live write allowlist, state-independent (Setup checklist)
     required_write_names: list[str]  # what the Setup checklist needs approved (single source: backend)
-    armed_at: datetime | None
-    armed_by: str | None
+    mode_changed_at: datetime | None
+    mode_changed_by: str | None
     restore_attempts: int = 0  # failed automatic restore attempts since the last clean restore
     next_restore_at: datetime | None = None
 
@@ -178,7 +178,7 @@ async def _admin_status(request: Request, device_id: str) -> AdminEnergyDeviceSt
     energy = _energy_or_503(request)
     dispatch = _dispatch_or_503(request)
     public = EnergyStatusResponse.from_domain(await energy.status(device_id))
-    record = energy.armed_record(device_id)
+    record = energy.mode_record(device_id)
     runtime = request.app.state.runtime
     limits = dispatch.device_limits(device_id)
     restore_attempts, next_restore_at = await dispatch.restore_retry_info(device_id)
@@ -231,8 +231,8 @@ async def _admin_status(request: Request, device_id: str) -> AdminEnergyDeviceSt
         added_write_names=list(record.added_write_names),
         approved_write_names=list(await energy.approved_write_names()),
         required_write_names=list(energy.required_write_names()),
-        armed_at=record.armed_at,
-        armed_by=record.armed_by,
+        mode_changed_at=record.changed_at,
+        mode_changed_by=record.changed_by,
         restore_attempts=restore_attempts,
         next_restore_at=next_restore_at,
     )
@@ -284,16 +284,16 @@ async def post_command(
     await energy.command(
         device_id,
         EnergyCommand(body.action, body.target_soc_percent, body.max_power_w),
-        actor=_ADMIN_ACTOR,
+        actor=ADMIN_ACTOR,
     )
     return await _status_after_action(request, device_id)
 
 
-@router.put("/devices/{device_id}/armed")
-async def put_armed(
+@router.put("/devices/{device_id}/mode")
+async def put_mode(
     request: Request,
     device_id: str,
-    body: ArmedBody,
+    body: ModeBody,
     admin: Annotated[dict | None, Depends(_require_admin_write)],
 ) -> AdminEnergyDeviceStatus:
     del admin
@@ -301,7 +301,7 @@ async def put_armed(
     runtime = request.app.state.runtime
     runtime.ensure_accepting()
     energy = _energy_or_503(request)
-    await energy.set_armed(device_id, armed=body.armed, actor=_ADMIN_ACTOR)
+    await energy.set_mode(device_id, body.mode, actor=ADMIN_ACTOR)
     return await _status_after_action(request, device_id)
 
 

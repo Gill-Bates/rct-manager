@@ -1304,9 +1304,21 @@
     holding: 'Holding', stopping: 'Stopping', fault: 'Fault',
   };
   const ENERGY_REASON_LABELS = {
-    not_armed: 'manual control is off', write_not_permitted: 'write access was revoked',
+    mode_off: 'the inverter is switched off', external: 'controlled by an external app',
+    write_not_permitted: 'write access was revoked',
     limits_missing: 'power limits are not configured', hardware_not_verified: 'hardware is not verified',
     restore_required: 'the inverter must be handed back first',
+  };
+  // The operating mode per inverter (app/energy/models.py EnergyMode): who may command it.
+  const ENERGY_MODES = [
+    ['off', 'Off', 'power_settings_new', 'the inverter runs on its own'],
+    ['manual', 'Manual', 'touch_app', 'you operate it from this page'],
+    ['external', 'External', 'api', 'an external app controls it through the API'],
+  ];
+  const ENERGY_MODE_TOASTS = {
+    off: 'Switched off; the inverter is back in automatic operation.',
+    manual: 'Manual mode: you can operate this inverter from this page.',
+    external: 'External mode: an app can now control this inverter through the API.',
   };
   // The Setup checklist's "Write access enabled" row is required_write_names (served by the
   // backend, RctDispatchGateway.REQUIRED_WRITES) ⊆ approved_write_names.
@@ -1494,8 +1506,8 @@
   }
 
   // The state-independent readiness checklist (design §12). Every row is derived from a field that
-  // is authoritative in all arm states, so a disarmed/never-armed device still reports it correctly
-  // (unlike device.actions[].reason, which collapses to not_armed while disarmed). Shared by the
+  // is authoritative in every mode, so a device that is switched off still reports it correctly
+  // (unlike device.actions[].reason, which collapses to mode_off while it is off). Shared by the
   // Operate "needs setup" banner (§9) and the Setup block renderer (§12).
   function energyChecklist(device) {
     const writeAccess = device.write_support_enabled !== false && missingRequiredWrites(device).length === 0;
@@ -1521,7 +1533,7 @@
   }
 
   // "Needs setup" is any unmet item among write-access / power-limits / hardware-verified (connection
-  // is handled by its own branch). Used to place the §9 banner above the !armed branch.
+  // is handled by its own branch). Used to place the §9 banner above the mode branches.
   function energyNeedsSetup(checklist) {
     return !checklist.limits || !checklist.writeAccess || !checklist.hardwareVerified;
   }
@@ -1542,8 +1554,11 @@
     if (energyNeedsSetup(checklist)) {
       return { ready: false, kind: 'setup', text: 'Manual control needs setup.', detail: '', firstUnmet: energyFirstUnmet(checklist) };
     }
-    if (!device.armed) {
-      return { ready: false, kind: 'disabled', text: 'Manual control is disabled.', detail: '' };
+    if (device.mode === 'off') {
+      return { ready: false, kind: 'disabled', text: 'Manual control is off for this inverter. Choose Manual to operate it here.', detail: '' };
+    }
+    if (device.mode === 'external') {
+      return { ready: false, kind: 'external', text: 'This inverter is controlled by an external app through the API (PAT required).', detail: '' };
     }
     return { ready: true, kind: 'ready', text: '', detail: '' };
   }
@@ -1610,7 +1625,7 @@
     let device = first;
     let selected = null; // 'charge' | 'discharge' while its target slider is open
     let busy = false;
-    let pendingArmed = null;   // the user's switch value while its PUT is in flight
+    let pendingMode = null;    // the user's mode choice while its PUT is in flight
     let actionFinishedAt = 0;  // energyClock tick of the last finished action
     let lastPoll503 = false;   // the Operate poll returned 503 (write support disabled) — §9.2
     let lastPollFailed = false; // a non-503 transient poll failure — §13 freshness note
@@ -1633,15 +1648,24 @@
     collapseIcon.setAttribute('aria-hidden', 'true');
     collapseToggle.append(collapseIcon);
     title.append(collapseToggle, nameNode, dot, connection);
-    const switchBox = element('div', 'energy-switch form-check form-switch');
-    const armedInput = element('input', 'form-check-input');
-    armedInput.type = 'checkbox';
-    armedInput.setAttribute('role', 'switch');
-    armedInput.id = `energy-armed-${id}`;
-    const armedLabel = element('label', 'form-check-label energy-switch-label');
-    armedLabel.htmlFor = armedInput.id;
-    switchBox.append(armedInput, armedLabel);
-    head.append(title, switchBox);
+    // Three-state radio group; arrow keys only move the focus, Space/Enter/click selects, so
+    // passing over a mode never switches the inverter.
+    const modeGroup = element('div', 'energy-mode-switch');
+    modeGroup.setAttribute('role', 'radiogroup');
+    const modeButtons = {};
+    for (const [value, label, icon, hint] of ENERGY_MODES) {
+      const button = element('button', 'energy-mode-option');
+      button.type = 'button';
+      button.setAttribute('role', 'radio');
+      button.setAttribute('aria-label', `${label}: ${hint}`);
+      button.title = hint;
+      const glyph = element('span', 'material-icons', icon);
+      glyph.setAttribute('aria-hidden', 'true');
+      button.append(glyph, element('span', null, label));
+      modeButtons[value] = button;
+      modeGroup.append(button);
+    }
+    head.append(title, modeGroup);
     body.append(head);
 
     const layout = element('div', 'energy-body');
@@ -1666,6 +1690,13 @@
     });
 
     // The state-independent Setup checklist (design §12), shown only when a prerequisite is unmet.
+    const modeNote = element('p', 'small text-secondary energy-mode-note');
+    const modeLink = element('a', null, 'Inverters page');
+    modeLink.href = '/ui/inverters';
+    modeNote.append('Write access is switched off, so Manual and External cannot be selected yet. Turn it on on the ', modeLink, '.');
+    modeNote.hidden = true;
+    control.append(modeNote);
+
     const setupBox = element('div', 'energy-setup');
     setupBox.hidden = true;
     const setupHeading = element('h3', 'h6 mb-2', 'Manual battery control setup');
@@ -1762,19 +1793,34 @@
       finally { setBusy(false); }
     }
 
-    armedInput.addEventListener('change', async () => {
-      const wanted = armedInput.checked;
-      pendingArmed = wanted;
+    async function chooseMode(wanted) {
+      // aria-disabled instead of disabled keeps the keyboard focus on the group while a PUT runs.
+      if (busy || lastPoll503 || wanted === (pendingMode ?? device.mode)) return;
+      pendingMode = wanted;
       setBusy(true);
       try {
-        const result = await api(`${path}/armed`, { method: 'PUT', body: JSON.stringify({ armed: wanted }) });
-        pendingArmed = null;
-        toast(wanted ? 'Manual control is enabled.' : 'Manual control is disabled; the inverter is back in automatic operation.');
-        if (!wanted) selected = null;
+        const result = await api(`${path}/mode`, { method: 'PUT', body: JSON.stringify({ mode: wanted }) });
+        pendingMode = null;
+        toast(ENERGY_MODE_TOASTS[wanted]);
+        selected = null;
         await applyActionResult(result);
       } catch (error) { toast(messageFrom(error), 'danger'); }
-      finally { pendingArmed = null; setBusy(false); }
-    });
+      finally { pendingMode = null; setBusy(false); }
+    }
+    const modeValues = ENERGY_MODES.map(([value]) => value);
+    for (const value of modeValues) {
+      modeButtons[value].addEventListener('click', () => chooseMode(value));
+      modeButtons[value].addEventListener('keydown', (event) => {
+        const step = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 }[event.key];
+        let next = null;
+        if (step !== undefined) next = modeValues[(modeValues.indexOf(value) + step + modeValues.length) % modeValues.length];
+        else if (event.key === 'Home') next = modeValues[0];
+        else if (event.key === 'End') next = modeValues[modeValues.length - 1];
+        if (next === null) return;
+        event.preventDefault();
+        modeButtons[next].focus();
+      });
+    }
 
     buttons.hold.addEventListener('click', () => send({ action: 'hold' }));
     buttons.auto.addEventListener('click', () => send({ action: 'auto' }));
@@ -1858,10 +1904,17 @@
       collapseToggle.setAttribute('aria-label', `Show or hide details of ${device.device_name}`);
       dot.className = `status-dot ${device.connected ? 'online' : 'offline'}`;
       connection.textContent = `${device.connected ? 'Connected' : 'Not connected'} · ${device.host}`;
-      const shownArmed = pendingArmed ?? device.armed;
-      armedInput.checked = shownArmed;
-      armedInput.disabled = busy || lastPoll503;
-      armedLabel.textContent = `Manual control: ${shownArmed ? 'Enabled' : 'Disabled'}`;
+      const shownMode = pendingMode ?? device.mode ?? 'off';
+      modeGroup.setAttribute('aria-label', `Operating mode of ${device.device_name}`);
+      for (const value of modeValues) {
+        const button = modeButtons[value];
+        const checked = value === shownMode;
+        button.setAttribute('aria-checked', String(checked));
+        button.setAttribute('aria-disabled', String(busy || lastPoll503));
+        button.tabIndex = checked ? 0 : -1;
+        setClass(button, 'is-selected', checked);
+      }
+      modeNote.hidden = !(device.write_support_enabled === false && shownMode === 'off');
 
       renderSetup(energyChecklist(device));
 
@@ -1874,9 +1927,11 @@
       statusDetail.hidden = !readyState.detail;
 
       // Mode + one plain sentence; the whole block is hidden until manual control is ready.
+      // In External the controls stay visible but disabled, so the state is readable.
       const operable = readyState.ready;
-      modeBox.hidden = !operable;
-      if (operable) {
+      const external = readyState.kind === 'external';
+      modeBox.hidden = !(operable || external);
+      if (operable || external) {
         const mode = energyModeSentence(device);
         modeLine.textContent = `Current mode: ${mode.mode}`;
         modeSentence.textContent = mode.sentence;
@@ -1889,12 +1944,13 @@
       }
 
       // Actions + target are usable only once ready.
-      actions.hidden = !operable;
+      actions.hidden = !(operable || external || readyState.kind === 'disabled');
       for (const action of ['charge', 'hold', 'discharge', 'auto']) {
         const item = energyAvailability(device, action);
-        const enabled = operable && device.armed && item.available && !busy && device.connected;
+        const enabled = operable && item.available && !busy && device.connected;
         buttons[action].disabled = !enabled;
-        buttons[action].title = enabled ? '' : (ENERGY_REASON_LABELS[item.reason] || '');
+        const reason = external ? 'external' : item.reason;
+        buttons[action].title = enabled ? '' : (ENERGY_REASON_LABELS[reason] || '');
         setClass(buttons[action], 'is-selected', selected === action);
         buttons[action].setAttribute('aria-pressed', action === 'charge' || action === 'discharge' ? String(selected === action) : 'false');
       }
@@ -2048,7 +2104,7 @@
 
     // 2b. Write approvals and freshness (Diagnostics)
     const writeSection = section(diagInner, 'Write approvals',
-      'The live approved register set and what arming itself contributed.');
+      'The live approved register set and what mode changes contributed.');
     const writeApproved = element('p', 'small mb-1');
     const writeAdded = element('p', 'small mb-0 text-secondary');
     writeSection.append(writeApproved, writeAdded);
@@ -2350,7 +2406,7 @@
         ]),
       ));
       writeApproved.textContent = `Approved writes: ${(device.approved_write_names || []).join(', ') || '–'}`;
-      writeAdded.textContent = `Added by arming: ${(device.added_write_names || []).join(', ') || '–'}`;
+      writeAdded.textContent = `Added by mode changes: ${(device.added_write_names || []).join(', ') || '–'}`;
       freshHost.replaceChildren(simpleTable(
         ['Reading', 'Age (s)', 'Stale'],
         Object.entries(device.readings || {}).map(([name, reading]) => [
@@ -3185,7 +3241,7 @@
   function deviceDirty() { return deviceChanges().count > 0; }
 
   const deviceLabel = (entry) => `${entry.host}:${entry.port}`;
-  const RESET_NOTE = 'Verification evidence, Engineering Mode and arming of these inverters are reset';
+  const RESET_NOTE = 'Verification evidence, Engineering Mode and operating mode of these inverters are reset';
 
   // The only owner of the row markers, the Apply bar and the controls' locked state. Returns true if
   // every non-blank row is valid; an invalid draft can never be applied.
@@ -3413,7 +3469,7 @@
   }
 
   // The one place that sends the device list. Re-addressing or removing an inverter resets its
-  // verification evidence, Engineering Mode and arming, so it needs an explicit confirmation.
+  // verification evidence, Engineering Mode and operating mode, so it needs an explicit confirmation.
   async function applyDevices(card) {
     if (deviceUi.applying) return;
     if (!refreshDeviceState(card)) {

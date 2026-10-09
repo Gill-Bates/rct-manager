@@ -29,6 +29,8 @@ class EndpointCounters:
     last_success_monotonic: float | None = None
     last_periodic_monotonic: float | None = None
     discarded_bytes: int = 0
+    crc_errors: int = 0  # frames dropped for a CRC mismatch; never reach the cache
+    framing_errors: int = 0
     unexpected_frames: int = 0
     unexpected_frames_window: deque[list[float]] = field(default_factory=deque)  # [bucket_start, count]
     # flood_frames_window below holds the subset that are not well-formed responses to another

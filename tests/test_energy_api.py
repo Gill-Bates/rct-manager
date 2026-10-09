@@ -108,11 +108,14 @@ def seed_payloads(harness) -> None:
         harness.net.payloads[catalog.object_entry(name).object_id] = payload
 
 
-async def arm(harness, device_id: str = "main") -> dict:
-    """Arm through the admin surface: the public API has no arming endpoint."""
+async def arm(harness, device_id: str = "main", mode: str = "external") -> dict:
+    """Select an operating mode through the admin surface: the public API cannot switch it.
+
+    The default is External, the mode the PAT-driven tests below need.
+    """
     headers = await admin_session(harness)
     response = await harness.client.put(
-        f"/admin/api/energy/devices/{device_id}/armed", headers=headers, json={"armed": True}
+        f"/admin/api/energy/devices/{device_id}/mode", headers=headers, json={"mode": mode}
     )
     assert response.status_code == 200, response.text
     return response.json()
@@ -239,21 +242,20 @@ async def test_an_invalid_command_body_is_rejected_by_the_request_model(
         assert response.json()["code"] == "invalid_request"
 
 
-async def test_the_armed_flag_is_not_coerced_from_a_string(tmp_path: Path) -> None:
+@pytest.mark.parametrize("body", [{"mode": "true"}, {"mode": "auto"}, {"armed": True}, {}])
+async def test_an_unknown_mode_is_a_422(tmp_path: Path, body: dict) -> None:
     async with running_app(energy_settings(tmp_path)) as harness:
         headers = await admin_session(harness)
-        response = await harness.client.put(
-            "/admin/api/energy/devices/main/armed", headers=headers, json={"armed": "true"}
-        )
+        response = await harness.client.put("/admin/api/energy/devices/main/mode", headers=headers, json=body)
         assert response.status_code == 422, response.text
 
 
-async def test_the_public_api_has_no_arming_endpoint(tmp_path: Path) -> None:
-    """Arming is a GUI decision: a token, even a write token, cannot switch the manager on."""
+async def test_the_public_api_has_no_mode_endpoint(tmp_path: Path) -> None:
+    """The mode is a GUI decision: a token, even a write token, cannot switch the manager on."""
     async with running_app(energy_settings(tmp_path)) as harness:
         for headers in (WRITER, READER):
             response = await harness.client.put(
-                "/api/v1/devices/main/energy/armed", headers=headers, json={"armed": True}
+                "/api/v1/devices/main/energy/mode", headers=headers, json={"mode": "external"}
             )
             assert response.status_code == 404, response.text  # 403 would mean the route still exists
         status = await harness.client.get("/api/v1/devices/main/energy", headers=WRITER)
@@ -263,12 +265,12 @@ async def test_the_public_api_has_no_arming_endpoint(tmp_path: Path) -> None:
 # --- item 20: refusals ----------------------------------------------------------------------------
 
 
-async def test_a_disarmed_device_refuses_a_command(tmp_path: Path) -> None:
+async def test_a_device_in_mode_off_refuses_a_command(tmp_path: Path) -> None:
     async with running_app(energy_settings(tmp_path)) as harness:
         seed_payloads(harness)
         response = await command(harness, {"action": "charge", "target_soc_percent": 80})
         assert response.status_code == 409, response.text
-        assert response.json()["code"] == "energy_manager_disarmed"
+        assert response.json()["code"] == "energy_manager_off"
 
 
 async def test_an_unknown_device_is_a_404(tmp_path: Path) -> None:
@@ -308,7 +310,7 @@ async def test_without_write_support_the_public_router_is_absent_and_the_admin_s
 
         headers = await admin_session(harness)
         arming = await harness.client.put(
-            "/admin/api/energy/devices/main/armed", headers=headers, json={"armed": True}
+            "/admin/api/energy/devices/main/mode", headers=headers, json={"mode": "external"}
         )
         assert arming.status_code == 409, arming.text
         assert arming.json()["code"] == "energy_write_support_required"
@@ -412,7 +414,7 @@ def fake_request(method: str, path: str) -> Request:
         ("DELETE", "/api/v1/devices/main/battery/dispatch", True),
         ("GET", "/api/v1/devices/main/energy", True),
         ("POST", "/api/v1/devices/main/energy/command", True),
-        ("PUT", "/api/v1/devices/main/energy/armed", False),  # removed: arming is admin-only
+        ("PUT", "/api/v1/devices/main/energy/mode", False),  # no public mode switch
         # Short paths must return False, not raise: this runs inside the global exception handler,
         # where an IndexError would turn a plain 404 into an unhandled 500.
         ("GET", "/api/v1/devices", False),
@@ -457,7 +459,7 @@ async def test_the_shutdown_drain_refuses_commands_on_both_surfaces_but_still_re
                     json={"action": "charge", "target_soc_percent": 80},
                 ),
                 await harness.client.put(
-                    "/admin/api/energy/devices/main/armed", headers=headers, json={"armed": True}
+                    "/admin/api/energy/devices/main/mode", headers=headers, json={"mode": "external"}
                 ),
             ]
             for response in refused:
@@ -558,11 +560,11 @@ async def test_the_admin_surface_requires_a_session_and_the_csrf_header(tmp_path
         assert (await harness.client.get("/admin/api/energy/devices")).status_code == 200
         # A mutation without the CSRF header is refused even with a valid session.
         without_csrf = await harness.client.put(
-            "/admin/api/energy/devices/main/armed", json={"armed": True}
+            "/admin/api/energy/devices/main/mode", json={"mode": "external"}
         )
         assert without_csrf.status_code == 403, without_csrf.text
         with_csrf = await harness.client.put(
-            "/admin/api/energy/devices/main/armed", headers=headers, json={"armed": True}
+            "/admin/api/energy/devices/main/mode", headers=headers, json={"mode": "external"}
         )
         assert with_csrf.status_code == 200, with_csrf.text
 
@@ -572,19 +574,19 @@ async def test_admin_arming_adds_the_register_approvals_add_only(tmp_path: Path)
         headers = await admin_session(harness)
         assert harness.app.state.admin_store.get("write_names") == list(PRE_APPROVED)
         armed = await harness.client.put(
-            "/admin/api/energy/devices/main/armed", headers=headers, json={"armed": True}
+            "/admin/api/energy/devices/main/mode", headers=headers, json={"mode": "external"}
         )
         assert armed.status_code == 200, armed.text
         names = harness.app.state.admin_store.get("write_names")
         # Add-only and order-preserving: the operator's own entry stays first.
         assert names[: len(PRE_APPROVED)] == list(PRE_APPROVED)
         assert set(names) == set(DISPATCH_WRITE_NAMES)
-        assert armed.json()["armed_by"] == "admin"
-        assert armed.json()["armed_at"] is not None
+        assert armed.json()["mode_changed_by"] == "admin"
+        assert armed.json()["mode_changed_at"] is not None
         assert set(armed.json()["added_write_names"]) == set(DISPATCH_WRITE_NAMES) - set(PRE_APPROVED)
 
         disarmed = await harness.client.put(
-            "/admin/api/energy/devices/main/armed", headers=headers, json={"armed": False}
+            "/admin/api/energy/devices/main/mode", headers=headers, json={"mode": "off"}
         )
         assert disarmed.status_code == 200, disarmed.text
         assert disarmed.json()["armed"] is False
@@ -658,7 +660,7 @@ async def test_the_admin_status_carries_the_raw_gate_detail_and_the_policy(tmp_p
 
         public = await harness.client.get("/api/v1/devices/main/energy", headers=WRITER)
         assert public.status_code == 200, public.text
-        for admin_only in ("gates", "soc_target_policy", "added_write_names", "armed_by"):
+        for admin_only in ("gates", "soc_target_policy", "added_write_names", "mode_changed_by"):
             assert admin_only not in public.json()
 
 
@@ -846,7 +848,7 @@ def test_the_public_document_names_no_vendor_internal(tmp_path: Path, vendor: bo
     assert scoped, "the energy and dispatch schemas must be part of the public document"
     assert "byte_width" not in json.dumps(scoped)
     energy_paths = {
-        path: item for path, item in document["paths"].items() if path.endswith(("/energy", "/energy/command", "/energy/armed"))
+        path: item for path, item in document["paths"].items() if path.endswith(("/energy", "/energy/command", "/energy/mode"))
     }
     assert sorted(energy_paths) == [
         "/api/v1/devices/{device_id}/energy",
@@ -903,7 +905,7 @@ async def test_a_failing_status_projection_after_an_executed_action_still_report
 
     async with running_app(energy_settings(tmp_path)) as harness:
         seed_payloads(harness)
-        await arm(harness)
+        await arm(harness, mode="manual")
         headers = await admin_session(harness)
         with patch("app.admin.energy_api._admin_status", side_effect=RuntimeError("projection broke")):
             response = await harness.client.post(
@@ -979,7 +981,7 @@ async def test_clearing_a_required_register_closes_the_gate_and_the_checklist(tm
         assert DISPATCH_WRITE_NAMES[1] in set(main["required_write_names"]) - set(main["approved_write_names"])
         status = await harness.client.get("/api/v1/devices/main/energy", headers=WRITER)
         reasons = {i["reason"] for i in status.json()["actions"] if i["action"] != "auto"}
-        assert reasons <= {"write_not_permitted", "not_armed"}
+        assert reasons <= {"write_not_permitted", "mode_off"}
 
 
 async def _put_write_support(harness, headers: dict[str, str], value: bool):
@@ -1020,10 +1022,68 @@ async def test_write_support_switches_on_and_off_live_without_a_restart(tmp_path
         panel = (await harness.client.get("/admin/api/energy/devices")).json()[0]
         assert panel["armed"] is False and panel["state"] == "automatic"
         rearm = await harness.client.put(
-            "/admin/api/energy/devices/main/armed", headers=headers, json={"armed": True}
+            "/admin/api/energy/devices/main/mode", headers=headers, json={"mode": "external"}
         )
         assert rearm.status_code == 409 and rearm.json()["code"] == "energy_write_support_required"
 
         # Back on: dispatch is reused, a fresh arming is needed.
         assert (await _put_write_support(harness, headers, True)).status_code == 200
-        assert (await command(harness, {"action": "auto"})).json()["code"] == "energy_manager_disarmed"
+        assert (await command(harness, {"action": "auto"})).json()["code"] == "energy_manager_off"
+
+
+# --- operating modes ------------------------------------------------------------------------------
+
+
+async def test_a_pat_cannot_switch_the_mode_and_the_session_can(tmp_path: Path) -> None:
+    async with running_app(energy_settings(tmp_path)) as harness:
+        for headers in (WRITER, READER):  # before any login: the client carries no session cookie yet
+            response = await harness.client.put(
+                "/admin/api/energy/devices/main/mode", headers=headers, json={"mode": "external"}
+            )
+            assert response.status_code == 403, response.text
+        public = await harness.client.get("/api/v1/devices/main/energy", headers=WRITER)
+        assert public.json()["mode"] == "off"
+        assert (await arm(harness, mode="manual"))["mode"] == "manual"
+
+
+async def test_the_mode_decides_which_surface_may_command(tmp_path: Path) -> None:
+    body = {"action": "hold"}
+    async with running_app(energy_settings(tmp_path)) as harness:
+        seed_payloads(harness)
+
+        async def gui(headers: dict[str, str]):
+            return await harness.client.post(
+                "/admin/api/energy/devices/main/command", headers=headers, json=body
+            )
+
+        headers = await admin_session(harness)
+        # off: both surfaces refuse
+        for response in (await gui(headers), await command(harness, body)):
+            assert response.status_code == 409 and response.json()["code"] == "energy_manager_off"
+
+        # manual: the GUI commands, a PAT is told to ask the operator for External
+        await arm(harness, mode="manual")
+        headers = await admin_session(harness)
+        assert (await gui(headers)).status_code == 200
+        refused = await command(harness, body)
+        assert refused.status_code == 409, refused.text
+        assert refused.json()["code"] == "energy_manager_not_external"
+        assert "External" in refused.json()["detail"]
+        assert (await harness.client.get("/api/v1/devices/main/energy", headers=WRITER)).status_code == 200
+
+        # external: a PAT commands, the GUI is refused; the running hold was handed back by the switch
+        await arm(harness, mode="external")
+        headers = await admin_session(harness)
+        status = (await harness.client.get("/api/v1/devices/main/energy", headers=WRITER)).json()
+        assert status["mode"] == "external" and status["armed"] is True
+        assert status["accepts_commands_from"] == "api" and status["state"] == "automatic"
+        assert (await command(harness, body)).status_code == 200
+        refused = await gui(headers)
+        assert refused.status_code == 409 and refused.json()["code"] == "energy_manager_external"
+        admin = (await harness.client.get("/admin/api/energy/devices", headers=headers)).json()[0]
+        assert admin["mode"] == "external" and admin["mode_changed_by"] == "admin"
+
+        # back to off: every command is refused again
+        await arm(harness, mode="off")
+        assert (await command(harness, body)).json()["code"] == "energy_manager_off"
+        assert (await harness.client.get("/api/v1/devices/main/energy", headers=WRITER)).json()["armed"] is False
