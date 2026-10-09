@@ -34,7 +34,8 @@ const scrubExpected = (start, matches, sink = problems) => {
 function trackProblems(pg, sink) {
   pg.on('console', (m) => { if (['error', 'warning'].includes(m.type())) sink.push(`console ${m.type()}: ${m.text()} @ ${m.location().url}`); });
   pg.on('pageerror', (e) => sink.push(`pageerror: ${e.message}`));
-  pg.on('requestfailed', (r) => sink.push(`requestfailed: ${r.method()} ${r.url()} (${r.failure()?.errorText || 'unknown'})`));
+  // WebKit reports in-flight loads dropped by a navigation as failed; Chromium does not, so real aborts still show.
+  pg.on('requestfailed', (r) => { if (r.failure()?.errorText === 'Load request cancelled') return; sink.push(`requestfailed: ${r.method()} ${r.url()} (${r.failure()?.errorText || 'unknown'})`); });
   pg.on('response', (r) => { if (r.status() >= 400) sink.push(`http ${r.status()}: ${r.request().method()} ${r.url()}`); });
 }
 // A deliberate HTTP error shows up twice: as the response and as the browser's console line.
@@ -1627,6 +1628,7 @@ await shot('prometheus-master-toggle-on');
 
   const commands = [];
   ep.on('request', (r) => { if (r.method() === 'POST' && r.url().endsWith('/command')) commands.push(r.postDataJSON()); });
+  // The simulator needs ~10 s to apply a charge, and the buttons stay busy until then (waits below allow for it).
   // The simulator ships unverified hardware; verify it first, as an operator would in Expert.
   const csrf = await ep.evaluate(async () => (await (await fetch('/admin/api/session')).json()).csrf_token);
   const verification = await ep.request.put(`${energyBase}/admin/api/energy/devices/sim/hardware-verification`, {
@@ -1658,13 +1660,19 @@ await shot('prometheus-master-toggle-on');
     && /switched off/.test(await buttons[0].getAttribute('title') || ''), JSON.stringify(initialStates));
   // Keyboard: arrows only move the focus; Space selects.
   const modeCalls = [];
+  // Synchronise on the PUT /mode answer, then on the rendered state; a timeout fails the step loudly.
+  const switchMode = async (act, label) => {
+    const answered = ep.waitForResponse((r) => r.request().method() === 'PUT' && r.url().endsWith('/mode'), { timeout: 15000 });
+    await act();
+    await answered;
+    await ep.waitForFunction((l) => (document.querySelector('.energy-mode-switch [aria-checked=true]')?.textContent.trim() || '').endsWith(l), label, { timeout: 15000 });
+  };
   ep.on('request', (r) => { if (r.method() === 'PUT' && r.url().endsWith('/mode')) modeCalls.push(r.postDataJSON()); });
   await radios.first().focus();
   await ep.keyboard.press('ArrowRight');
   check('ArrowRight moves the focus to Manual without selecting it',
     (await ep.evaluate(() => document.activeElement?.textContent.trim().endsWith('Manual'))) && modeCalls.length === 0 && /Off$/.test(await checkedMode()));
-  await ep.keyboard.press('Space');
-  await ep.waitForFunction(() => /Manual$/.test(document.querySelector('.energy-mode-switch [aria-checked=true]')?.textContent.trim() || ''), null, { timeout: 15000 }).catch(() => { });
+  await switchMode(() => ep.keyboard.press('Space'), 'Manual');
   check('Space selects Manual and the focus stays on the control',
     /Manual$/.test(await checkedMode()) && modeCalls.length === 1 && modeCalls[0].mode === 'manual'
     && (await ep.evaluate(() => document.activeElement?.closest('.energy-mode-switch') !== null)), JSON.stringify(modeCalls));
@@ -1698,19 +1706,20 @@ await shot('prometheus-master-toggle-on');
     const charge = await cmd(() => ep.locator('.energy-target button').click());
     check('Charge sends a command with a target SoC', charge?.action === 'charge' && Number.isFinite(charge.target_soc_percent), JSON.stringify(charge));
   } else check('Charge is available in Manual', false, 'disabled in Manual');
-  await ep.waitForFunction(() => [...document.querySelectorAll('.energy-actions button')].some((b) => b.textContent.trim() === 'Keep battery idle' && !b.disabled), null, { timeout: 10000 }).catch(() => { });
+  await ep.waitForFunction(() => [...document.querySelectorAll('.energy-actions button')].some((b) => b.textContent.trim() === 'Keep battery idle' && !b.disabled), null, { timeout: 40000 }).catch(() => { });
   const hold = !(await states())[1] ? await cmd(() => buttons[1].click()) : null;
-  check('Keep battery idle sends a hold command without a target SoC', hold?.action === 'hold' && !('target_soc_percent' in hold), JSON.stringify(hold));
+  const holdDiag = await ep.evaluate(async () => ({ buttons: [...document.querySelectorAll('.energy-actions button')].map((b) => [b.textContent.trim(), b.disabled, b.title]), status: document.querySelector('.energy-status')?.innerText, mode: document.querySelector('.energy-mode')?.innerText, api: await (await fetch('/admin/api/energy/devices')).json().then((l) => ({ state: l[0].state, connected: l[0].connected, mode: l[0].mode, actions: l[0].actions, stop: l[0].stop_reason, restore: l[0].restore_attempts })) }));
+  await ep.screenshot({ path: path.join(OUT, 'energy-after-charge.png'), fullPage: true });
+  check('Keep battery idle sends a hold command without a target SoC', hold?.action === 'hold' && !('target_soc_percent' in hold), JSON.stringify(hold) + JSON.stringify(holdDiag));
   const auto = await cmd(() => ep.locator('.energy-actions button', { hasText: 'Return to automatic' }).click());
   check('Return to automatic sends auto', auto?.action === 'auto', JSON.stringify(auto));
 
   // External: the GUI is refused and the controls are disabled with an info line; a PAT may command.
-  await radios.nth(2).click();
-  await ep.waitForFunction(() => /External$/.test(document.querySelector('.energy-mode-switch [aria-checked=true]')?.textContent.trim() || ''), null, { timeout: 15000 }).catch(() => { });
+  await switchMode(() => radios.nth(2).click(), 'External');
   await ep.waitForFunction(() => [...document.querySelectorAll('.energy-actions button')].every((b) => b.disabled), null, { timeout: 5000 }).catch(() => { });
   const externalText = await operateText();
   check('External: the controls are disabled and the panel says an external app is in control',
-    (await states()).every(Boolean) && /controlled by an external app through the API \(PAT required\)\./.test(externalText), externalText.slice(0, 300));
+    (await states()).every(Boolean) && /controlled by an external app through the API \(PAT required\)\./.test(externalText), externalText.slice(0, 700));
   check('External: a disabled control names the reason', /external app/.test(await buttons[0].getAttribute('title') || ''));
   const csrfNow = await ep.evaluate(async () => (await (await fetch('/admin/api/session')).json()).csrf_token);
   const viaGui = await ep.request.post(`${energyBase}/admin/api/energy/devices/sim/command`, { headers: { 'X-CSRF-Token': csrfNow, Origin: energyBase }, data: { action: 'hold' } });
@@ -1720,8 +1729,7 @@ await shot('prometheus-master-toggle-on');
     check('External: a PAT command is accepted', viaPat.status() === 200, String(viaPat.status()));
   }
   // Back to Manual so the remaining checks see the operable controls.
-  await radios.nth(1).click();
-  await ep.waitForFunction(() => /Manual$/.test(document.querySelector('.energy-mode-switch [aria-checked=true]')?.textContent.trim() || ''), null, { timeout: 15000 }).catch(() => { });
+  await switchMode(() => radios.nth(1).click(), 'Manual');
 
   // The relabels are visible on Operate (presentation-only; the REST action names stayed on the wire
   // above: hold/charge/auto). Manual-control enable/disable wording replaces the old ON/OFF switch.

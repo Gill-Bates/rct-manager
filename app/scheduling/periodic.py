@@ -12,7 +12,7 @@ from collections.abc import Sequence
 
 from app.clock import Clock
 from app.config import DeviceKey
-from app.errors import ConfigError
+from app.errors import ConfigError, DeviceApiError
 from app.protocol.types import Command, DataType
 from app.protocol.values import decode_value, encode_value
 from app.scheduling.serializer import AccessSerializer
@@ -228,6 +228,15 @@ class PeriodicManager:
                     continue
                 self._registered.add(object_id)
                 self.registrations += 1
+        except DeviceApiError as exc:
+            if exc.code != "not_ready":
+                self.last_failure = f"{type(exc).__name__}: {exc}"
+                log.warning("Periodic setup failed: %s", self.last_failure, exc_info=True)
+                return False
+            # The serializer stopped accepting work (shutdown): expected, not a device fault.
+            self.last_failure = "device access is shutting down"
+            log.info("Periodic setup aborted: device access is shutting down")
+            return False
         except Exception as exc:  # the periodic feature must never disturb plain reads
             self.last_failure = f"{type(exc).__name__}: {exc}"
             log.warning("Periodic setup failed: %s", self.last_failure, exc_info=True)

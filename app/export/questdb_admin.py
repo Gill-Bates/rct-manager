@@ -17,6 +17,9 @@ from dataclasses import dataclass
 
 log = logging.getLogger(__name__)
 
+# Consecutive not-yet-refreshed attempts before warning (then again at each doubling); a power of two.
+_NOT_REFRESHED_WARN_AFTER = 8
+
 STATE_TABLE = "_rct_export_state"
 _TTL_UNIT_HOURS = {"HOUR": 1, "DAY": 24, "WEEK": 24 * 7, "MONTH": 24 * 30, "YEAR": 24 * 365}
 _COUNTER_SUFFIXES = ("_total", "_sum", "_count")
@@ -138,6 +141,7 @@ class QuestDbProvisioner:
         self.downsampling = downsampling
         self.total_days = total_days
         self.raw_days = effective_raw_days(downsampling, raw_days, total_days)
+        self._not_refreshed = 0
 
     def ensure_tables(self) -> None:
         self._exec(create_table_sql(self.table))
@@ -163,13 +167,26 @@ class QuestDbProvisioner:
         view = rollup_view_name(self.table, preset, schema_signature(columns))
         self._exec(rollup_ddl(self.table, preset, columns, view))
         if not self._view_current(view):
-            log.warning("QuestDB rollup view '%s' is not refreshed yet; raw TTL is unchanged", view)
+            self._note_not_refreshed(view)
             return False
+        self._not_refreshed = 0
         self._warn_about_superseded_rollups(view)
         # The raw TTL only shortens once the rollup holds the data that it would drop.
         return self._apply_ttl(view, self.total_days, view=True) and self._apply_ttl(
             self.table, self.raw_days or 0, view=False
         )
+
+    def _note_not_refreshed(self, view: str) -> None:
+        """A fresh or rebuilt view catches up on its own; only a persistent lag is worth a warning."""
+        self._not_refreshed += 1
+        attempts = self._not_refreshed
+        if attempts >= _NOT_REFRESHED_WARN_AFTER and attempts & (attempts - 1) == 0:
+            log.warning(
+                "QuestDB rollup view '%s' is still not refreshed after %d attempts; raw TTL is unchanged",
+                view, attempts,
+            )
+        else:
+            log.debug("QuestDB rollup view '%s' is not refreshed yet; raw TTL is unchanged", view)
 
     def _warn_about_superseded_rollups(self, current: str) -> None:
         """Report earlier service-created rollup views of this table that a schema change replaced.

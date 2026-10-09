@@ -773,7 +773,8 @@
     const nodes = [];
     for (const cell of card.cells) {
       const available = patchMetricCell(cell, metrics);
-      if (!cell.optional || available) nodes.push(cell.node);
+      // An optional cell whose reading only ran out stays, as n/a, so the card keeps its shape.
+      if (!cell.optional || available || metrics.get(cell.name)?.expired) nodes.push(cell.node);
     }
     syncChildren(card.grid, nodes);
   }
@@ -878,9 +879,10 @@
   function patchDeviceFlow(visual, device) {
     const readings = device.energy_flow;
     const hasReading = readings && Object.values(readings).some((reading) => reading && reading.value != null);
-    visual.flowBox.hidden = !hasReading;
-    setClass(visual.node, 'has-flow', Boolean(hasReading));
-    if (hasReading) visual.flow.update(readings);
+    const shown = Boolean(hasReading || device.flow_known);
+    visual.flowBox.hidden = !shown;
+    setClass(visual.node, 'has-flow', shown);
+    if (shown) visual.flow.update(readings);
   }
 
   // Collapsed device ids live in localStorage (survives logins); read once, then kept in memory
@@ -984,43 +986,165 @@
   let dashboardTimer = null;
   let dashboardController = null;
   let dashboardGeneration = 0;
-  // Last good snapshot: a failed poll keeps showing it (dimmed, with a banner) instead of blanking the page.
+  // Last known state per device and for the TSDB tile. A poll only refreshes what it actually
+  // delivered; everything else keeps its last value until it is older than VALUE_MAX_AGE_MS (the
+  // next expected poll plus a tolerance) and then shows n/a. Structure (towers, flow graphic)
+  // outlives values, so a failed, empty or "connecting" answer never rebuilds the layout.
   const SNAPSHOT_KEY = 'rct.dashboard.snapshot';
+  const SNAPSHOT_VERSION = 2;
   const SNAPSHOT_MAX_AGE_MS = 60 * 60 * 1000;
-  let dashboardSnapshot = null;
+  const VALUE_MAX_AGE_MS = DASHBOARD_INTERVAL_MS + DASHBOARD_TIMEOUT_MS + 2000;
+  const FLOW_FIELDS = ['pv_power_w', 'grid_power_w', 'house_load_w', 'battery_power_w', 'battery_soc_percent'];
+  let dashboardView = new Map(); // key -> { device, metrics: Map(name -> { metric, at }), flow: Map(field -> { reading, at }), batteries }
+  let dashboardTsdb = { raw: null, good: null, goodAt: 0 };
+  let dashboardSnapshot = null; // { at } of the last successful poll (or of the restored snapshot)
+  let dashboardStaleTimer = null;
   let dashboardBanner = null;
 
-  function saveSnapshot(snapshot) {
+  function deviceKeys(devices) {
+    const seen = new Set();
+    return devices.map((device, index) => {
+      let key = String(device.id ?? `index-${index}`);
+      while (seen.has(key)) key += '+';
+      seen.add(key);
+      return key;
+    });
+  }
+
+  // Whether a card cell shows this reading as a value (not n/a); only such a cell can run out.
+  function metricShown(metric) {
+    const value = metric.value !== null && metric.value !== undefined ? Number(metric.value) : NaN;
+    return Number.isFinite(value) && (metric.name !== 'power_mng_bat_next_calib_date' || value > 0);
+  }
+
+  // A TSDB status is "settled" when it is not configured or exports healthily; a restart reports an
+  // unsettled one for a moment, which must not replace the last settled status before it expires.
+  const tsdbSettled = (tsdb) => Boolean(tsdb) && (!tsdb.configured || (tsdb.export_enabled && tsdb.healthy));
+
+  function absorbDashboard(devices, tsdb, now) {
+    const keys = deviceKeys(devices);
+    const next = new Map();
+    devices.forEach((incoming, index) => {
+      const prev = dashboardView.get(keys[index]);
+      const entry = prev || { metrics: new Map(), flow: new Map(), batteries: [] };
+      for (const metric of Array.isArray(incoming.metrics) ? incoming.metrics : []) entry.metrics.set(metric.name, { metric, at: now });
+      for (const field of FLOW_FIELDS) {
+        const reading = incoming.energy_flow?.[field];
+        if (reading && reading.value !== null && reading.value !== undefined) entry.flow.set(field, { reading, at: now });
+      }
+      // Towers merge by id: one that is missing from an answer (module scan after a restart) stays and
+      // runs out by its values; a tower still detecting its modules keeps its last module count.
+      const reported = new Map((Array.isArray(incoming.batteries) ? incoming.batteries : []).map((tower) => [tower.id, tower]));
+      const merged = [];
+      for (const known of entry.batteries) {
+        const tower = reported.get(known.id);
+        reported.delete(known.id);
+        if (!tower) { if (now - known.seen_at <= SNAPSHOT_MAX_AGE_MS) merged.push(known); continue; }
+        merged.push(tower.module_count_status !== 'ok' && known.module_count_status === 'ok'
+          ? { ...tower, module_count: known.module_count, module_count_status: 'ok', populated_module_slots: known.populated_module_slots, seen_at: now }
+          : { ...tower, seen_at: now });
+      }
+      for (const tower of reported.values()) merged.push({ ...tower, seen_at: now });
+      entry.batteries = merged;
+      const { metrics, batteries, energy_flow: flow, ...info } = incoming; // the parts above are kept per value
+      entry.device = { ...info, last_success_at: info.last_success_at || prev?.device.last_success_at || null };
+      next.set(keys[index], entry);
+    });
+    dashboardView = next;
+    dashboardTsdb.raw = tsdb;
+    if (tsdbSettled(tsdb)) { dashboardTsdb.good = tsdb; dashboardTsdb.goodAt = now; }
+  }
+
+  // The devices as shown at `now`: expired values become null (n/a), expired structure is dropped.
+  function viewDevices(now) {
+    return [...dashboardView.values()].map((entry) => {
+      const flow = {};
+      for (const field of FLOW_FIELDS) {
+        const known = entry.flow.get(field);
+        flow[field] = known && now - known.at <= VALUE_MAX_AGE_MS
+          ? known.reading : { value: null, stale: true, age_seconds: null, expired: Boolean(known) };
+      }
+      return {
+        ...entry.device,
+        metrics: [...entry.metrics.values()].map(({ metric, at }) => (now - at <= VALUE_MAX_AGE_MS ? metric : { ...metric, value: null, label: undefined, expired: metricShown(metric) })),
+        batteries: entry.batteries.filter((tower) => now - tower.seen_at <= SNAPSHOT_MAX_AGE_MS),
+        energy_flow: flow,
+        flow_known: [...entry.flow.values()].some((known) => now - known.at <= SNAPSHOT_MAX_AGE_MS),
+      };
+    });
+  }
+
+  function viewTsdb(now) {
+    const { raw, good, goodAt } = dashboardTsdb;
+    return !tsdbSettled(raw) && good && now - goodAt <= VALUE_MAX_AGE_MS ? good : raw;
+  }
+
+  // Re-renders from the last known state and arms a timer for the next value that runs out.
+  function refreshDashboard() {
+    clearTimeout(dashboardStaleTimer);
+    dashboardStaleTimer = null;
+    const now = Date.now();
+    renderDashboard(viewDevices(now), viewTsdb(now));
+    const ages = [dashboardTsdb.goodAt];
+    for (const entry of dashboardView.values()) {
+      for (const { at } of entry.metrics.values()) ages.push(at);
+      for (const { at } of entry.flow.values()) ages.push(at);
+    }
+    const live = ages.filter((at) => at && now - at < VALUE_MAX_AGE_MS);
+    if (live.length) dashboardStaleTimer = setTimeout(refreshDashboard, Math.min(...live) + VALUE_MAX_AGE_MS - now + 50);
+  }
+
+  function saveSnapshot() {
+    const snapshot = {
+      v: SNAPSHOT_VERSION, at: dashboardSnapshot.at, tsdb: dashboardTsdb,
+      devices: [...dashboardView].map(([key, entry]) => ({
+        key, device: entry.device, metrics: [...entry.metrics.values()], flow: [...entry.flow], batteries: entry.batteries,
+      })),
+    };
     try { localStorage.setItem(SNAPSHOT_KEY, JSON.stringify(snapshot)); } catch { /* storage full or blocked */ }
   }
 
-  function loadSnapshot() {
+  // After a reload (the connection-lost modal reloads once the server is back) the page starts from
+  // the stored state instead of from an empty one; values still expire by their own age.
+  function restoreSnapshot() {
     try {
       const stored = JSON.parse(localStorage.getItem(SNAPSHOT_KEY) || 'null');
-      if (stored && Array.isArray(stored.devices) && Number.isFinite(stored.at) && Date.now() - stored.at < SNAPSHOT_MAX_AGE_MS) return stored;
-    } catch { /* corrupt entry: ignore */ }
-    return null;
+      if (!stored || stored.v !== SNAPSHOT_VERSION || !Array.isArray(stored.devices) || !Number.isFinite(stored.at) || Date.now() - stored.at >= SNAPSHOT_MAX_AGE_MS) return false;
+      const view = new Map();
+      for (const item of stored.devices) {
+        view.set(item.key, {
+          device: item.device, metrics: new Map(item.metrics.map((known) => [known.metric.name, known])),
+          flow: new Map(item.flow), batteries: item.batteries,
+        });
+      }
+      dashboardTsdb = { raw: stored.tsdb.raw, good: stored.tsdb.good, goodAt: stored.tsdb.goodAt };
+      dashboardView = view;
+      dashboardSnapshot = { at: stored.at };
+      return true;
+    } catch { return false; /* corrupt or foreign entry: start empty */ }
   }
 
+  // The note takes the place of the page subtitle, so showing it never moves the grid.
   function setDashboardStale(error) {
     const grid = $('dashboard-grid') || $('devices-list');
+    const subtitle = document.querySelector('.page-heading p.text-secondary');
     if (!dashboardBanner) {
-      // Inline above the grid (not fixed), so it never covers the footer or the last tile row.
-      dashboardBanner = element('div', 'alert alert-warning dashboard-offline-banner mt-3 mb-0');
+      dashboardBanner = element('p', 'dashboard-offline-banner fw-medium text-warning-emphasis mb-0');
       dashboardBanner.setAttribute('role', 'status');
-      grid.before(dashboardBanner);
+      if (subtitle) subtitle.after(dashboardBanner); else grid.before(dashboardBanner);
     }
-    const at = new Date(dashboardSnapshot.at);
-    const minutes = Math.floor((Date.now() - at.getTime()) / 60000);
-    const age = minutes < 1 ? 'less than a minute ago' : `${minutes} min ago`;
     const reason = error?.status >= 500 ? `Server error (${error.status})` : 'Connection to server lost';
-    dashboardBanner.textContent = `${reason} \u2013 showing data from ${hhmm(at)} (${age})`;
+    const text = `${reason} – data from ${hhmm(new Date(dashboardSnapshot.at))}`;
+    if (dashboardBanner.textContent !== text) dashboardBanner.textContent = text;
     dashboardBanner.hidden = false;
+    if (subtitle) subtitle.hidden = true;
     grid.classList.add('is-offline');
   }
 
   function clearDashboardStale() {
     if (dashboardBanner) dashboardBanner.hidden = true;
+    const subtitle = document.querySelector('.page-heading p.text-secondary');
+    if (subtitle) subtitle.hidden = false;
     ($('dashboard-grid') || $('devices-list')).classList.remove('is-offline');
   }
 
@@ -1078,11 +1202,10 @@
     renderTsdbTile(tsdb);
     $('device-count').textContent = String(devices.length);
     $('connected-count').textContent = String(devices.filter((item) => displayStatus(item.status)[1] === 'online').length);
-    const seen = new Set();
+    const keys = deviceKeys(devices);
+    const seen = new Set(keys);
     const nodes = devices.map((device, index) => {
-      let key = String(device.id ?? `index-${index}`);
-      while (seen.has(key)) key += '+';
-      seen.add(key);
+      const key = keys[index];
       let ref = dashboardCards.get(key);
       if (!ref) { ref = createDeviceCard(key, devices.length); dashboardCards.set(key, ref); }
       patchDeviceCard(ref, device);
@@ -1109,19 +1232,17 @@
       if (generation !== dashboardGeneration) return 'skipped';
       dashboardPollFailing = false;
       dashboardFailures = 0;
-      renderDashboard(Array.isArray(data.devices) ? data.devices : [], data.tsdb || null);
-      dashboardSnapshot = { devices: Array.isArray(data.devices) ? data.devices : [], tsdb: data.tsdb || null, at: Date.now() };
-      saveSnapshot(dashboardSnapshot);
+      const now = Date.now();
+      absorbDashboard(Array.isArray(data.devices) ? data.devices : [], data.tsdb || null, now);
+      dashboardSnapshot = { at: now };
+      refreshDashboard();
+      saveSnapshot();
       clearDashboardStale();
       return 'ok';
     } catch (error) {
       if (generation !== dashboardGeneration) return 'skipped';
       dashboardFailures += 1;
-      // Server unreachable or failing: keep the last known data on screen (a reload restores it from storage).
-      if (!dashboardSnapshot) {
-        dashboardSnapshot = loadSnapshot();
-        if (dashboardSnapshot) renderDashboard(dashboardSnapshot.devices, dashboardSnapshot.tsdb);
-      }
+      // Server unreachable or failing: the last known state stays on screen and expires value by value.
       if (dashboardSnapshot) setDashboardStale(error);
       else syncChildren($('devices-list'), [dashboardNotices.error]);
       // Automatic background polls toast only on the first failure after a success streak, so a
@@ -1136,6 +1257,7 @@
   }
 
   function initDashboardPolling() {
+    if (restoreSnapshot()) refreshDashboard();
     // Refresh at once when the tab becomes visible instead of waiting for the next tick.
     document.addEventListener('visibilitychange', () => {
       if (document.hidden) { clearTimeout(dashboardTimer); dashboardTimer = null; return; }
@@ -1320,6 +1442,7 @@
     manual: 'Manual mode: you can operate this inverter from this page.',
     external: 'External mode: an app can now control this inverter through the API.',
   };
+  const ENERGY_MODE_TOAST_MANUAL_LOCKED = 'Manual mode is selected, but control stays locked until the setup steps below are complete.';
   // The Setup checklist's "Write access enabled" row is required_write_names (served by the
   // backend, RctDispatchGateway.REQUIRED_WRITES) ⊆ approved_write_names.
   const missingRequiredWrites = (device) => {
@@ -1433,15 +1556,18 @@
     }
 
     // state is [text, ok] or null when the reading is unknown (badge hidden, no invented state).
-    function setBadge(key, state, stale) {
+    // `expired`: the reading ran out, so the badge reads n/a instead of vanishing (the row keeps its height).
+    function setBadge(key, state, stale, expired = false) {
       const badge = badgeNodes[key];
-      if (badge.node.hidden !== !state) badge.node.hidden = !state;
-      if (!state) return;
-      setText(badge.state, state[0]);
-      setClass(badge.state, 'is-ok', state[1]);
-      setClass(badge.state, 'is-bad', !state[1]);
-      setClass(badge.node, 'is-stale', stale);
-      const label = `${badge.caption}: ${state[0]}`;
+      const shown = Boolean(state) || expired;
+      if (badge.node.hidden !== !shown) badge.node.hidden = !shown;
+      if (!shown) return;
+      const [text, ok] = state || ['n/a', null];
+      setText(badge.state, text);
+      setClass(badge.state, 'is-ok', ok === true);
+      setClass(badge.state, 'is-bad', ok === false);
+      setClass(badge.node, 'is-stale', stale || !state);
+      const label = `${badge.caption}: ${text}`;
       if (badge.node.getAttribute('aria-label') !== label) badge.node.setAttribute('aria-label', label);
     }
 
@@ -1486,10 +1612,10 @@
       setNode('battery', battery === null ? '–' : formatPower(battery), !!r.battery_power_w.stale,
         soc === null ? '' : formatPercent(soc));
       const idle = ENERGY_IDLE_WATTS;
-      setBadge('generation', pv === null ? null : pv >= idle ? ['Generating', true] : ['No generation', false], !!r.pv_power_w.stale);
-      setBadge('consumption', grid === null ? null : grid < idle ? ['Independent', true] : ['Grid supplied', false], !!r.grid_power_w.stale);
-      setBadge('grid', grid === null ? null : grid <= -idle ? ['Feed-in', true] : grid < idle ? ['Idle', true] : ['Import', false], !!r.grid_power_w.stale);
-      setBadge('battery', battery === null ? null : battery <= -idle ? ['Charging', true] : battery >= idle ? ['Discharging', false] : ['Idle', false], !!r.battery_power_w.stale);
+      setBadge('generation', pv === null ? null : pv >= idle ? ['Generating', true] : ['No generation', false], !!r.pv_power_w.stale, !!r.pv_power_w.expired);
+      setBadge('consumption', grid === null ? null : grid < idle ? ['Independent', true] : ['Grid supplied', false], !!r.grid_power_w.stale, !!r.grid_power_w.expired);
+      setBadge('grid', grid === null ? null : grid <= -idle ? ['Feed-in', true] : grid < idle ? ['Idle', true] : ['Import', false], !!r.grid_power_w.stale, !!r.grid_power_w.expired);
+      setBadge('battery', battery === null ? null : battery <= -idle ? ['Charging', true] : battery >= idle ? ['Discharging', false] : ['Idle', false], !!r.battery_power_w.stale, !!r.battery_power_w.expired);
       svg.setAttribute('aria-label', [
         `PV ${pv === null ? 'unknown' : formatPower(pv)}`,
         `grid ${grid === null ? 'unknown' : `${formatPower(grid)} ${gridWord.toLowerCase()}`}`,
@@ -1801,7 +1927,9 @@
       try {
         const result = await api(`${path}/mode`, { method: 'PUT', body: JSON.stringify({ mode: wanted }) });
         pendingMode = null;
-        toast(ENERGY_MODE_TOASTS[wanted]);
+        // Manual with an unfinished setup stays locked; the toast must not promise otherwise.
+        const locked = wanted === 'manual' && energyNeedsSetup(energyChecklist(device));
+        toast(locked ? ENERGY_MODE_TOAST_MANUAL_LOCKED : ENERGY_MODE_TOASTS[wanted]);
         selected = null;
         await applyActionResult(result);
       } catch (error) { toast(messageFrom(error), 'danger'); }
@@ -2325,7 +2453,7 @@
     const renderHardwareText = (expertOn) => {
       hardwareText.textContent = 'Hardware control must be verified on this inverter before it can be controlled. '
         + (expertOn ? 'Enter the values you measured under Expert settings below.'
-          : 'This needs the values you measured on the hardware and opens the Expert settings. Do not guess them.');
+          : 'No built-in profile covers this inverter yet, so its values must be measured on the hardware. An experienced administrator can enter them under Expert settings (this button opens them). Do not guess them.');
       openVerifyButton.hidden = expertOn;
     };
     // Plain wording first; the raw register names stay one click away for people who need them.

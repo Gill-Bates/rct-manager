@@ -479,3 +479,28 @@ def test_failed_registrations_are_counted_named_and_cleared_by_a_successful_one(
     assert first[0] == 1 and first[1] and not first[2]
     assert second[0] == 2 and second[1] and not second[2]
     assert third[0] == 0 and third[2]
+
+
+def test_setup_during_shutdown_is_not_a_warning_with_traceback(caplog: pytest.LogCaptureFixture) -> None:
+    """A serializer that stopped accepting work (SIGINT) makes the setup abort quietly."""
+
+    async def scenario() -> tuple[bool, str | None]:
+        clock = AutoClock()
+        key = EndpointKey("10.0.0.5", 8899)
+        net = FakeNetwork(clock, behavior=lambda frame: "respond")
+        cfg = EndpointConfig(response_timeout_seconds=0.01, min_interval=timedelta(0))
+        endpoint = TransportEndpoint("endpoint-1", key, cfg, clock, connector=net.connect)
+
+        async def handler(request):
+            return await endpoint.execute(request)
+
+        serializer = AccessSerializer(endpoint, handler, queue_max_length=10, queue_max_wait_seconds=10)
+        serializer.start()
+        serializer.stop_accepting()
+        manager = PeriodicManager(endpoint, serializer, DeviceKey(key), [0x1111], 30, clock)
+        return await manager.setup(), manager.last_failure
+
+    caplog.set_level("INFO", logger="app.scheduling.periodic")
+    ok, failure = asyncio.run(scenario())
+    assert ok is False and failure == "device access is shutting down"
+    assert not [r for r in caplog.records if r.levelname == "WARNING" or r.exc_info]

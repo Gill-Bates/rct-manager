@@ -152,3 +152,14 @@ def test_raw_ttl_waits_for_a_current_view_and_for_data() -> None:
     empty = FakeQuestDb(columns={"timestamp": "TIMESTAMP", "device": "SYMBOL"})
     assert not QuestDbProvisioner(empty, "rct", "medium", None, 90).run()
     assert not any(s.startswith("CREATE MATERIALIZED") for s in empty.sql)
+
+
+def test_a_view_that_is_not_refreshed_yet_warns_only_when_the_lag_persists(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level("DEBUG", logger="app.export.questdb_admin")
+    provisioner = QuestDbProvisioner(FakeQuestDb(view_ok=False), "rct", "medium", None, 90)
+    for _ in range(7):
+        assert not provisioner.run()
+    assert not [r for r in caplog.records if r.levelname == "WARNING"]
+    assert not provisioner.run()  # 8th consecutive attempt
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 1 and "after 8 attempts" in warnings[0].getMessage()

@@ -564,15 +564,21 @@ def test_build_group_body_is_shared_so_a_group_rerender_adds_no_second_heading()
 
 
 def test_dashboard_keeps_last_known_data_on_fetch_failure():
-    """A failed poll must not blank the Overview: the last snapshot stays, dimmed, with a banner."""
+    """A failed or empty poll must not blank or shrink the Overview: values expire, the layout stays."""
     js = JS.read_text(encoding="utf-8")
     html = (TEMPLATES / "dashboard.html").read_text(encoding="utf-8")
     block = js[js.index("async function loadDashboard("):js.index("function initDashboardPolling(")]
     fail = block[block.index("} catch (error) {"):]
     assert "setDashboardStale(error)" in fail and "clearDashboardStale()" in block
-    # The failure path only replaces the list with the error notice when no snapshot exists at all.
+    # The failure path only replaces the list with the error notice when nothing was ever known.
     assert fail.index("if (dashboardSnapshot) setDashboardStale") < fail.index("dashboardNotices.error")
-    assert "SNAPSHOT_MAX_AGE_MS" in js and "localStorage" in js
+    # A successful poll renders from the merged last-known state, never from the raw payload.
+    assert "absorbDashboard(" in block and "refreshDashboard()" in block and "renderDashboard(data" not in block
+    # Values run out by age (n/a), structure (towers, flow graphic) outlives them; a reload restores both.
+    for marker in ("VALUE_MAX_AGE_MS", "expired: true", "flow_known", "restoreSnapshot()", "SNAPSHOT_MAX_AGE_MS", "localStorage"):
+        assert marker in js, marker
+    # The note replaces the subtitle instead of being inserted above the grid, so nothing shifts.
+    assert "subtitle.after(dashboardBanner)" in js and "grid.before(dashboardBanner)" in js
     assert "dashboard-offline-banner" in (ADMIN_DIR / "static/css/admin.css").read_text(encoding="utf-8")
     # The removed 'Updated HH:MM' line stays removed.
     for marker in ('dashboard-updated', 'dashboardLastSuccess', 'id="refresh-dashboard"'):
@@ -873,3 +879,15 @@ def test_banner_shows_build_hash(monkeypatch):
         assert "(abc1234)" in banner.banner()
     finally:
         banner.build_info.cache_clear()
+
+
+def test_manual_mode_toast_does_not_promise_control_while_the_setup_is_incomplete():
+    js = JS.read_text(encoding="utf-8")
+    assert "control stays locked until the setup steps below are complete" in js
+    assert "wanted === 'manual' && energyNeedsSetup(energyChecklist(device))" in js
+
+
+def test_hardware_step_text_names_the_missing_profile_and_the_expert_path():
+    js = JS.read_text(encoding="utf-8")
+    assert "No built-in profile covers this inverter yet" in js
+    assert "An experienced administrator can enter them under Expert settings" in js
