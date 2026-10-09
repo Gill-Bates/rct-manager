@@ -908,20 +908,21 @@ def _admin_settings(tmp_path: Path, admin_path: Path, **overrides):
 
 @contextlib.asynccontextmanager
 async def _admin_harness(tmp_path: Path):
-    """A running app plus a read/write admin PAT, for the admin dispatch API's own tests."""
-    from app.admin.store import AdminStore
-    from tests.api_helpers import _fixed_pat, running_app
+    """A running app logged in as the admin, for the admin dispatch API's own tests.
 
-    token = _fixed_pat("AdminDispatchToken")
+    The dispatch admin API is session-only (SEC-01), so a PAT would be refused with 403.
+    """
+    from app.admin.store import AdminStore
+    from tests.api_helpers import admin_session_headers, running_app
+
     admin_path = tmp_path / "admin.db"
     store = AdminStore(admin_path, "s" * 48)
     password = store.initialize()
     assert store.change_password(password, "replacement-test-password")
-    with patch("app.admin.store.generate_pat", side_effect=[token]):
-        store.create_token("admin dispatch test token", "read/write", None)
     store.close()
     async with running_app(_admin_settings(tmp_path, admin_path)) as harness:
-        yield harness, {"Authorization": f"Bearer {token}"}
+        headers = await admin_session_headers(harness.client, "replacement-test-password")
+        yield harness, headers
 
 
 # --- The gate is armed in submit(): unverified hardware is never touched (AK-18) --------------

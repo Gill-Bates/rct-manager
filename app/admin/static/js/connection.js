@@ -100,12 +100,23 @@
     }
   }
 
+  function reloadPage() {
+    clearReconnectTimer();
+    clearHeartbeatTimer();
+    window.location.reload();
+  }
+
   function handlePingResponse(response) {
     if (response.status === 401) {
       redirectToLoginIfNeeded();
       return 'handled';
     }
     if (response.ok) {
+      if (reconnectState.active) {
+        // The server is back: reload so the page starts from fresh state instead of resuming stale.
+        reloadPage();
+        return 'handled';
+      }
       stopReconnectMode();
       return 'handled';
     }
@@ -326,25 +337,7 @@
     window.removeEventListener('offline', onOffline);
     window.removeEventListener('pageshow', onPageShow);
     window.removeEventListener('pagehide', onPageHide);
-    // The modal action buttons are long-lived DOM; drop their handlers too so destroy() leaves no
-    // listener behind (JS-05).
-    retryButton?.removeEventListener('click', onReconnectRetry);
-    reloadButton?.removeEventListener('click', onReconnectReload);
   }
-
-  function onReconnectRetry() {
-    if (!reconnectState.active) return;
-    clearReconnectTimer();
-    void probeReconnect();
-  }
-  function onReconnectReload() {
-    window.location.reload();
-  }
-
-  const retryButton = document.getElementById('reconnect-retry');
-  const reloadButton = document.getElementById('reconnect-reload');
-  retryButton?.addEventListener('click', onReconnectRetry);
-  reloadButton?.addEventListener('click', onReconnectReload);
 
   document.addEventListener('visibilitychange', onVisibilityChange);
   window.addEventListener('online', onOnline);

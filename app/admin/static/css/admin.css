@@ -55,12 +55,14 @@
     --bs-primary-rgb: 136, 23, 26;
     /* Focus ring: at least 3:1 against the page and card backgrounds of its theme. */
     --rct-focus-ring: #88171a;
+    --rct-auth-card-shadow: 0 .25rem .75rem rgba(0, 0, 0, .08);
 }
 
 [data-bs-theme="dark"] {
     --rct-sidebar: #171a20;
     --rct-line: #363b45;
     --rct-focus-ring: #f2878a;
+    --rct-auth-card-shadow: 0 .25rem .75rem rgba(0, 0, 0, .35);
 }
 
 /* Bootstrap's #6c757d is 4.4:1 on the light page and 2.9:1 on the dark cards; the theme's own
@@ -606,7 +608,7 @@ body {
     display: flex;
     flex-wrap: wrap;
     justify-content: center;
-    gap: .5rem .75rem;
+    gap: .5rem 1.5rem;
     width: 100%;
     max-width: 34rem;
     padding-top: 1.5rem;
@@ -1583,6 +1585,8 @@ body {
 
 .auth-card {
     width: min(100%, 28rem);
+    /* .shadow-sm on the card is !important and reads this variable, so override the variable. */
+    --bs-box-shadow-sm: var(--rct-auth-card-shadow);
 }
 
 .auth-logo {
