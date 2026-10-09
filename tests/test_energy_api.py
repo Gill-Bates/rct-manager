@@ -13,12 +13,14 @@ the one GET serves the whole card, readings included, without costing a device t
 
 import asyncio
 import json
+import math
 import re
 from pathlib import Path
 
 import pytest
 from starlette.requests import Request
 
+from app.admin.energy_verification import BalanceProof, BalanceSample, prove_signs_from_balance
 from app.admin.store import AdminStore
 from app.api.app_factory import (
     _ENERGY_METRIC_NAMES,
@@ -1097,12 +1099,18 @@ async def test_the_mode_decides_which_surface_may_command(tmp_path: Path) -> Non
 ASSIST = "/admin/api/energy/devices/main/verification-assistant"
 
 
-def seed_identity(harness, *, battery_w: float = 400.0, target: float = 0.5) -> None:
+def seed_identity(
+    harness, *, battery_w: float = 400.0, target: float = 0.5, load_w: float | None = None, grid_w: float = 1200.0
+) -> None:
+    """Identity plus a physically consistent house (solar 2400 W): load = solar + grid + battery."""
     catalog = RegistryCatalog.from_file(harness.runtime.settings.object_registry_path)
     for name, text in (("android_description", "RCT Power DC 10.0"), ("svnversion", "2.3.5687")):
         entry = catalog.object_entry(name)
         harness.net.payloads[entry.object_id] = encode_value(entry.data_type, text, byte_width=entry.byte_width)
     harness.net.payloads[catalog.object_entry("battery_power").object_id] = float_payload(battery_w)
+    harness.net.payloads[catalog.object_entry("grid_power").object_id] = float_payload(grid_w)
+    load = 2400.0 + grid_w + battery_w if load_w is None else load_w
+    harness.net.payloads[catalog.object_entry("household_load_power").object_id] = float_payload(load)
     harness.net.payloads[catalog.object_entry("power_mng_soc_target_set").object_id] = float_payload(target)
 
 
@@ -1123,6 +1131,7 @@ async def follow_the_setpoint(harness, stop: asyncio.Event) -> None:
 def fast_probe(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("app.admin.energy_verification.PROBE_POLL_S", 0.02)
     monkeypatch.setattr("app.admin.energy_verification.PROBE_TIMEOUT_S", 0.5)
+    monkeypatch.setattr("app.admin.energy_verification.BALANCE_GAP_S", 0.0)
 
 
 async def assistant_ready(harness) -> dict[str, str]:
@@ -1227,8 +1236,8 @@ async def test_the_assistant_refuses_readings_it_cannot_interpret(tmp_path: Path
         assert mismatched.status_code == 422
         await harness.client.post(f"{ASSIST}/direction", headers=headers, json={"kind": "grid", "answer": "importing"})
         # An idle battery cannot show that the hold took effect, so the test must not pass.
-        seed_identity(harness, battery_w=400.0)
-        await harness.client.post(f"{ASSIST}/direction", headers=headers, json={"kind": "battery", "answer": "charging"})
+        seed_identity(harness, battery_w=400.0)  # the balance makes 400 W a discharge, so "charging" would be refused
+        await harness.client.post(f"{ASSIST}/direction", headers=headers, json={"kind": "battery", "answer": "discharging"})
         seed_identity(harness, battery_w=0.0)
         idle = (await harness.client.post(f"{ASSIST}/control-test", headers=headers, json={"confirm": True})).json()
         step = next(item for item in idle["steps"] if item["id"] == "control_test")
@@ -1243,3 +1252,144 @@ async def test_an_unreadable_target_unit_blocks_the_commit(tmp_path: Path, fast_
         state = (await harness.client.post(f"{ASSIST}/start", headers=headers)).json()
         assert state["started"] is True and state["can_commit"] is False
         assert any("unit cannot be determined" in blocker for blocker in state["blockers"])
+
+
+# --- sign conventions: proven from the power balance, asked only where the data cannot prove them ---
+
+def sample(battery: float, grid: float, solar: float, load: float) -> BalanceSample:
+    return BalanceSample(battery_w=battery, grid_w=grid, solar_w=solar, load_w=load)
+
+
+@pytest.mark.parametrize(
+    ("readings", "expected"),
+    [
+        pytest.param(sample(0, 500, 0, 500), (None, True), id="night-battery-idle-grid-import-fixes-grid"),
+        pytest.param(sample(1000, 0, 0, 1000), (True, None), id="night-battery-discharging-grid-idle"),
+        pytest.param(sample(600, 400, 0, 1000), (True, True), id="night-discharge-plus-import"),
+        pytest.param(sample(-1500, -500, 3000, 1000), (True, True), id="day-charging-and-export"),
+        pytest.param(sample(1500, 500, 3000, 1000), (False, False), id="same-day-with-both-signs-mirrored"),
+        pytest.param(sample(0, 0, 0, 0), (None, None), id="everything-idle"),
+        pytest.param(sample(0, 520, 0, 500), (None, True), id="meter-noise-inside-the-tolerance"),
+        pytest.param(sample(50, 450, 0, 500), (None, True), id="battery-below-the-direction-threshold"),
+        pytest.param(sample(100, 100, 0, 3000), (None, None), id="inconsistent-balance"),
+        pytest.param(sample(-500, 500, 0, 0), (None, None), id="symmetric-hypotheses-cannot-be-told-apart"),
+        pytest.param(sample(0, 500, 0, -500), (None, None), id="negative-load-is-not-a-load"),
+        pytest.param(sample(0, 500, -400, 100), (None, None), id="negative-solar-is-not-generation"),
+        pytest.param(sample(0, math.nan, 0, 500), (None, None), id="not-a-number"),
+        pytest.param(sample(2000, 0, 0, 500), (None, None), id="unmetered-extra-source-breaks-the-balance"),
+    ],
+)
+def test_the_power_balance_proves_only_what_a_unique_fit_supports(readings: BalanceSample, expected) -> None:
+    proof = prove_signs_from_balance([readings, readings])
+    assert (proof.battery_discharge_positive, proof.grid_import_positive) == expected
+
+
+def test_samples_that_disagree_prove_nothing() -> None:
+    discharging = sample(1000, 0, 0, 1000)
+    mirrored = sample(-1000, 0, 0, 1000)  # the same load explained by the opposite convention
+    proof = prove_signs_from_balance([discharging, mirrored])
+    assert (proof.battery_discharge_positive, proof.grid_import_positive) == (None, None)
+    assert prove_signs_from_balance([]) == BalanceProof()
+
+
+def step_of(state: dict, step_id: str) -> dict:
+    return next(item for item in state["steps"] if item["id"] == step_id)
+
+
+async def test_proven_signs_skip_the_questions_and_are_recorded_as_such(tmp_path: Path, fast_probe: None) -> None:
+    async with running_app(energy_settings(tmp_path)) as harness:
+        headers = await assistant_ready(harness)  # solar 2400 + import 1200 + discharge 400 = load 4000
+        await harness.client.post(f"{ASSIST}/start", headers=headers)
+        state = (await harness.client.post(f"{ASSIST}/auto-check", headers=headers)).json()
+        battery, grid = step_of(state, "battery"), step_of(state, "grid")
+        assert (battery["status"], battery["method"], battery["direction"]) == ("done", "balance", "discharging")
+        assert (grid["status"], grid["method"], grid["direction"]) == ("done", "balance", "importing")
+        assert battery["power_w"] == 400.0 and state["min_direction_w"] == 100.0
+
+        stop = asyncio.Event()
+        follower = asyncio.create_task(follow_the_setpoint(harness, stop))
+        try:
+            tested = await harness.client.post(f"{ASSIST}/control-test", headers=headers, json={"confirm": True})
+        finally:
+            stop.set()
+            await follower
+        assert tested.json()["can_commit"] is True, tested.json()
+        done = await harness.client.post(f"{ASSIST}/commit", headers=headers, json={"confirm": True})
+        assert done.status_code == 200, done.text
+        caps = _capabilities(done.json())
+        assert caps["battery_power_sign_convention"]["battery_discharge_positive"] is True
+        assert caps["grid_power_sign_convention"]["grid_import_positive"] is True
+        note = caps["write_path_convention"]["note"]
+        assert "battery sign by power balance" in note and "grid sign by power balance" in note
+
+
+async def test_a_mirrored_register_convention_is_proven_as_such(tmp_path: Path, fast_probe: None) -> None:
+    async with running_app(energy_settings(tmp_path)) as harness:
+        headers = await assistant_ready(harness)
+        # The battery discharges 400 W but its register is negative: discharge is NOT positive here.
+        seed_identity(harness, battery_w=-400.0, load_w=2400.0 + 1200.0 + 400.0)
+        await harness.client.post(f"{ASSIST}/start", headers=headers)
+        state = (await harness.client.post(f"{ASSIST}/auto-check", headers=headers)).json()
+        battery = step_of(state, "battery")
+        assert (battery["status"], battery["direction"], battery["power_w"]) == ("done", "discharging", 400.0)
+        session = harness.app.state.energy_verification_sessions["main"]
+        assert session.battery_discharge_positive is False
+
+
+async def test_an_idle_battery_is_never_guessed_and_the_proof_arrives_when_it_moves(
+    tmp_path: Path, fast_probe: None
+) -> None:
+    async with running_app(energy_settings(tmp_path)) as harness:
+        headers = await assistant_ready(harness)
+        seed_identity(harness, battery_w=0.0)  # night-like balance: the grid alone fixes only the grid sign
+        await harness.client.post(f"{ASSIST}/start", headers=headers)
+        state = (await harness.client.post(f"{ASSIST}/auto-check", headers=headers)).json()
+        assert step_of(state, "grid")["status"] == "done" and step_of(state, "grid")["method"] == "balance"
+        waiting = step_of(state, "battery")
+        assert (waiting["status"], waiting["message"], waiting["method"]) == ("pending", None, None)
+        # "Idle" is only a statement: validated, never a proof.
+        idle = (await harness.client.post(
+            f"{ASSIST}/direction", headers=headers, json={"kind": "battery", "answer": "idle"}
+        )).json()
+        assert (step_of(idle, "battery")["status"], step_of(idle, "battery")["message"]) == ("pending", None)
+        assert idle["can_commit"] is False
+        assert (await harness.client.post(f"{ASSIST}/commit", headers=headers, json={"confirm": True})).status_code == 409
+        # The inverter reports power, so "idle" contradicts it and is refused with a plain reason.
+        seed_identity(harness, battery_w=400.0, load_w=0.0)
+        contradicted = (await harness.client.post(
+            f"{ASSIST}/direction", headers=headers, json={"kind": "battery", "answer": "idle"}
+        )).json()
+        message = step_of(contradicted, "battery")["message"]
+        assert step_of(contradicted, "battery")["status"] == "failed" and "not idle" in message
+        # The battery starts moving with a consistent balance: the next check proves it by itself.
+        seed_identity(harness, battery_w=400.0)
+        proven = (await harness.client.post(f"{ASSIST}/auto-check", headers=headers)).json()
+        assert step_of(proven, "battery")["status"] == "done" and step_of(proven, "battery")["method"] == "balance"
+
+
+async def test_without_a_usable_balance_the_operator_is_asked_and_a_contradiction_is_refused(
+    tmp_path: Path, fast_probe: None
+) -> None:
+    async with running_app(energy_settings(tmp_path)) as harness:
+        headers = await assistant_ready(harness)
+        seed_identity(harness, load_w=0.0)  # no usable load figure: the balance proves nothing
+        await harness.client.post(f"{ASSIST}/start", headers=headers)
+        state = (await harness.client.post(f"{ASSIST}/auto-check", headers=headers)).json()
+        assert [item["status"] for item in state["steps"]] == ["pending", "pending", "pending"]
+        answered = (await harness.client.post(
+            f"{ASSIST}/direction", headers=headers, json={"kind": "battery", "answer": "discharging"}
+        )).json()
+        assert (step_of(answered, "battery")["status"], step_of(answered, "battery")["method"]) == ("done", "operator")
+        # A consistent balance now proves discharge; an operator answer to the contrary is not stored.
+        seed_identity(harness)
+        await harness.client.delete(ASSIST, headers=headers)
+        await harness.client.post(f"{ASSIST}/start", headers=headers)
+        conflict = (await harness.client.post(
+            f"{ASSIST}/direction", headers=headers, json={"kind": "battery", "answer": "charging"}
+        )).json()
+        step = step_of(conflict, "battery")
+        assert step["status"] == "failed" and "points the other way" in step["message"]
+        agreed = (await harness.client.post(
+            f"{ASSIST}/direction", headers=headers, json={"kind": "battery", "answer": "discharging"}
+        )).json()
+        assert step_of(agreed, "battery")["method"] == "both"

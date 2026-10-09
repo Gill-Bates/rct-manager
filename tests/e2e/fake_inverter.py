@@ -6,11 +6,15 @@
 
 """Simulated RCT inverter for browser E2E runs: answers reads with fixed floats on a local port.
 
-Usage: python -m tests.e2e.fake_inverter PORT   (binds 127.0.0.1 only)
+Usage: python -m tests.e2e.fake_inverter PORT [OVERRIDES_JSON]   (binds 127.0.0.1 only)
+
+OVERRIDES_JSON is an optional file of {register name: float} that is re-read on every answer, so a
+browser test can switch the scenario (night, battery idle, charging, inconsistent) while it runs.
 """
 
 import asyncio
 import contextlib
+import json
 import struct
 import sys
 from pathlib import Path
@@ -28,6 +32,9 @@ VALUES = {"solar_a_power": 1234.5, "solar_b_power": 800.0, "grid_power": -250.0,
           # Control registers and a moving battery, so the guided hardware verification can run: the
           # battery follows the written setpoint once the external strategy (code 2) is active.
           "power_mng_soc_target_set": 0.5, "battery_power": 400.0,
+          # Consistent with the figures above (solar 2034.5 W + grid export -250 W + battery 400 W), so the
+          # assistant can prove both sign conventions from the power balance.
+          "household_load_power": 2184.5,
           # The second battery tower reports its own SoC and temperature. The values differ from the
           # first tower's on purpose: a card that falls back to the shared battery_* names would then
           # show two identical towers, which the browser test asserts against.
@@ -82,12 +89,23 @@ def _by_object_id() -> tuple[dict[int, bytes], dict[int, RegistryEntry]]:
     return payloads, entries
 
 
-async def _serve(port: int) -> None:
+async def _serve(port: int, overrides_file: Path | None = None) -> None:
     values, entries = _by_object_id()
     stored: dict[int, bytes] = {}
     ids = {name: object_id for object_id, entry in entries.items() for name in [entry.name]}
     battery_power_id, strategy_id, extern_id = (
         ids["battery_power"], ids["power_mng_soc_strategy"], ids["power_mng_battery_power_extern"])
+
+    names = {object_id: entry.name for object_id, entry in entries.items()}
+
+    def override_for(object_id: int) -> bytes | None:
+        if overrides_file is None:
+            return None
+        try:
+            value = json.loads(overrides_file.read_text()).get(names.get(object_id))
+        except (OSError, ValueError, AttributeError):
+            return None
+        return None if value is None else struct.pack(">f", float(value))
 
     async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         parser = StreamParser()
@@ -98,6 +116,8 @@ async def _serve(port: int) -> None:
                 return stored[extern_id]  # external control active: the battery follows the setpoint
             if object_id in stored:
                 return stored[object_id]
+            if (overridden := override_for(object_id)) is not None:
+                return overridden
             if object_id in values:
                 return values[object_id]
             return _default_payload(entries.get(object_id))
@@ -136,4 +156,4 @@ async def _serve(port: int) -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(_serve(int(sys.argv[1])))
+    asyncio.run(_serve(int(sys.argv[1]), Path(sys.argv[2]) if len(sys.argv) > 2 else None))

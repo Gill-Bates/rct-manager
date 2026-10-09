@@ -20,7 +20,8 @@ Rules:
      incomplete form is reported by a toast plus aria-invalid on the field.
  R4  The admin scripts never open the native "leave page" dialog (beforeunload).
  R5  The TSDB action bar is exactly one `btn btn-primary` "Apply changes" button, requested through
-     the shared bar (every explicit-apply form, Inverters included); there is no Discard, count badge or
+     the shared bar (every explicit-apply form; the Inverters dialog saves each add and delete at
+     once and has no apply bar); there is no Discard, count badge or
      hint text.
  R6  Card grids define at most four columns (`.settings-grid`), a card may span a whole row via the
      shared `.card-span-all`.
@@ -106,7 +107,7 @@ def check_r4_unload(scripts: dict[str, str]) -> list[str]:
 
 def check_r5_apply_bar(js: str, template: str) -> list[str]:
     problems = []
-    builder = js[js.index("function buildApplyBar("):js.index("function buildDeviceApplyBar(")]
+    builder = js[js.index("function buildApplyBar("):js.index("function buildGroupBody(")]
     if "'Discard'" in builder or "badge" in builder or "status" in builder:
         problems.append("admin.js: R5 - the shared apply bar must hold the button only")
     if "element('button', 'btn btn-primary', applyLabel)" not in builder:

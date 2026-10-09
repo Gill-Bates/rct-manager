@@ -11,8 +11,11 @@ inverter or from a short, explicitly confirmed test, never from a guess:
 
 * model and firmware are read live from the inverter;
 * the SoC-target unit is derived from the live register value (and left open when it is ambiguous);
-* both sign conventions come from a live reading plus the operator's statement of what the battery
-  or the grid is physically doing right now (the server re-reads the value itself);
+* both sign conventions are first derived from the inverter's own power balance (house load = solar +
+  grid import + battery discharge) with a unique, well-separated fit of the sign hypotheses; only
+  what that cannot prove is taken from a live reading plus the operator's statement of what the
+  battery or the grid is physically doing right now (the server re-reads the value itself). A sign
+  that is neither proven nor confirmed is never stored, and an "idle" statement proves nothing;
 * the write path is proven by one bounded hold test: the inverter is told to stay at 0 W, every
   control register is read back, the battery power must actually follow, and the previous state
   must be restored and read back again.
@@ -67,8 +70,94 @@ SETTLED_W = 50.0
 PROBE_TIMEOUT_S = 30.0
 PROBE_POLL_S = 2.0
 PROBE_VALID_S = 60.0
+# Power balance: the readings are taken one after another and the inverter has conversion losses,
+# so a fit counts only inside this tolerance and only when the opposite sign is clearly worse.
+BALANCE_TOLERANCE_W = 120.0
+BALANCE_TOLERANCE_RATIO = 0.08
+BALANCE_NOISE_W = 20.0  # a solar sum slightly below zero at night is meter noise, not a convention
+BALANCE_SAMPLES = 2
+BALANCE_GAP_S = 1.0
 
 _RESTORE_REGISTERS = RctDispatchGateway.REQUIRED_WRITES  # exactly what a hold writes or restores
+
+
+@dataclass(frozen=True, slots=True)
+class BalanceSample:
+    """One simultaneous set of readings, all as the registers report them (conventions unproven)."""
+
+    battery_w: float
+    grid_w: float
+    solar_w: float
+    load_w: float
+
+
+@dataclass(frozen=True, slots=True)
+class BalanceProof:
+    battery_discharge_positive: bool | None = None
+    grid_import_positive: bool | None = None
+
+
+def _prove_sample(sample: BalanceSample) -> tuple[bool | None, bool | None]:
+    """Which sign hypotheses the balance load = solar + grid_import + battery_discharge supports.
+
+    Solar generation and house load are physical magnitudes that cannot be negative, so they anchor
+    the balance without a convention under test. A flag is proven only when its best hypothesis fits
+    within the tolerance and the opposite one misses by more than twice that, otherwise it stays open.
+    """
+    values = (sample.battery_w, sample.grid_w, sample.solar_w, sample.load_w)
+    if not all(math.isfinite(v) for v in values) or sample.solar_w < -BALANCE_NOISE_W or sample.load_w < 0:
+        return None, None
+    solar = max(sample.solar_w, 0.0)
+    tolerance = max(
+        BALANCE_TOLERANCE_W,
+        BALANCE_TOLERANCE_RATIO * max(sample.load_w, solar, abs(sample.grid_w), abs(sample.battery_w)),
+    )
+    residual = {
+        (battery, grid): abs(
+            sample.load_w - solar
+            - (sample.grid_w if grid else -sample.grid_w)
+            - (sample.battery_w if battery else -sample.battery_w)
+        )
+        for battery in (True, False)
+        for grid in (True, False)
+    }
+
+    def decide(index: int, magnitude: float) -> bool | None:
+        if magnitude < MIN_DIRECTION_W:
+            return None  # an idle quantity cannot tell its own sign
+        best = {value: min(r for key, r in residual.items() if key[index] is value) for value in (True, False)}
+        if best[True] == best[False]:
+            return None
+        winner = best[True] < best[False]
+        return winner if best[winner] <= tolerance and best[not winner] > 2 * tolerance else None
+
+    battery = decide(0, abs(sample.battery_w))
+    grid = decide(1, abs(sample.grid_w))
+    if battery is not None and grid is not None and residual[(battery, grid)] > tolerance:
+        return None, None  # the two proofs do not describe one consistent system
+    return battery, grid
+
+
+def prove_signs_from_balance(samples: list[BalanceSample]) -> BalanceProof:
+    """A flag is proven only when every sample proves the same value; inconsistent data proves nothing."""
+    if not samples:
+        return BalanceProof()
+    results = [_prove_sample(sample) for sample in samples]
+
+    def agreed(index: int) -> bool | None:
+        values = {result[index] for result in results}
+        return values.pop() if len(values) == 1 else None
+
+    return BalanceProof(agreed(0), agreed(1))
+
+
+@dataclass(frozen=True, slots=True)
+class _Established:
+    """How a sign flag was established, kept for the operator's summary and the audit note."""
+
+    method: Literal["balance", "operator", "both"]
+    direction: Literal["charging", "discharging", "importing", "exporting"]
+    power_w: float
 
 
 @dataclass
@@ -81,6 +170,8 @@ class _Session:
     grid_import_positive: bool | None = None
     battery_evidence: str | None = None
     grid_evidence: str | None = None
+    battery_proof: _Established | None = None
+    grid_proof: _Established | None = None
     code: int | None = None
     enum_byte_width: int | None = None
     bool_byte_width: int | None = None
@@ -93,6 +184,9 @@ class StepView(BaseModel):
     id: Literal["battery", "grid", "control_test"]
     status: Literal["pending", "done", "failed"]
     message: str | None
+    method: Literal["balance", "operator", "both"] | None = None  # how a done sign step was established
+    direction: Literal["charging", "discharging", "importing", "exporting"] | None = None
+    power_w: float | None = None
 
 
 class ReadingsView(BaseModel):
@@ -113,13 +207,14 @@ class AssistantState(BaseModel):
     readings: ReadingsView | None
     can_commit: bool
     expires_at: datetime | None
+    min_direction_w: float = MIN_DIRECTION_W
 
 
 class DirectionBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     kind: Literal["battery", "grid"]
-    answer: Literal["discharging", "charging", "importing", "exporting"]
+    answer: Literal["discharging", "charging", "importing", "exporting", "idle"]
 
 
 class ConfirmBody(BaseModel):
@@ -210,14 +305,21 @@ async def _readings(request: Request, device_id: str) -> ReadingsView:
 
 
 def _view(device_id: str, session: _Session | None, blockers: list[str], readings, now: datetime | None) -> AssistantState:
-    def step(step_id, done: bool) -> StepView:
+    def step(step_id, done: bool, proof: _Established | None = None) -> StepView:
         message = None if session is None else session.messages.get(step_id)
         status = "done" if done else ("failed" if message else "pending")
-        return StepView(id=step_id, status=status, message=message)
+        if not done or proof is None:
+            return StepView(id=step_id, status=status, message=message)
+        return StepView(
+            id=step_id, status=status, message=message,
+            method=proof.method, direction=proof.direction, power_w=round(proof.power_w, 1),
+        )
 
     steps = [
-        step("battery", session is not None and session.battery_discharge_positive is not None),
-        step("grid", session is not None and session.grid_import_positive is not None),
+        step("battery", session is not None and session.battery_discharge_positive is not None,
+             None if session is None else session.battery_proof),
+        step("grid", session is not None and session.grid_import_positive is not None,
+             None if session is None else session.grid_proof),
         step("control_test", session is not None and session.code is not None),
     ]
     can_commit = session is not None and not blockers and all(s.status == "done" for s in steps) and (
@@ -293,6 +395,55 @@ async def cancel(
     return _view(device_id, None, [], None, None)
 
 
+async def _balance_proof(request: Request, device_id: str) -> tuple[BalanceProof, BalanceSample | None]:
+    """Sample the balance a moment apart; any missing reading means there is nothing to prove with."""
+    samples: list[BalanceSample] = []
+    for index in range(BALANCE_SAMPLES):
+        if index:
+            await asyncio.sleep(BALANCE_GAP_S)
+        live = await _readings(request, device_id)
+        figures = (live.battery_power_w, live.grid_power_w, live.solar_power_w, live.household_load_w)
+        if any(value is None for value in figures):
+            return BalanceProof(), None
+        samples.append(BalanceSample(*figures))  # type: ignore[arg-type]  # None excluded above
+    return prove_signs_from_balance(samples), samples[-1]
+
+
+def _establish(
+    session: _Session, kind: str, flag: bool, raw: float, method: Literal["balance", "operator", "both"]
+) -> None:
+    """Store one proven flag with how it was established; ``raw`` is the register value as read."""
+    first = (raw > 0) == flag  # discharging / importing
+    how = {"balance": "power balance", "operator": "operator saw it", "both": "power balance, operator agreed"}[method]
+    evidence = f"{how} ({raw:+.0f} W)"
+    if kind == "battery":
+        proof = _Established(method, "discharging" if first else "charging", abs(raw))
+        session.battery_discharge_positive, session.battery_evidence, session.battery_proof = flag, evidence, proof
+    else:
+        proof = _Established(method, "importing" if first else "exporting", abs(raw))
+        session.grid_import_positive, session.grid_evidence, session.grid_proof = flag, evidence, proof
+    session.messages.pop(kind, None)
+
+
+@router.post("/auto-check")
+async def auto_check(
+    request: Request,
+    device_id: str,
+    admin: Annotated[dict | None, Depends(_require_admin_write)],
+) -> AssistantState:
+    """Prove the sign conventions from the power balance where the data allows; ask nobody."""
+    del admin
+    _device_or_404(request, device_id)
+    session = _live_session(request, device_id)
+    proof, sample = await _balance_proof(request, device_id)
+    if sample is not None:
+        if session.battery_discharge_positive is None and proof.battery_discharge_positive is not None:
+            _establish(session, "battery", proof.battery_discharge_positive, sample.battery_w, "balance")
+        if session.grid_import_positive is None and proof.grid_import_positive is not None:
+            _establish(session, "grid", proof.grid_import_positive, sample.grid_w, "balance")
+    return await _state(request, device_id, session)
+
+
 @router.post("/direction")
 async def direction(
     request: Request,
@@ -300,11 +451,15 @@ async def direction(
     body: DirectionBody,
     admin: Annotated[dict | None, Depends(_require_admin_write)],
 ) -> AssistantState:
-    """Derive one sign convention from a live reading and the operator's physical observation."""
+    """Derive one sign convention from a live reading and the operator's physical observation.
+
+    Used only where the power balance cannot prove it. An "idle" statement proves no direction: it is
+    checked against the live reading and otherwise changes nothing.
+    """
     del admin
     _device_or_404(request, device_id)
     session = _live_session(request, device_id)
-    allowed = {"battery": ("discharging", "charging"), "grid": ("importing", "exporting")}[body.kind]
+    allowed = {"battery": ("discharging", "charging", "idle"), "grid": ("importing", "exporting", "idle")}[body.kind]
     if body.answer not in allowed:
         raise HTTPException(422, "The answer does not belong to this question.")
     register = "battery_power" if body.kind == "battery" else "grid_power"
@@ -313,21 +468,32 @@ async def direction(
     except _Blocked as exc:
         session.messages[body.kind] = str(exc)
         return await _state(request, device_id, session)
+    if body.answer == "idle":
+        if abs(raw) >= MIN_DIRECTION_W:
+            session.messages[body.kind] = (
+                f"The inverter reports about {abs(raw):.0f} W, so the {body.kind} is not idle right now. "
+                "Choose what it is doing, or wait until the display shows it idle."
+            )
+        else:
+            session.messages.pop(body.kind, None)  # still unproven: the assistant keeps waiting
+        return await _state(request, device_id, session)
     if abs(raw) < MIN_DIRECTION_W:
         session.messages[body.kind] = (
             f"The inverter currently reports only {raw:.0f} W, which is too little to tell the direction. "
             "Try again when more power is flowing."
         )
         return await _state(request, device_id, session)
-    positive_means_first = raw > 0  # "first" answer = discharging / importing
     first = body.answer in ("discharging", "importing")
-    flag = positive_means_first == first
-    evidence = f"inverter reported {raw:.0f} W while the operator saw it {body.answer}"
-    if body.kind == "battery":
-        session.battery_discharge_positive, session.battery_evidence = flag, evidence
-    else:
-        session.grid_import_positive, session.grid_evidence = flag, evidence
-    session.messages.pop(body.kind, None)
+    flag = (raw > 0) == first
+    proof, _ = await _balance_proof(request, device_id)
+    proven = proof.battery_discharge_positive if body.kind == "battery" else proof.grid_import_positive
+    if proven is not None and proven != flag:
+        session.messages[body.kind] = (
+            "The inverter's own power balance points the other way, so your answer was not used and nothing "
+            "was saved. Look at the display again; if the readings stay inconsistent, check the inverter in its own app."
+        )
+        return await _state(request, device_id, session)
+    _establish(session, body.kind, flag, raw, "operator" if proven is None else "both")
     return await _state(request, device_id, session)
 
 
@@ -420,10 +586,7 @@ async def _run_hold_test(request: Request, device_id: str) -> tuple[int, str]:
                 await dispatch.set_capabilities(device_id, [write_record])
             except Exception:  # noqa: BLE001 - an unverified candidate left behind is harmless
                 log.warning("Could not reset the candidate strategy code: device=%s", device_id)
-    evidence = (
-        f"control test: with the strategy set, battery moved from {baseline:.0f} W to {last:.0f} W under a 0 W hold; "
-        "registers read back; previous state restored and read back"
-    )
+    evidence = f"control test: battery {baseline:.0f} -> {last:.0f} W under a 0 W hold, read back, restored"
     return code, evidence
 
 
@@ -497,7 +660,7 @@ async def commit(
         raise HTTPException(409, "The inverter identification changed during the verification. Start again.")
     assert session.code is not None and session.soc_target_unit is not None  # guaranteed by can_commit
     note = (
-        f"Guided: battery sign - {session.battery_evidence}; grid sign - {session.grid_evidence}; "
+        f"Guided: battery sign by {session.battery_evidence}; grid sign by {session.grid_evidence}; "
         f"{session.test_evidence}"
     )[:200]
     record_body = HardwareVerificationBody(

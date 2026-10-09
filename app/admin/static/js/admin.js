@@ -970,7 +970,7 @@
     setText(ref.address, `${device.host || NOT_AVAILABLE}${device.port ? `:${device.port}` : ''}`);
     if (device.last_success_at) setText(ref.last, `Last connection: ${formatDate(device.last_success_at, { time: true })}`);
     const serial = typeof device.serial_number === 'string' ? device.serial_number.trim() : '';
-    if (serial) setText(ref.serial, `Serial number: ${serial}`);
+    if (serial) setText(ref.serial, `S/N: ${serial}`);
     syncChildren(ref.meta, [ref.address, ...(serial ? [ref.serial] : []), ...(device.last_success_at ? [ref.last] : [])]);
     syncChildren(ref.head, [ref.top, ref.meta]);
     patchDeviceVisual(ref.visual, device);
@@ -2145,7 +2145,20 @@
     let running = false;
     let problem = null;
     let finished = false;
+    // The direction steps keep checking by themselves while the dialog is open: about five minutes at
+    // most (the server session lasts fifteen), then the operator restarts the wait with one click.
+    const POLL_MS = 3000;
+    const POLL_MAX = 100;
+    let pollTimer = null;
+    let pollCount = 0;
+    let pollStopped = false;
+    let epoch = 0;
+    let renderedStage = -1;
+    let liveNode = null;
+    let renderedKey = '';
     const power = (value) => (Number.isFinite(value) ? `${Math.round(Math.abs(value)).toLocaleString('en-GB')} W` : 'unknown');
+    const powerShort = (value) => (Math.abs(value) >= 1000
+      ? `${(Math.abs(value) / 1000).toLocaleString('en-GB', { maximumFractionDigits: 1 })} kW` : power(value));
 
     const modalEl = element('div', 'modal fade energy-assistant');
     modalEl.tabIndex = -1;
@@ -2184,20 +2197,107 @@
     const guarded = (task) => async () => {
       problem = null;
       running = true;
+      epoch += 1;
       render();
       try { await task(); } catch (error) { problem = messageFrom(error); } finally { running = false; render(); }
     };
     const note = (text, kind) => { const n = element('div', `alert alert-${kind} small`, text); n.setAttribute('role', kind === 'danger' ? 'alert' : 'status'); return n; };
-    const choice = (kind, options, lead) => {
+    // What an established sign step says in plain words, e.g. "the battery is charging with 1.2 kW".
+    const finding = (step) => {
+      const p = powerShort(step.power_w);
+      const what = {
+        discharging: `the battery is discharging with ${p}`,
+        charging: `the battery is charging with ${p}`,
+        importing: `the house is taking ${p} from the grid`,
+        exporting: `the house is feeding ${p} into the grid`,
+      }[step.direction];
+      if (step.method === 'operator') return `Confirmed by you: ${what}.`;
+      return `Checked automatically: ${what} (from the power balance${step.method === 'both' ? ', and you agreed' : ''}).`;
+    };
+    const findings = () => {
+      const done = (state ? state.steps.slice(0, 2) : []).filter((step) => step.status === 'done' && step.direction);
+      if (!done.length) return null;
+      const list = element('ul', 'energy-assistant-findings small list-unstyled');
+      for (const step of done) list.append(element('li', null, finding(step)));
+      return list;
+    };
+    // 'wait' while the quantity is (almost) zero or unreadable, 'ask' when it moves but the balance
+    // could not prove the direction. Nothing is stored while waiting.
+    const KINDS = [
+      { kind: 'battery', subject: 'battery', field: 'battery_power_w' },
+      { kind: 'grid', subject: 'grid', field: 'grid_power_w' },
+    ];
+    const directionMode = (index) => {
+      const value = state && state.readings ? state.readings[KINDS[index].field] : null;
+      return Number.isFinite(value) && Math.abs(value) >= state.min_direction_w ? 'ask' : 'wait';
+    };
+    const liveText = (index) => {
+      const value = state && state.readings ? state.readings[KINDS[index].field] : null;
+      return Number.isFinite(value) ? `Current reading: about ${power(value)}.` : 'The inverter did not report a current reading.';
+    };
+    const choice = (index) => {
+      const kind = KINDS[index].kind;
+      const options = index === 0
+        ? [['discharging', 'The battery is discharging (supplying the house)'], ['charging', 'The battery is charging (taking power in)'], ['idle', 'The battery is idle (neither charging nor discharging)']]
+        : [['importing', 'The house is taking power from the grid (import)'], ['exporting', 'The house is feeding power into the grid (export)'], ['idle', 'No power flows to or from the grid (idle)']];
       const wrap = element('div', 'd-grid gap-2');
-      wrap.append(element('p', null, lead));
-      for (const [answer, label] of options) wrap.append(button(label, 'btn-outline-primary text-start', guarded(async () => { state = await post('direction', { kind, answer }); })));
-      wrap.append(button("I can't tell", 'btn-link', () => { problem = 'Without a reliable observation the check cannot continue. Nothing was saved. Try again when you can see the inverter display or app.'; render(); }));
+      wrap.append(element('p', 'mb-1', index === 0 ? 'Right now, the battery is:' : 'Right now, the house is:'));
+      for (const [answer, label] of options) wrap.append(button(label, 'btn-primary', guarded(async () => { state = await post('direction', { kind, answer }); })));
       return wrap;
     };
+    const waiting = (index) => {
+      const box = element('div', 'alert alert-info small energy-assistant-waiting');
+      box.setAttribute('role', 'status');
+      const lead = index === 0
+        ? 'The battery is idle right now. The direction can be verified as soon as the battery charges or discharges.'
+        : 'No power flows to or from the grid right now. The direction can be verified as soon as the house imports or exports power.';
+      box.append(element('p', 'mb-1 fw-semibold', lead));
+      if (pollStopped) {
+        box.append(element('p', 'mb-0', 'Stopped waiting after a few minutes. Nothing was saved. Use "Check again" to keep waiting, or cancel and start again later.'));
+      } else {
+        const spin = element('span', 'spinner-border spinner-border-sm me-2'); spin.setAttribute('aria-hidden', 'true');
+        liveNode = element('span', null, liveText(index));
+        const line = element('p', 'mb-1'); line.append(spin, 'This window keeps checking by itself. ', liveNode);
+        box.append(line, element('p', 'mb-0', 'You do not have to do anything. If you cancel, nothing is saved and manual control stays locked.'));
+      }
+      return box;
+    };
+    const viewKey = () => {
+      if (!state) return '';
+      const parts = state.steps.map((step) => `${step.status}|${step.method}|${step.message}`);
+      const stage = stageOf();
+      return [stage, pollStopped, ...(stage === 1 || stage === 2 ? [directionMode(stage - 1)] : []), ...parts].join('#');
+    };
+    const schedulePoll = () => {
+      clearTimeout(pollTimer);
+      pollTimer = null;
+      const stage = stageOf();
+      if ((stage !== 1 && stage !== 2) || running || pollStopped || finished) return;
+      pollTimer = setTimeout(poll, POLL_MS);
+    };
+    async function poll() {
+      pollTimer = null;
+      if (running || finished || !modalEl.isConnected) return;
+      pollCount += 1;
+      if (pollCount > POLL_MAX) { pollStopped = true; render(); return; }
+      const mine = epoch;
+      try {
+        const next = await post('auto-check');
+        if (mine !== epoch || running || !modalEl.isConnected) return;
+        state = next;
+        if (viewKey() !== renderedKey) render();
+        else { if (liveNode) liveNode.textContent = liveText(stageOf() - 1); schedulePoll(); }
+      } catch (error) {
+        if (mine !== epoch || !modalEl.isConnected) return;
+        pollStopped = true;
+        problem = messageFrom(error);
+        render();
+      }
+    }
 
     function render() {
       const stage = stageOf();
+      liveNode = null;
       const steps = element('ol', 'energy-assistant-steps list-unstyled d-flex flex-wrap gap-2 small mb-3');
       LABELS.forEach((label, index) => {
         const item = element('li', `energy-assistant-step ${index < stage ? 'is-done' : ''} ${index === stage ? 'is-current' : ''}`, `${index + 1}. ${label}`);
@@ -2218,24 +2318,26 @@
         footerButtons.push(button('Check again', 'btn-primary', guarded(async () => { state = await post('start'); identified = false; })));
       } else if (stage === 0 && !(state && state.started)) {
         main.append(heading('Before you start'),
-          element('p', 'small', 'This guided check reads your inverter, asks you two simple questions about what the battery and the grid are doing right now, and runs one short test. Nothing is saved until the end, and you can cancel at any time.'),
+          element('p', 'small', 'This guided check reads your inverter and works out from its power readings whether the battery and the grid report their direction the way this app assumes. Only where the readings cannot settle that, it asks you what the battery or the grid is doing right now. Then it runs one short test. Nothing is saved until the end, and you can cancel at any time.'),
           element('p', 'small', 'The test briefly tells the inverter to hold the battery at 0 W (up to about 30 seconds) and then returns it to its previous state. The house keeps running; it may draw from the grid for that moment. The battery must be visibly charging or discharging when the test starts.'));
         footerButtons.push(button('Start check', 'btn-primary', guarded(async () => { state = await post('start'); identified = false; })));
       } else if (stage === 0) {
         main.append(heading('Is this your inverter?'),
           element('p', 'small', `The inverter reports itself as "${state.model}" with software "${state.firmware}".`));
-        footerButtons.push(button('Yes, continue', 'btn-primary', () => { identified = true; render(); }));
-      } else if (stage === 1) {
-        main.append(heading('What is the battery doing?'), stepMessage(0) || '',
-          element('p', 'small', `The inverter currently reports about ${power(state.readings?.battery_power_w)} of battery power. Check the inverter display or app.`),
-          choice('battery', [['discharging', 'The battery is discharging (supplying the house)'], ['charging', 'The battery is charging (taking power in)']], 'Right now, the battery is:'));
-      } else if (stage === 2) {
-        const r = state.readings || {};
-        main.append(heading('Grid: import or export?'), stepMessage(1) || '',
-          element('p', 'small', `Grid reading about ${power(r.grid_power_w)}, house about ${power(r.household_load_w)}, solar about ${power(r.solar_power_w)}. Check the inverter display or app.`),
-          choice('grid', [['importing', 'The house is taking power from the grid (import)'], ['exporting', 'The house is feeding power into the grid (export)']], 'Right now, the house is:'));
+        footerButtons.push(button('Yes, continue', 'btn-primary', guarded(async () => { identified = true; pollCount = 0; pollStopped = false; state = await post('auto-check'); })));
+      } else if (stage === 1 || stage === 2) {
+        const index = stage - 1;
+        const asking = directionMode(index) === 'ask';
+        const titles = [['What is the battery doing?', 'Waiting for the battery to move'], ['Grid: import or export?', 'Waiting for power to flow to or from the grid']];
+        main.append(heading(titles[index][asking ? 0 : 1]), findings() || '', stepMessage(index) || '');
+        if (asking) {
+          main.append(element('p', 'small', `The inverter's power readings do not settle this on their own. It reports about ${power(state.readings[KINDS[index].field])} here. Look at the inverter display or app, then answer.`), choice(index));
+        } else {
+          main.append(waiting(index));
+          if (pollStopped) footerButtons.push(button('Check again', 'btn-primary', guarded(async () => { pollCount = 0; pollStopped = false; state = await post('auto-check'); })));
+        }
       } else if (stage === 3) {
-        main.append(heading('Run the short test'), stepMessage(2) || '',
+        main.append(heading('Run the short test'), findings() || '', stepMessage(2) || '',
           element('p', 'small', 'The inverter will be told to hold the battery at 0 W for a few seconds, the result will be read back, and the previous state will be restored. Keep this window open until it finishes.'));
         const consent = element('div', 'form-check mb-2');
         const box = element('input', 'form-check-input'); box.type = 'checkbox'; box.id = `${uid}-consent`;
@@ -2248,7 +2350,8 @@
         footerButtons.push(run);
       } else {
         main.append(heading('Save the verification'),
-          element('p', 'small', `Verified: ${state.model}, software ${state.firmware}; battery and grid directions confirmed; control test passed and the inverter was restored.`),
+          element('p', 'small', `Verified: ${state.model}, software ${state.firmware}; battery and grid directions established; control test passed and the inverter was restored.`),
+          findings() || '',
           element('p', 'small text-warning-emphasis', 'Limit of this check: it holds the battery at 0 W and does not move it in either direction. The first charge or discharge you start is the first real movement, so watch the battery then.'));
         footerButtons.push(button('Save verification', 'btn-primary', guarded(async () => {
           const status = await post('commit', { confirm: true });
@@ -2264,12 +2367,17 @@
       for (const node of footerButtons) node.disabled = node.disabled || running;
       body.replaceChildren(steps, main);
       footer.replaceChildren(cancel, ...footerButtons);
+      renderedKey = viewKey();
+      if (stage !== renderedStage) { renderedStage = stage; main.querySelector('h3')?.focus(); }
+      schedulePoll();
     }
 
     modalEl.addEventListener('hide.bs.modal', (event) => { if (running) event.preventDefault(); });
     modalEl.addEventListener('keydown', (event) => { if (event.key === 'Escape' && !running) modal.hide(); });
     modalEl.addEventListener('shown.bs.modal', () => body.querySelector('h3')?.focus());
     modalEl.addEventListener('hidden.bs.modal', () => {
+      clearTimeout(pollTimer);
+      epoch += 1;
       if (!finished) api(base, { method: 'DELETE' }).catch(() => { });
       modal.dispose();
       modalEl.remove();
@@ -3589,26 +3697,21 @@
     return twin ? { field: 'host', message: 'This inverter address is already listed with the same network ID.' } : { field: '', message: '' };
   }
 
-  // A fresh, still empty row is ignored; every other row must be valid before anything is saved.
-  function isBlankNewRow(device) { return !device.device_id && !String(device.host || '').trim(); }
-
-  // Client-only stable identity. Handlers and the row DOM reference a device object, not an array
-  // index: an index does not survive a splice or a re-render, and replacing the array on a failed
-  // save would orphan every object the live handlers still hold.
+  // Client-only stable identity. Row DOM and handlers reference a device by uid, never by array
+  // index, because the list is replaced by the server's answer after every add and delete.
   let deviceUid = 0;
   function withUid(device) { if (!device._uid) device._uid = `d${++deviceUid}`; return device; }
-  // The draft becomes the server state; the baseline is what dirty-marking and Discard compare to.
+  // The list always mirrors the server state: there is no draft, each add or delete is saved at once.
   function adoptDevices(list) {
     settingsDraft.devices = (list || []).map(withUid);
-    deviceBaseline = settingsDraft.devices.map((device) => ({ ...deviceSnapshot(device), display_name: device.display_name || null }));
     return settingsDraft.devices;
   }
   function deviceByUid(uid) { return (settingsDraft.devices || []).find((device) => device._uid === uid) || null; }
 
   // Explicit fields instead of a spread, so the payload stays self-documenting and independent of
   // the server dropping unknown per-device keys (_normalize_devices rebuilds from a whitelist).
-  function devicesPayload() {
-    return settingsDraft.devices.filter((device) => !isBlankNewRow(device)).map((device) => ({
+  function devicesPayload(list) {
+    return list.map((device) => ({
       host: String(device.host).trim(),
       port: Number(device.port),
       network_id: networkId(device.network_id),
@@ -3617,199 +3720,230 @@
     }));
   }
 
-  // The device list is applied explicitly: edits only change the draft, and one PUT (with the live
-  // reconfiguration it triggers) is sent on Apply. Unlike the other settings it never autosaves.
-  let deviceBaseline = [];                  // server state: [{ uid, host, port, network_id, device_id, display_name }]
-  const deviceUi = { applying: false };
+  const deviceUi = { busy: false };
+  const deviceLabel = (entry) => `${String(entry.host).trim()}:${entry.port}`;
+  const RESET_NOTE = 'its verification evidence, Engineering Mode and operating mode are reset and its connection is closed';
 
-  function deviceSnapshot(device) {
-    return {
-      uid: device._uid,
-      host: String(device.host || '').trim(),
-      port: Number(device.port),
-      network_id: networkId(device.network_id),
-      device_id: device.device_id || null,
-    };
+  // The one place that sends the device list: a full-list PUT that reconfigures the live
+  // connections without a restart. Throws the api() error; the caller reports it inline.
+  async function commitDevices(next) {
+    const payload = { devices: devicesPayload(next) };
+    const result = await api('settings', { method: 'PUT', body: JSON.stringify(payload) });
+    settingsCommitted = result.settings || { ...settingsCommitted, ...payload };
+    adoptDevices(structuredClone(settingsCommitted.devices || payload.devices));
+    showRestartNotice(result.restart_required);
+    if (page === 'dashboard') { loadDashboard().catch((error) => toast(messageFrom(error), 'danger')); loadMetricCount(); }
   }
 
-  // Dirty state is derived from draft vs baseline, so there is no flag a stale handler could leave behind.
-  function deviceChanges() {
-    const base = new Map(deviceBaseline.map((entry) => [entry.uid, entry]));
-    const rows = new Map();   // uid -> 'New' | 'Changed'
-    const risky = [];         // baseline entries whose live state is reset by an apply
-    const seen = new Set();
-    for (const device of settingsDraft.devices || []) {
-      if (isBlankNewRow(device)) continue;
-      const before = base.get(device._uid);
-      if (!before) { rows.set(device._uid, 'New'); continue; }
-      seen.add(device._uid);
-      const now = deviceSnapshot(device);
-      if (now.host !== before.host || now.port !== before.port || now.network_id !== before.network_id) rows.set(device._uid, 'Changed');
-      if (now.host.toLowerCase() !== before.host.toLowerCase() || now.port !== before.port || now.network_id !== before.network_id) risky.push(before);
-    }
-    const removed = deviceBaseline.filter((entry) => !seen.has(entry.uid));
-    risky.push(...removed);
-    return { rows, removed, risky, count: rows.size + removed.length };
+  function deviceFailureMessage(error, action) {
+    const reason = messageFrom(error);
+    if (error?.status === 409) return `The change was rejected and rolled back (${reason}). The previous configuration is still active.`;
+    if (error?.status === 504) return `${action} timed out (${reason}). Check the dashboard before retrying.`;
+    return `${action} failed (${reason}).`;
   }
 
-  function deviceDirty() { return deviceChanges().count > 0; }
-
-  const deviceLabel = (entry) => `${entry.host}:${entry.port}`;
-  const RESET_NOTE = 'Verification evidence, Engineering Mode and operating mode of these inverters are reset';
-
-  // The only owner of the row markers, the Apply bar and the controls' locked state. Returns true if
-  // every non-blank row is valid; an invalid draft can never be applied.
-  function refreshDeviceState(card) {
-    let invalid = false;
-    const changes = deviceChanges();
-    for (const row of card.querySelectorAll('.device-settings-item')) {
-      const device = deviceByUid(row.dataset.uid);
-      if (!device) continue; // the row belongs to a draft generation that is already gone
-      const { field, message } = isBlankNewRow(device) ? { field: '', message: '' } : deviceProblem(device);
-      const feedback = row.querySelector('.invalid-feedback');
-      feedback.textContent = message;
-      // The feedback sits at row level, so it needs d-block instead of Bootstrap's sibling rule.
-      feedback.classList.toggle('d-block', Boolean(message));
-      for (const input of row.querySelectorAll('input[data-field]')) {
-        const offending = Boolean(message) && input.dataset.field === field;
-        input.classList.toggle('is-invalid', offending);
-        // Rewritten on every render, so no stale reference survives a splice or a re-render.
-        if (offending) input.setAttribute('aria-invalid', 'true');
-        else input.removeAttribute('aria-invalid');
-        const described = [input.dataset.help || '', offending ? feedback.id : ''].filter(Boolean).join(' ');
-        if (described) input.setAttribute('aria-describedby', described);
-        else input.removeAttribute('aria-describedby');
-      }
-      const flag = changes.rows.get(device._uid) || '';
-      row.classList.toggle('is-dirty', Boolean(flag));
-      const flagNode = row.querySelector('.device-row-flag');
-      flagNode.textContent = flag ? `${flag} — unsaved` : '';
-      flagNode.hidden = !flag;
-      if (message) invalid = true;
-    }
-    for (const control of card.querySelectorAll('.device-settings input, .device-settings button, #device-add-row')) control.disabled = deviceUi.applying;
-    const apply = card.querySelector('#device-apply');
-    if (apply) {
-      apply.disabled = deviceUi.applying || invalid || changes.count === 0;
-      apply.setAttribute('aria-busy', String(deviceUi.applying));
-    }
-    return !invalid;
+  // Outcome texts live in two persistent nodes (never rebuilt, so screen readers announce them):
+  // #device-status for results, #device-error (role=alert) for problems.
+  function setDeviceMessage(kind, text) {
+    const error = document.getElementById('device-error');
+    const status = document.getElementById('device-status');
+    if (error) { error.textContent = kind === 'error' ? text : ''; error.hidden = kind !== 'error' || !text; }
+    if (status) status.textContent = kind === 'status' ? text : '';
   }
 
-  // Rebuilds exactly the device card, so every change handler is re-bound to the current draft
-  // objects. Used after a successful add, after Discard changes, and after a removal.
-  function rebuildDeviceSection() {
-    const host = document.getElementById('device-editor') || $('settings-sections')?.querySelector('.device-settings');
-    const body = host?.parentElement;
-    if (!body) return; // not on this page, or the editor was never rendered
-    preserveFocus(() => {
-      body.replaceChildren(element('h2', 'h5 mb-3', 'Inverters'));
-      renderDevicesSettings(body);
+  function setDeviceBusy(busy) {
+    deviceUi.busy = busy;
+    const editor = document.getElementById('device-editor');
+    if (!editor) return;
+    for (const control of editor.querySelectorAll('input, button')) control.disabled = busy;
+    editor.querySelector('#device-add')?.setAttribute('aria-busy', String(busy));
+  }
+
+  function markDeviceField(field) {
+    const form = document.getElementById('device-add-form');
+    for (const input of form?.querySelectorAll('input[data-field]') || []) {
+      const offending = input.dataset.field === field;
+      input.classList.toggle('is-invalid', offending);
+      if (offending) input.setAttribute('aria-invalid', 'true');
+      else input.removeAttribute('aria-invalid');
+      const described = offending ? 'device-error' : (input.dataset.help || '');
+      if (described) input.setAttribute('aria-describedby', described);
+      else input.removeAttribute('aria-describedby');
+    }
+  }
+
+  // `scope` is the editor itself while it is still detached (first render), else the document.
+  function renderDeviceList(scope = document) {
+    const list = scope.querySelector('#device-list');
+    if (!list) return;
+    const devices = settingsDraft.devices || [];
+    list.replaceChildren(...devices.map((device) => deviceItem(device)));
+    scope.querySelector('#device-empty').hidden = devices.length > 0;
+  }
+
+  // A saved inverter is shown, not edited: re-addressing would be a fourth function of the dialog.
+  function deviceItem(device) {
+    const row = element('li', 'device-settings-item');
+    row.dataset.uid = device._uid;
+    const grid = element('div', 'row g-2 align-items-center');
+    const hostCol = element('div', 'col-12 col-sm');
+    hostCol.append(element('span', 'device-saved-host text-break', String(device.host)));
+    const portCol = element('div', 'col-6 col-sm-3', `Port ${device.port}`);
+    const network = networkId(device.network_id);
+    const networkCol = element('div', 'col-6 col-sm-3', network === null ? 'Direct connection' : `Network ID ${network}`);
+    const removeCol = element('div', 'col-auto ms-auto');
+    const remove = element('button', 'btn btn-outline-danger');
+    remove.type = 'button';
+    remove.title = 'Remove inverter';
+    remove.setAttribute('aria-label', `Remove inverter ${deviceLabel(device)}`);
+    const icon = element('span', 'material-icons', 'delete_outline');
+    icon.setAttribute('aria-hidden', 'true');
+    remove.append(icon);
+    remove.addEventListener('click', () => { removeDevice(device._uid, remove).catch((error) => toast(messageFrom(error), 'danger')); });
+    removeCol.append(remove);
+    grid.append(hostCol, portCol, networkCol, removeCol);
+    row.append(grid);
+    return row;
+  }
+
+  // Deleting reconfigures the live connections and resets the inverter's evidence and modes, so it
+  // asks first (the shared confirm dialog) and then saves at once.
+  async function removeDevice(uid, button) {
+    if (deviceUi.busy) return;
+    const device = deviceByUid(uid);
+    if (!device) return;
+    const label = deviceLabel(device);
+    const accepted = await confirmAction({
+      title: 'Remove inverter?',
+      message: `${label}: ${RESET_NOTE}.`,
+      confirmLabel: 'Remove inverter',
+      danger: true,
     });
+    if (!accepted) { if (button.isConnected) button.focus(); return; }
+    setDeviceMessage('status', '');
+    setDeviceBusy(true);
+    let failed = false;
+    try {
+      await commitDevices(settingsDraft.devices.filter((other) => other !== device));
+      renderDeviceList();
+      setDeviceMessage('status', `Inverter ${label} removed.`);
+    } catch (error) {
+      failed = true;
+      setDeviceMessage('error', deviceFailureMessage(error, 'Removing the inverter'));
+    } finally {
+      setDeviceBusy(false);
+    }
+    const editor = document.getElementById('device-editor');
+    if (!editor) return;
+    const target = failed && button.isConnected ? button : editor.querySelector('.device-settings-item button') || editor.querySelector('#device-new-host');
+    target?.focus();
+  }
+
+  // Validates the new row and saves the extended list at once. The input stays on any failure.
+  async function addDevice(card) {
+    if (deviceUi.busy) return;
+    const form = card.querySelector('#device-add-form');
+    const input = (field) => form.querySelector(`input[data-field="${field}"]`);
+    const candidate = withUid({
+      host: input('host').value.trim(),
+      port: input('port').value === '' ? null : Number(input('port').value),
+      network_id: networkId(input('network_id').value),
+    });
+    const problem = deviceProblem(candidate);
+    markDeviceField(problem.field);
+    if (problem.message) {
+      setDeviceMessage('error', problem.message);
+      input(problem.field).focus();
+      return;
+    }
+    setDeviceMessage('error', '');
+    setDeviceMessage('status', '');
+    setDeviceBusy(true);
+    let failed = false;
+    try {
+      await commitDevices([...settingsDraft.devices, candidate]);
+      renderDeviceList();
+      input('host').value = '';
+      input('port').value = '8899';
+      input('network_id').value = '';
+      setDeviceMessage('status', `Inverter ${deviceLabel(candidate)} added.`);
+    } catch (error) {
+      failed = true;
+      setDeviceMessage('error', deviceFailureMessage(error, 'Adding the inverter'));
+    } finally {
+      setDeviceBusy(false);
+    }
+    (failed ? card.querySelector('#device-add') : input('host'))?.focus();
   }
 
   function renderDevicesSettings(card) {
     const host = element('div', 'device-settings');
     host.id = 'device-editor'; // the anchor the persistent devices alert is inserted before
-    const devices = settingsDraft.devices || (settingsDraft.devices = []);
-    // One empty row is always offered, because "Add inverter" now confirms a row instead of
-    // creating one; without it the dialog would open with nowhere to type.
-    if (!devices.some(isBlankNewRow)) devices.push(withUid({ host: '', port: 8899, network_id: null }));
-    for (const [index, device] of devices.entries()) {
-      const row = element('div', 'device-settings-item');
-      row.dataset.uid = device._uid;  // identity
-      row.dataset.index = String(index); // rendering position only, never an identity
-      const grid = element('div', 'row g-2 align-items-start');
-      const hostCol = element('div', 'col-12 col-sm');
-      const hostInput = element('input', 'form-control');
-      // Ids derive from the stable row uid, not the loop index: preserveFocus() restores focus by
-      // id after rebuildDeviceSection(), so an index-derived id would move focus to a different row
-      // once a row above is removed (JS-01).
-      hostInput.id = `device-${device._uid}-host`;
-      hostInput.dataset.field = 'host';
-      hostInput.setAttribute('aria-label', 'IP address or host name');
-      hostInput.placeholder = 'IP address or host name';
-      hostInput.autocomplete = 'off';
-      hostInput.value = String(device.host ?? '');
-      hostCol.append(hostInput);
-      const portCol = element('div', 'col-6 col-sm-3');
-      const portInput = element('input', 'form-control');
-      portInput.id = `device-${device._uid}-port`;
-      portInput.dataset.field = 'port';
-      portInput.type = 'number';
-      portInput.min = '1'; portInput.max = '65535'; portInput.inputMode = 'numeric';
-      portInput.setAttribute('aria-label', 'Port');
-      portInput.value = String(device.port ?? '');
-      portCol.append(portInput);
-      const networkCol = element('div', 'col-6 col-sm-3');
-      // Visually hidden keeps the row aligned with the unlabelled host and port inputs.
-      const networkLabel = element('label', 'visually-hidden', 'Network ID (optional, empty means directly attached)');
-      networkLabel.htmlFor = `device-${device._uid}-network-id`;
-      const networkInput = element('input', 'form-control');
-      networkInput.id = `device-${device._uid}-network-id`;
-      networkInput.dataset.field = 'network_id';
-      networkInput.type = 'number';
-      networkInput.min = '0'; networkInput.max = String(MAX_NETWORK_ID); networkInput.inputMode = 'numeric';
-      networkInput.placeholder = 'Network ID (optional)';
-      // refreshDeviceState() composes aria-describedby from this plus the row's error node.
-      networkInput.dataset.help = 'device-network-help';
-      networkInput.setAttribute('aria-describedby', 'device-network-help');
-      networkInput.value = device.network_id === null || device.network_id === undefined ? '' : String(device.network_id);
-      networkCol.append(networkLabel, networkInput);
-      const removeCol = element('div', 'col-6 col-sm-auto');
-      const remove = element('button', 'btn btn-outline-danger');
-      remove.type = 'button';
-      remove.title = 'Remove inverter';
-      remove.setAttribute('aria-label', `Remove inverter ${device.host || index + 1}`);
-      const removeIcon = element('span', 'material-icons', 'delete_outline');
-      removeIcon.setAttribute('aria-hidden', 'true');
-      remove.append(removeIcon);
-      // The trailing empty row has nothing to remove; it is re-created on every render anyway.
-      if (!isBlankNewRow(device)) removeCol.append(remove);
-      grid.append(hostCol, portCol, networkCol, removeCol);
-      const flag = element('span', 'device-row-flag status-badge status-badge-warning mt-1');
-      flag.hidden = true;
-      const feedback = element('div', 'invalid-feedback');
-      feedback.id = `device-${device._uid}-feedback`;
-      row.append(grid, flag, feedback);
-      host.append(row);
-      // Draft only: no request is sent until Apply, so a spinner step cannot reconfigure anything.
-      const onInput = () => {
-        device.host = hostInput.value;
-        device.port = portInput.value === '' ? null : Number(portInput.value);
-        device.network_id = networkId(networkInput.value);
-        refreshDeviceState(card);
-      };
-      hostInput.addEventListener('input', onInput);
-      portInput.addEventListener('input', onInput);
-      networkInput.addEventListener('input', onInput);
-      remove.addEventListener('click', () => {
-        const restoreFocus = document.activeElement === remove;
-        // Removing only edits the draft; the reset warning is shown before the removal is applied.
-        const at = devices.indexOf(device);
-        if (at < 0) return; // a stale closure must not delete a different row
-        devices.splice(at, 1);
-        rebuildDeviceSection();  // rebinds every handler to the current draft objects
-        const editor = document.getElementById('device-editor');
-        // Not delegated to preserveFocus(): the remove buttons carry no id, so it cannot restore them.
-        if (restoreFocus) {
-          const rows = editor?.querySelectorAll('.device-settings-item');
-          (rows?.[Math.min(at, rows.length - 1)]?.querySelector('button')
-            || editor?.parentElement?.querySelector('.device-settings ~ button'))?.focus();
-        }
-        if (editor?.parentElement) refreshDeviceState(editor.parentElement);
-      });
-    }
+    const list = element('ul', 'list-unstyled device-list mb-0');
+    list.id = 'device-list';
+    list.setAttribute('aria-label', 'Configured inverters');
+    const empty = element('p', 'text-secondary small mb-0', 'No inverters configured yet.');
+    empty.id = 'device-empty';
+    const form = element('form', 'device-add');
+    form.id = 'device-add-form';
+    form.noValidate = true; // deviceProblem() reports the problem inline, not as a browser bubble
+    const row = element('div', 'device-settings-item');
+    const grid = element('div', 'row g-2 align-items-start');
+    const hostCol = element('div', 'col-12 col-sm');
+    const hostInput = element('input', 'form-control');
+    hostInput.id = 'device-new-host';
+    hostInput.dataset.field = 'host';
+    hostInput.setAttribute('aria-label', 'IP address or host name');
+    hostInput.placeholder = 'IP address or host name';
+    hostInput.autocomplete = 'off';
+    hostCol.append(hostInput);
+    const portCol = element('div', 'col-6 col-sm-3');
+    const portInput = element('input', 'form-control');
+    portInput.id = 'device-new-port';
+    portInput.dataset.field = 'port';
+    portInput.type = 'number';
+    portInput.min = '1'; portInput.max = '65535'; portInput.inputMode = 'numeric';
+    portInput.setAttribute('aria-label', 'Port');
+    portInput.value = '8899';
+    portCol.append(portInput);
+    const networkCol = element('div', 'col-6 col-sm-3');
+    // Visually hidden keeps the row aligned with the unlabelled host and port inputs.
+    const networkLabel = element('label', 'visually-hidden', 'Network ID (optional, empty means directly attached)');
+    networkLabel.htmlFor = 'device-new-network-id';
+    const networkInput = element('input', 'form-control');
+    networkInput.id = 'device-new-network-id';
+    networkInput.dataset.field = 'network_id';
+    networkInput.type = 'number';
+    networkInput.min = '0'; networkInput.max = String(MAX_NETWORK_ID); networkInput.inputMode = 'numeric';
+    networkInput.placeholder = 'Network ID (optional)';
+    networkInput.dataset.help = 'device-network-help';
+    networkInput.setAttribute('aria-describedby', 'device-network-help');
+    networkCol.append(networkLabel, networkInput);
+    grid.append(hostCol, portCol, networkCol);
+    const error = element('div', 'invalid-feedback d-block');
+    error.id = 'device-error';
+    error.setAttribute('role', 'alert');
+    error.hidden = true;
+    row.append(grid, error);
     const networkHelp = element('p', 'text-secondary small mt-2 mb-0', 'Network ID: leave empty for a direct connection. Only set it for an inverter reached through the master in the plant network.');
     networkHelp.id = 'device-network-help';
-    host.append(networkHelp);
-    if (devices.every(isBlankNewRow)) host.append(element('p', 'text-secondary small', 'No inverters configured yet.'));
-    const add = element('button', 'btn btn-outline-primary mt-3', 'Add another inverter');
-    add.type = 'button';
-    add.id = 'device-add-row';
-    add.addEventListener('click', () => addDeviceRow(card));
-    card.append(host, add, buildDeviceApplyBar(card));
-    refreshDeviceState(card);
+    const add = element('button', 'btn btn-primary mt-3', 'Add inverter');
+    add.type = 'submit';
+    add.id = 'device-add';
+    const status = element('p', 'text-secondary small mt-2 mb-0');
+    status.id = 'device-status';
+    status.setAttribute('role', 'status');
+    form.append(row, networkHelp, add, status);
+    for (const input of [hostInput, portInput, networkInput]) {
+      input.addEventListener('input', () => { markDeviceField(''); setDeviceMessage('error', ''); });
+    }
+    form.addEventListener('submit', (event) => {
+      event.preventDefault();
+      addDevice(card).catch((failure) => toast(messageFrom(failure), 'danger'));
+    });
+    host.append(list, empty, form);
+    card.append(host);
+    renderDeviceList(host);
   }
 
   // The shared action bar of every explicit-apply form: the Apply button alone. Its native disabled
@@ -3822,71 +3956,6 @@
     apply.addEventListener('click', onApply);
     bar.append(apply);
     return bar;
-  }
-
-  function buildDeviceApplyBar(card) {
-    const bar = buildApplyBar('device', {
-      onApply: () => { applyDevices(card).catch((error) => toast(messageFrom(error), 'danger')); },
-    });
-    bar.classList.add('mt-4');
-    return bar;
-  }
-
-  // Adds a draft row only; a still-empty row is reused instead of stacking blanks.
-  function addDeviceRow(card) {
-    const devices = settingsDraft.devices || (settingsDraft.devices = []);
-    if (!devices.some(isBlankNewRow)) devices.push(withUid({ host: '', port: 8899, network_id: null }));
-    rebuildDeviceSection();
-    const blank = devices.find(isBlankNewRow);
-    card.querySelector(`.device-settings-item[data-uid="${blank._uid}"] input[data-field="host"]`)?.focus();
-  }
-
-  function applyFailureMessage(error) {
-    const reason = messageFrom(error);
-    if (error?.status === 409) return `The inverter list was rejected and rolled back (${reason}). The previous configuration is still active; your changes are kept.`;
-    if (error?.status === 504) return `Applying the inverter list timed out (${reason}). Check the dashboard before retrying; your changes are kept.`;
-    return `The inverters were not applied (${reason}). Your changes are kept; apply again or discard them.`;
-  }
-
-  // The one place that sends the device list. Re-addressing or removing an inverter resets its
-  // verification evidence, Engineering Mode and operating mode, so it needs an explicit confirmation.
-  async function applyDevices(card) {
-    if (deviceUi.applying) return;
-    if (!refreshDeviceState(card)) {
-      card.querySelector('.device-settings-item input.is-invalid')?.focus();
-      return;
-    }
-    const changes = deviceChanges();
-    if (!changes.count) return;
-    if (changes.risky.length && !await confirmAction({
-      title: 'Apply inverter change?',
-      message: `${RESET_NOTE}: ${changes.risky.map(deviceLabel).join(', ')}.`,
-      confirmLabel: 'Apply change',
-      danger: true,
-    })) return;
-    deviceUi.applying = true;
-    refreshDeviceState(card);
-    let failed = false;
-    try {
-      const payload = { devices: devicesPayload() };
-      const result = await api('settings', { method: 'PUT', body: JSON.stringify(payload) });
-      settingsCommitted = result.settings || { ...settingsCommitted, ...payload };
-      // After a successful apply the draft is the server state, including newly assigned ids.
-      adoptDevices(structuredClone(settingsCommitted.devices || payload.devices));
-      showRestartNotice(result.restart_required);
-      if (page === 'dashboard') { loadDashboard().catch((error) => toast(messageFrom(error), 'danger')); loadMetricCount(); }
-      toast('Inverters applied.');
-    } catch (error) {
-      failed = true;
-      toast(applyFailureMessage(error), 'danger');
-    } finally {
-      deviceUi.applying = false;
-    }
-    const host = document.getElementById('device-editor');
-    if (!host?.parentElement) return;
-    if (failed) refreshDeviceState(host.parentElement);
-    else rebuildDeviceSection();
-    if (failed) document.getElementById('device-apply')?.focus();
   }
 
   // One builder for both renderSettings() and rerenderGroup(), so the Account relabel cannot drift

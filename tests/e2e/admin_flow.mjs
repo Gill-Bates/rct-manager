@@ -5,26 +5,13 @@
 
 // Browser E2E for the administration GUI against an isolated database and a simulated inverter.
 // Usage: PLAYWRIGHT_DIR=<dir containing node_modules/playwright> node tests/e2e/admin_flow.mjs <artifact-dir>
-import { spawn } from 'node:child_process';
-import { createRequire } from 'node:module';
 import net from 'node:net';
 import fs from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { check, engine, freePort, NEW_PASSWORD, OUT, results, sleep, spawnPy } from './harness.mjs';
 
-const require = createRequire(path.join(process.env.PLAYWRIGHT_DIR, 'noop.js'));
-const playwright = require('playwright');
-// BROWSER=chromium|webkit|firefox, VIEWPORT_WIDTH and COLOR_SCHEME=light|dark select the matrix cell.
-const engine = playwright[process.env.BROWSER || 'chromium'];
-const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
-const OUT = path.resolve(process.argv[2]);
-fs.mkdirSync(OUT, { recursive: true });
-const PY = process.env.PYTHON || path.join(ROOT, '.venv/bin/python');
-const NEW_PASSWORD = 'e2e-a-much-stronger-password';
-const results = [];
 const problems = [];
 
-const check = (name, ok, detail = '') => { results.push({ name, ok, detail }); console.log(`${ok ? 'PASS' : 'FAIL'} ${name} ${detail}`); };
 // Remove only errors produced by the current deliberate fault, never earlier failures.
 const scrubExpected = (start, matches, sink = problems) => {
   const kept = sink.slice(start).filter((problem) => !matches(problem));
@@ -55,20 +42,6 @@ const expectedRestartProblem = (problem, baseUrl) => problem.includes(`${baseUrl
   || problem.startsWith('http 503: GET ')
   || /^console error: Failed to load resource: the server responded with a status of 503/.test(problem)
 );
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-const freePort = () => new Promise((resolve) => { const s = net.createServer(); s.listen(0, '127.0.0.1', () => { const { port } = s.address(); s.close(() => resolve(port)); }); });
-
-const procs = [];
-process.once('exit', () => { for (const proc of procs) if (proc.exitCode === null) proc.kill('SIGTERM'); });
-function spawnPy(args, log) {
-  const proc = spawn(PY, ['-m', ...args], { cwd: ROOT, env: { ...process.env, PYTHONUNBUFFERED: '1' } });
-  let out = '';
-  proc.stdout.on('data', (d) => { out += d; fs.appendFileSync(log, d); });
-  proc.stderr.on('data', (d) => fs.appendFileSync(log, d));
-  procs.push(proc);
-  return { proc, output: () => out };
-}
-
 async function startServer(db, httpPort, devicePort, tag) {
   const server = spawnPy(['tests.e2e.run_server', db, String(httpPort), String(devicePort)], path.join(OUT, `server-${tag}.log`));
   for (let i = 0; i < 100; i++) {
@@ -252,9 +225,11 @@ const flowColors = await page.evaluate(() => {
 });
 check('discharge and PV/export share the same (green) flow colour', flowColors.discharge === flowColors.pv, JSON.stringify(flowColors));
 check('import and charge use distinct, non-green flow colours', flowColors.import !== flowColors.pv && flowColors.charge !== flowColors.pv && flowColors.import !== flowColors.charge, JSON.stringify(flowColors));
+// A dashboard poll without waiting out the 10s timer; the dashboard listens for visibilitychange.
+const forceDashboardPoll = () => page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
 const dashboardNetworkLegs = [];
 page.on('request', (r) => { if (r.url().includes('/admin/api/energy/devices')) dashboardNetworkLegs.push(r.url()); });
-await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
+await forceDashboardPoll();
 await page.waitForTimeout(300);
 check('the dashboard poll makes no energy/devices request', dashboardNetworkLegs.length === 0, dashboardNetworkLegs.join(','));
 
@@ -279,9 +254,8 @@ check('reload keeps the Battery level and House consumption tiles above the inve
 await page.evaluate(() => window.RCTAdmin.api('dashboard-layout', { method: 'DELETE' }));
 await page.reload();
 
-// The inverter image sits beside the power card's readings; the battery tower is now a stack of
-// top + N middle + bottom slices (app/admin/static/img/battery_{top,middle,bottom}.svg) beside the
-// battery card's readings, so the device no longer carries exactly 2 images.
+// The inverter image sits beside the power card's readings; each battery tower is a stack of
+// top + N middle + bottom slices (app/admin/static/img/battery_{top,middle,bottom}.svg).
 await page.waitForFunction(() => {
   const images = [...document.querySelectorAll('.device-visual img')];
   return images.length >= 3 && images.every((image) => image.complete);
@@ -295,9 +269,8 @@ const deviceImages = await page.locator('.device-visual img').evaluateAll((image
 })));
 const inverterImages = deviceImages.filter((image) => image.src === '/admin/static/img/rct-inverter.svg');
 const batterySliceImages = deviceImages.filter((image) => /\/admin\/static\/img\/battery_(top|middle|bottom)\.svg$/.test(image.src));
-// The simulated device now carries two battery towers (tests/e2e/fake_inverter.py: primary +
-// battery_placeholder_0), so there are two independent top+middle(s)+bottom stacks, each with
-// its own top/bottom slice, not globally exactly one of each.
+// The simulator reports two battery towers (primary + battery_placeholder_0), so each tower has
+// its own top and bottom slice.
 const towerCount = await page.locator('.device-subcard-battery').count();
 check('device card shows the inverter SVG and one battery slice stack per tower, all left of their readings',
   inverterImages.length === 1
@@ -397,10 +370,7 @@ check('stale API readings display values without stale labels or titles', staleR
 await page.unroute('**/admin/api/devices');
 
 // 2a. Device metadata stays in the header; the readings live in one power subcard plus one subcard
-// per battery tower. The previous .device-half-* / .device-divider / .device-metrics structure no
-// longer exists in the DOM, so the checks below are written against the current
-// .device-subcard-power / .device-subcard-battery layout - querying the old classes returned null
-// and asserted nothing at all.
+// per battery tower.
 // Module detection needs several consecutive stable reads (the pending state renders no tower), so
 // the second tower appears a few polls after the first paint; wait for it instead of sampling once.
 await page.waitForFunction(() => document.querySelectorAll('.device-subcard-battery').length >= 2, null, { timeout: 30000 }).catch(() => { /* reported by the checks below */ });
@@ -473,8 +443,7 @@ check('the inverter status is shown on the power subcard chip', /feed in/i.test(
 // ITEM 3/4: the simulated device has two towers (5 and 4 modules) with deliberately different SoC
 // and status values, so shared-metric rendering would be visible as two identical towers.
 check('one subcard per battery tower, titled Battery 1 and Battery 2',
-  layout.towers.length === 2 && layout.towers.map((tower) => tower.title).join(',') === 'Battery 1,Battery 2'
-  && layout.towers.length === 2,
+  layout.towers.length === 2 && layout.towers.map((tower) => tower.title).join(',') === 'Battery 1,Battery 2',
   JSON.stringify({ titles: layout.towers.map((t) => t.title) }));
 check('each tower shows its own charge level (55 % and 42 %), not a shared one',
   /^55\s*%$/.test(layout.towers[0].charge) && /^42\s*%$/.test(layout.towers[1].charge),
@@ -530,8 +499,11 @@ const patchBatteries = (mutate) => page.route('**/admin/api/devices', async (rou
   for (const device of data.devices) mutate(device.batteries || []);
   await route.fulfill({ response, json: data });
 });
-// A dashboard poll without waiting out the 10s timer; the dashboard listens for visibilitychange.
-const forceDashboardPoll = () => page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
+const trustModuleCount = (modules) => patchBatteries((batteries) => batteries.forEach((battery) => {
+  battery.module_count = modules;
+  battery.module_count_status = 'ok';
+  battery.populated_module_slots = [...Array(modules).keys()];
+}));
 const towerGeometry = async () => {
   await forceDashboardPoll();
   await page.waitForResponse((response) => response.url().endsWith('/admin/api/devices'), { timeout: 20000 }).catch(() => { });
@@ -549,11 +521,7 @@ const freshDashboardView = async () => {
 // (5) battery segments + 1 bottom cap. 2..5 modules render every module; the hardware maximum of
 // 6 modules (RCT_MAX_MODULES_PER_TOWER) is drawn with 5 segments and the note keeps the true count.
 for (const modules of [2, 3, 4, 5]) {
-  await patchBatteries((batteries) => batteries.forEach((battery) => {
-    battery.module_count = modules;
-    battery.module_count_status = 'ok';
-    battery.populated_module_slots = [...Array(modules).keys()];
-  }));
+  await trustModuleCount(modules);
   const towers = await towerGeometry();
   await page.unroute('**/admin/api/devices');
   check(`a ${modules}-module tower stays within the ${TOWER_HEIGHT_CAP}px height cap and shows all its modules`,
@@ -562,11 +530,7 @@ for (const modules of [2, 3, 4, 5]) {
       && tower.stack.width > 0 && tower.stack.width <= 80),
     JSON.stringify(towers.map((tower) => ({ middles: tower.middles, height: tower.stack.height, width: tower.stack.width }))));
 }
-await patchBatteries((batteries) => batteries.forEach((battery) => {
-  battery.module_count = 6;
-  battery.module_count_status = 'ok';
-  battery.populated_module_slots = [...Array(6).keys()];
-}));
+await trustModuleCount(6);
 const sixModuleTowers = await towerGeometry();
 await page.unroute('**/admin/api/devices');
 check('a trusted 6-module tower is drawn with 5 middle segments and still says "6 modules"',
@@ -577,11 +541,7 @@ check('a trusted 6-module tower is drawn with 5 middle segments and still says "
 // Taller towers must get narrower rather than taller: that is what keeps the cap without dropping
 // modules from the drawing. Both widths are within the graphic's 5-segment ceiling.
 const widthAt = async (modules) => {
-  await patchBatteries((batteries) => batteries.forEach((battery) => {
-    battery.module_count = modules;
-    battery.module_count_status = 'ok';
-    battery.populated_module_slots = [...Array(modules).keys()];
-  }));
+  await trustModuleCount(modules);
   const towers = await towerGeometry();
   await page.unroute('**/admin/api/devices');
   return towers[0].stack.width;
@@ -684,18 +644,11 @@ for (const width of [390, 320]) {
       && image.inside && (!image.stacked || (image.aboveReadings && image.centred))), JSON.stringify(images));
   if (width === 320) check('subcards are stacked (illustration above readings) at 320px', images.every((image) => image.stacked), JSON.stringify(images));
 }
-// The footer is fixed to the viewport bottom while .app-shell reserves --rct-footer-height (2.75rem)
-// there, so the last card must not merely touch the footer edge but keep a visible gap. Measured
-// gap between the last card's bottom and the footer top after scrolling to the end: 23.9px at 390px
-// and 12.7px at 320px, where the footer text wraps to two lines and the footer grows to 55.4px. A
-// sweep of 430..280px put the wrap between 344px (one line, 44px) and 330px, and the wrapped gap is
-// a constant 12.6875px from 330px down to 280px.
-// `reserveShortfall` is asserted, not merely recorded. Before the fix the footer was 11.375px taller
-// at 320px than .app-shell reserved, so the gap above survived on the last card's incidental height
-// rather than on the reserve: a taller final element would have slid under the footer. The CSS now
-// raises --rct-footer-height to 3.5rem below 420px, which feeds both the reserve and the footer's
-// min-height, so the reserve covers the wrapped footer by construction and the shortfall must be
-// <= 0 at every width measured here.
+// The footer is fixed to the viewport bottom while .app-shell reserves --rct-footer-height there,
+// so the last card must keep a visible gap above it. At 320px the footer text wraps to two lines;
+// below 420px the CSS raises --rct-footer-height to 3.5rem, which feeds both the reserve and the
+// footer's min-height. `reserveShortfall` must therefore be <= 0: a gap that only survives on the
+// last card's incidental height would let a taller final element slide under the footer.
 const MIN_FOOTER_GAP = 8;
 for (const width of [390, 320]) {
   await page.setViewportSize({ width, height: 844 });
@@ -727,10 +680,10 @@ const metaLine = () => page.evaluate(() => {
   return { items: [...meta.children].map((node) => node.textContent.trim()), text: meta.textContent, scrollW: document.documentElement.scrollWidth, clientW: document.documentElement.clientWidth };
 });
 await forceDashboardPoll();
-await page.waitForFunction(() => /Serial number: SIM1234567/.test(document.querySelector('.device-item .device-head-meta')?.textContent || ''), null, { timeout: 20000 }).catch(() => { /* reported below */ });
+await page.waitForFunction(() => /S\/N: SIM1234567/.test(document.querySelector('.device-item .device-head-meta')?.textContent || ''), null, { timeout: 20000 }).catch(() => { /* reported below */ });
 const withSerial = await metaLine();
 check('the device header shows the serial number between address and last connection',
-  withSerial.items.length === 3 && /:\d+$/.test(withSerial.items[0]) && withSerial.items[1] === 'Serial number: SIM1234567'
+  withSerial.items.length === 3 && /:\d+$/.test(withSerial.items[0]) && withSerial.items[1] === 'S/N: SIM1234567'
   && withSerial.items[2].startsWith('Last connection: '), JSON.stringify(withSerial.items));
 await page.setViewportSize({ width: 390, height: 844 });
 await page.waitForTimeout(300);
@@ -744,23 +697,21 @@ await page.route('**/admin/api/devices', async (route) => {
   await route.fulfill({ response, json: data });
 });
 await forceDashboardPoll();
-await page.waitForFunction(() => !/Serial number/.test(document.querySelector('.device-item .device-head-meta')?.textContent || ''), null, { timeout: 20000 }).catch(() => { /* reported below */ });
+await page.waitForFunction(() => !/S\/N/.test(document.querySelector('.device-item .device-head-meta')?.textContent || ''), null, { timeout: 20000 }).catch(() => { /* reported below */ });
 const withoutSerial = await metaLine();
 check('an unknown serial number is omitted cleanly from the device header',
-  withoutSerial.items.length === 2 && !/undefined|null|Serial/.test(withoutSerial.text) && withoutSerial.items[0].length > 0
+  withoutSerial.items.length === 2 && !/undefined|null|S\/N/.test(withoutSerial.text) && withoutSerial.items[0].length > 0
   && withoutSerial.items[1].startsWith('Last connection: '), JSON.stringify(withoutSerial.items));
 await page.unroute('**/admin/api/devices');
 
 // 2b. dashboard polling: a forced poll keeps the card nodes, and parameters are not part of the
-// loop. There is no manual refresh button anymore (removed per user request, auto-polling already
-// covers it); a visibilitychange dispatch forces the same loadDashboard({ automatic: true }) path
-// the real 10s timer and tab-focus handler use, without waiting out the interval.
+// loop. There is no manual refresh button; the visibilitychange dispatch takes the same automatic
+// loadDashboard() path as the 10s timer and the tab-focus handler.
 await page.evaluate(() => { document.querySelector('.device-item').dataset.probe = 'kept'; });
-const forcePoll = () => page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
 const waitForSuccessfulPoll = async () => {
   const before = await page.evaluate(() => JSON.parse(localStorage.getItem('rct.dashboard.snapshot') || 'null')?.at || 0);
   const response = page.waitForResponse((r) => new URL(r.url()).pathname === '/admin/api/devices' && r.status() === 200, { timeout: 20000 });
-  await forcePoll();
+  await forceDashboardPoll();
   await response;
   await page.waitForFunction((previous) => {
     const snapshot = JSON.parse(localStorage.getItem('rct.dashboard.snapshot') || 'null');
@@ -816,7 +767,7 @@ check('CSP header present', Boolean(csp && csp.includes("script-src 'self'")));
 check('no "Updated" timestamp line on the dashboard', (await page.locator('#dashboard-updated').count()) === 0);
 const rateFailureStart = problems.length;
 await page.route('**/admin/api/devices', (route) => route.fulfill({ status: 429, contentType: 'application/json', body: JSON.stringify({ detail: 'The request rate or the failed-authentication limit was exceeded.' }) }));
-await forcePoll();
+await forceDashboardPoll();
 await page.waitForFunction(() => document.querySelector('#toast-region .alert-danger'), null, { timeout: 8000 });
 check('no stale-data banner element exists on the page', (await page.locator('#dashboard-staleness').count()) === 0);
 // 350ms, not 150ms: the slide-in transition itself takes 300ms (admin.css), and the transform
@@ -834,7 +785,7 @@ const toastAnim = await page.evaluate(() => {
 const settledX = (matrix) => (matrix === 'none' ? 0 : Number(matrix.match(/matrix\(([^)]*)\)/)?.[1].split(',')[4] ?? NaN));
 check('surviving toast slid in from the right and is visible',
   Boolean(toastAnim?.visible && toastAnim.visibility === 'visible' && Math.abs(settledX(toastAnim.transform)) < 1), JSON.stringify(toastAnim));
-await forcePoll();
+await forceDashboardPoll();
 await page.waitForTimeout(350);
 const dupToastsAfter = await page.$$eval('#toast-region .alert-danger', (nodes) => nodes.filter((n) => n.textContent.includes('rate or the failed-authentication limit')).length);
 check('a second consecutive automatic failure does not stack another toast', dupToastsAfter === 1, String(dupToastsAfter));
@@ -855,7 +806,7 @@ const leaveState = await leavingToast.evaluate((node) => new Promise((resolve) =
 check('dismissed toast is marked leaving and slides out to the right', Boolean(leaveState?.leaving && settledX(leaveState.transform) > 0), JSON.stringify(leaveState));
 await page.waitForFunction(() => ![...document.querySelectorAll('#toast-region .alert-danger')].some((n) => n.textContent.includes('rate or the failed-authentication limit')), null, { timeout: 2000 });
 await page.unroute('**/admin/api/devices');
-await forcePoll();
+await forceDashboardPoll();
 await page.waitForTimeout(300);
 scrubExpected(rateFailureStart, (p) => p.includes(`${base}/admin/api/devices`) &&
   (p.startsWith('http 429: GET ') || (p.startsWith('console ') && p.includes('429'))));
@@ -865,7 +816,7 @@ scrubExpected(rateFailureStart, (p) => p.includes(`${base}/admin/api/devices`) &
 const kpiBefore = await page.locator('#pv-power').innerText();
 const unavailableStart = problems.length;
 await page.route('**/admin/api/devices', (route) => route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ detail: 'Administration is unavailable' }) }));
-await forcePoll();
+await forceDashboardPoll();
 await page.waitForFunction(() => document.querySelector('.dashboard-offline-banner:not([hidden])'), null, { timeout: 20000 });
 check('the offline banner is inline, names the last good data time and the server error',
   await page.evaluate(() => { const b = document.querySelector('.dashboard-offline-banner'); return getComputedStyle(b).position !== 'fixed' && /Server error \(503\).*\d\d:\d\d/.test(b.textContent); }));
@@ -873,7 +824,7 @@ const pvAfter = await page.locator('#pv-power').innerText();
 check('the last known KPI values are kept, not blanked', pvAfter === kpiBefore, `${pvAfter} vs ${kpiBefore}`);
 await shot('02d-dashboard-failed-poll');
 await page.unroute('**/admin/api/devices');
-await forcePoll();
+await forceDashboardPoll();
 await page.waitForFunction(() => !document.querySelector('#devices-list .text-danger'), null, { timeout: 20000 });
 scrubExpected(unavailableStart, (p) => p.includes(`${base}/admin/api/devices`) &&
   (p.startsWith('http 503: GET ') || (p.startsWith('console ') && p.includes('503'))));
@@ -993,6 +944,12 @@ const STACKED_PAGES = [
   ['/ui/tsdb', '#settings-sections .card'], ['/ui/tokens', '#tokens-title'],
   ['/ui/settings', '#settings-sections .card'], ['/ui/energy', '#energy-list > *'], ['/ui/about', '.about-top-row .card'],
 ];
+const openParamTable = async (url, prefix) => {
+  await page.goto(base + url);
+  await page.waitForSelector(`#${prefix}-list tr`, { state: 'attached' });
+  await page.waitForLoadState('networkidle');
+  await sleep(300);
+};
 async function stackedGeometry() {
   return page.evaluate(() => {
     const main = document.querySelector('#main-content');
@@ -1055,10 +1012,7 @@ for (const scheme of ['light', 'dark']) {
     // Prometheus and Inverters are one layout: same container edges, same card width, same Add action corner.
     const frames = {};
     for (const [url, prefix] of [['/ui/prometheus', 'exposed'], ['/ui/inverters', 'writable']]) {
-      await page.goto(base + url);
-      await page.waitForSelector(`#${prefix}-list tr`, { state: 'attached' });
-      await page.waitForLoadState('networkidle');
-      await sleep(300);
+      await openParamTable(url, prefix);
       frames[prefix] = await page.evaluate((pfx) => {
         const edges = (node) => { const r = node.getBoundingClientRect(); return { left: r.left, right: r.right, top: r.top, bottom: r.bottom, width: r.width }; };
         const card = document.getElementById(`${pfx}-list`).closest('.card');
@@ -1100,24 +1054,19 @@ for (const scheme of ['light', 'dark']) {
 // the footer once scrolled to the bottom, and a short page fills exactly the viewport (no scroll caused by the card).
 {
   const savedViewport = page.viewportSize();
-  const heightProbe = () => page.evaluate((pfx) => {
+  const heightProbe = (prefix) => page.evaluate((pfx) => {
     window.scrollTo({ top: document.documentElement.scrollHeight, behavior: 'instant' });
     const card = document.getElementById(`${pfx}-list`).closest('.card');
     const footer = document.querySelector('.admin-footer').getBoundingClientRect();
     const de = document.documentElement;
     return { cardToFooter: footer.top - card.getBoundingClientRect().bottom, docOverflowY: de.scrollHeight - de.clientHeight, footerTop: footer.top, cardBottom: card.getBoundingClientRect().bottom, rows: document.querySelectorAll(`#${pfx}-list .metric-row`).length };
-  }, pfx);
-  let pfx;
+  }, prefix);
   for (const [width, height] of [[1280, 720], [1280, 900], [1536, 864], [1280, 1200], [1280, 2200], [390, 844]]) {
     await page.setViewportSize({ width, height });
     const probes = {};
     for (const [url, prefix] of [['/ui/prometheus', 'exposed'], ['/ui/inverters', 'writable']]) {
-      await page.goto(base + url);
-      await page.waitForSelector(`#${prefix}-list tr`, { state: 'attached' });
-      await page.waitForLoadState('networkidle');
-      await sleep(300);
-      pfx = prefix;
-      probes[prefix] = await heightProbe();
+      await openParamTable(url, prefix);
+      probes[prefix] = await heightProbe(prefix);
     }
     const [pm, inv] = [probes.exposed, probes.writable];
     const label = `@${width}x${height}`;
@@ -1200,7 +1149,7 @@ const gridRows = async (selector) => page.evaluate((sel) => {
   }
   return [...rows.values()];
 }, selector);
-let rows = await gridRows('.settings-grid > .card');
+const rows = await gridRows('.settings-grid > .card');
 check('settings page renders more than one card per row', rows.some((r) => r.length > 1), JSON.stringify(rows));
 check('settings cards in one row share the same height', rows.every((r) => Math.max(...r) - Math.min(...r) <= 1), JSON.stringify(rows));
 const before = await page.isChecked('#setting-docs_public');
@@ -1312,193 +1261,172 @@ check('plus opens the inverter editor modal', (await page.locator('#inverters-mo
 await page.waitForFunction(() => document.getElementById('inverters-modal').contains(document.activeElement));
 check('focus stays in the modal', await page.evaluate(() => document.getElementById('inverters-modal').contains(document.activeElement)));
 const deviceRows = () => page.locator('.device-settings-item').count();
-const deviceField = (index, field) => page.locator('.device-settings-item').nth(index).locator(`input[data-field="${field}"]`);
+const savedRows = () => page.locator('#device-list .device-settings-item').count();
+const newField = (field) => page.locator(`#device-add-form input[data-field="${field}"]`);
 const modalOpen = () => page.locator('#inverters-modal.show').count();
-const rowState = (index) => page.evaluate((i) => {
-  const row = document.querySelectorAll('.device-settings-item')[i];
-  return {
-    invalid: [...row.querySelectorAll('input.is-invalid')].map((input) => input.dataset.field),
-    feedback: row.querySelector('.invalid-feedback').textContent,
-    flag: row.querySelector('.device-row-flag').hidden ? '' : row.querySelector('.device-row-flag').textContent,
-  };
-}, index);
 // A toast can sit over the bottom-right controls; closing it first keeps the click deterministic.
 const clearToasts = () => page.evaluate(() => document.querySelectorAll('#toast-region .alert').forEach((node) => node.remove()));
-const settleDevicePuts = async () => { await sleep(900); return devicePuts.length; }; // > the old 450 ms debounce
-const barState = () => page.evaluate(() => ({ apply: !document.getElementById('device-apply').disabled }));
-
+const settleDevicePuts = async () => { await sleep(900); return devicePuts.length; };
 const serverDevices = async () => (await (await context.request.get(base + '/admin/api/settings')).json()).settings.devices;
-const unloadWarns = () => page.evaluate(() => { const event = new Event('beforeunload', { cancelable: true }); window.dispatchEvent(event); return event.defaultPrevented; });
-check('the dialog offers one empty row below the saved inverter', (await deviceRows()) === 2, String(await deviceRows()));
-check('trash icon has an accessible label', (await page.locator('.device-settings-item').nth(0).locator('button[aria-label^="Remove inverter"] .material-icons').innerText()) === 'delete_outline');
-check('the empty row has no remove button', (await page.locator('.device-settings-item').nth(1).locator('button').count()) === 0);
+const formState = () => page.evaluate(() => {
+  const error = document.getElementById('device-error');
+  return {
+    invalid: [...document.querySelectorAll('#device-add-form input.is-invalid')].map((input) => input.dataset.field),
+    described: [...document.querySelectorAll('#device-add-form input[aria-invalid="true"]')].every((input) => input.getAttribute('aria-describedby') === 'device-error'),
+    error: error.hidden ? '' : error.textContent,
+    status: document.getElementById('device-status').textContent,
+  };
+});
+const trashFor = (host) => page.locator(`#device-list button[aria-label^="Remove inverter ${host}:"]`);
+const focusedLabel = () => page.evaluate(() => document.activeElement?.getAttribute('aria-label') || document.activeElement?.id || '');
+
+check('the dialog lists the saved inverter and offers one empty add row', (await savedRows()) === 1 && (await deviceRows()) === 2, `${await savedRows()}/${await deviceRows()}`);
+check('trash icon has an accessible label with the address', (await page.locator('#device-list button[aria-label^="Remove inverter "] .material-icons').first().innerText()) === 'delete_outline'
+  && /^Remove inverter \S+:\d+$/.test(await page.locator('#device-list button').first().getAttribute('aria-label')));
+check('saved inverters are shown as text, not editable', (await page.locator('#device-list input').count()) === 0);
 check('no id or name fields', (await page.locator('.device-settings-item input[data-field="device_id"], .device-settings-item input[data-field="display_name"]').count()) === 0);
-let bar = await barState();
-check('Apply is disabled while the draft is clean', !bar.apply, JSON.stringify(bar));
-check('the action bar is the Apply changes button alone',
-  (await page.locator('#device-apply').innerText()).trim() === 'Apply changes'
-  && (await page.locator('.apply-bar button').count()) === 1
-  && (await page.locator('.apply-bar .badge, .apply-bar p, #device-discard, #device-reset-warning').count()) === 0);
-check('a clean draft shows no browser warning', !(await unloadWarns()));
 
-// (b)-(d) invalid rows: field-level errors as before, Apply stays disabled, nothing is sent
+// The dialog has three functions only: add, delete (trash per saved row) and close.
+const modalButtons = await page.$$eval('#inverters-modal button', (nodes) => nodes.map((node) => node.id || node.className));
+check('the only buttons are close, add and one trash per saved inverter', modalButtons.length === 2 + (await savedRows())
+  && modalButtons.filter((name) => name.includes('btn-close')).length === 1 && modalButtons.includes('device-add'), JSON.stringify(modalButtons));
+const modalText = await page.locator('#inverters-modal').innerText();
+check('no Apply anywhere in the modal', !/apply/i.test(modalText) && (await page.locator('#device-apply, #inverters-modal .apply-bar, #inverters-modal .modal-footer').count()) === 0, modalText);
+check('the subtitle says each change takes effect immediately', modalText.includes('Each change takes effect immediately'));
+const addStyle = await page.evaluate(() => {
+  const button = document.getElementById('device-add');
+  const style = getComputedStyle(button);
+  return { classes: button.className, bg: style.backgroundColor, text: button.textContent.trim(), disabled: button.disabled };
+});
+check('Add inverter is a filled btn btn-primary button', addStyle.classes.split(' ').includes('btn-primary') && !addStyle.classes.includes('outline')
+  && addStyle.bg !== 'rgba(0, 0, 0, 0)' && addStyle.bg !== 'transparent' && addStyle.text === 'Add inverter' && !addStyle.disabled, JSON.stringify(addStyle));
+
+// Invalid input is reported inline on the offending field and nothing is sent.
 const putsBefore = devicePuts.length;
-await deviceField(1, 'host').fill('http://nope/path');
-let state = await rowState(1);
-check('invalid host is reported on the host field', state.invalid.join(',') === 'host' && state.feedback.includes('without scheme'), JSON.stringify(state));
-bar = await barState();
-check('an invalid draft keeps Apply disabled; the marked field says why', !bar.apply && (await rowState(1)).feedback.length > 0, JSON.stringify(bar));
-await deviceField(1, 'host').fill('192.0.2.10');
-await deviceField(1, 'port').fill('70000');
-state = await rowState(1);
-check('out-of-range port is reported on the port field, not the host', state.invalid.join(',') === 'port' && state.feedback.includes('65535'), JSON.stringify(state));
-const savedHost = await deviceField(0, 'host').inputValue();
-const savedPort = await deviceField(0, 'port').inputValue();
-await deviceField(1, 'host').fill(savedHost);
-await deviceField(1, 'port').fill(savedPort);
-state = await rowState(1);
-check('duplicate inverter is reported on the host field', state.invalid.join(',') === 'host' && state.feedback.includes('already listed'), JSON.stringify(state));
-check('invalid edits sent no request', (await settleDevicePuts()) === putsBefore && (await modalOpen()) === 1);
+await page.click('#device-add');
+let state = await formState();
+check('an empty host is reported on the host field and focused', state.invalid.join(',') === 'host' && state.error.includes('Enter an IP address') && state.described
+  && await page.evaluate(() => document.activeElement?.dataset.field === 'host'), JSON.stringify(state));
+await newField('host').fill('http://nope/path');
+check('typing clears the previous error', (await formState()).error === '');
+await page.click('#device-add');
+state = await formState();
+check('a host with a scheme is reported on the host field', state.invalid.join(',') === 'host' && state.error.includes('without scheme'), JSON.stringify(state));
+await newField('host').fill('192.0.2.10');
+await newField('port').fill('70000');
+await page.click('#device-add');
+state = await formState();
+check('an out-of-range port is reported on the port field, not the host', state.invalid.join(',') === 'port' && state.error.includes('65535'), JSON.stringify(state));
+const savedHost = (await page.locator('#device-list .device-saved-host').first().innerText()).trim();
+const savedPort = (await page.locator('#device-list .device-settings-item').first().innerText()).match(/Port (\d+)/)[1];
+await newField('host').fill(savedHost);
+await newField('port').fill(savedPort);
+await page.click('#device-add');
+state = await formState();
+check('a duplicate inverter is reported on the host field', state.invalid.join(',') === 'host' && state.error.includes('already listed'), JSON.stringify(state));
+check('invalid input sent no request and kept the dialog open', (await settleDevicePuts()) === putsBefore && (await modalOpen()) === 1);
 
-// (e) a valid new row: draft only, marked, counted, no request even past the old debounce window
-await deviceField(1, 'host').fill('192.0.2.10');
-await deviceField(1, 'port').fill('18899');
-await deviceField(1, 'port').dispatchEvent('change');
-await deviceField(1, 'port').focus();
-await page.keyboard.press('ArrowUp');
-await page.keyboard.press('ArrowUp');
-await page.keyboard.press('ArrowDown');
-check('a changed field sends no request, not even after change events and spinner steps', (await settleDevicePuts()) === putsBefore);
-state = await rowState(1);
-bar = await barState();
-check('the changed row is marked as unsaved', state.flag.includes('New') && state.flag.includes('unsaved'), JSON.stringify(state));
-check('Apply is enabled for the unsaved row', bar.apply, JSON.stringify(bar));
-check('leaving with an unsaved draft shows no browser warning', !(await unloadWarns()));
-await deviceField(1, 'port').fill('18899');
+// Add: a valid row is saved at once (Enter submits like the button), appears, persists.
+await newField('host').fill('192.0.2.10');
+await newField('port').fill('18899');
 await clearToasts();
-await page.click('#device-apply');
-await page.waitForFunction(() => document.getElementById('toast-region').textContent.includes('Inverters applied'), null, { timeout: 8000 });
-check('Apply sends exactly one PUT with the new list', devicePuts.length === putsBefore + 1
-  && devicePuts.at(-1).devices.length === 2 && devicePuts.at(-1).devices[1].host === '192.0.2.10' && devicePuts.at(-1).devices[1].port === 18899,
-  JSON.stringify(devicePuts.slice(putsBefore)));
-check('the PUT carries nothing but the device list', Object.keys(devicePuts.at(-1)).join(',') === 'devices');
-check('Apply keeps the dialog open and the server has the new inverter', (await modalOpen()) === 1 && (await serverDevices()).some((d) => d.host === '192.0.2.10' && Number(d.port) === 18899));
-bar = await barState();
-check('after a successful apply the draft is the server state', !bar.apply && (await deviceRows()) === 3, JSON.stringify(bar));
-check('no browser warning after apply', !(await unloadWarns()));
+await newField('host').press('Enter');
+await page.waitForFunction(() => document.getElementById('device-status').textContent.includes('added'), null, { timeout: 8000 });
+check('adding sends exactly one PUT with the full new list and nothing else', devicePuts.length === putsBefore + 1
+  && devicePuts.at(-1).devices.length === 2 && devicePuts.at(-1).devices[1].host === '192.0.2.10' && devicePuts.at(-1).devices[1].port === 18899
+  && Object.keys(devicePuts.at(-1)).join(',') === 'devices', JSON.stringify(devicePuts.slice(putsBefore)));
+check('the server has the new inverter and the dialog stays open', (await modalOpen()) === 1 && (await serverDevices()).some((d) => d.host === '192.0.2.10' && Number(d.port) === 18899));
+check('the new inverter appears as a saved row and the add row is empty again', (await savedRows()) === 2 && (await trashFor('192.0.2.10').count()) === 1
+  && (await newField('host').inputValue()) === '' && (await newField('port').inputValue()) === '8899', `${await savedRows()}`);
+check('focus moves to the empty host input after an add', await page.evaluate(() => document.activeElement?.id === 'device-new-host'));
+check('the result is announced in a polite status region', (await page.locator('#device-status[role="status"]').innerText()).includes('192.0.2.10:18899 added'));
 await shot('inverter-added');
-
-// (f) Reloading the page drops an unsaved draft silently and sends nothing
-const putsAtDiscard = devicePuts.length;
-await deviceField(0, 'port').fill(String(Number(savedPort) + 1));
-check('editing a saved row marks it as changed', (await rowState(0)).flag.includes('Changed'), JSON.stringify(await rowState(0)));
 await page.reload();
 await page.click('#add-inverter');
 await page.waitForSelector('#inverters-modal.show .device-settings-item input[data-field="host"]');
-check('reloading restores the server state and sends nothing', (await deviceField(0, 'port').inputValue()) === savedPort && (await settleDevicePuts()) === putsAtDiscard);
+await page.waitForSelector('#device-list .device-settings-item');
+check('the added inverter persists after a reload', (await savedRows()) === 2 && (await trashFor('192.0.2.10').count()) === 1);
+await newField('host').fill('192.0.2.10');
+await newField('port').fill('18899');
+await page.click('#device-add');
+check('adding the same address again is refused inline', (await formState()).error.includes('already listed'));
 
-// (g) re-addressing needs a confirmation that names the reset; cancelling sends nothing
-const extraRow = 1;
-await deviceField(extraRow, 'port').fill('18898');
-await clearToasts();
-await page.click('#device-apply');
-await page.waitForSelector('#confirm-modal.show', { timeout: 5000 });
-const confirmText = await page.locator('#confirm-modal .modal-body').innerText();
-check('re-addressing asks for confirmation that names the reset', confirmText.includes('Verification evidence, Engineering Mode and operating mode') && confirmText.includes('192.0.2.10:18899'), confirmText);
-check('the confirmation focuses the safe button', await page.waitForFunction(() => document.activeElement?.id === 'confirm-cancel', null, { timeout: 3000 }).then(() => true).catch(() => false));
-await page.click('#confirm-cancel');
-await page.waitForSelector('#confirm-modal.show', { state: 'detached', timeout: 5000 }).catch(() => { });
-await sleep(300);
-check('cancelling the confirmation sends nothing and keeps the draft', devicePuts.length === putsAtDiscard && (await barState()).apply);
-
-// (h) a rejected apply keeps the draft, toasts once, shows the error and moves focus to it
-const injectedApplyStart = problems.length;
+// A server rejection stays inline, keeps the input and focuses the add button.
+const injectedStart = problems.length;
+await newField('host').fill('192.0.2.77');
+await newField('port').fill('18877');
 await page.route('**/admin/api/settings', (route) => route.request().method() === 'PUT'
   ? route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ detail: 'Injected failure' }) })
   : route.continue());
-await clearToasts();
-await page.click('#device-apply');
-await page.waitForSelector('#confirm-modal.show', { timeout: 5000 });
-await page.click('#confirm-accept');
-await page.waitForFunction(() => [...document.querySelectorAll('#toast-region .alert-danger')].some((n) => n.textContent.includes('Injected failure')), null, { timeout: 8000 });
-bar = await barState();
-check('a failed apply names the reason and keeps the draft', bar.apply && (await page.locator('#toast-region .alert-danger').first().innerText()).includes('kept'), JSON.stringify(bar));
-check('a failed apply raises the danger toast exactly once',
-  (await page.$$eval('#toast-region .alert-danger', (nodes) => nodes.filter((n) => n.textContent.includes('Injected failure')).length)) === 1);
-check('focus returns to the Apply button after a failed apply', await page.evaluate(() => document.activeElement?.id === 'device-apply'));
-check('the draft value survives the failed apply', (await deviceField(extraRow, 'port').inputValue()) === '18898');
+await page.click('#device-add');
+await page.waitForFunction(() => document.getElementById('device-error').textContent.includes('Injected failure'), null, { timeout: 8000 });
+check('a failed add names the reason inline and keeps the input', (await newField('host').inputValue()) === '192.0.2.77' && (await newField('port').inputValue()) === '18877'
+  && (await savedRows()) === 2 && (await page.locator('#device-error[role="alert"]').count()) === 1);
+check('focus returns to the add button and it is usable again', await page.evaluate(() => document.activeElement?.id === 'device-add' && !document.activeElement.disabled));
 await page.unroute('**/admin/api/settings');
 await page.route('**/admin/api/settings', (route) => route.request().method() === 'PUT'
   ? route.fulfill({ status: 409, contentType: 'application/json', body: JSON.stringify({ detail: 'Device graph build failed' }) })
   : route.continue());
-await clearToasts();
-await page.click('#device-apply');
-await page.waitForSelector('#confirm-modal.show', { timeout: 5000 });
-await page.click('#confirm-accept');
-await page.waitForFunction(() => [...document.querySelectorAll('#toast-region .alert-danger')].some((n) => n.textContent.includes('rolled back')), null, { timeout: 8000 });
-check('a 409 reports the rollback and keeps the draft', (await page.locator('#toast-region .alert-danger').first().innerText()).includes('Device graph build failed') && (await barState()).apply);
+await page.click('#device-add');
+await page.waitForFunction(() => document.getElementById('device-error').textContent.includes('rolled back'), null, { timeout: 8000 });
+check('a 409 reports the rollback and the reason', (await page.locator('#device-error').innerText()).includes('Device graph build failed'));
 await page.unroute('**/admin/api/settings');
-await page.route('**/admin/api/settings', (route) => route.request().method() === 'PUT'
-  ? route.fulfill({ status: 504, contentType: 'application/json', body: JSON.stringify({ detail: 'Reconfiguration timed out' }) })
-  : route.continue());
-await clearToasts();
-await page.click('#device-apply');
-await page.waitForSelector('#confirm-modal.show', { timeout: 5000 });
-await page.click('#confirm-accept');
-await page.waitForFunction(() => [...document.querySelectorAll('#toast-region .alert-danger')].some((n) => n.textContent.includes('timed out')), null, { timeout: 8000 });
-check('a 504 reports the timeout and keeps the draft', (await barState()).apply);
-await page.unroute('**/admin/api/settings');
-scrubExpected(injectedApplyStart, (p) => p.includes(`${base}/admin/api/settings`) &&
-  (p.startsWith('http 500: PUT ') || p.startsWith('http 409: PUT ') || p.startsWith('http 504: PUT ')
-    || (p.startsWith('console ') && /\b(500|409|504)\b/.test(p))));
 
-// (i) the Apply button is locked while the request runs: no double submit
-const putsAtApply = devicePuts.length;
+// Double submit: the button is locked while the request runs.
+const putsAtLock = devicePuts.length;
 await page.route('**/admin/api/settings', async (route) => {
   if (route.request().method() === 'PUT') await sleep(700);
   await route.continue();
 });
-await clearToasts();
-await page.click('#device-apply');
-await page.waitForSelector('#confirm-modal.show', { timeout: 5000 });
-await page.click('#confirm-accept');
-await page.waitForFunction(() => document.getElementById('device-apply').disabled, null, { timeout: 3000 });
-const lockedWhileSending = await page.evaluate(() => document.getElementById('device-apply').disabled && document.getElementById('device-apply').getAttribute('aria-busy') === 'true');
-await page.locator('#device-apply').click({ force: true, timeout: 500 }).catch(() => { });
-await page.waitForFunction(() => document.getElementById('toast-region').textContent.includes('Inverters applied'), null, { timeout: 8000 });
+await page.click('#device-add');
+await page.waitForFunction(() => document.getElementById('device-add').disabled, null, { timeout: 3000 });
+const locked = await page.evaluate(() => document.getElementById('device-add').getAttribute('aria-busy') === 'true');
+await page.locator('#device-add').click({ force: true, timeout: 500 }).catch(() => { });
+await page.waitForFunction(() => document.getElementById('device-status').textContent.includes('added'), null, { timeout: 8000 });
 await page.unroute('**/admin/api/settings');
-check('Apply is locked during the request and sends exactly one PUT', lockedWhileSending && devicePuts.length === putsAtApply + 1, String(devicePuts.length - putsAtApply));
-check('the re-addressed inverter is on the server', (await serverDevices()).some((d) => d.host === '192.0.2.10' && Number(d.port) === 18898));
+check('Add is busy during the request and sends exactly one PUT', locked && devicePuts.length === putsAtLock + 1, String(devicePuts.length - putsAtLock));
+scrubExpected(injectedStart, (p) => p.includes(`${base}/admin/api/settings`) &&
+  (p.startsWith('http 500: PUT ') || p.startsWith('http 409: PUT ') || (p.startsWith('console ') && /\b(500|409)\b/.test(p))));
 
-// (j) removing an inverter is a draft edit until Apply; it carries the same reset warning
-await page.locator('.device-settings-item').nth(extraRow).locator('button').click();
-check('Remove drops the row from the draft only', (await deviceRows()) === 2 && (await serverDevices()).some((d) => d.host === '192.0.2.10'));
-bar = await barState();
-check('a pending removal enables Apply', bar.apply, JSON.stringify(bar));
-const putsAtRemove = devicePuts.length;
+// Delete: the trash icon asks first (the reset warning), cancelling sends nothing, accepting saves at once.
+const putsAtDelete = devicePuts.length;
 await clearToasts();
-await page.click('#device-apply');
+await trashFor('192.0.2.77').click();
 await page.waitForSelector('#confirm-modal.show', { timeout: 5000 });
-check('the confirmation names the reset and the removed inverter', /192\.0\.2\.10:18898/.test(await page.locator('#confirm-modal').innerText()) && /Engineering Mode/.test(await page.locator('#confirm-modal').innerText()));
+const confirmText = await page.locator('#confirm-modal .modal-body').innerText();
+check('the confirmation names the inverter and the reset', confirmText.includes('192.0.2.77:18877') && /Engineering Mode/.test(confirmText), confirmText);
+await page.click('#confirm-cancel');
+await page.waitForSelector('#confirm-modal.show', { state: 'detached', timeout: 5000 }).catch(() => { });
+await sleep(300);
+check('cancelling sends nothing, keeps the row and returns focus to its trash icon', devicePuts.length === putsAtDelete && (await trashFor('192.0.2.77').count()) === 1
+  && (await focusedLabel()) === 'Remove inverter 192.0.2.77:18877', await focusedLabel());
+await page.route('**/admin/api/settings', (route) => route.request().method() === 'PUT'
+  ? route.fulfill({ status: 409, contentType: 'application/json', body: JSON.stringify({ detail: 'Active battery dispatch' }) })
+  : route.continue());
+await trashFor('192.0.2.77').click();
+await page.waitForSelector('#confirm-modal.show', { timeout: 5000 });
 await page.click('#confirm-accept');
-await page.waitForFunction(() => document.getElementById('toast-region').textContent.includes('Inverters applied'), null, { timeout: 8000 });
-check('Apply removes the inverter with exactly one PUT', devicePuts.length === putsAtRemove + 1 && devicePuts.at(-1).devices.length === 1
-  && !(await serverDevices()).some((d) => d.host === '192.0.2.10'));
-
-// (k) a draft survives closing and reopening the dialog
-await deviceField(1, 'host').fill('192.0.2.55');
-await page.click('#inverters-modal .btn-close');
-await page.waitForSelector('#inverters-modal', { state: 'hidden' });
-await page.click('#add-inverter');
-await page.waitForSelector('#inverters-modal.show .device-settings-item input[data-field="host"]');
-check('an unsaved draft survives closing the dialog', (await deviceField(1, 'host').inputValue()) === '192.0.2.55' && (await barState()).apply);
+await page.waitForFunction(() => document.getElementById('device-error').textContent.includes('Active battery dispatch'), null, { timeout: 8000 });
+check('a refused delete shows the reason inline and keeps the row', (await trashFor('192.0.2.77').count()) === 1 && (await serverDevices()).some((d) => d.host === '192.0.2.77'));
+await page.unroute('**/admin/api/settings');
+scrubExpected(injectedStart, (p) => p.includes(`${base}/admin/api/settings`) && (p.startsWith('http 409: PUT ') || (p.startsWith('console ') && /\b409\b/.test(p))));
+await trashFor('192.0.2.77').click();
+await page.waitForSelector('#confirm-modal.show', { timeout: 5000 });
+await page.click('#confirm-accept');
+await page.waitForFunction(() => document.getElementById('device-status').textContent.includes('192.0.2.77:18877 removed'), null, { timeout: 8000 });
+check('deleting sends one PUT, removes the row and the server entry', (await trashFor('192.0.2.77').count()) === 0 && (await serverDevices()).every((d) => d.host !== '192.0.2.77')
+  && devicePuts.at(-1).devices.length === 2, JSON.stringify(devicePuts.at(-1)));
+await trashFor('192.0.2.10').click();
+await page.waitForSelector('#confirm-modal.show', { timeout: 5000 });
+await page.click('#confirm-accept');
+await page.waitForFunction(() => document.getElementById('device-status').textContent.includes('192.0.2.10:18899 removed'), null, { timeout: 8000 });
+check('the second delete leaves only the original inverter', (await savedRows()) === 1 && (await serverDevices()).length === 1 && devicePuts.at(-1).devices.length === 1);
+check('focus lands on a usable control after a delete', await page.evaluate(() => document.getElementById('inverters-modal').contains(document.activeElement)));
 await page.reload();
 await page.click('#add-inverter');
 await page.waitForSelector('#inverters-modal.show .device-settings-item input[data-field="host"]');
-check('reloading clears the leftover draft', (await deviceField(1, 'host').inputValue()) === '' && !(await barState()).apply);
-// "Add another inverter" reuses the empty row and focuses it
-await page.click('#device-add-row');
-check('Add another inverter focuses the empty row without sending anything', await deviceField(1, 'host').evaluate((input) => document.activeElement === input) && (await deviceRows()) === 2);
+await page.waitForSelector('#device-list .device-settings-item');
+check('the deletion persists after a reload', (await savedRows()) === 1 && (await trashFor('192.0.2.10').count()) === 0);
 await page.click('#inverters-modal .btn-close');
 await page.waitForSelector('#inverters-modal', { state: 'hidden' });
 // (g) no stray bottom-right Close button
@@ -1867,7 +1795,12 @@ await shot('prometheus-master-toggle-on');
   const energyPort = await freePort();
   // Its own simulated inverter: two app instances on one device would be competing clients.
   const energyDevicePort = await freePort();
-  const energyFake = spawnPy(['tests.e2e.fake_inverter', String(energyDevicePort)], path.join(OUT, 'fake-energy.log'));
+  // The simulator re-reads this file on every answer, so the assistant scenarios (idle battery,
+  // unusable balance) can be switched while the dialog is open.
+  const fakeOverrides = path.join(OUT, 'fake-energy-overrides.json');
+  const setScenario = (values) => fs.writeFileSync(fakeOverrides, JSON.stringify(values));
+  setScenario({});
+  const energyFake = spawnPy(['tests.e2e.fake_inverter', String(energyDevicePort), fakeOverrides], path.join(OUT, 'fake-energy.log'));
   const spawned = spawnPy(['tests.e2e.run_server', energyDb, String(energyPort), String(energyDevicePort), 'energy'], path.join(OUT, 'server-energy.log'));
   try {
     await waitForPort(energyDevicePort);
@@ -1998,17 +1931,110 @@ await shot('prometheus-master-toggle-on');
         (await ep.locator('#energy-expert-mode').isChecked()) === false && /Before you start/.test(await dialog.innerText()));
       await dialog.getByRole('button', { name: 'Start check' }).click();
       await dialog.getByRole('button', { name: 'Yes, continue' }).click();
-      await dialog.getByRole('button', { name: /The battery is discharging/ }).click();
-      await dialog.getByRole('button', { name: /feeding power into the grid/ }).click();
+      // Scenario A: a consistent power balance proves both directions, so nobody is asked.
+      await dialog.getByRole('heading', { name: 'Run the short test' }).waitFor({ timeout: 15000 });
+      const provenText = await dialog.innerText();
+      check('proven directions are explained in plain words and nobody is asked',
+        /Checked automatically: the battery is discharging with 400 W \(from the power balance\)/.test(provenText)
+        && /Checked automatically: the house is feeding 250 W into the grid \(from the power balance\)/.test(provenText)
+        && (await dialog.getByRole('button', { name: /^The (battery|house) / }).count()) === 0, provenText.slice(0, 400));
       check('the assistant reaches the test step and offers no register names',
-        /Run the short test/.test(await dialog.innerText()) && !/power_mng|Strategy code|Byte width/.test(await dialog.innerText()));
+        /Run the short test/.test(provenText) && !/power_mng|Strategy code|Byte width/.test(provenText));
+      check('the assistant never offers "I can\'t tell"', !/can.t tell/i.test(provenText));
+      await ep.screenshot({ path: path.join(OUT, 'assistant-auto-proven.png') });
       const runButton = dialog.getByRole('button', { name: 'Run test' });
       check('the test button stays disabled until the operator consents', await runButton.isDisabled());
+      // Footer buttons follow the canonical variants: one filled primary, Cancel as the secondary.
+      const variantStyle = (locator, cls) => locator.evaluate((node, probeClass) => {
+        const probe = document.createElement('button');
+        probe.className = probeClass;
+        probe.textContent = 'Probe';
+        node.after(probe);
+        const keys = ['fontSize', 'fontWeight', 'lineHeight', 'paddingTop', 'paddingLeft', 'borderRadius', 'backgroundColor', 'color', 'borderTopColor'];
+        const pick = (el) => { const style = getComputedStyle(el); return keys.map((key) => style[key]).join('|'); };
+        const result = { own: pick(node), canonical: pick(probe), fill: getComputedStyle(node).backgroundColor };
+        probe.remove();
+        return result;
+      }, cls);
+      const runStyle = await variantStyle(runButton, 'btn btn-primary');
+      check('"Run test" is the canonical filled primary button', runStyle.own === runStyle.canonical, `${runStyle.own} vs ${runStyle.canonical}`);
+      const cancelStyle = await variantStyle(dialog.getByRole('button', { name: 'Cancel' }), 'btn btn-outline-secondary');
+      check('"Cancel" is the canonical secondary button', cancelStyle.own === cancelStyle.canonical, `${cancelStyle.own} vs ${cancelStyle.canonical}`);
       await dialog.getByRole('button', { name: 'Cancel' }).click();
       await ep.waitForSelector('.energy-assistant', { state: 'detached', timeout: 5000 });
       check('cancelling the assistant leaves the hardware unverified',
         (await ep.locator('.energy-setup-step button', { hasText: 'Verify hardware' }).count()) === 1
-        && (await ep.locator('.energy-actions button').count()) >= 0 && (await ep.locator('.energy-setup:not([hidden])').count()) >= 1);
+        && (await ep.locator('.energy-setup:not([hidden])').count()) >= 1);
+      const openAssistant = async () => {
+        await ep.locator('.energy-setup-step button', { hasText: 'Verify hardware' }).click();
+        await dialog.waitFor({ timeout: 5000 });
+        await dialog.getByRole('button', { name: 'Start check' }).click();
+        await dialog.getByRole('button', { name: 'Yes, continue' }).click();
+      };
+      const closeAssistant = async () => {
+        await dialog.getByRole('button', { name: 'Cancel' }).click();
+        await ep.waitForSelector('.energy-assistant', { state: 'detached', timeout: 5000 });
+      };
+
+      // Scenario B: no usable load reading, so the balance proves nothing and the operator is asked,
+      // with three filled primary buttons and without any "I can't tell".
+      setScenario({ household_load_power: 0 });
+      await openAssistant();
+      await dialog.getByRole('heading', { name: 'What is the battery doing?' }).waitFor({ timeout: 15000 });
+      const questionText = await dialog.innerText();
+      const options = dialog.locator('.modal-body button');
+      check('the fallback question offers exactly discharging, charging and idle',
+        (await options.count()) === 3
+        && (await dialog.getByRole('button', { name: /^The battery is discharging/ }).count()) === 1
+        && (await dialog.getByRole('button', { name: /^The battery is charging/ }).count()) === 1
+        && (await dialog.getByRole('button', { name: /^The battery is idle \(neither charging nor discharging\)/ }).count()) === 1, questionText.slice(0, 400));
+      check('the fallback question has no "I can\'t tell" option', !/can.t tell/i.test(questionText));
+      const optionStyles = [];
+      for (let i = 0; i < 3; i++) optionStyles.push(await variantStyle(options.nth(i), 'btn btn-primary'));
+      check('every answer button is the canonical filled primary button',
+        optionStyles.every((item) => item.own === item.canonical && !/rgba\(0, 0, 0, 0\)/.test(item.fill)), JSON.stringify(optionStyles[0]));
+      await ep.screenshot({ path: path.join(OUT, 'assistant-question.png') });
+      await dialog.getByRole('button', { name: /^The battery is idle/ }).click();
+      await dialog.getByText(/is not idle right now/).waitFor({ timeout: 5000 });
+      check('an idle statement that contradicts the live reading is refused and proves nothing',
+        (await dialog.getByRole('heading', { name: 'What is the battery doing?' }).count()) === 1);
+      await dialog.getByRole('button', { name: /^The battery is discharging/ }).click();
+      await dialog.getByRole('heading', { name: 'Grid: import or export?' }).waitFor({ timeout: 5000 });
+      check('a confirmed answer is summarised and the grid question follows',
+        /Confirmed by you: the battery is discharging with 400 W/.test(await dialog.innerText()) && (await dialog.locator('.modal-body button').count()) === 3);
+      await dialog.getByRole('button', { name: /^The house is feeding power into the grid/ }).click();
+      await dialog.getByRole('heading', { name: 'Run the short test' }).waitFor({ timeout: 5000 });
+      await closeAssistant();
+
+      // Scenario C: the battery is idle. Nothing may be guessed; the dialog waits, explains, keeps
+      // polling and continues by itself once the battery moves.
+      setScenario({ battery_power: 0, household_load_power: 1784.5 });
+      await openAssistant();
+      await dialog.getByText('The battery is idle right now.').waitFor({ timeout: 15000 });
+      const waitingText = await dialog.innerText();
+      check('an idle battery shows a waiting state with the grid result and no guess',
+        /Waiting for the battery to move/.test(waitingText) && /Checked automatically: the house is feeding 250 W into the grid/.test(waitingText)
+        && (await dialog.locator('.modal-body button').count()) === 0 && !/can.t tell/i.test(waitingText), waitingText.slice(0, 400));
+      check('the waiting state is announced politely',
+        (await dialog.locator('.modal-body[aria-live=polite] .energy-assistant-waiting[role=status]').count()) === 1);
+      await ep.screenshot({ path: path.join(OUT, 'assistant-waiting-light-1280.png') });
+      await ep.setViewportSize({ width: 390, height: 844 });
+      await sleep(300);
+      await ep.screenshot({ path: path.join(OUT, 'assistant-waiting-light-390.png') });
+      check('the waiting state fits a 390 px viewport without horizontal scrolling',
+        await ep.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1));
+      await ep.evaluate(() => document.documentElement.setAttribute('data-bs-theme', 'dark'));
+      await ep.screenshot({ path: path.join(OUT, 'assistant-waiting-dark-390.png') });
+      await ep.setViewportSize({ width: 1280, height: 900 });
+      await sleep(300);
+      await ep.screenshot({ path: path.join(OUT, 'assistant-waiting-dark-1280.png') });
+      await ep.evaluate(() => document.documentElement.setAttribute('data-bs-theme', 'light'));
+      setScenario({}); // the battery starts moving with a consistent balance
+      await dialog.getByRole('heading', { name: 'Run the short test' }).waitFor({ timeout: 20000 });
+      check('the assistant continues by itself once the battery moves',
+        /Checked automatically: the battery is discharging with 400 W/.test(await dialog.innerText()));
+      await closeAssistant();
+
       // The Expert form checks below need the Expert section.
       await ep.locator('#energy-expert-mode').check();
     }
@@ -2044,8 +2070,7 @@ await shot('prometheus-master-toggle-on');
       await dialog.waitFor({ timeout: 5000 });
       await dialog.getByRole('button', { name: 'Start check' }).click();
       await dialog.getByRole('button', { name: 'Yes, continue' }).click();
-      await dialog.getByRole('button', { name: /The battery is discharging/ }).click();
-      await dialog.getByRole('button', { name: /feeding power into the grid/ }).click();
+      await dialog.getByRole('heading', { name: 'Run the short test' }).waitFor({ timeout: 15000 });
       await dialog.getByLabel(/I understand the battery will pause/).check();
       await dialog.getByRole('button', { name: 'Run test' }).click();
       await dialog.getByRole('button', { name: 'Save verification' }).waitFor({ timeout: 60000 });
@@ -2074,8 +2099,7 @@ await shot('prometheus-master-toggle-on');
     await ep.goto(`${energyBase}/ui/energy`);
     await ep.waitForSelector('.energy-panel');
     check('energy page renders a device panel', (await ep.locator('.energy-panel').count()) >= 1);
-    // Stage 1 moved the flow graphic to the dashboard and removed the Energy page's own instance
-    // (energyFlowGraphic() is now shared, single-instance); the panel keeps its control column.
+    // The flow graphic lives on the dashboard only; the Energy panel keeps its control column.
     check('the Energy Manager panel no longer contains its own flow graphic', (await ep.locator('.energy-panel .energy-flow-svg').count()) === 0);
     // The relabelled, Operate-layer action buttons (presentation only; REST names unchanged).
     const buttons = ['Charge battery', 'Keep battery idle', 'Discharge battery']
@@ -2138,10 +2162,7 @@ await shot('prometheus-master-toggle-on');
     check('Manual enables the available actions', afterArm.some((disabled) => !disabled), JSON.stringify(afterArm));
 
     // A token cannot command a Manual inverter: 409 energy_manager_not_external (the PAT is created below via the API).
-    const patBody = await ep.evaluate(async () => {
-      const token = await (await fetch('/admin/api/tokens', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': (await (await fetch('/admin/api/session')).json()).csrf_token }, body: JSON.stringify({ name: 'e2e-mode', role: 'read/write' }) })).json();
-      return token;
-    });
+    const patBody = await ep.evaluate(async () => (await fetch('/admin/api/tokens', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': (await (await fetch('/admin/api/session')).json()).csrf_token }, body: JSON.stringify({ name: 'e2e-mode', role: 'read/write' }) })).json());
     const secret = patBody.token || patBody.secret || '';
     if (secret) {
       const viaPat = await ep.request.post(`${energyBase}/api/v1/devices/sim/energy/command`, { headers: { Authorization: `Bearer ${secret}` }, data: { action: 'hold' } });
@@ -2258,8 +2279,13 @@ await shot('prometheus-master-toggle-on');
 }
 
 // 6a. GridStack dashboard layout: edit mode, move+resize a widget, autosave, reload, reset.
+const pvWidgetReady = () => page.waitForFunction(() => document.querySelector('#dashboard-grid .grid-stack-item[data-widget-id="pv-power"]')?.gridstackNode);
+const pvPosition = () => page.evaluate(() => {
+  const node = document.querySelector('.grid-stack-item[data-widget-id="pv-power"]').gridstackNode;
+  return { x: node.x, y: node.y, w: node.w, h: node.h };
+});
 await page.goto(base + '/ui/dashboard');
-await page.waitForFunction(() => document.querySelector('#dashboard-grid .grid-stack-item[data-widget-id="pv-power"]')?.gridstackNode);
+await pvWidgetReady();
 const editToggle = page.locator('#dashboard-edit-toggle');
 check('dashboard starts in view mode with the drag handle hidden',
   await editToggle.isVisible() && !(await page.locator('.dashboard-widget-header').first().isVisible())
@@ -2295,11 +2321,8 @@ check('autosave shows the "Dashboard layout saved." toast once', (await toastTex
 await page.unroute('**/admin/api/dashboard-layout');
 
 await page.reload();
-await page.waitForFunction(() => document.querySelector('#dashboard-grid .grid-stack-item[data-widget-id="pv-power"]')?.gridstackNode);
-const afterReload = await page.evaluate(() => {
-  const node = document.querySelector('.grid-stack-item[data-widget-id="pv-power"]').gridstackNode;
-  return { x: node.x, y: node.y, w: node.w, h: node.h };
-});
+await pvWidgetReady();
+const afterReload = await pvPosition();
 check('the moved/resized position persists after a browser reload',
   afterReload.x === movedPosition.x && afterReload.y === movedPosition.y
   && afterReload.w === movedPosition.w && afterReload.h === movedPosition.h,
@@ -2312,18 +2335,12 @@ await page.waitForSelector('#confirm-modal.show', { timeout: 5000 });
 check('"Restore default layout?" confirmation was shown', (await page.locator('#confirm-title').innerText()) === 'Restore default layout?');
 await page.click('#confirm-accept');
 await sleep(400);
-const afterReset = await page.evaluate(() => {
-  const node = document.querySelector('.grid-stack-item[data-widget-id="pv-power"]').gridstackNode;
-  return { x: node.x, y: node.y, w: node.w, h: node.h };
-});
+const afterReset = await pvPosition();
 check('reset layout restores the default pv-power position immediately',
   afterReset.x === 0 && afterReset.y === 0 && afterReset.w === 2 && afterReset.h === 2, JSON.stringify(afterReset));
 await page.reload();
-await page.waitForFunction(() => document.querySelector('#dashboard-grid .grid-stack-item[data-widget-id="pv-power"]')?.gridstackNode);
-const afterResetReload = await page.evaluate(() => {
-  const node = document.querySelector('.grid-stack-item[data-widget-id="pv-power"]').gridstackNode;
-  return { x: node.x, y: node.y, w: node.w, h: node.h };
-});
+await pvWidgetReady();
+const afterResetReload = await pvPosition();
 check('default position survives a reload after reset',
   afterResetReload.x === 0 && afterResetReload.y === 0 && afterResetReload.w === 2 && afterResetReload.h === 2,
   JSON.stringify(afterResetReload));

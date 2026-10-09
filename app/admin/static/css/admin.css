@@ -569,7 +569,7 @@ body {
 .device-item h3 {
     font-size: 1.5rem;
     line-height: 1.2;
-    font-weight: 650;
+    font-weight: 500;
     overflow-wrap: anywhere;
 }
 
@@ -1400,10 +1400,9 @@ body {
     align-items: end;
 }
 
-/* Unsaved rows are marked by more than colour: the badge text carries the state too. */
-.device-settings-item.is-dirty {
-    border-color: var(--bs-warning);
-    border-left-width: .3rem;
+.device-list {
+    display: grid;
+    gap: .8rem;
 }
 
 /* Saving is reported by the toast only; the status text stays for screen readers (aria-live). */
@@ -1973,6 +1972,14 @@ body.is-reconnecting #reconnect-modal.show .reconnect-pulse {
     .parameter-item {
         min-height: 44px;
     }
+
+    /* Centres the label text in its 44px box, level with the centred switch; the gap stands in
+       for the collapsed space before an inline <span>. */
+    .form-check-label {
+        display: flex;
+        align-items: center;
+        column-gap: .25em;
+    }
 }
 
 /* Three 44px header buttons no longer fit beside the brand text on a phone: keep the text for
@@ -2039,4 +2046,9 @@ body.is-reconnecting #reconnect-modal.show .reconnect-pulse {
     color: var(--bs-body-color);
     font-weight: 600;
     background: var(--bs-tertiary-bg);
+}
+
+.energy-assistant-findings {
+    margin-bottom: 1rem;
+    color: var(--bs-success-text-emphasis);
 }

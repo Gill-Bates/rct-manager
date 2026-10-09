@@ -155,21 +155,21 @@ def test_header_is_sticky_above_content_and_toasts_stay_on_top():
 def test_device_editor_has_host_port_and_network_id_fields():
     js = (ADMIN_DIR / "static/js/admin.js").read_text(encoding="utf-8")
     assert "Device ID" not in js and "Display name" not in js
-    assert ("data-field" in js or "dataset.field" in js) and "Add another inverter" in js
+    assert ("data-field" in js or "dataset.field" in js) and "Add inverter" in js
     # The network id is part of the backend uniqueness key, so master/slave setups need the field.
     assert "'network_id'" in js and "Network ID" in js
     assert "networkLabel.htmlFor" in js and "networkInput.inputMode = 'numeric'" in js
-    # The blank trailing row goes through the same single place that mints a device identity.
-    assert "devices.push(withUid({ host: '', port: 8899, network_id: null }))" in js
+    # The add row is a native form, so Enter submits exactly like the button.
+    assert "form.addEventListener('submit'" in js and "add.type = 'submit';" in js
 
 
-def test_device_duplicate_rule_matches_the_backend_key_and_apply_adopts_the_server_list():
+def test_device_duplicate_rule_matches_the_backend_key_and_a_save_adopts_the_server_list():
     js = (ADMIN_DIR / "static/js/admin.js").read_text(encoding="utf-8")
     assert "networkId(other.network_id) === network" in js  # host, port and network id together
     assert "Object.assign(device, (result.settings" not in js
-    # After a successful apply the draft is the server state, including newly assigned ids.
-    apply_block = js[js.index("async function applyDevices(card)"):js.index("function buildGroupBody(")]
-    assert "adoptDevices(structuredClone(settingsCommitted.devices || payload.devices));" in apply_block
+    # After a successful save the list is the server state, including newly assigned ids.
+    save_block = js[js.index("async function commitDevices(next)"):js.index("function deviceFailureMessage(")]
+    assert "adoptDevices(structuredClone(settingsCommitted.devices || payload.devices));" in save_block
 
 
 def test_numeric_settings_carry_their_own_bounds():
@@ -381,7 +381,7 @@ def test_tsdb_form_has_a_button_only_apply_bar_and_does_not_autosave():
     assert 'id="export-actions"' in html and "align-items-end" in html
     # The shared bar is parameterised, not overridden: TSDB asks for the button alone.
     assert "buildApplyBar('export', {" in js
-    builder = js[js.index("function buildApplyBar("):js.index("function buildDeviceApplyBar(")]
+    builder = js[js.index("function buildApplyBar("):js.index("function buildGroupBody(")]
     # Every explicit-apply form shows the button alone: no Discard, count badge or status text.
     assert "'Discard'" not in builder and "badge" not in builder and "status" not in builder
     assert "bar.append(apply);" in builder and "'Apply changes'" in builder
@@ -431,36 +431,59 @@ def test_failed_settings_save_does_not_re_render_the_whole_page():
 
 
 def test_device_list_has_no_autosave_path():
-    """The device list reconfigures live connections, so only an explicit Apply may send it."""
+    """The device list reconfigures live connections, so only an explicit add or delete may send it."""
     js = (ADMIN_DIR / "static/js/admin.js").read_text(encoding="utf-8")
     assert "queueSettings('devices')" not in js
     assert "pendingKeys.has('devices')" not in js
     assert "function syncDeviceInputs(" not in js and "function addInverter(" not in js
     assert "function devicesValid()" not in js
-    editor = js[js.index("function renderDevicesSettings(card)"):js.index("function buildDeviceApplyBar(")]
-    assert "addEventListener('change'" not in editor  # edits are draft-only, on input
-    assert "addEventListener('input', onInput)" in editor
+    editor = js[js.index("function renderDevicesSettings(card)"):js.index("function buildApplyBar(")]
+    assert "addEventListener('change'" not in editor  # typing never saves anything
     # Exactly one request site sends the devices key.
-    assert js.count("body: JSON.stringify({ devices") + js.count("payload = { devices: devicesPayload() }") == 1
+    assert js.count("body: JSON.stringify({ devices") + js.count("payload = { devices: devicesPayload(next) }") == 1
     template = (TEMPLATES / "dashboard.html").read_text(encoding="utf-8")
     assert "saved automatically" not in template
 
 
-def test_device_apply_bar_is_explicit_accessible_and_guards_reset_and_unload():
+def test_inverters_dialog_has_no_apply_step_and_only_add_delete_and_close():
     js = (ADMIN_DIR / "static/js/admin.js").read_text(encoding="utf-8")
-    bar = js[js.index("function buildApplyBar("):js.index("function addDeviceRow(")]
-    assert "'Apply changes'" in bar and "apply.id = `${prefix}-apply`" in bar and "'Discard'" not in bar
-    assert "buildApplyBar('device'" in bar
-    assert "discardDeviceChanges" not in js and "device-reset-warning" not in js
-    state = js[js.index("function refreshDeviceState(card)"):js.index("function rebuildDeviceSection()")]
-    assert "apply.disabled = deviceUi.applying || invalid || changes.count === 0;" in state
-    run = js[js.index("async function applyDevices(card)"):js.index("function buildGroupBody(")]
-    assert "if (deviceUi.applying) return;" in run
-    assert "confirmAction({" in run and "message: `${RESET_NOTE}" in run and "changes.risky.length" in run
-    assert "document.getElementById('device-apply')?.focus()" in run
-    assert "error?.status === 409" in js and "error?.status === 504" in js
-    # Leaving the page with an unsaved draft is silent: no native beforeunload dialog anywhere.
+    html = (TEMPLATES / "dashboard.html").read_text(encoding="utf-8")
+    modal = html[html.index('<div id="inverters-modal"'):html.index("{% endblock %}", html.index('<div id="inverters-modal"'))]
+    # No apply concept left: no bar, no Apply/Discard/Reset text, no dirty tracking, no unload guard.
+    assert "apply" not in modal.lower() and "Apply" not in modal
+    for gone in ("device-apply", "buildDeviceApplyBar", "applyDevices", "deviceChanges", "deviceBaseline",
+                 "deviceDirty", "discardDeviceChanges", "isBlankNewRow", "is-dirty", "Add another inverter"):
+        assert gone not in js, gone
     assert "beforeunload" not in js and "onbeforeunload" not in js and "returnValue" not in js
+    editor = js[js.index("function renderDeviceList("):js.index("function buildApplyBar(")]
+    # Controls of the dialog: the close button (template), one submit button, one trash per row.
+    assert modal.count("<button") == 1 and 'data-bs-dismiss="modal"' in modal
+    assert editor.count("element('button'") == 2
+    assert "const add = element('button', 'btn btn-primary mt-3', 'Add inverter');" in editor
+    assert "add.type = 'submit';" in editor
+    assert "const remove = element('button', 'btn btn-outline-danger');" in editor
+    assert "remove.setAttribute('aria-label', `Remove inverter ${deviceLabel(device)}`);" in editor
+    # Saved rows are text, not inputs: re-addressing an inverter is not a function of the dialog.
+    item = js[js.index("function deviceItem(device)"):js.index("async function removeDevice(")]
+    assert "element('input'" not in item
+
+
+def test_inverters_dialog_saves_each_add_and_delete_at_once_and_reports_inline():
+    js = (ADMIN_DIR / "static/js/admin.js").read_text(encoding="utf-8")
+    remove = js[js.index("async function removeDevice("):js.index("// Validates the new row")]
+    # Deleting is destructive (resets evidence and modes): the shared confirm dialog comes first.
+    assert remove.index("await confirmAction({") < remove.index("await commitDevices(")
+    assert "danger: true" in remove and "if (deviceUi.busy) return;" in remove
+    assert "setDeviceMessage('error', deviceFailureMessage(error, 'Removing the inverter'))" in remove
+    add = js[js.index("async function addDevice(card)"):js.index("function renderDevicesSettings(card)")]
+    assert "if (deviceUi.busy) return;" in add
+    assert add.index("deviceProblem(candidate)") < add.index("await commitDevices(")
+    assert "setDeviceMessage('error', deviceFailureMessage(error, 'Adding the inverter'))" in add
+    # The input is only cleared after the server accepted the new inverter.
+    assert add.index("await commitDevices(") < add.index("input('host').value = '';")
+    # The result nodes are persistent live regions, so announcements are not lost on a rebuild.
+    assert "error.setAttribute('role', 'alert');" in js and "status.setAttribute('role', 'status');" in js
+    assert "error?.status === 409" in js and "error?.status === 504" in js
 
 
 def test_questdb_username_and_password_must_be_filled_together():
@@ -609,30 +632,26 @@ def test_devices_are_bound_by_a_stable_identity_not_by_array_index():
     assert js.count("device._uid = `d${++deviceUid}`") == 1  # exactly one place mints a _uid
     assert "if (Object.hasOwn(settingsDraft, 'devices')) adoptDevices(settingsDraft.devices);" in js
     assert "function deviceByUid(uid) { return (settingsDraft.devices || []).find((device) => device._uid === uid) || null; }" in js
-    # The row lookup resolves by _uid and skips a miss, which is a real state right after Discard.
-    assert js.count("const device = deviceByUid(row.dataset.uid);") == 1
-    assert js.count("if (!device) continue;") >= 1
+    # The delete handler resolves its row by _uid and skips a miss (a stale click after a save).
+    assert js.count("const device = deviceByUid(uid);") == 1
     assert "settingsDraft.devices[Number(row.dataset.index)]" not in js
     assert "row.dataset.uid = device._uid;" in js
     # The payload is explicit instead of a spread, so no client-only key rides along.
-    payload = js[js.index("function devicesPayload()"):js.index("// The device list is applied explicitly")]
+    payload = js[js.index("function devicesPayload(list)"):js.index("const deviceUi = ")]
     assert "{ ...device" not in payload
     for field in ("host:", "port:", "network_id:", "device_id:", "display_name:"):
         assert field in payload, field
 
 
-def test_device_remove_handler_only_edits_the_draft_and_keeps_focus():
+def test_device_remove_handler_confirms_saves_and_keeps_focus():
     js = JS.read_text(encoding="utf-8")
-    handler = js[js.index("remove.addEventListener('click', () => {"):js.index("const networkHelp = element(")]
-    assert "confirm(" not in handler                         # the reset warning belongs to Apply
-    assert "const at = devices.indexOf(device);" in handler  # identity, not the captured index
-    assert "if (at < 0) return;" in handler
+    handler = js[js.index("async function removeDevice("):js.index("// Validates the new row")]
+    assert "confirm(" not in handler.replace("confirmAction(", "")  # the themed dialog, never window.confirm
+    assert "const device = deviceByUid(uid);" in handler  # identity, not a captured array index
+    assert "if (!device) return;" in handler
     assert "devices.splice(index, 1)" not in js
-    assert "rebuildDeviceSection();" in handler
-    assert ".device-settings ~ button" in handler           # focus falls back to the Add button
-    assert "queueSettings(" not in handler and "api(" not in handler
-
-
+    # Focus: back to the trash on cancel or failure, else the next row or the new row's host input.
+    assert "if (button.isConnected) button.focus();" in handler and "#device-new-host" in handler
 def test_build_group_body_is_shared_so_a_group_rerender_adds_no_second_heading():
     js = JS.read_text(encoding="utf-8")
     builder = js[js.index("function buildGroupBody(group)"):js.index("function groupSectionId(")]
@@ -684,15 +703,13 @@ def test_accessibility_wiring_for_help_texts_field_errors_and_icon_only_buttons(
     assert "element('div', 'invalid-feedback d-block')" in invalid
     assert "control.setAttribute('aria-describedby', `${control.id}-help ${errorId}`);" in invalid
     assert "function clearInvalid(control)" in js and js.count("clearInvalid(control);") == 2
-    # Device rows reference their row-level error node and mark only the offending input. The ids
-    # derive from the stable row uid (not the loop index) so preserveFocus() restores focus to the
-    # right row after a removal (JS-01).
-    assert "feedback.id = `device-${device._uid}-feedback`;" in js
+    # The add row references its alert node and marks only the offending input.
+    assert "error.id = 'device-error';" in js and "error.setAttribute('role', 'alert');" in js
     assert "input.setAttribute('aria-invalid', 'true');" in js
-    # Focus survives the two full-section rebuilds and the device rebuild.
+    assert "const described = offending ? 'device-error' : (input.dataset.help || '');" in js
+    # Focus survives the section rebuilds.
     assert "function preserveFocus(render)" in js
     assert "const rerender = () => preserveFocus(render);" in js
-    assert "preserveFocus(() => {" in js
     # Prometheus descriptions stay reachable on mobile through a native disclosure.
     assert "element('details', 'metric-description-mobile')" in js
     assert re.search(r"@media \(max-width: 767\.98px\) \{\s*\.metric-description-mobile \{\s*display: block", css)
@@ -988,10 +1005,9 @@ def test_tsdb_page_uses_the_shared_page_heading_cards_and_setting_rows():
     css = (ADMIN_DIR / "static/css/admin.css").read_text(encoding="utf-8")
     js = (ADMIN_DIR / "static/js/admin.js").read_text(encoding="utf-8")
     html = (TEMPLATES / "tsdb.html").read_text(encoding="utf-8")
-    # No TSDB-specific layout or typography rules: only the log console keeps its own look, plus
-    # .export-card, which only tightens the setting-row padding so the page fits one viewport.
+    # No TSDB-specific layout or typography rules: only the log console keeps its own look.
     own = set(re.findall(r"\.(tsdb-[a-z-]+|export-[a-z-]+)", css))
-    assert own <= {"tsdb-console", "tsdb-console-line", "tsdb-console-time", "export-card"}, own
+    assert own <= {"tsdb-console", "tsdb-console-line", "tsdb-console-time"}, own
     assert 'class="page-heading"' in html and 'id="save-state" class="save-state' in html
     assert 'class="settings-grid"' in html and "tsdb-status-badge" not in html
     render = js[js.index("function renderExportSettings("):js.index("// Mirrors the server-side host plausibility")]
@@ -1167,6 +1183,6 @@ def test_primary_button_themes_its_disabled_and_focus_state():
 
 def test_device_header_serial_number_is_text_only_and_omitted_when_unknown():
     js = JS.read_text(encoding="utf-8")
-    assert "if (serial) setText(ref.serial, `Serial number: ${serial}`);" in js
+    assert "if (serial) setText(ref.serial, `S/N: ${serial}`);" in js
     assert "ref.serial.innerHTML" not in js
     assert "...(serial ? [ref.serial] : [])" in js

@@ -6,39 +6,12 @@
 // Browser E2E: a failed, empty or "connecting" poll must not rebuild or shrink the Overview. Values
 // stay until they are older than the next expected poll, then read n/a; the layout never changes.
 // Usage: PLAYWRIGHT_DIR=<dir containing node_modules/playwright> node tests/e2e/dashboard_resilience.mjs <artifact-dir>
-import { spawn } from 'node:child_process';
-import { createRequire } from 'node:module';
-import net from 'node:net';
 import fs from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { check, engine, freePort, NEW_PASSWORD, OUT, results, sleep, spawnPy } from './harness.mjs';
 
-const require = createRequire(path.join(process.env.PLAYWRIGHT_DIR, 'noop.js'));
-const playwright = require('playwright');
-// BROWSER=chromium|webkit|firefox, VIEWPORT_WIDTH and COLOR_SCHEME=light|dark select the matrix cell.
-const engine = playwright[process.env.BROWSER || 'chromium'];
-const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
-const OUT = path.resolve(process.argv[2]);
-fs.mkdirSync(OUT, { recursive: true });
-const PY = process.env.PYTHON || path.join(ROOT, '.venv/bin/python');
-const NEW_PASSWORD = 'e2e-a-much-stronger-password';
 const VALUE_MAX_AGE_MS = 20000; // keep in sync with VALUE_MAX_AGE_MS in admin.js
-const results = [];
 const problems = [];
-
-const check = (name, ok, detail = '') => { results.push({ name, ok, detail }); console.log(`${ok ? 'PASS' : 'FAIL'} ${name} ${detail}`); };
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-const freePort = () => new Promise((resolve) => { const s = net.createServer(); s.listen(0, '127.0.0.1', () => { const { port } = s.address(); s.close(() => resolve(port)); }); });
-const procs = [];
-process.once('exit', () => { for (const proc of procs) if (proc.exitCode === null) proc.kill('SIGTERM'); });
-function spawnPy(args, log) {
-  const proc = spawn(PY, ['-m', ...args], { cwd: ROOT, env: { ...process.env, PYTHONUNBUFFERED: '1' } });
-  let out = '';
-  proc.stdout.on('data', (d) => { out += d; fs.appendFileSync(log, d); });
-  proc.stderr.on('data', (d) => fs.appendFileSync(log, d));
-  procs.push(proc);
-  return { proc, output: () => out };
-}
 
 const dbDir = fs.mkdtempSync(path.join(OUT, 'db-'));
 const httpPort = await freePort();

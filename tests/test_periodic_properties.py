@@ -33,6 +33,13 @@ from tests.fakes import FakeNetwork
 FAILING_OBJECT_ID = 0x2222
 
 
+@pytest.fixture(autouse=True)
+def _no_background_refresh(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The app's own refresh loop reads stale values on a real 10 s timer; tests here drive
+    # refresh_stale_periodic by hand and count the reads, so the loop must not race them.
+    monkeypatch.setattr("app.api.app_factory._REFRESH_CYCLE_SECONDS", 1e9)
+
+
 def test_partial_registration_leaves_available_false_until_retried() -> None:
     async def scenario() -> tuple[bool, bool, int]:
         clock = AutoClock()
@@ -407,10 +414,14 @@ async def test_pushed_values_cause_no_refresh_reads_and_the_cycle_is_limited() -
     async with running_app(settings, settle=False) as h:
         await _registered(h)
         gateway = h.runtime.gateway
-        # The startup heartbeat read and the name read are not part of the refresh cycle; under load
-        # they would land inside the counted window, so let them finish before counting.
+        # The startup heartbeat, name and serial reads are not part of the refresh cycle; under load
+        # the serial read (queued right after the name) would land inside the counted window.
         async with asyncio.timeout(5):
-            while gateway._device("main").last_heartbeat_at is None or gateway.reported_name("main") is None:
+            while (
+                gateway._device("main").last_heartbeat_at is None
+                or gateway.reported_name("main") is None
+                or gateway.reported_serial("main") is None
+            ):
                 await asyncio.sleep(0.01)
         start = len(h.net.frames)
         for _ in range(5):  # the device keeps pushing this one value
