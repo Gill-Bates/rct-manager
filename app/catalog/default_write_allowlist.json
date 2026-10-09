@@ -2830,8 +2830,8 @@
     {
       "name": "battery_soc_target",
       "data_type": "t_float",
-      "minimum": -3.4028234663852886e+38,
-      "maximum": 3.4028234663852886e+38
+      "minimum": 0,
+      "maximum": 100
     },
     {
       "name": "battery_cells_stat_6_t_min_time",

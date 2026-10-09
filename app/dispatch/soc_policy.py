@@ -20,6 +20,7 @@ This module stays vendor-neutral: like ``app.dispatch.capabilities`` it must not
 ``app.gateway.*``.
 """
 
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
@@ -47,6 +48,12 @@ class SocTargetPolicy:
 
     def __post_init__(self) -> None:
         check_printable_ascii(self.note, "note", NOTE_MAX_LENGTH)
+        # The numeric margin is the long-lived safety bound that derives the device-level SoC
+        # target, so it is enforced here and not only in the admin API: a NaN/Infinity would
+        # survive every clamp in RctSocTargetConvention, and a negative or oversized margin would
+        # push the register target away from the operator's stop goal. Bounds match the admin API.
+        if not math.isfinite(self.below_margin_percent) or not 0.0 <= self.below_margin_percent <= 50.0:
+            raise ValueError("below_margin_percent must be finite and within 0..50")
 
 
 class SocTargetPolicyRegistry:

@@ -108,6 +108,11 @@ async def test_device_heading_prefers_display_name_then_reported_name_then_id(tm
         app.state.runtime.gateway.set_reported_name("main", "Garage Inverter")
         reported = (await client.get("/admin/api/devices", headers=headers)).json()["devices"]
         assert reported[0]["name"] == "Garage Inverter"
+        assert reported[0]["serial_number"] is None  # not read yet: the card omits it
+
+        app.state.runtime.gateway.set_reported_serial("main", "12345678")
+        with_serial = (await client.get("/admin/api/devices", headers=headers)).json()["devices"]
+        assert with_serial[0]["serial_number"] == "12345678"
 
     # An admin-set display_name wins over the device-reported name (checked at startup,
     # since "devices" is not a live setting: a saved display_name needs a restart to apply).

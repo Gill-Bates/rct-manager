@@ -237,8 +237,10 @@ async def test_scaled_register_divides_an_int_body_like_a_float_body(value) -> N
     assert body["confirmed"] is True and body["readback_value"] == pytest.approx(80.0)
 
 
-@pytest.mark.parametrize("value,expected", [(0, "00000000"), (-5, "bd4ccccd"), (100, "3f800000")])
-async def test_scaled_register_divides_zero_and_negative_int_bodies(value, expected) -> None:
+@pytest.mark.parametrize("value,expected", [(0, "00000000"), (100, "3f800000")])
+async def test_scaled_register_divides_an_int_body_at_the_range_bounds(value, expected) -> None:
+    """0 % and 100 % are the allowlist bounds of battery_soc_target; both must scale to the wire
+    ratio (0.0 -> 00000000, 1.0 -> 3f800000) whether the JSON body is int or float."""
     async with running_app(_shipped_settings()) as h:
         response, body = await _put(h, SOC_TARGET, value)
         wire = _write_payload(h.net, SOC_TARGET_OBJECT_ID)
@@ -246,6 +248,19 @@ async def test_scaled_register_divides_zero_and_negative_int_bodies(value, expec
     assert wire == expected
     assert body["confirmed"] is True
     assert body["readback_value"] == pytest.approx(float(value), abs=1e-4)
+
+
+@pytest.mark.parametrize("value", [-5, -0.1, 100.1, 1000000])
+async def test_soc_target_allowlist_rejects_an_out_of_range_percentage(value) -> None:
+    """battery_soc_target is a percent (object catalog: percent API-side, ratio 0..1 wire-side,
+    scale 100); the write allowlist range is the pre-transaction bound, so a value outside 0..100 %
+    must be refused before any device transaction, not scaled through to the hardware."""
+    async with running_app(_shipped_settings()) as h:
+        response, body = await _put(h, SOC_TARGET, value)
+        wire = [f for _, f in h.net.frames if f.command in WRITE_COMMANDS and f.object_id == SOC_TARGET_OBJECT_ID]
+    assert response.status_code == 422, response.text
+    assert body["code"] == "value_out_of_range"
+    assert wire == []  # the device was never touched
 
 
 @pytest.mark.parametrize("name,object_id,value,expected", [

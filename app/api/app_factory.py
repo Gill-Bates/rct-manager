@@ -88,6 +88,7 @@ from app.transport.endpoint import (
 log = logging.getLogger(__name__)
 _PERIODIC_CHECK_SECONDS = 10.0
 _NAME_RETRY_SECONDS = 15.0  # between attempts to read the inverter's own name
+_SERIAL_MAX_ATTEMPTS = 3  # tries to read the serial number once the name is known
 _PASSWORD_POLL_SECONDS = 1.0
 _RECONFIGURE_DRAIN_SECONDS = 10.0  # shutdown waits this long for an in-flight reconfiguration
 _REFRESH_CYCLE_SECONDS = 10.0  # 8 reads per cycle cover 40 values within the 2 x pas.period threshold
@@ -449,6 +450,10 @@ def _seed_limits(settings: Settings, stored: dict[str, DeviceLimits]) -> dict[st
     return stored
 
 
+def _printable(raw: str) -> str:
+    return "".join(ch if ch.isprintable() else "?" for ch in raw).strip()
+
+
 async def _heartbeat_loop(connect: asyncio.Task[None], heartbeat: Heartbeat) -> None:
     await asyncio.gather(connect, return_exceptions=True)
     try:
@@ -466,7 +471,7 @@ async def _log_startup_device(
     entry: DeviceEntry,
     settings: Settings,
 ) -> None:
-    """Read the inverter's own name, retrying until it succeeds.
+    """Read the inverter's own name, retrying until it succeeds, then its serial number.
 
     A single attempt left the dashboard on the device id ("main") for good whenever the inverter was
     unreachable at startup; the loop ends on success or when a reconfiguration cancels the task.
@@ -475,8 +480,24 @@ async def _log_startup_device(
     address = f"{entry.host}:{entry.port}"
     timeout = settings.queue_max_wait_seconds + settings.connect_timeout_seconds + settings.read_total_timeout_seconds
     first_attempt = True
+    name_known = False
+    serial_attempts = 0
     while True:
-        if endpoint.state is not EndpointState.CONNECTED:
+        if name_known:
+            # The serial is best effort: a few tries, then the card simply omits it.
+            try:
+                async with asyncio.timeout(timeout):
+                    serial = _printable(await gateway.read_inverter_serial(entry.device_id))[:64]
+            except (DeviceApiError, TimeoutError):
+                serial_attempts += 1
+                if serial_attempts >= _SERIAL_MAX_ATTEMPTS:
+                    log.warning("Inverter %s at %s: serial number could not be read", entry.device_id, address)
+                    return
+            else:
+                if serial:
+                    gateway.set_reported_serial(entry.device_id, serial)
+                return
+        elif endpoint.state is not EndpointState.CONNECTED:
             if first_attempt:
                 log.warning("Inverter %s at %s: connection failed", entry.device_id, address)
         else:
@@ -488,10 +509,11 @@ async def _log_startup_device(
                     reason = exc.code if isinstance(exc, DeviceApiError) else "startup_timeout"
                     log.warning("Inverter %s at %s: connected, name read failed (%s)", entry.device_id, address, reason)
             else:
-                name = "".join(ch if ch.isprintable() else "?" for ch in raw_name).strip()[:64] or "unknown"
+                name = _printable(raw_name)[:64] or "unknown"
                 gateway.set_reported_name(entry.device_id, name)
                 log.info("Inverter %s at %s: connected, name=%s", entry.device_id, address, name)
-                return
+                name_known = True
+                continue
         first_attempt = False
         await asyncio.sleep(_NAME_RETRY_SECONDS)
 

@@ -217,6 +217,23 @@ class DispatchConfig:
         for name in numeric_fields:
             if not math.isfinite(getattr(self, name)):
                 raise ValueError(f"{name} must be finite")
+        # Durations, powers, intervals and telemetry ages are physically non-negative; a negative
+        # value is nonsensical and some of them are unsafe. min_soc/max_soc have their own 0..100
+        # check below, so they are excluded here.
+        non_negative_fields = (
+            "grid_import_reserve_w", "grid_control_deadband_w", "power_write_deadband_w",
+            "min_write_interval_seconds", "cycle_interval_seconds", "telemetry_timeout_seconds",
+            "control_telemetry_max_age_seconds", "soc_telemetry_max_age_seconds",
+        )  # fmt: skip
+        for name in non_negative_fields:
+            if getattr(self, name) < 0:
+                raise ValueError(f"{name} must not be negative")
+        # The operation-duration caps must be strictly positive: a zero or negative cap makes
+        # submit() derive an effective deadline at or before "now", so it writes hardware and the
+        # very next tick() immediately expires it (the TTL safety bound never actually holds).
+        for name in ("max_operation_duration_seconds", "max_operation_duration_engineering_seconds"):
+            if getattr(self, name) <= 0:
+                raise ValueError(f"{name} must be positive")
         if self.min_soc < 0 or self.max_soc > 100 or self.min_soc >= self.max_soc:
             raise ValueError("min_soc must be smaller than max_soc, both within 0..100")
         if self.max_operation_duration_engineering_seconds > self.max_operation_duration_seconds:

@@ -9,23 +9,25 @@
     </div><span id="save-state" class="save-state text-secondary small" aria-live="polite"></span>
 </div>
 <section class="card" aria-label="Prometheus status">
-    <div class="card-body prometheus-summary">
-        <div><span class="text-secondary small d-block">Status</span><strong id="prometheus-status">Loading …</strong>
+    <div class="card-body prometheus-card">
+        <div id="prometheus-toggle" class="prometheus-toggle">
+            <p class="text-secondary small mb-0">Loading …</p>
         </div>
-        <div><span class="text-secondary small d-block">Endpoint</span><code>/metrics</code> <button
-                id="copy-metrics-endpoint" type="button" class="btn btn-link btn-sm p-0 ms-1"
-                aria-label="Copy metrics endpoint">Copy</button></div>
-        <div><span class="text-secondary small d-block">Exposed</span><strong id="prometheus-count">–</strong></div>
-        <div><span class="text-secondary small d-block">Last saved here</span><span id="prometheus-last-saved">Not
-                yet</span></div>
+        <div class="prometheus-summary">
+            <div><span class="text-secondary small d-block">Status</span><strong id="prometheus-status">Loading
+                    …</strong></div>
+            <div><span class="text-secondary small d-block">Endpoint</span><code>/metrics</code> <button
+                    id="copy-metrics-endpoint" type="button" class="btn btn-link btn-sm p-0 ms-1"
+                    aria-label="Copy metrics endpoint">Copy</button></div>
+            <div><span class="text-secondary small d-block">Exposed</span><strong id="prometheus-count">–</strong></div>
+            <div><span class="text-secondary small d-block">Last saved here</span><span id="prometheus-last-saved">Not
+                    yet</span></div>
+        </div>
     </div>
 </section>
-<details class="card prometheus-settings">
-    <summary class="card-header bg-transparent py-3">Scrape settings</summary>
-    <div id="settings-sections" class="card-body">
-        <p class="text-secondary">Loading settings …</p>
-    </div>
-</details>
+<div id="settings-sections" class="prometheus-dependent-settings">
+    <p class="text-secondary">Loading settings …</p>
+</div>
 {{ param_table('exposed', 'Exposed metrics', 'Drag the handle to reorder; use the row menu for keyboard controls.', 'Add metrics', 'open-add-metrics', 'add-metrics-modal', 'Search exposed metrics', 'Metric pages', reorder=true) }}
 <div id="add-metrics-modal" class="modal fade" tabindex="-1" aria-labelledby="add-metrics-title" aria-hidden="true">
     <div class="modal-dialog modal-lg modal-dialog-scrollable">

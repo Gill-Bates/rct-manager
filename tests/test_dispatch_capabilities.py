@@ -299,6 +299,55 @@ def test_capability_note_is_bounded_printable_ascii(note: str) -> None:
         CapabilityRecord("main", CapabilityName.WRITE_PATH, note=note)
 
 
+def test_verified_export_limit_requires_its_safety_flag() -> None:
+    """H6 fail-closed: the gate decides on status alone, so a VERIFIED EXPORT_LIMIT whose
+    export_limit_zero_blocks_export is still None must be rejected at the dataclass boundary — it
+    would otherwise pass the safety gate without the fact the status claims.
+    """
+    with pytest.raises(ValueError, match="export_limit_zero_blocks_export"):
+        CapabilityRecord(
+            "main",
+            CapabilityName.EXPORT_LIMIT,
+            status=CapabilityStatus.VERIFIED,
+            export_limit_zero_blocks_export=None,
+        )
+    # The same record with the flag set is accepted.
+    CapabilityRecord(
+        "main",
+        CapabilityName.EXPORT_LIMIT,
+        status=CapabilityStatus.VERIFIED,
+        export_limit_zero_blocks_export=True,
+    )
+
+
+@pytest.mark.parametrize(
+    "field, value",
+    [
+        ("soc_strategy_external_code", 256),
+        ("soc_strategy_external_code", -1),
+        ("enum_byte_width", 0),
+        ("enum_byte_width", 5),
+        ("bool_byte_width", 5),
+        ("refresh_interval_seconds", float("inf")),
+        ("refresh_interval_seconds", -1.0),
+        ("refresh_interval_seconds", 86_401.0),
+    ],
+)
+def test_capability_value_ranges_are_enforced_in_the_domain(field: str, value) -> None:
+    with pytest.raises(ValueError):
+        CapabilityRecord("main", CapabilityName.WRITE_PATH, **{field: value})
+
+
+def test_optional_bool_is_fail_closed_on_deserialization() -> None:
+    """A stored "false" must not deserialize to True: a bool-looking string is corruption, which
+    from_dict reports so the store treats the row as unreadable (reads as unverified).
+    """
+    data = CapabilityRecord("main", CapabilityName.EXPORT_LIMIT).to_dict()
+    data["export_limit_zero_blocks_export"] = "false"
+    with pytest.raises(TypeError):
+        CapabilityRecord.from_dict(data)
+
+
 # --- The port is the only writer (design 4.4) ------------------------------------------------
 
 

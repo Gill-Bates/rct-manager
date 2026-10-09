@@ -1293,6 +1293,7 @@ def devices(request: Request) -> dict:
         flow = runtime.energy_readings.readings(item.device_id) if runtime.energy_readings else None
         result.append({
             "id": item.device_id, "name": item.display_name or reported or item.device_id,
+            "serial_number": runtime.gateway.reported_serial(item.device_id),
             "status": status.state.value, "host": item.host, "port": item.port,
             "last_success_at": status.last_success_at.isoformat() if status.last_success_at else None,
             "queue_length": status.queue_length, "metrics": readings, "batteries": batteries,

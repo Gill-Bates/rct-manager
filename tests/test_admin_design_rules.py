@@ -28,6 +28,8 @@ Rules:
      except the log console's terminal palette (listed in R8_ALLOWED_SELECTORS).
  R9  TSDB fields are built by the shared buildFieldControl() (setting-row, form-text), not by own
      wrappers.
+ R10 Energy Manager step buttons (`energy-step-link`) are plain `btn btn-primary` and no CSS rule
+     targets `.energy-step-link`: size, radius, font and height come from the shared button.
 """
 
 import re
@@ -159,6 +161,20 @@ def check_r9_shared_fields(js: str) -> list[str]:
     return problems
 
 
+def check_r10_energy_step_buttons(js: str, css: str) -> list[str]:
+    problems = []
+    classes = re.findall(r"element\('[a-z]+', '([^']*\benergy-step-link\b[^']*)'", js)
+    if not classes:
+        problems.append("admin.js: R10 - no energy-step-link button found")
+    for cls in classes:
+        if cls.split() != ["btn", "btn-primary", "energy-step-link"]:
+            problems.append(f"admin.js: R10 - '{cls}' deviates from the shared button; use 'btn btn-primary energy-step-link'")
+    for selector, _body, line in _rules(css):
+        if "energy-step-link" in selector:
+            problems.append(f"admin.css:{line}: R10 - {selector} restyles the shared button; delete it")
+    return problems
+
+
 def _read(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
@@ -224,3 +240,10 @@ def test_r9_tsdb_fields_use_the_shared_field_builder() -> None:
     broken = js.replace("buildFieldControl(field, settingsDraft[field.key]);\n    // The shared", "buildOtherControl();\n    // The shared", 1)
     if broken != js:
         assert check_r9_shared_fields(broken)
+
+
+def test_r10_energy_step_buttons_use_the_shared_button() -> None:
+    js = _read(JS_DIR / "admin.js")
+    assert check_r10_energy_step_buttons(js, _read(CSS_FILE)) == []
+    assert check_r10_energy_step_buttons(js.replace("'btn btn-primary energy-step-link'", "'btn btn-sm btn-primary energy-step-link'"), "")
+    assert check_r10_energy_step_buttons(js, ".energy-step-link { min-height: 44px; }")

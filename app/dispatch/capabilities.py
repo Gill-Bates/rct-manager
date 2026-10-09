@@ -176,11 +176,27 @@ def _strict_optional_int(value: object) -> int | None:
 
 
 def _optional_float(value: object) -> float | None:
-    return None if value is None else float(value)  # type: ignore[arg-type]
+    """Fail-closed read of a safety-relevant optional float field (H6): a stored string or bool is
+    corruption, not a value to coerce. ``float("1.0")`` would silently accept a non-number.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise TypeError(f"expected a number, got {type(value).__name__}")
+    return float(value)
 
 
 def _optional_bool(value: object) -> bool | None:
-    return None if value is None else bool(value)
+    """Fail-closed read of a safety-relevant optional bool field (H6): ``bool("false")`` is
+    ``True``, so a permissive coercion would silently accept a corrupted persisted value. The
+    store's existing (ValueError, TypeError) handling then treats the row as unreadable, which for
+    a capability means it reads as unverified — the safe default.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, bool):
+        raise TypeError(f"expected a bool, got {type(value).__name__}")
+    return value
 
 
 def required_for(mode: DispatchMode, *, limit_export: bool) -> frozenset[CapabilityName]:

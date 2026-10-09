@@ -59,6 +59,15 @@ def test_registry_replace_takes_a_policy_over() -> None:
     assert registry.policy("main").mode is SocTargetMode.BUSINESS_TARGET
 
 
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), -1.0, 50.5, 1000.0])
+def test_policy_below_margin_percent_is_a_finite_bounded_percentage(bad: float) -> None:
+    """The margin is the long-lived safety bound that derives the register target, so NaN/Infinity
+    or an out-of-range value must be rejected at the dataclass boundary, not only by the admin API.
+    """
+    with pytest.raises(ValueError, match="below_margin_percent"):
+        SocTargetPolicy("main", below_margin_percent=bad)
+
+
 def test_policy_note_is_bounded_printable_ascii() -> None:
     SocTargetPolicy("main", note="x" * NOTE_MAX_LENGTH)
     with pytest.raises(ValueError, match="at most"):

@@ -44,7 +44,7 @@ INT_VALUES = {"inverter_state": 13, "battery_status2": 2304, "battery_cycles": 1
 # string an unpopulated slot really returns - so the derived counts are 5 and 4 (6 and 5 populated slots minus one). Seven slots
 # exist in the catalog; at most 6 modules exist in the documented hardware.
 STRING_VALUES = {
-    "android_description": "RCT Power DC 10.0 SIM", "svnversion": "2.3.5687",
+    "android_description": "RCT Power DC 10.0 SIM", "inverter_serial": "SIM1234567", "svnversion": "2.3.5687",
     **{f"battery_module_sn_{i}": f"SIM-{i:03d}" for i in range(6)},
     **{f"battery_placeholder_0_module_sn_{i}": f"SIM-B{i:03d}" for i in range(5)},
 }

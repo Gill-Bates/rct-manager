@@ -76,6 +76,7 @@ from app.transport.types import (
 log = logging.getLogger(__name__)
 MAX_SLAVES = 31  # network ids the plant network can hold (Requirement 18.10)
 _INVERTER_NAME_OBJECT_ID = 0xEBC62737
+_INVERTER_SERIAL_OBJECT_ID = 0x7924ABD9
 REFRESH_MAX_PER_CYCLE = 8  # reads per refresh cycle and device (Requirement 17.28)
 REFRESH_FAILURES_CONFIRMED = 3  # consecutive failed refresh reads after which a value counts as unanswered
 
@@ -107,6 +108,7 @@ class DeviceBinding:
     periodic: PeriodicManager | None = None
     last_heartbeat_at: datetime | None = None
     reported_name: str | None = None  # the device's own name, read once at startup
+    reported_serial: str | None = None  # the device's serial number, read once at startup
     cache_hits: int = 0
     cache_misses: int = 0
     errors: int = 0
@@ -672,10 +674,17 @@ class RctGateway:
     # ---- liveness and status ---------------------------------------------------------------
     async def read_inverter_name(self, device_id: str) -> str:
         """Read the device's own name through its existing serialized connection."""
+        return await self._read_string_object(device_id, _INVERTER_NAME_OBJECT_ID)
+
+    async def read_inverter_serial(self, device_id: str) -> str:
+        """Read the device's serial number through its existing serialized connection."""
+        return await self._read_string_object(device_id, _INVERTER_SERIAL_OBJECT_ID)
+
+    async def _read_string_object(self, device_id: str, object_id: int) -> str:
         binding = self._device(device_id)
         request = TransactionRequest(
             binding.entry.key,
-            make_frame(binding.entry.network_id, Command.READ, _INVERTER_NAME_OBJECT_ID),
+            make_frame(binding.entry.network_id, Command.READ, object_id),
             TransactionOrigin.HEARTBEAT,
             "read",
             self._clock.now(),
@@ -710,6 +719,13 @@ class RctGateway:
 
     def reported_name(self, device_id: str) -> str | None:
         return self._device(device_id).reported_name
+
+    def set_reported_serial(self, device_id: str, serial: str) -> None:
+        """Record the device's serial number, read once at startup via ``read_inverter_serial``."""
+        self._device(device_id).reported_serial = serial
+
+    def reported_serial(self, device_id: str) -> str | None:
+        return self._device(device_id).reported_serial
 
     def set_allowlist(self, allowlist: Allowlist) -> None:
         self._allowlist = allowlist

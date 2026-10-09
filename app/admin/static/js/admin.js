@@ -940,6 +940,7 @@
       title: element('h3', 'mb-0 me-auto'),
       statusText: element('div', 'fw-medium small'),
       address: element('small', 'text-secondary'),
+      serial: element('small', 'text-secondary device-serial'),
       last: element('small', 'text-secondary'),
       visual: createDeviceVisual(),
     };
@@ -968,7 +969,9 @@
     syncChildren(ref.top, connected ? [ref.toggle, ref.title, ref.statusBadge] : [ref.toggle, ref.dot, ref.title, ref.statusText]);
     setText(ref.address, `${device.host || NOT_AVAILABLE}${device.port ? `:${device.port}` : ''}`);
     if (device.last_success_at) setText(ref.last, `Last connection: ${formatDate(device.last_success_at, { time: true })}`);
-    syncChildren(ref.meta, device.last_success_at ? [ref.address, ref.last] : [ref.address]);
+    const serial = typeof device.serial_number === 'string' ? device.serial_number.trim() : '';
+    if (serial) setText(ref.serial, `Serial number: ${serial}`);
+    syncChildren(ref.meta, [ref.address, ...(serial ? [ref.serial] : []), ...(device.last_success_at ? [ref.last] : [])]);
     syncChildren(ref.head, [ref.top, ref.meta]);
     patchDeviceVisual(ref.visual, device);
     syncChildren(ref.card, [ref.head, ref.visual.node]);
@@ -2244,6 +2247,7 @@
         footerButtons.push(button('Save verification', 'btn-primary', guarded(async () => {
           const status = await post('commit', { confirm: true });
           finished = true;
+          running = false; // hide.bs.modal refuses to close while a step runs
           onDone(status);
           modal.hide();
           toast('Hardware verified. Manual battery control is available.');
@@ -2260,7 +2264,7 @@
     modalEl.addEventListener('keydown', (event) => { if (event.key === 'Escape' && !running) modal.hide(); });
     modalEl.addEventListener('shown.bs.modal', () => body.querySelector('h3')?.focus());
     modalEl.addEventListener('hidden.bs.modal', () => {
-      if (!finished) api(base, { method: 'DELETE' }).catch(() => {});
+      if (!finished) api(base, { method: 'DELETE' }).catch(() => { });
       modal.dispose();
       modalEl.remove();
       opener?.focus();
@@ -2488,7 +2492,7 @@
     // Step 0.001 from min 0.001, so whole-watt values like 3.00 kW validate (a 0.01 step rejected them).
     const maxCharge = numberInput(0.001, 100, 0.001);
     const maxDischarge = numberInput(0.001, 100, 0.001);
-    const limitButton = element('button', 'btn btn-sm btn-primary', 'Save and continue');
+    const limitButton = element('button', 'btn btn-primary', 'Save and continue');
     limitButton.type = 'submit';
     const limitButtonCol = element('div', 'col-auto');
     limitButtonCol.append(limitButton);
@@ -2574,7 +2578,7 @@
 
     // Guided Setup steps. No register names here; the forms above are moved into their step.
     const inverterLink = (text, href) => {
-      const link = element('a', 'btn btn-sm btn-primary energy-step-link', text);
+      const link = element('a', 'btn btn-primary energy-step-link', text);
       link.href = href;
       return link;
     };
@@ -2597,7 +2601,7 @@
     // Basic step says so and never guesses or pre-fills them.
     const hardwareText = steps.hardware.querySelector('p');
     // Opens the guided check on an explicit click only; nothing is written by the setup step itself.
-    const openVerifyButton = element('button', 'btn btn-sm btn-primary energy-step-link', 'Verify hardware');
+    const openVerifyButton = element('button', 'btn btn-primary energy-step-link', 'Verify hardware');
     openVerifyButton.type = 'button';
     hardwareText.after(openVerifyButton);
     openVerifyButton.addEventListener('click', () => {
@@ -2712,7 +2716,7 @@
     energyNote.setAttribute('role', 'status');
     const label = element('span', null, text);
     if (action) {
-      const link = element('a', 'btn btn-sm btn-primary energy-step-link', action.label);
+      const link = element('a', 'btn btn-primary energy-step-link', action.label);
       link.href = action.href;
       energyNote.replaceChildren(label, link);
     } else energyNote.replaceChildren(label);
@@ -3198,9 +3202,14 @@
       settingsDraft[field.key] = next;
       queueSettings(field.key);
       if (page === 'prometheus') renderPrometheusSummary();
-      // A master toggle decides which dependent fields exist, so only its own group is rebuilt
-      // live — and the toggle keeps the focus it had when it was operated.
-      if (gatesOtherFields(field.key)) preserveFocus(() => rerenderGroup(field.group));
+      // A master toggle decides which dependent fields exist, so only the dependents are rebuilt
+      // live — the toggle keeps the focus it had when it was operated. On the Prometheus page the
+      // master lives in the top card and its dependents in #settings-sections, so only that host is
+      // rebuilt; elsewhere the master and its dependents share one group card.
+      if (gatesOtherFields(field.key)) {
+        if (page === 'prometheus') preserveFocus(rerenderPrometheusDependents);
+        else preserveFocus(() => rerenderGroup(field.group));
+      }
     };
     control.addEventListener('change', onChange);
     return wrap;
@@ -3929,11 +3938,12 @@
     if (failed) document.getElementById('device-apply-error')?.focus();
   }
 
-  // One builder for both renderSettings() and rerenderGroup(), so the heading suppression and the
-  // Account relabel cannot drift and a group re-render cannot emit a second <h2>.
+  // One builder for both renderSettings() and rerenderGroup(), so the Account relabel cannot drift
+  // and a group re-render cannot emit a second <h2>. The Prometheus page does not use this builder;
+  // it renders its master toggle and dependents through renderPrometheusSettings().
   function buildGroupBody(group) {
     const body = element('div', 'card-body');
-    if (!(page === 'prometheus' && group === 'Prometheus')) body.append(element('h2', 'h5 mb-3', { Account: 'Administrator account' }[group] || group));
+    body.append(element('h2', 'h5 mb-3', { Account: 'Administrator account' }[group] || group));
     if (group === 'Account') renderAccount(body);
     else if (group === 'Inverters') renderDevicesSettings(body);
     else for (const field of settingFields.filter((item) => item.group === group && Object.hasOwn(settingsDraft, item.key) && settingVisible(item))) body.append(settingControl(field));
@@ -3949,14 +3959,43 @@
     section.replaceChildren(buildGroupBody(group));
   }
 
+  // The Prometheus page splits the group: the master toggle lives at the top of the status card
+  // (#prometheus-toggle), while its dependent fields render straight into #settings-sections. The
+  // master's live gating goes through rerenderPrometheusDependents(), not the shared section card.
+  function renderPrometheusSettings() {
+    const toggleHost = $('prometheus-toggle');
+    if (toggleHost) toggleHost.replaceChildren(settingControl(prometheusMasterField()));
+    rerenderPrometheusDependents();
+  }
+
+  function prometheusMasterField() {
+    return settingFields.find((field) => field.key === 'enable_metrics_endpoint');
+  }
+
+  function rerenderPrometheusDependents() {
+    const host = $('settings-sections');
+    if (!host) return;
+    const fields = settingFields.filter((item) => item.group === 'Prometheus'
+      && item.key !== 'enable_metrics_endpoint' && Object.hasOwn(settingsDraft, item.key) && settingVisible(item));
+    // No dependent fields are visible while the endpoint is off, so the card is dropped entirely
+    // rather than left as an empty shell.
+    if (!fields.length) { host.replaceChildren(); return; }
+    const section = element('section', 'card');
+    const body = element('div', 'card-body');
+    body.append(element('h2', 'h5 mb-3', 'Scrape settings'));
+    for (const field of fields) body.append(settingControl(field));
+    section.append(body);
+    host.replaceChildren(section);
+  }
+
   function renderSettings() {
+    if (page === 'prometheus') { renderPrometheusSettings(); return; }
     const host = $('settings-sections');
     host.replaceChildren();
     const groups = {
       settings: ['Access', 'Server', 'Network', 'Account'],
       dashboard: ['Inverters'],
       inverters: ['Write access'],
-      prometheus: ['Prometheus'],
       tsdb: ['Export'],
     }[page] || [];
     for (const group of groups) {
@@ -4172,11 +4211,13 @@
     const actionCell = parameterActionMenu(parameter.name, [
       { key: 'up', label: 'Move up', disabled: index === 0, run: () => moveParameter(parameter.name, -1) },
       { key: 'down', label: 'Move down', disabled: index === parameterData.exposed_names.length - 1, run: () => moveParameter(parameter.name, 1) },
-      { key: 'remove', label: 'Remove', run: () => {
-        parameterData.exposed_names = parameterData.exposed_names.filter((name) => name !== parameter.name);
-        queueParameters(); renderParameters();
-        $('exposed-search').focus();
-      } },
+      {
+        key: 'remove', label: 'Remove', run: () => {
+          parameterData.exposed_names = parameterData.exposed_names.filter((name) => name !== parameter.name);
+          queueParameters(); renderParameters();
+          $('exposed-search').focus();
+        }
+      },
     ]);
     row.append(dragCell, nameCell, descriptionCell, actionCell);
     row.addEventListener('dragover', (event) => { event.preventDefault(); row.classList.add('drag-over'); });
@@ -4215,11 +4256,13 @@
       descriptionCell.append(help);
     }
     const actionCell = parameterActionMenu(parameter.name, [
-      { key: 'revoke', label: 'Remove write access', run: () => {
-        parameterData.write_names = parameterData.write_names.filter((name) => name !== parameter.name);
-        queueParameters(); renderParameters();
-        $('writable-search').focus();
-      } },
+      {
+        key: 'revoke', label: 'Remove write access', run: () => {
+          parameterData.write_names = parameterData.write_names.filter((name) => name !== parameter.name);
+          queueParameters(); renderParameters();
+          $('writable-search').focus();
+        }
+      },
     ], helpId);
     row.append(nameCell, descriptionCell, actionCell);
     return row;

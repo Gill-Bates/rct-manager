@@ -112,3 +112,7 @@ class DeviceGateway(Protocol):
     def reported_name(self, device_id: str) -> str | None:
         """The device's own name, if read since startup; None otherwise."""
         ...
+
+    def reported_serial(self, device_id: str) -> str | None:
+        """The device's serial number, if read since startup; None otherwise."""
+        ...

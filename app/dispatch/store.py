@@ -32,7 +32,31 @@ log = logging.getLogger(__name__)
 # `restore_required` there: the two safety-deciding facts — is this device released, and does it
 # run in engineering mode — must remain readable when the service is down or HMAC_SECRET was
 # rotated. They are state names, not secrets.
+# The base schema (user_version 0 -> 1). Its own atomic migration like every later one, so a crash
+# between the CREATE TABLE and the version bump cannot leave the table present with the version
+# still at 0, which would fail the next start's CREATE TABLE with "already exists".
+_SCHEMA_V1 = """
+    BEGIN IMMEDIATE;
+    CREATE TABLE dispatch_operations (
+        device_id TEXT PRIMARY KEY,
+        state TEXT NOT NULL,
+        restore_required INTEGER NOT NULL CHECK(restore_required IN (0,1)),
+        updated_at TEXT NOT NULL,
+        record_version INTEGER NOT NULL,
+        encrypted BLOB NOT NULL
+    ) STRICT;
+    PRAGMA user_version = 1;
+    COMMIT;
+"""
+
+# Each migration is one transaction (BEGIN IMMEDIATE ... PRAGMA user_version=N ... COMMIT), so a
+# crash either leaves the whole step applied (tables created and version bumped together) or none
+# of it. executescript() commits any pending transaction before running the script, so the
+# explicit BEGIN here is the migration's own unit. user_version is part of the transaction and
+# rolls back with it. Without the transaction, a CREATE TABLE could commit in autocommit mode while
+# a crash before the version bump left the version stale, breaking the next start.
 _SCHEMA_V2 = """
+    BEGIN IMMEDIATE;
     CREATE TABLE dispatch_capabilities (
         device_id TEXT NOT NULL,
         name      TEXT NOT NULL,
@@ -47,6 +71,7 @@ _SCHEMA_V2 = """
         encrypted        BLOB NOT NULL
     ) STRICT;
     PRAGMA user_version = 2;
+    COMMIT;
 """
 
 # user_version 3 is strictly additive as well: it adds the Energy Manager's armed flag (superseded by `mode` in version 4) and the
@@ -55,6 +80,7 @@ _SCHEMA_V2 = """
 # whether a device is switched on, and how its target is derived, while the service is down or after an
 # HMAC_SECRET rotation. They are state names, not secrets.
 _SCHEMA_V3 = """
+    BEGIN IMMEDIATE;
     CREATE TABLE energy_manager_state (
         device_id TEXT PRIMARY KEY,
         armed     INTEGER NOT NULL CHECK(armed IN (0,1)),
@@ -67,6 +93,7 @@ _SCHEMA_V3 = """
         encrypted BLOB NOT NULL
     ) STRICT;
     PRAGMA user_version = 3;
+    COMMIT;
 """
 
 # user_version 4 adds the Energy Manager's operating mode. The old `armed` column stays (SQLite
@@ -123,16 +150,7 @@ class DispatchStore:
             if version not in (0, 1, 2, 3, 4):
                 raise ValueError("unsupported dispatch database version")
             if version == 0:
-                db.executescript("""
-                    CREATE TABLE dispatch_operations (
-                        device_id TEXT PRIMARY KEY,
-                        state TEXT NOT NULL,
-                        restore_required INTEGER NOT NULL CHECK(restore_required IN (0,1)),
-                        updated_at TEXT NOT NULL,
-                        record_version INTEGER NOT NULL,
-                        encrypted BLOB NOT NULL
-                    ) STRICT;
-                """)
+                db.executescript(_SCHEMA_V1)
             if version in (0, 1):
                 # Upgrade 1 -> 2 adds the two capability tables and nothing else: the schema of
                 # dispatch_operations and every row in it stay exactly as they are, so an update

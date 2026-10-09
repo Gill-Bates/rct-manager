@@ -329,8 +329,10 @@ const badgeMetrics = await page.evaluate(() => {
     const a = bg.length > 3 ? bg[3] : 1;
     const mix = [0, 1, 2].map((k) => bg[k] * a + page[k] * (1 - a));
     const [hi, lo] = [lum(fg), lum(mix)].sort((x, y) => y - x);
-    return { text: n.textContent.trim(), size: [cs.fontSize, cs.fontWeight, cs.padding, cs.borderRadius, cs.lineHeight, dot.width, dot.height].join('|'),
-      height: Math.round(n.getBoundingClientRect().height * 10) / 10, opacity: getComputedStyle(n.closest('.flow-badge') || n).opacity, contrast: (hi + .05) / (lo + .05) };
+    return {
+      text: n.textContent.trim(), size: [cs.fontSize, cs.fontWeight, cs.padding, cs.borderRadius, cs.lineHeight, dot.width, dot.height].join('|'),
+      height: Math.round(n.getBoundingClientRect().height * 10) / 10, opacity: getComputedStyle(n.closest('.flow-badge') || n).opacity, contrast: (hi + .05) / (lo + .05)
+    };
   });
 });
 check('status badges share size, padding, radius, typography and dot (colour aside)',
@@ -703,6 +705,37 @@ for (const width of [390, 320]) {
 await page.setViewportSize({ width: 1280, height: 800 });
 await page.waitForTimeout(400);
 
+// 2a-3. The serial number sits in the second header line between address and last connection, and
+// is omitted without a stray separator or "undefined" while the device has not reported one.
+const metaLine = () => page.evaluate(() => {
+  const meta = document.querySelector('.device-item .device-head-meta');
+  return { items: [...meta.children].map((node) => node.textContent.trim()), text: meta.textContent, scrollW: document.documentElement.scrollWidth, clientW: document.documentElement.clientWidth };
+});
+await forceDashboardPoll();
+await page.waitForFunction(() => /Serial number: SIM1234567/.test(document.querySelector('.device-item .device-head-meta')?.textContent || ''), null, { timeout: 20000 }).catch(() => { /* reported below */ });
+const withSerial = await metaLine();
+check('the device header shows the serial number between address and last connection',
+  withSerial.items.length === 3 && /:\d+$/.test(withSerial.items[0]) && withSerial.items[1] === 'Serial number: SIM1234567'
+  && withSerial.items[2].startsWith('Last connection: '), JSON.stringify(withSerial.items));
+await page.setViewportSize({ width: 390, height: 844 });
+await page.waitForTimeout(300);
+const narrowSerial = await metaLine();
+check('the serial number line wraps at 390px without horizontal scroll', narrowSerial.scrollW <= narrowSerial.clientW, JSON.stringify(narrowSerial));
+await page.setViewportSize({ width: 1280, height: 800 });
+await page.route('**/admin/api/devices', async (route) => {
+  const response = await route.fetch();
+  const data = await response.json();
+  for (const device of data.devices) device.serial_number = null;
+  await route.fulfill({ response, json: data });
+});
+await forceDashboardPoll();
+await page.waitForFunction(() => !/Serial number/.test(document.querySelector('.device-item .device-head-meta')?.textContent || ''), null, { timeout: 20000 }).catch(() => { /* reported below */ });
+const withoutSerial = await metaLine();
+check('an unknown serial number is omitted cleanly from the device header',
+  withoutSerial.items.length === 2 && !/undefined|null|Serial/.test(withoutSerial.text) && withoutSerial.items[0].length > 0
+  && withoutSerial.items[1].startsWith('Last connection: '), JSON.stringify(withoutSerial.items));
+await page.unroute('**/admin/api/devices');
+
 // 2b. dashboard polling: a forced poll keeps the card nodes, and parameters are not part of the
 // loop. There is no manual refresh button anymore (removed per user request, auto-polling already
 // covers it); a visibilitychange dispatch forces the same loadDashboard({ automatic: true }) path
@@ -1012,13 +1045,17 @@ for (const scheme of ['light', 'dark']) {
       await page.waitForLoadState('networkidle');
       await sleep(300);
       frames[prefix] = await page.evaluate((pfx) => {
-        const edges = (node) => { const r = node.getBoundingClientRect(); return { left: r.left, right: r.right, top: r.top, width: r.width }; };
+        const edges = (node) => { const r = node.getBoundingClientRect(); return { left: r.left, right: r.right, top: r.top, bottom: r.bottom, width: r.width }; };
         const card = document.getElementById(`${pfx}-list`).closest('.card');
         const container = document.querySelector('.page-heading').parentElement;
         const add = card.querySelector('.btn-primary');
+        const pager = document.getElementById(`${pfx}-range`).parentElement;
         return {
           container: edges(container), heading: edges(document.querySelector('.page-heading')), card: edges(card),
           wrap: edges(card.querySelector('.param-table-wrap')), search: edges(document.getElementById(`${pfx}-search`)),
+          pager: edges(pager), footer: edges(document.querySelector('.admin-footer')),
+          rows: document.querySelectorAll(`#${pfx}-list .metric-row`).length,
+          pageOverflowY: document.documentElement.scrollHeight - document.documentElement.clientHeight,
           addFromRight: card.getBoundingClientRect().right - add.getBoundingClientRect().right, addFromLeft: add.getBoundingClientRect().left - card.getBoundingClientRect().left,
           addFromTop: add.getBoundingClientRect().top - card.getBoundingClientRect().top, cardHeight: card.getBoundingClientRect().height,
           zoom: parseFloat(getComputedStyle(document.querySelector('#main-content')).zoom),
@@ -1033,6 +1070,11 @@ for (const scheme of ['light', 'dark']) {
     check(`Prometheus and Inverters table cards have the same edges and width ${label}`,
       near(pm.card.left, inv.card.left) && near(pm.card.right, inv.card.right) && near(pm.card.width, inv.card.width), JSON.stringify([pm.card, inv.card]));
     check(`table wrapper and search share their edges ${label}`, near(pm.wrap.left, inv.wrap.left) && near(pm.wrap.right, inv.wrap.right) && near(pm.search.left, inv.search.left) && near(pm.search.width, inv.search.width));
+    if (width === 1280) check(`sparse Inverters table fills the available viewport and keeps its pager at the bottom ${label}`,
+      inv.rows <= 1 && inv.footer.top - inv.card.bottom >= 0 && inv.footer.top - inv.card.bottom <= 40
+      && inv.card.bottom - inv.pager.bottom >= 0 && inv.card.bottom - inv.pager.bottom <= 40
+      && inv.pageOverflowY <= 1,
+      JSON.stringify({ rows: inv.rows, cardBottom: inv.card.bottom, pagerBottom: inv.pager.bottom, footerTop: inv.footer.top, pageOverflowY: inv.pageOverflowY }));
     // Centered against a title block of different height, so only the horizontal corner and the header band are compared.
     const addInside = (f) => f.addFromRight >= 0 && f.addFromLeft >= 0 && f.addFromTop >= 0 && f.addFromTop < f.cardHeight / 2;
     check(`the primary Add action sits in the card header band ${label}`, addInside(pm) && addInside(inv), JSON.stringify([pm, inv].map((f) => [f.addFromLeft, f.addFromRight, f.addFromTop])));
@@ -1567,7 +1609,7 @@ check('docs toggle lives on settings only', (await page.locator('#setting-docs_p
 // so release the pointer and let earlier toasts leave before clicking, as a user would.
 const clickExportApply = async () => {
   await page.mouse.move(0, 0);
-  await page.waitForFunction(() => document.querySelectorAll('#toast-region .alert').length === 0, null, { timeout: 8000 });
+  await page.waitForFunction(() => document.querySelectorAll('#toast-region .alert').length === 0, null, { timeout: 15000 });
   await page.click('#export-apply');
 };
 // 6c. TSDB export cards: all cards visible in the shared grid; changes are sent by Apply only
@@ -1739,10 +1781,24 @@ for (const width of [390, 320]) {
 await page.setViewportSize({ width: 1280, height: 800 });
 
 await page.goto(base + '/ui/prometheus');
-await page.click('.prometheus-settings summary');
+// The Scrape settings collapsible is gone: the master toggle is present directly, no summary to expand.
 await page.waitForSelector('#setting-enable_metrics_endpoint');
+check('no Scrape settings collapsible on the Prometheus page', (await page.locator('.prometheus-settings, summary:has-text("Scrape settings")').count()) === 0);
 
-// 6d. Prometheus master toggle gates the dependent fields live, without a reload
+// 6d. The master toggle is the first element inside the top status card, above the status grid.
+const toggleFirstInTopCard = await page.evaluate(() => {
+  const card = document.querySelector('section.card[aria-label="Prometheus status"] > .card-body');
+  const toggle = document.getElementById('setting-enable_metrics_endpoint');
+  if (!card || !toggle) return false;
+  const first = card.firstElementChild;
+  // The toggle lives in the first child of the card body, which precedes the status grid.
+  return first.contains(toggle) && !first.classList.contains('prometheus-summary')
+    && Boolean(card.querySelector('.prometheus-summary'))
+    && (first.compareDocumentPosition(card.querySelector('.prometheus-summary')) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0;
+});
+check('Enable Metrics Endpoint toggle is first inside the top status card', toggleFirstInTopCard);
+
+// 6e. Prometheus master toggle gates the dependent fields live, without a reload
 const DEPENDENT = ['metrics_require_token', 'metrics_trusted_sources', 'metrics_rate_limit_requests', 'metrics_rate_limit_window_seconds'];
 const dependentCount = () => page.locator(DEPENDENT.map((key) => `#setting-${key}`).join(', ')).count();
 check('master toggle is labelled "Enable Metrics Endpoint"', (await page.locator('label[for="setting-enable_metrics_endpoint"]').innerText()).trim() === 'Enable Metrics Endpoint', await page.locator('label[for="setting-enable_metrics_endpoint"]').innerText());
@@ -1772,363 +1828,387 @@ await shot('prometheus-master-toggle-on');
   const energyFake = spawnPy(['tests.e2e.fake_inverter', String(energyDevicePort)], path.join(OUT, 'fake-energy.log'));
   const spawned = spawnPy(['tests.e2e.run_server', energyDb, String(energyPort), String(energyDevicePort), 'energy'], path.join(OUT, 'server-energy.log'));
   try {
-  await waitForPort(energyDevicePort);
-  const energyBase = `http://127.0.0.1:${energyPort}`;
-  for (let i = 0; i < 100; i++) {
-    try { if ((await fetch(`${energyBase}/health`)).ok) break; } catch { /* not up yet */ }
-    await sleep(200);
-  }
-  const energyPassword = firstStartPassword(spawned.output());
-  const energyContext = await browser.newContext({ viewport: { width: 1280, height: 900 }, locale: 'en-GB' });
-  const ep = await energyContext.newPage();
-  const energyProblems = [];
-  trackProblems(ep, energyProblems);
-  await ep.goto(`${energyBase}/login`);
-  await ep.fill('#password', energyPassword);
-  await ep.click('#login-form button[type=submit]');
-  await ep.waitForURL('**/change-password');
-  await ep.fill('#current-password', energyPassword);
-  await ep.fill('#new-password', NEW_PASSWORD);
-  await ep.fill('#confirm-password', NEW_PASSWORD);
-  await ep.click('#change-password-form button[type=submit]');
-  await ep.waitForURL('**/ui/dashboard');
-
-  // Measured values for the panel's own readings-derived text (e.g. the battery state sentence);
-  // the simulator's own readings are not part of this contract.
-  const reading = (value) => ({ value, age_seconds: 1, stale: false });
-  let mockNoLimits = false;
-  await ep.route('**/admin/api/energy/devices', async (route) => {
-    if (route.request().method() !== 'GET') return route.continue();
-    const response = await route.fetch();
-    const list = await response.json();
-    for (const device of list) {
-      if (mockNoLimits) device.limits = null;
-      device.readings = {
-        battery_soc_percent: reading(54), grid_power_w: reading(1200), pv_power_w: reading(1500),
-        house_load_w: reading(800), battery_power_w: reading(-900),
-      };
+    await waitForPort(energyDevicePort);
+    const energyBase = `http://127.0.0.1:${energyPort}`;
+    for (let i = 0; i < 100; i++) {
+      try { if ((await fetch(`${energyBase}/health`)).ok) break; } catch { /* not up yet */ }
+      await sleep(200);
     }
-    await route.fulfill({ response, json: list });
-  });
+    const energyPassword = firstStartPassword(spawned.output());
+    const energyContext = await browser.newContext({ viewport: { width: 1280, height: 900 }, locale: 'en-GB' });
+    const ep = await energyContext.newPage();
+    const energyProblems = [];
+    trackProblems(ep, energyProblems);
+    await ep.goto(`${energyBase}/login`);
+    await ep.fill('#password', energyPassword);
+    await ep.click('#login-form button[type=submit]');
+    await ep.waitForURL('**/change-password');
+    await ep.fill('#current-password', energyPassword);
+    await ep.fill('#new-password', NEW_PASSWORD);
+    await ep.fill('#confirm-password', NEW_PASSWORD);
+    await ep.click('#change-password-form button[type=submit]');
+    await ep.waitForURL('**/ui/dashboard');
 
-  // Before any verification: the device ships unverified, so Operate must show the Setup checklist
-  // and its single "Complete setup"/"Set up manual control" CTA — and must NOT leak raw capability
-  // names (write_path_convention etc.) onto the Operate surface (requirement 5, design §9/§12).
-  await ep.goto(`${energyBase}/ui/energy`);
-  await ep.waitForSelector('.energy-panel');
-  await ep.waitForSelector('.energy-setup:not([hidden])', { timeout: 15000 }).catch(() => { });
-  check('Setup checklist is shown while hardware is unverified', await ep.locator('.energy-setup:not([hidden])').count() >= 1);
-  // Wait until the inverter has connected, so the §9 branch order (connection first) advances from
-  // "Not connected." to the hardware-unverified "needs setup" banner.
-  await ep.waitForFunction(() => {
-    const list = document.querySelector('.energy-setup-list');
-    const connectedRow = list && list.querySelector('.energy-setup-item.is-met');
-    return connectedRow && /Inverter connected/.test(connectedRow.textContent);
-  }, null, { timeout: 20000 }).catch(() => { });
-  const setupText = await ep.locator('.energy-panel').first().innerText();
-  check('a single guided setup block is shown, without the old duplicated "needs setup" line',
-    /Manual battery control setup/.test(setupText) && !/Manual control needs setup/.test(setupText) && !/Complete setup/.test(setupText), setupText.slice(0, 500));
-  check('Expert mode exists and is OFF on load',
-    (await ep.locator('#energy-expert-mode').isChecked()) === false && (await ep.locator('.energy-expert').count()) === 0);
-  check('Basic mode has no diagnostics, engineering mode or SoC policy',
-    (await ep.locator('.energy-diagnostics').count()) === 0 && !/Engineering mode|SoC target policy|Revoke verification/.test(setupText), setupText.slice(0, 500));
-  const shownStep = await ep.locator('.energy-setup-step').first().innerText();
-  check('only the first open setup step is shown, without engineering mode',
-    /Write access|Power limits|Hardware verification/.test(shownStep) && !/Engineering mode/.test(shownStep), shownStep.slice(0, 300));
-  check('no raw capability names leak onto the Operate surface',
-    !/write_path_convention|battery_power_sign_convention|grid_power_sign_convention/.test(setupText), setupText.slice(0, 500));
-
-  // Manual may be selected while the setup is open, but it must read as pending, not as active.
-  const manualAnswered = ep.waitForResponse((r) => r.request().method() === 'PUT' && r.url().endsWith('/mode'), { timeout: 15000 }).catch(() => null);
-  await ep.locator('.energy-mode-switch [role=radio]').nth(1).click();
-  const manualResponse = await manualAnswered;
-  if (manualResponse && manualResponse.ok()) {
-    await ep.waitForSelector('.energy-mode-option.is-selected.is-pending', { timeout: 15000 }).catch(() => { });
-    const lead = ep.locator('.energy-setup-lead:not([hidden])');
-    check('Manual with an open setup is marked pending and says it is not active yet',
-      (await ep.locator('.energy-mode-option.is-selected.is-pending').count()) === 1
-      && /not active yet/.test(await lead.first().innerText().catch(() => '')));
-    const offAnswered = ep.waitForResponse((r) => r.request().method() === 'PUT' && r.url().endsWith('/mode'), { timeout: 15000 });
-    await ep.locator('.energy-mode-switch [role=radio]').first().click();
-    await offAnswered;
-    await ep.waitForSelector('.energy-mode-option.is-selected:not(.is-pending)', { timeout: 15000 });
-    check('Off is never shown as pending', (await ep.locator('.energy-setup-lead:not([hidden])').count()) === 0);
-  } else {
-    check('Manual can be selected while the setup is open', false, String(manualResponse && manualResponse.status()));
-  }
-
-  // The verification form must never pre-select the sign conventions or the evidence checkboxes.
-  const verifyPuts = [];
-  ep.on('request', (r) => { if (r.method() === 'PUT' && r.url().endsWith('/hardware-verification')) verifyPuts.push(r.postDataJSON()); });
-  // Basic mode only points to the verification (no strategy code / byte widths); the form is Expert-only
-  // and Expert mode is switched on by the user, never by the setup step.
-  check('Basic mode shows no hardware verification form or protocol fields',
-    (await ep.locator('.energy-setup-step form').count()) === 0 && !/Strategy code|Byte width/.test(shownStep), shownStep.slice(0, 300));
-  if (/Hardware verification/.test(shownStep)) {
-    check('the Basic hardware step offers "Verify hardware" and leaves Expert mode off',
-      (await ep.locator('.energy-setup-step button', { hasText: 'Verify hardware' }).count()) === 1
-      && (await ep.locator('#energy-expert-mode').isChecked()) === false, shownStep.slice(0, 300));
-    // Guided assistant: cancelling at the consent step stores nothing and keeps the gate closed.
-    await ep.locator('.energy-setup-step button', { hasText: 'Verify hardware' }).click();
-    const dialog = ep.locator('.energy-assistant.show');
-    await dialog.waitFor({ timeout: 5000 });
-    check('"Verify hardware" opens the guided assistant without switching Expert mode on',
-      (await ep.locator('#energy-expert-mode').isChecked()) === false && /Before you start/.test(await dialog.innerText()));
-    await dialog.getByRole('button', { name: 'Start check' }).click();
-    await dialog.getByRole('button', { name: 'Yes, continue' }).click();
-    await dialog.getByRole('button', { name: /The battery is discharging/ }).click();
-    await dialog.getByRole('button', { name: /feeding power into the grid/ }).click();
-    check('the assistant reaches the test step and offers no register names',
-      /Run the short test/.test(await dialog.innerText()) && !/power_mng|Strategy code|Byte width/.test(await dialog.innerText()));
-    const runButton = dialog.getByRole('button', { name: 'Run test' });
-    check('the test button stays disabled until the operator consents', await runButton.isDisabled());
-    await dialog.getByRole('button', { name: 'Cancel' }).click();
-    await ep.waitForSelector('.energy-assistant', { state: 'detached', timeout: 5000 });
-    check('cancelling the assistant leaves the hardware unverified',
-      (await ep.locator('.energy-setup-step button', { hasText: 'Verify hardware' }).count()) === 1
-      && (await ep.locator('.energy-actions button').count()) >= 0 && (await ep.locator('.energy-setup:not([hidden])').count()) >= 1);
-    // The Expert form checks below need the Expert section.
-    await ep.locator('#energy-expert-mode').check();
-  }
-  const uiForm = ep.locator('.energy-expert form').filter({ hasText: 'Device model' });
-  if (await uiForm.count()) {
-    const blank = await uiForm.evaluate((form) => ({
-      signs: [...form.querySelectorAll('select')].map((select) => select.value),
-      checked: [...form.querySelectorAll('input[type=checkbox]')].filter((box) => box.checked).length,
-    }));
-    check('the verification form starts with empty sign selects and no evidence boxes ticked',
-      blank.signs.length === 2 && blank.signs.every((value) => value === '') && blank.checked === 0, JSON.stringify(blank));
-    await uiForm.getByLabel('Device model').fill('Simulator');
-    await uiForm.getByLabel('Firmware').fill('1.0');
-    await uiForm.getByLabel('Strategy code').fill('2');
-    await uiForm.getByLabel('Enum byte width').fill('1');
-    await uiForm.getByLabel('Bool byte width').fill('1');
-    await uiForm.getByLabel('Evidence note').fill('e2e form');
-    await uiForm.getByLabel('Write frame layout verified').check();
-    await uiForm.getByLabel('Apply sequence verified').check();
-    await uiForm.getByLabel('I verified these values on the hardware').check();
-    await uiForm.locator('button[type=submit]').click();
-    await sleep(500);
-    check('submitting without choosing the sign conventions is rejected on the field',
-      verifyPuts.length === 0 && (await uiForm.locator('.is-invalid').count()) >= 1, JSON.stringify(verifyPuts));
-  }
-
-  // Complete guided run, back in Basic mode so the Expert form state does not interfere.
-  await ep.locator('#energy-expert-mode').uncheck();
-  {
-    const dialog = ep.locator('.energy-assistant.show');
-    // Consent, test, save; the banner goes away and the manual actions appear.
-    await ep.locator('.energy-setup-step button', { hasText: 'Verify hardware' }).click();
-    await dialog.waitFor({ timeout: 5000 });
-    await dialog.getByRole('button', { name: 'Start check' }).click();
-    await dialog.getByRole('button', { name: 'Yes, continue' }).click();
-    await dialog.getByRole('button', { name: /The battery is discharging/ }).click();
-    await dialog.getByRole('button', { name: /feeding power into the grid/ }).click();
-    await dialog.getByLabel(/I understand the battery will pause/).check();
-    await dialog.getByRole('button', { name: 'Run test' }).click();
-    await dialog.getByRole('button', { name: 'Save verification' }).waitFor({ timeout: 60000 });
-    await dialog.getByRole('button', { name: 'Save verification' }).click();
-    await ep.waitForSelector('.energy-assistant', { state: 'detached', timeout: 10000 });
-    await ep.waitForSelector('.energy-setup', { state: 'hidden', timeout: 15000 });
-    check('after the guided verification the setup banner is gone and Expert mode is still off',
-      (await ep.locator('.energy-setup:not([hidden])').count()) === 0 && (await ep.locator('#energy-expert-mode').isChecked()) === false);
-    check('the manual actions are visible after the guided verification',
-      (await ep.locator('.energy-actions button:visible').count()) >= 3);
-  }
-  // A fresh dispatch store ships unverified hardware; verify it through the atomic admin endpoint.
-  const verified = await ep.evaluate(async () => {
-    const { csrf_token: csrf } = await (await fetch('/admin/api/session', { credentials: 'same-origin' })).json();
-    const response = await fetch('/admin/api/energy/devices/sim/hardware-verification', {
-      method: 'PUT', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrf },
-      body: JSON.stringify({
-        verified_device_model: 'Simulator', verified_firmware: '1.0', note: 'e2e', soc_strategy_external_code: 2,
-        enum_byte_width: 1, bool_byte_width: 1, write_frame_layout_verified: true, apply_sequence_verified: true,
-        battery_discharge_positive: true, grid_import_positive: true, soc_target_unit: 'ratio',
-      }),
+    // Measured values for the panel's own readings-derived text (e.g. the battery state sentence);
+    // the simulator's own readings are not part of this contract.
+    const reading = (value) => ({ value, age_seconds: 1, stale: false });
+    let mockNoLimits = false;
+    await ep.route('**/admin/api/energy/devices', async (route) => {
+      if (route.request().method() !== 'GET') return route.continue();
+      const response = await route.fetch();
+      const list = await response.json();
+      for (const device of list) {
+        if (mockNoLimits) device.limits = null;
+        device.readings = {
+          battery_soc_percent: reading(54), grid_power_w: reading(1200), pv_power_w: reading(1500),
+          house_load_w: reading(800), battery_power_w: reading(-900),
+        };
+      }
+      await route.fulfill({ response, json: list });
     });
-    return response.status;
-  });
-  check('the hardware verification endpoint accepts one complete attestation', verified === 200, String(verified));
-  await ep.goto(`${energyBase}/ui/energy`);
-  await ep.waitForSelector('.energy-panel');
-  check('energy page renders a device panel', (await ep.locator('.energy-panel').count()) >= 1);
-  // Stage 1 moved the flow graphic to the dashboard and removed the Energy page's own instance
-  // (energyFlowGraphic() is now shared, single-instance); the panel keeps its control column.
-  check('the Energy Manager panel no longer contains its own flow graphic', (await ep.locator('.energy-panel .energy-flow-svg').count()) === 0);
-  // The relabelled, Operate-layer action buttons (presentation only; REST names unchanged).
-  const buttons = ['Charge battery', 'Keep battery idle', 'Discharge battery']
-    .map((name) => ep.locator('.energy-actions button', { hasText: new RegExp(`^${name}$`) }));
-  const states = async () => Promise.all(buttons.map((button) => button.isDisabled()));
-  const operateText = async () => (await ep.locator('.energy-panel').first().innerText());
 
-  const commands = [];
-  ep.on('request', (r) => { if (r.method() === 'POST' && r.url().endsWith('/command')) commands.push(r.postDataJSON()); });
-  // The simulator needs ~10 s to apply a charge, and the buttons stay busy until then (waits below allow for it).
-  // The simulator ships unverified hardware; verify it first, as an operator would in Expert.
-  const csrf = await ep.evaluate(async () => (await (await fetch('/admin/api/session')).json()).csrf_token);
-  const verification = await ep.request.put(`${energyBase}/admin/api/energy/devices/sim/hardware-verification`, {
-    headers: { 'X-CSRF-Token': csrf, Origin: energyBase },
-    data: {
-      verified_device_model: 'Simulator', verified_firmware: '1.0', note: 'e2e simulator',
-      soc_strategy_external_code: 2, enum_byte_width: 1, bool_byte_width: 1,
-      write_frame_layout_verified: true, apply_sequence_verified: true,
-      battery_discharge_positive: true, grid_import_positive: true, soc_target_unit: 'ratio',
-    },
-  });
-  check('hardware verification endpoint accepts the evidence', verification.ok(), String(verification.status()));
-  await ep.reload();
-  await ep.waitForSelector('.energy-panel');
-  // Operating mode: a three-state radio group. Off is the initial state; Write access is already on here.
-  const radios = ep.locator('.energy-mode-switch [role=radio]');
-  const checkedMode = () => ep.evaluate(() => document.querySelector('.energy-mode-switch [aria-checked=true]')?.textContent.trim());
-  check('the mode control is a radio group with Off, Manual and External',
-    (await ep.locator('.energy-mode-switch[role=radiogroup]').count()) === 1
-    && (await radios.allInnerTexts()).map((text) => text.replace(/\s+/g, ' ').trim().replace(/^\S+ /, '')).join('|') === 'Off|Manual|External',
-    JSON.stringify(await radios.allInnerTexts()));
-  check('initially Off is selected and the only tab stop', /Off$/.test(await checkedMode()),
-    String(await checkedMode()));
-  check('roving tabindex: exactly one radio is tabbable', (await ep.locator('.energy-mode-switch [role=radio][tabindex="0"]').count()) === 1);
-  check('every radio has an aria-label that starts with its visible text',
-    (await radios.evaluateAll((nodes) => nodes.every((n) => n.getAttribute('aria-label').startsWith(n.lastElementChild.textContent.trim())))));
-  const initialStates = await states();
-  check('Off: the operate buttons are disabled and name the reason', initialStates.every(Boolean)
-    && /switched off/.test(await buttons[0].getAttribute('title') || ''), JSON.stringify(initialStates));
-  // Keyboard: arrows only move the focus; Space selects.
-  const modeCalls = [];
-  // Synchronise on the PUT /mode answer, then on the rendered state; a timeout fails the step loudly.
-  const switchMode = async (act, label) => {
-    const answered = ep.waitForResponse((r) => r.request().method() === 'PUT' && r.url().endsWith('/mode'), { timeout: 15000 });
-    await act();
-    await answered;
-    await ep.waitForFunction((l) => (document.querySelector('.energy-mode-switch [aria-checked=true]')?.textContent.trim() || '').endsWith(l), label, { timeout: 15000 });
-  };
-  ep.on('request', (r) => { if (r.method() === 'PUT' && r.url().endsWith('/mode')) modeCalls.push(r.postDataJSON()); });
-  await radios.first().focus();
-  await ep.keyboard.press('ArrowRight');
-  check('ArrowRight moves the focus to Manual without selecting it',
-    (await ep.evaluate(() => document.activeElement?.textContent.trim().endsWith('Manual'))) && modeCalls.length === 0 && /Off$/.test(await checkedMode()));
-  await switchMode(() => ep.keyboard.press('Space'), 'Manual');
-  check('Space selects Manual and the focus stays on the control',
-    /Manual$/.test(await checkedMode()) && modeCalls.length === 1 && modeCalls[0].mode === 'manual'
-    && (await ep.evaluate(() => document.activeElement?.closest('.energy-mode-switch') !== null)), JSON.stringify(modeCalls));
-  await ep.waitForFunction(() => [...document.querySelectorAll('.energy-actions button')].some((b) => !b.disabled), null, { timeout: 15000 }).catch(() => { });
-  const afterArm = await states();
-  check('Manual enables the available actions', afterArm.some((disabled) => !disabled), JSON.stringify(afterArm));
+    // Before any verification: the device ships unverified, so Operate must show the Setup checklist
+    // and its single "Complete setup"/"Set up manual control" CTA — and must NOT leak raw capability
+    // names (write_path_convention etc.) onto the Operate surface (requirement 5, design §9/§12).
+    await ep.goto(`${energyBase}/ui/energy`);
+    await ep.waitForSelector('.energy-panel');
+    await ep.waitForSelector('.energy-setup:not([hidden])', { timeout: 15000 }).catch(() => { });
+    check('Setup checklist is shown while hardware is unverified', await ep.locator('.energy-setup:not([hidden])').count() >= 1);
+    // Wait until the inverter has connected, so the §9 branch order (connection first) advances from
+    // "Not connected." to the hardware-unverified "needs setup" banner.
+    await ep.waitForFunction(() => {
+      const list = document.querySelector('.energy-setup-list');
+      const connectedRow = list && list.querySelector('.energy-setup-item.is-met');
+      return connectedRow && /Inverter connected/.test(connectedRow.textContent);
+    }, null, { timeout: 20000 }).catch(() => { });
+    const setupText = await ep.locator('.energy-panel').first().innerText();
+    check('a single guided setup block is shown, without the old duplicated "needs setup" line',
+      /Manual battery control setup/.test(setupText) && !/Manual control needs setup/.test(setupText) && !/Complete setup/.test(setupText), setupText.slice(0, 500));
+    check('Expert mode exists and is OFF on load',
+      (await ep.locator('#energy-expert-mode').isChecked()) === false && (await ep.locator('.energy-expert').count()) === 0);
+    check('Basic mode has no diagnostics, engineering mode or SoC policy',
+      (await ep.locator('.energy-diagnostics').count()) === 0 && !/Engineering mode|SoC target policy|Revoke verification/.test(setupText), setupText.slice(0, 500));
+    const shownStep = await ep.locator('.energy-setup-step').first().innerText();
+    check('only the first open setup step is shown, without engineering mode',
+      /Write access|Power limits|Hardware verification/.test(shownStep) && !/Engineering mode/.test(shownStep), shownStep.slice(0, 300));
+    check('no raw capability names leak onto the Operate surface',
+      !/write_path_convention|battery_power_sign_convention|grid_power_sign_convention/.test(setupText), setupText.slice(0, 500));
 
-  // A token cannot command a Manual inverter: 409 energy_manager_not_external (the PAT is created below via the API).
-  const patBody = await ep.evaluate(async () => {
-    const token = await (await fetch('/admin/api/tokens', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': (await (await fetch('/admin/api/session')).json()).csrf_token }, body: JSON.stringify({ name: 'e2e-mode', role: 'read/write' }) })).json();
-    return token;
-  });
-  const secret = patBody.token || patBody.secret || '';
-  if (secret) {
-    const viaPat = await ep.request.post(`${energyBase}/api/v1/devices/sim/energy/command`, { headers: { Authorization: `Bearer ${secret}` }, data: { action: 'hold' } });
-    check('a PAT command on a Manual inverter answers 409 energy_manager_not_external',
-      viaPat.status() === 409 && (await viaPat.json()).code === 'energy_manager_not_external', String(viaPat.status()));
-    // This request belongs to the separate energy page, outside the main page's error listener.
-  } else check('a PAT could be created for the Manual-mode check', false, JSON.stringify(patBody).slice(0, 200));
+    // Manual may be selected while the setup is open, but it must read as pending, not as active.
+    const manualAnswered = ep.waitForResponse((r) => r.request().method() === 'PUT' && r.url().endsWith('/mode'), { timeout: 15000 }).catch(() => null);
+    await ep.locator('.energy-mode-switch [role=radio]').nth(1).click();
+    const manualResponse = await manualAnswered;
+    if (manualResponse && manualResponse.ok()) {
+      await ep.waitForSelector('.energy-mode-option.is-selected.is-pending', { timeout: 15000 }).catch(() => { });
+      const lead = ep.locator('.energy-setup-lead:not([hidden])');
+      check('Manual with an open setup is marked pending and says it is not active yet',
+        (await ep.locator('.energy-mode-option.is-selected.is-pending').count()) === 1
+        && /not active yet/.test(await lead.first().innerText().catch(() => '')));
+      const offAnswered = ep.waitForResponse((r) => r.request().method() === 'PUT' && r.url().endsWith('/mode'), { timeout: 15000 });
+      await ep.locator('.energy-mode-switch [role=radio]').first().click();
+      await offAnswered;
+      await ep.waitForSelector('.energy-mode-option.is-selected:not(.is-pending)', { timeout: 15000 });
+      check('Off is never shown as pending', (await ep.locator('.energy-setup-lead:not([hidden])').count()) === 0);
+    } else {
+      check('Manual can be selected while the setup is open', false, String(manualResponse && manualResponse.status()));
+    }
 
-  const cmd = async (action) => {
-    const before = commands.length;
-    await action();
-    const started = Date.now();
-    while (commands.length === before && Date.now() - started < 8000) await sleep(100);
-    return commands[before];
-  };
-  if (!afterArm[0]) {
-    await buttons[0].click();
-    check('Charge opens the target SoC area', await ep.locator('.energy-target').isVisible());
-    const charge = await cmd(() => ep.locator('.energy-target button').click());
-    check('Charge sends a command with a target SoC', charge?.action === 'charge' && Number.isFinite(charge.target_soc_percent), JSON.stringify(charge));
-  } else check('Charge is available in Manual', false, 'disabled in Manual');
-  await ep.waitForFunction(() => [...document.querySelectorAll('.energy-actions button')].some((b) => b.textContent.trim() === 'Keep battery idle' && !b.disabled), null, { timeout: 40000 }).catch(() => { });
-  const hold = !(await states())[1] ? await cmd(() => buttons[1].click()) : null;
-  const holdDiag = await ep.evaluate(async () => ({ buttons: [...document.querySelectorAll('.energy-actions button')].map((b) => [b.textContent.trim(), b.disabled, b.title]), status: document.querySelector('.energy-status')?.innerText, mode: document.querySelector('.energy-mode')?.innerText, api: await (await fetch('/admin/api/energy/devices')).json().then((l) => ({ state: l[0].state, connected: l[0].connected, mode: l[0].mode, actions: l[0].actions, stop: l[0].stop_reason, restore: l[0].restore_attempts })) }));
-  await ep.screenshot({ path: path.join(OUT, 'energy-after-charge.png'), fullPage: true });
-  check('Keep battery idle sends a hold command without a target SoC', hold?.action === 'hold' && !('target_soc_percent' in hold), JSON.stringify(hold) + JSON.stringify(holdDiag));
-  const auto = await cmd(() => ep.locator('.energy-actions button', { hasText: 'Return to automatic' }).click());
-  check('Return to automatic sends auto', auto?.action === 'auto', JSON.stringify(auto));
+    // The verification form must never pre-select the sign conventions or the evidence checkboxes.
+    const verifyPuts = [];
+    ep.on('request', (r) => { if (r.method() === 'PUT' && r.url().endsWith('/hardware-verification')) verifyPuts.push(r.postDataJSON()); });
+    // Basic mode only points to the verification (no strategy code / byte widths); the form is Expert-only
+    // and Expert mode is switched on by the user, never by the setup step.
+    check('Basic mode shows no hardware verification form or protocol fields',
+      (await ep.locator('.energy-setup-step form').count()) === 0 && !/Strategy code|Byte width/.test(shownStep), shownStep.slice(0, 300));
+    if (/Hardware verification/.test(shownStep)) {
+      check('the Basic hardware step offers "Verify hardware" and leaves Expert mode off',
+        (await ep.locator('.energy-setup-step button', { hasText: 'Verify hardware' }).count()) === 1
+        && (await ep.locator('#energy-expert-mode').isChecked()) === false, shownStep.slice(0, 300));
+      // Shared primary metrics and AA contrast on the warning box; this context is light, dark brand
+      // fill vs surface is a global token matter.
+      const buttonStyle = await ep.locator('.energy-setup-step button', { hasText: 'Verify hardware' }).evaluate((button) => {
+        const probe = document.createElement('button');
+        probe.className = 'btn btn-primary';
+        probe.textContent = 'Probe';
+        button.after(probe);
+        const luminance = (color) => {
+          const [r, g, b] = color.match(/[\d.]+/g).slice(0, 3).map((v) => { const c = Number(v) / 255; return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4; });
+          return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+        };
+        const ratio = (a, b) => { const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x); return (hi + 0.05) / (lo + 0.05); };
+        const metrics = (el) => { const s = getComputedStyle(el); return [s.fontSize, s.fontWeight, s.lineHeight, s.padding, s.borderRadius, s.display, s.backgroundColor, el.getBoundingClientRect().height.toFixed(1)].join('|'); };
+        let surface = 'rgba(0, 0, 0, 0)';
+        for (let node = button.parentElement; node && /rgba\(0, 0, 0, 0\)|transparent/.test(surface); node = node.parentElement) surface = getComputedStyle(node).backgroundColor;
+        const own = getComputedStyle(button);
+        const result = { button: metrics(button), canonical: metrics(probe), text: ratio(own.color, own.backgroundColor), boundary: ratio(own.backgroundColor, surface) };
+        probe.remove();
+        return result;
+      });
+      check('"Verify hardware" has the computed style of the shared primary button',
+        buttonStyle.button === buttonStyle.canonical, `${buttonStyle.button} vs ${buttonStyle.canonical}`);
+      check('"Verify hardware" is readable on the setup box (text 4.5:1, boundary 3:1)',
+        buttonStyle.text >= 4.5 && buttonStyle.boundary >= 3, `text ${buttonStyle.text.toFixed(2)}, boundary ${buttonStyle.boundary.toFixed(2)}`);
+      // Guided assistant: cancelling at the consent step stores nothing and keeps the gate closed.
+      await ep.locator('.energy-setup-step button', { hasText: 'Verify hardware' }).click();
+      const dialog = ep.locator('.energy-assistant.show');
+      await dialog.waitFor({ timeout: 5000 });
+      check('"Verify hardware" opens the guided assistant without switching Expert mode on',
+        (await ep.locator('#energy-expert-mode').isChecked()) === false && /Before you start/.test(await dialog.innerText()));
+      await dialog.getByRole('button', { name: 'Start check' }).click();
+      await dialog.getByRole('button', { name: 'Yes, continue' }).click();
+      await dialog.getByRole('button', { name: /The battery is discharging/ }).click();
+      await dialog.getByRole('button', { name: /feeding power into the grid/ }).click();
+      check('the assistant reaches the test step and offers no register names',
+        /Run the short test/.test(await dialog.innerText()) && !/power_mng|Strategy code|Byte width/.test(await dialog.innerText()));
+      const runButton = dialog.getByRole('button', { name: 'Run test' });
+      check('the test button stays disabled until the operator consents', await runButton.isDisabled());
+      await dialog.getByRole('button', { name: 'Cancel' }).click();
+      await ep.waitForSelector('.energy-assistant', { state: 'detached', timeout: 5000 });
+      check('cancelling the assistant leaves the hardware unverified',
+        (await ep.locator('.energy-setup-step button', { hasText: 'Verify hardware' }).count()) === 1
+        && (await ep.locator('.energy-actions button').count()) >= 0 && (await ep.locator('.energy-setup:not([hidden])').count()) >= 1);
+      // The Expert form checks below need the Expert section.
+      await ep.locator('#energy-expert-mode').check();
+    }
+    const uiForm = ep.locator('.energy-expert form').filter({ hasText: 'Device model' });
+    if (await uiForm.count()) {
+      const blank = await uiForm.evaluate((form) => ({
+        signs: [...form.querySelectorAll('select')].map((select) => select.value),
+        checked: [...form.querySelectorAll('input[type=checkbox]')].filter((box) => box.checked).length,
+      }));
+      check('the verification form starts with empty sign selects and no evidence boxes ticked',
+        blank.signs.length === 2 && blank.signs.every((value) => value === '') && blank.checked === 0, JSON.stringify(blank));
+      await uiForm.getByLabel('Device model').fill('Simulator');
+      await uiForm.getByLabel('Firmware').fill('1.0');
+      await uiForm.getByLabel('Strategy code').fill('2');
+      await uiForm.getByLabel('Enum byte width').fill('1');
+      await uiForm.getByLabel('Bool byte width').fill('1');
+      await uiForm.getByLabel('Evidence note').fill('e2e form');
+      await uiForm.getByLabel('Write frame layout verified').check();
+      await uiForm.getByLabel('Apply sequence verified').check();
+      await uiForm.getByLabel('I verified these values on the hardware').check();
+      await uiForm.locator('button[type=submit]').click();
+      await sleep(500);
+      check('submitting without choosing the sign conventions is rejected on the field',
+        verifyPuts.length === 0 && (await uiForm.locator('.is-invalid').count()) >= 1, JSON.stringify(verifyPuts));
+    }
 
-  // External: the GUI is refused and the controls are disabled with an info line; a PAT may command.
-  await switchMode(() => radios.nth(2).click(), 'External');
-  await ep.waitForFunction(() => [...document.querySelectorAll('.energy-actions button')].every((b) => b.disabled), null, { timeout: 5000 }).catch(() => { });
-  const externalText = await operateText();
-  check('External: the controls are disabled and the panel says an external app is in control',
-    (await states()).every(Boolean) && /controlled by an external app through the API \(PAT required\)\./.test(externalText), externalText.slice(0, 700));
-  check('External: a disabled control names the reason', /external app/.test(await buttons[0].getAttribute('title') || ''));
-  const csrfNow = await ep.evaluate(async () => (await (await fetch('/admin/api/session')).json()).csrf_token);
-  const viaGui = await ep.request.post(`${energyBase}/admin/api/energy/devices/sim/command`, { headers: { 'X-CSRF-Token': csrfNow, Origin: energyBase }, data: { action: 'hold' } });
-  check('External: a GUI command answers 409 energy_manager_external', viaGui.status() === 409 && (await viaGui.json()).code === 'energy_manager_external', String(viaGui.status()));
-  if (secret) {
-    const viaPat = await ep.request.post(`${energyBase}/api/v1/devices/sim/energy/command`, { headers: { Authorization: `Bearer ${secret}` }, data: { action: 'hold' } });
-    check('External: a PAT command is accepted', viaPat.status() === 200, String(viaPat.status()));
-  }
-  // Back to Manual so the remaining checks see the operable controls.
-  await switchMode(() => radios.nth(1).click(), 'Manual');
+    // Complete guided run, back in Basic mode so the Expert form state does not interfere.
+    await ep.locator('#energy-expert-mode').uncheck();
+    {
+      const dialog = ep.locator('.energy-assistant.show');
+      // Consent, test, save; the banner goes away and the manual actions appear.
+      await ep.locator('.energy-setup-step button', { hasText: 'Verify hardware' }).click();
+      await dialog.waitFor({ timeout: 5000 });
+      await dialog.getByRole('button', { name: 'Start check' }).click();
+      await dialog.getByRole('button', { name: 'Yes, continue' }).click();
+      await dialog.getByRole('button', { name: /The battery is discharging/ }).click();
+      await dialog.getByRole('button', { name: /feeding power into the grid/ }).click();
+      await dialog.getByLabel(/I understand the battery will pause/).check();
+      await dialog.getByRole('button', { name: 'Run test' }).click();
+      await dialog.getByRole('button', { name: 'Save verification' }).waitFor({ timeout: 60000 });
+      await dialog.getByRole('button', { name: 'Save verification' }).click();
+      await ep.waitForSelector('.energy-assistant', { state: 'detached', timeout: 10000 });
+      await ep.waitForSelector('.energy-setup', { state: 'hidden', timeout: 15000 });
+      check('after the guided verification the setup banner is gone and Expert mode is still off',
+        (await ep.locator('.energy-setup:not([hidden])').count()) === 0 && (await ep.locator('#energy-expert-mode').isChecked()) === false);
+      check('the manual actions are visible after the guided verification',
+        (await ep.locator('.energy-actions button:visible').count()) >= 3);
+    }
+    // A fresh dispatch store ships unverified hardware; verify it through the atomic admin endpoint.
+    const verified = await ep.evaluate(async () => {
+      const { csrf_token: csrf } = await (await fetch('/admin/api/session', { credentials: 'same-origin' })).json();
+      const response = await fetch('/admin/api/energy/devices/sim/hardware-verification', {
+        method: 'PUT', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrf },
+        body: JSON.stringify({
+          verified_device_model: 'Simulator', verified_firmware: '1.0', note: 'e2e', soc_strategy_external_code: 2,
+          enum_byte_width: 1, bool_byte_width: 1, write_frame_layout_verified: true, apply_sequence_verified: true,
+          battery_discharge_positive: true, grid_import_positive: true, soc_target_unit: 'ratio',
+        }),
+      });
+      return response.status;
+    });
+    check('the hardware verification endpoint accepts one complete attestation', verified === 200, String(verified));
+    await ep.goto(`${energyBase}/ui/energy`);
+    await ep.waitForSelector('.energy-panel');
+    check('energy page renders a device panel', (await ep.locator('.energy-panel').count()) >= 1);
+    // Stage 1 moved the flow graphic to the dashboard and removed the Energy page's own instance
+    // (energyFlowGraphic() is now shared, single-instance); the panel keeps its control column.
+    check('the Energy Manager panel no longer contains its own flow graphic', (await ep.locator('.energy-panel .energy-flow-svg').count()) === 0);
+    // The relabelled, Operate-layer action buttons (presentation only; REST names unchanged).
+    const buttons = ['Charge battery', 'Keep battery idle', 'Discharge battery']
+      .map((name) => ep.locator('.energy-actions button', { hasText: new RegExp(`^${name}$`) }));
+    const states = async () => Promise.all(buttons.map((button) => button.isDisabled()));
+    const operateText = async () => (await ep.locator('.energy-panel').first().innerText());
 
-  // The relabels are visible on Operate (presentation-only; the REST action names stayed on the wire
-  // above: hold/charge/auto). Manual-control enable/disable wording replaces the old ON/OFF switch.
-  const operate = await operateText();
-  check('Operate shows the mode control', /Manual/.test(operate) && /External/.test(operate), operate.slice(0, 400));
-  check('Operate shows the relabelled battery actions',
-    /Charge battery/.test(operate) && /Keep battery idle/.test(operate) && /Discharge battery/.test(operate), operate.slice(0, 400));
+    const commands = [];
+    ep.on('request', (r) => { if (r.method() === 'POST' && r.url().endsWith('/command')) commands.push(r.postDataJSON()); });
+    // The simulator needs ~10 s to apply a charge, and the buttons stay busy until then (waits below allow for it).
+    // The simulator ships unverified hardware; verify it first, as an operator would in Expert.
+    const csrf = await ep.evaluate(async () => (await (await fetch('/admin/api/session')).json()).csrf_token);
+    const verification = await ep.request.put(`${energyBase}/admin/api/energy/devices/sim/hardware-verification`, {
+      headers: { 'X-CSRF-Token': csrf, Origin: energyBase },
+      data: {
+        verified_device_model: 'Simulator', verified_firmware: '1.0', note: 'e2e simulator',
+        soc_strategy_external_code: 2, enum_byte_width: 1, bool_byte_width: 1,
+        write_frame_layout_verified: true, apply_sequence_verified: true,
+        battery_discharge_positive: true, grid_import_positive: true, soc_target_unit: 'ratio',
+      },
+    });
+    check('hardware verification endpoint accepts the evidence', verification.ok(), String(verification.status()));
+    await ep.reload();
+    await ep.waitForSelector('.energy-panel');
+    // Operating mode: a three-state radio group. Off is the initial state; Write access is already on here.
+    const radios = ep.locator('.energy-mode-switch [role=radio]');
+    const checkedMode = () => ep.evaluate(() => document.querySelector('.energy-mode-switch [aria-checked=true]')?.textContent.trim());
+    check('the mode control is a radio group with Off, Manual and External',
+      (await ep.locator('.energy-mode-switch[role=radiogroup]').count()) === 1
+      && (await radios.allInnerTexts()).map((text) => text.replace(/\s+/g, ' ').trim().replace(/^\S+ /, '')).join('|') === 'Off|Manual|External',
+      JSON.stringify(await radios.allInnerTexts()));
+    check('initially Off is selected and the only tab stop', /Off$/.test(await checkedMode()),
+      String(await checkedMode()));
+    check('roving tabindex: exactly one radio is tabbable', (await ep.locator('.energy-mode-switch [role=radio][tabindex="0"]').count()) === 1);
+    check('every radio has an aria-label that starts with its visible text',
+      (await radios.evaluateAll((nodes) => nodes.every((n) => n.getAttribute('aria-label').startsWith(n.lastElementChild.textContent.trim())))));
+    const initialStates = await states();
+    check('Off: the operate buttons are disabled and name the reason', initialStates.every(Boolean)
+      && /switched off/.test(await buttons[0].getAttribute('title') || ''), JSON.stringify(initialStates));
+    // Keyboard: arrows only move the focus; Space selects.
+    const modeCalls = [];
+    // Synchronise on the PUT /mode answer, then on the rendered state; a timeout fails the step loudly.
+    const switchMode = async (act, label) => {
+      const answered = ep.waitForResponse((r) => r.request().method() === 'PUT' && r.url().endsWith('/mode'), { timeout: 15000 });
+      await act();
+      await answered;
+      await ep.waitForFunction((l) => (document.querySelector('.energy-mode-switch [aria-checked=true]')?.textContent.trim() || '').endsWith(l), label, { timeout: 15000 });
+    };
+    ep.on('request', (r) => { if (r.method() === 'PUT' && r.url().endsWith('/mode')) modeCalls.push(r.postDataJSON()); });
+    await radios.first().focus();
+    await ep.keyboard.press('ArrowRight');
+    check('ArrowRight moves the focus to Manual without selecting it',
+      (await ep.evaluate(() => document.activeElement?.textContent.trim().endsWith('Manual'))) && modeCalls.length === 0 && /Off$/.test(await checkedMode()));
+    await switchMode(() => ep.keyboard.press('Space'), 'Manual');
+    check('Space selects Manual and the focus stays on the control',
+      /Manual$/.test(await checkedMode()) && modeCalls.length === 1 && modeCalls[0].mode === 'manual'
+      && (await ep.evaluate(() => document.activeElement?.closest('.energy-mode-switch') !== null)), JSON.stringify(modeCalls));
+    await ep.waitForFunction(() => [...document.querySelectorAll('.energy-actions button')].some((b) => !b.disabled), null, { timeout: 15000 }).catch(() => { });
+    const afterArm = await states();
+    check('Manual enables the available actions', afterArm.some((disabled) => !disabled), JSON.stringify(afterArm));
 
-  // Normal mode stays compact: no raw capability names, reject detail or expert controls.
-  check('Normal mode shows no raw capability names, engineering mode or reject detail',
-    !/write_path_convention|reject|Engineering mode|SoC target policy|Revoke verification|Strategy code/i.test(operate)
-    && (await ep.locator('.energy-setup:visible').count()) === 0, operate.slice(0, 400));
-  // Expert mode is a pure display switch: toggling must not send any write request.
-  const writes = [];
-  ep.on('request', (r) => { if (r.method() !== 'GET') writes.push(`${r.method()} ${r.url()}`); });
-  await ep.locator('#energy-expert-mode').check();
-  await ep.locator('.energy-expert').first().waitFor();
-  check('Expert mode ON shows Revoke verification, engineering mode and SoC policy',
-    /Revoke verification/.test(await ep.locator('.energy-expert').first().innerText())
-    && /Engineering mode/.test(await ep.locator('.energy-expert').first().innerText())
-    && /SoC target policy/.test(await ep.locator('.energy-expert').first().innerText()));
-  await ep.locator('.energy-diagnostics summary').first().click();
-  const diagText = await ep.locator('.energy-diagnostics').first().innerText();
-  check('Diagnostics still exposes raw capability names',
-    /write_path_convention/.test(diagText) && /battery_power_sign_convention/.test(diagText), diagText.slice(0, 400));
-  const expertText = await ep.locator('.energy-expert').first().innerText();
-  check('Expert shows power limits in kW', /Maximum charging power \(kW\)/.test(expertText) && /Maximum discharging power \(kW\)/.test(expertText), expertText.slice(0, 400));
-  await ep.locator('#energy-expert-mode').uncheck();
-  check('Expert mode OFF hides expert content again; toggling sent no write request',
-    (await ep.locator('.energy-expert').count()) === 0 && (await ep.getByText('Revoke verification').count()) === 0
-    && writes.length === 0, writes.join(', '));
+    // A token cannot command a Manual inverter: 409 energy_manager_not_external (the PAT is created below via the API).
+    const patBody = await ep.evaluate(async () => {
+      const token = await (await fetch('/admin/api/tokens', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': (await (await fetch('/admin/api/session')).json()).csrf_token }, body: JSON.stringify({ name: 'e2e-mode', role: 'read/write' }) })).json();
+      return token;
+    });
+    const secret = patBody.token || patBody.secret || '';
+    if (secret) {
+      const viaPat = await ep.request.post(`${energyBase}/api/v1/devices/sim/energy/command`, { headers: { Authorization: `Bearer ${secret}` }, data: { action: 'hold' } });
+      check('a PAT command on a Manual inverter answers 409 energy_manager_not_external',
+        viaPat.status() === 409 && (await viaPat.json()).code === 'energy_manager_not_external', String(viaPat.status()));
+      // This request belongs to the separate energy page, outside the main page's error listener.
+    } else check('a PAT could be created for the Manual-mode check', false, JSON.stringify(patBody).slice(0, 200));
 
-  // Saving the power limits must carry the existing engineering_mode instead of resetting it.
-  const limitPuts = [];
-  ep.on('request', (r) => { if (r.method() === 'PUT' && /\/dispatch\/devices\//.test(r.url())) limitPuts.push(r.postDataJSON()); });
-  await ep.locator('#energy-expert-mode').check();
-  const expertBox = ep.locator('.energy-expert').first();
-  await expertBox.getByLabel('Engineering mode').check();
-  await expertBox.getByRole('button', { name: 'Save engineering mode' }).click();
-  await sleep(1000);
-  await expertBox.getByRole('button', { name: 'Save limits' }).click();
-  await sleep(800);
-  check('saving the power limits keeps the existing engineering_mode',
-    limitPuts.length >= 2 && limitPuts.at(-1).engineering_mode === true, JSON.stringify(limitPuts));
-  await expertBox.getByLabel('Engineering mode').uncheck(); // restore the simulator state
-  await expertBox.getByRole('button', { name: 'Save engineering mode' }).click();
-  await sleep(500);
-  await ep.locator('#energy-expert-mode').uncheck();
+    const cmd = async (action) => {
+      const before = commands.length;
+      await action();
+      const started = Date.now();
+      while (commands.length === before && Date.now() - started < 8000) await sleep(100);
+      return commands[before];
+    };
+    if (!afterArm[0]) {
+      await buttons[0].click();
+      check('Charge opens the target SoC area', await ep.locator('.energy-target').isVisible());
+      const charge = await cmd(() => ep.locator('.energy-target button').click());
+      check('Charge sends a command with a target SoC', charge?.action === 'charge' && Number.isFinite(charge.target_soc_percent), JSON.stringify(charge));
+    } else check('Charge is available in Manual', false, 'disabled in Manual');
+    await ep.waitForFunction(() => [...document.querySelectorAll('.energy-actions button')].some((b) => b.textContent.trim() === 'Keep battery idle' && !b.disabled), null, { timeout: 40000 }).catch(() => { });
+    const hold = !(await states())[1] ? await cmd(() => buttons[1].click()) : null;
+    const holdDiag = await ep.evaluate(async () => ({ buttons: [...document.querySelectorAll('.energy-actions button')].map((b) => [b.textContent.trim(), b.disabled, b.title]), status: document.querySelector('.energy-status')?.innerText, mode: document.querySelector('.energy-mode')?.innerText, api: await (await fetch('/admin/api/energy/devices')).json().then((l) => ({ state: l[0].state, connected: l[0].connected, mode: l[0].mode, actions: l[0].actions, stop: l[0].stop_reason, restore: l[0].restore_attempts })) }));
+    await ep.screenshot({ path: path.join(OUT, 'energy-after-charge.png'), fullPage: true });
+    check('Keep battery idle sends a hold command without a target SoC', hold?.action === 'hold' && !('target_soc_percent' in hold), JSON.stringify(hold) + JSON.stringify(holdDiag));
+    const auto = await cmd(() => ep.locator('.energy-actions button', { hasText: 'Return to automatic' }).click());
+    check('Return to automatic sends auto', auto?.action === 'auto', JSON.stringify(auto));
 
-  // Missing power limits open the limits step, without the engineering-mode control.
-  mockNoLimits = true;
-  await ep.reload();
-  await ep.waitForSelector('.energy-setup-step', { timeout: 15000 }).catch(() => { });
-  const noLimitsText = await ep.locator('.energy-panel').first().innerText();
-  check('missing power limits show the limits step without engineering mode',
-    /Maximum charging power/.test(noLimitsText) && !/Engineering mode/.test(noLimitsText), noLimitsText.slice(0, 400));
-  mockNoLimits = false;
+    // External: the GUI is refused and the controls are disabled with an info line; a PAT may command.
+    await switchMode(() => radios.nth(2).click(), 'External');
+    await ep.waitForFunction(() => [...document.querySelectorAll('.energy-actions button')].every((b) => b.disabled), null, { timeout: 5000 }).catch(() => { });
+    const externalText = await operateText();
+    check('External: the controls are disabled and the panel says an external app is in control',
+      (await states()).every(Boolean) && /controlled by an external app through the API \(PAT required\)\./.test(externalText), externalText.slice(0, 700));
+    check('External: a disabled control names the reason', /external app/.test(await buttons[0].getAttribute('title') || ''));
+    const csrfNow = await ep.evaluate(async () => (await (await fetch('/admin/api/session')).json()).csrf_token);
+    const viaGui = await ep.request.post(`${energyBase}/admin/api/energy/devices/sim/command`, { headers: { 'X-CSRF-Token': csrfNow, Origin: energyBase }, data: { action: 'hold' } });
+    check('External: a GUI command answers 409 energy_manager_external', viaGui.status() === 409 && (await viaGui.json()).code === 'energy_manager_external', String(viaGui.status()));
+    if (secret) {
+      const viaPat = await ep.request.post(`${energyBase}/api/v1/devices/sim/energy/command`, { headers: { Authorization: `Bearer ${secret}` }, data: { action: 'hold' } });
+      check('External: a PAT command is accepted', viaPat.status() === 200, String(viaPat.status()));
+    }
+    // Back to Manual so the remaining checks see the operable controls.
+    await switchMode(() => radios.nth(1).click(), 'Manual');
 
-  await ep.setViewportSize({ width: 390, height: 844 });
-  await sleep(300);
-  const energyOverflow = await ep.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
-  check('energy page has no horizontal page scroll at 390px', energyOverflow <= 0, String(energyOverflow));
-  check('energy page raised no console, network or script errors', energyProblems.length === 0, energyProblems.join('; '));
-  await energyContext.close();
+    // The relabels are visible on Operate (presentation-only; the REST action names stayed on the wire
+    // above: hold/charge/auto). Manual-control enable/disable wording replaces the old ON/OFF switch.
+    const operate = await operateText();
+    check('Operate shows the mode control', /Manual/.test(operate) && /External/.test(operate), operate.slice(0, 400));
+    check('Operate shows the relabelled battery actions',
+      /Charge battery/.test(operate) && /Keep battery idle/.test(operate) && /Discharge battery/.test(operate), operate.slice(0, 400));
+
+    // Normal mode stays compact: no raw capability names, reject detail or expert controls.
+    check('Normal mode shows no raw capability names, engineering mode or reject detail',
+      !/write_path_convention|reject|Engineering mode|SoC target policy|Revoke verification|Strategy code/i.test(operate)
+      && (await ep.locator('.energy-setup:visible').count()) === 0, operate.slice(0, 400));
+    // Expert mode is a pure display switch: toggling must not send any write request.
+    const writes = [];
+    ep.on('request', (r) => { if (r.method() !== 'GET') writes.push(`${r.method()} ${r.url()}`); });
+    await ep.locator('#energy-expert-mode').check();
+    await ep.locator('.energy-expert').first().waitFor();
+    check('Expert mode ON shows Revoke verification, engineering mode and SoC policy',
+      /Revoke verification/.test(await ep.locator('.energy-expert').first().innerText())
+      && /Engineering mode/.test(await ep.locator('.energy-expert').first().innerText())
+      && /SoC target policy/.test(await ep.locator('.energy-expert').first().innerText()));
+    await ep.locator('.energy-diagnostics summary').first().click();
+    const diagText = await ep.locator('.energy-diagnostics').first().innerText();
+    check('Diagnostics still exposes raw capability names',
+      /write_path_convention/.test(diagText) && /battery_power_sign_convention/.test(diagText), diagText.slice(0, 400));
+    const expertText = await ep.locator('.energy-expert').first().innerText();
+    check('Expert shows power limits in kW', /Maximum charging power \(kW\)/.test(expertText) && /Maximum discharging power \(kW\)/.test(expertText), expertText.slice(0, 400));
+    await ep.locator('#energy-expert-mode').uncheck();
+    check('Expert mode OFF hides expert content again; toggling sent no write request',
+      (await ep.locator('.energy-expert').count()) === 0 && (await ep.getByText('Revoke verification').count()) === 0
+      && writes.length === 0, writes.join(', '));
+
+    // Saving the power limits must carry the existing engineering_mode instead of resetting it.
+    const limitPuts = [];
+    ep.on('request', (r) => { if (r.method() === 'PUT' && /\/dispatch\/devices\//.test(r.url())) limitPuts.push(r.postDataJSON()); });
+    await ep.locator('#energy-expert-mode').check();
+    const expertBox = ep.locator('.energy-expert').first();
+    await expertBox.getByLabel('Engineering mode').check();
+    await expertBox.getByRole('button', { name: 'Save engineering mode' }).click();
+    await sleep(1000);
+    await expertBox.getByRole('button', { name: 'Save limits' }).click();
+    await sleep(800);
+    check('saving the power limits keeps the existing engineering_mode',
+      limitPuts.length >= 2 && limitPuts.at(-1).engineering_mode === true, JSON.stringify(limitPuts));
+    await expertBox.getByLabel('Engineering mode').uncheck(); // restore the simulator state
+    await expertBox.getByRole('button', { name: 'Save engineering mode' }).click();
+    await sleep(500);
+    await ep.locator('#energy-expert-mode').uncheck();
+
+    // Missing power limits open the limits step, without the engineering-mode control.
+    mockNoLimits = true;
+    await ep.reload();
+    await ep.waitForSelector('.energy-setup-step', { timeout: 15000 }).catch(() => { });
+    const noLimitsText = await ep.locator('.energy-panel').first().innerText();
+    check('missing power limits show the limits step without engineering mode',
+      /Maximum charging power/.test(noLimitsText) && !/Engineering mode/.test(noLimitsText), noLimitsText.slice(0, 400));
+    mockNoLimits = false;
+
+    await ep.setViewportSize({ width: 390, height: 844 });
+    await sleep(300);
+    const energyOverflow = await ep.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+    check('energy page has no horizontal page scroll at 390px', energyOverflow <= 0, String(energyOverflow));
+    check('energy page raised no console, network or script errors', energyProblems.length === 0, energyProblems.join('; '));
+    await energyContext.close();
   } finally {
     spawned.proc.kill('SIGTERM');
     energyFake.proc.kill('SIGTERM');

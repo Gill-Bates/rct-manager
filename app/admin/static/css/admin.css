@@ -193,7 +193,8 @@ body {
    anything other than the content stopping slightly earlier above the footer. */
 @media (max-width: 420px) {
     :root {
-        --rct-footer-height: 3.75rem; /* the build hash made the wrapped footer 56.4px, above 3.5rem */
+        --rct-footer-height: 3.75rem;
+        /* the build hash made the wrapped footer 56.4px, above 3.5rem */
     }
 }
 
@@ -449,6 +450,11 @@ body {
     display: flex;
     flex-wrap: wrap;
     gap: 0 .75rem;
+}
+
+.device-serial {
+    user-select: all;
+    overflow-wrap: anywhere;
 }
 
 .device-toggle {
@@ -1428,17 +1434,28 @@ body {
     overflow-wrap: anywhere;
 }
 
-.prometheus-settings>summary {
-    cursor: pointer;
-    font-weight: 600;
+/* The master toggle sits above the status grid inside the top card, separated by a hairline. */
+.prometheus-toggle {
+    padding-bottom: 1rem;
+    margin-bottom: 1rem;
+    border-bottom: 1px solid var(--rct-line);
 }
 
-.prometheus-settings #settings-sections>.card {
-    border: 0;
-}
-
-.prometheus-settings #settings-sections>.card>.card-body {
+.prometheus-toggle .setting-row {
     padding: 0;
+    border-top: 0;
+}
+
+/* Keep the writable table's pager at the bottom when only a few parameters are selected. */
+body[data-page="inverters"] #main-content,
+body[data-page="inverters"] #main-content>.card>.card-body {
+    display: flex;
+    flex-direction: column;
+}
+
+body[data-page="inverters"] #main-content>.card,
+body[data-page="inverters"] .param-table-wrap {
+    flex: 1 0 auto;
 }
 
 /* A long hint wraps inside its own column, so the primary action stays top right on every page. */
@@ -1889,13 +1906,6 @@ body.is-reconnecting #reconnect-modal.show .reconnect-pulse {
     white-space: pre-line;
 }
 
-/* The Energy Manager's navigation buttons: a 44px target, zoom-compensated like the rest of #main-content. */
-.energy-step-link {
-    display: inline-flex;
-    align-items: center;
-    min-height: calc(44px / var(--content-zoom));
-}
-
 /* Above the inverter dialog it can be opened from. */
 #confirm-modal {
     z-index: 1075;
@@ -2001,6 +2011,18 @@ body.is-reconnecting #reconnect-modal.show .reconnect-pulse {
 }
 
 /* Guided hardware verification dialog (Energy page, Basic mode) */
-.energy-assistant-step { padding: 0.125rem 0.5rem; border-radius: var(--bs-border-radius); color: var(--bs-secondary-color); }
-.energy-assistant-step.is-done { color: var(--bs-success-text-emphasis); }
-.energy-assistant-step.is-current { color: var(--bs-body-color); font-weight: 600; background: var(--bs-tertiary-bg); }
+.energy-assistant-step {
+    padding: 0.125rem 0.5rem;
+    border-radius: var(--bs-border-radius);
+    color: var(--bs-secondary-color);
+}
+
+.energy-assistant-step.is-done {
+    color: var(--bs-success-text-emphasis);
+}
+
+.energy-assistant-step.is-current {
+    color: var(--bs-body-color);
+    font-weight: 600;
+    background: var(--bs-tertiary-bg);
+}

@@ -272,9 +272,12 @@ def test_metrics_fields_hide_behind_the_master_toggle():
                 "metrics_rate_limit_requests", "metrics_rate_limit_window_seconds"):
         row = next(line for line in js.splitlines() if f"key: '{key}'" in line)
         assert "requires: 'enable_metrics_endpoint'" in row, key
-    # Only the affected group is rebuilt, and the toggle keeps the focus it was operated with.
+    # Only the dependent fields are rebuilt, and the toggle keeps the focus it was operated with.
     assert "function settingVisible(field)" in js
-    assert "gatesOtherFields(field.key)) preserveFocus(() => rerenderGroup(field.group))" in js
+    assert "preserveFocus(rerenderPrometheusDependents)" in js
+    # The master toggle lives in the top status card, the dependents in #settings-sections.
+    assert "function renderPrometheusSettings()" in js
+    assert "$('prometheus-toggle')" in js
 
 
 def test_token_expiry_uses_presets_with_a_ninety_day_default():
@@ -634,10 +637,10 @@ def test_device_remove_handler_only_edits_the_draft_and_keeps_focus():
 def test_build_group_body_is_shared_so_a_group_rerender_adds_no_second_heading():
     js = JS.read_text(encoding="utf-8")
     builder = js[js.index("function buildGroupBody(group)"):js.index("function groupSectionId(")]
-    assert "page === 'prometheus' && group === 'Prometheus'" in builder
+    # The Account relabel lives in one place, used by both renderSettings() and rerenderGroup().
     assert "{ Account: 'Administrator account' }[group]" in builder
-    # One copy of the heading conditional, used by both callers.
-    assert js.count("page === 'prometheus' && group === 'Prometheus'") == 1
+    # One <h2> per group card, so a live group re-render never stacks a second heading.
+    assert builder.count("element('h2'") == 1
     assert js.count("buildGroupBody(group)") == 3  # definition plus both call sites
     assert "section.replaceChildren(buildGroupBody(group));" in js
     assert "if (!section) { renderSettings(); return; }" in js
@@ -1159,3 +1162,10 @@ def test_primary_button_themes_its_disabled_and_focus_state():
     rule = css[css.index(".btn-primary {"):css.index(".btn-outline-primary {")]
     assert "--bs-btn-disabled-bg: var(--rct-brand);" in rule and "--bs-btn-focus-shadow-rgb: var(--bs-primary-rgb);" in rule
 
+
+
+def test_device_header_serial_number_is_text_only_and_omitted_when_unknown():
+    js = JS.read_text(encoding="utf-8")
+    assert "if (serial) setText(ref.serial, `Serial number: ${serial}`);" in js
+    assert "ref.serial.innerHTML" not in js
+    assert "...(serial ? [ref.serial] : [])" in js

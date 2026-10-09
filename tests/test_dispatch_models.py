@@ -218,6 +218,29 @@ def test_dispatch_config_rejects_engineering_ttl_above_the_normal_cap() -> None:
         DispatchConfig(max_operation_duration_seconds=1000, max_operation_duration_engineering_seconds=2000)
 
 
+def test_dispatch_config_rejects_a_non_positive_operation_duration_cap() -> None:
+    """A zero/negative TTL cap makes submit() derive an already-expired deadline yet still write
+    hardware before the next tick() expires it; the domain must reject it, not only the config layer.
+    """
+    with pytest.raises(ValueError, match="max_operation_duration_seconds"):
+        DispatchConfig(max_operation_duration_seconds=0)
+    with pytest.raises(ValueError, match="max_operation_duration_seconds"):
+        DispatchConfig(max_operation_duration_seconds=-1)
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "grid_import_reserve_w", "grid_control_deadband_w", "power_write_deadband_w",
+        "min_write_interval_seconds", "cycle_interval_seconds", "telemetry_timeout_seconds",
+        "control_telemetry_max_age_seconds", "soc_telemetry_max_age_seconds",
+    ],
+)
+def test_dispatch_config_rejects_a_negative_duration_or_power(field: str) -> None:
+    with pytest.raises(ValueError, match=field):
+        DispatchConfig(**{field: -1.0})
+
+
 def test_from_dict_rejects_a_truthy_string_instead_of_a_real_bool() -> None:
     with pytest.raises(DispatchRecordCorrupt):
         DispatchRecord.from_dict({"device_id": "x", "state": "idle", "restore_required": "yes"})
