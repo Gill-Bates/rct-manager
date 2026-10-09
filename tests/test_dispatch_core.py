@@ -242,7 +242,7 @@ def test_dispatch_store_upgrade_adds_only_the_new_tables_and_keeps_the_old_row(t
     with store.connect() as db:
         # A version 1 file now lands on the current schema version in one go (see
         # tests/test_energy_store.py for the 2 -> 3 step on its own).
-        assert int(db.execute("PRAGMA user_version").fetchone()[0]) == 3
+        assert int(db.execute("PRAGMA user_version").fetchone()[0]) == 4
         tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         assert {"dispatch_operations", "dispatch_capabilities", "dispatch_device_config"} <= tables
         assert db.execute("PRAGMA synchronous").fetchone()[0] == 2

@@ -15,7 +15,7 @@ Validation problems carry an `errors` list with `parameter`, `code` and
 | `dispatch_not_found` | 404 | No battery dispatch operation is active |
 | `metric_is_action`, `fresh_not_available_for_periodic_metric` | 409 | Wrong endpoint for an action; fresh read not possible |
 | `dispatch_mode_unavailable`, `dispatch_limits_missing`, `dispatch_restore_required`, `dispatch_operation_conflict`, `dispatch_unverified`, `dispatch_capability_conflict` | 409 | Battery dispatch refused: mode not offered, power limits missing, previous state must be restored first, expected operation no longer active, hardware not verified, capability change during an active operation |
-| `energy_manager_disarmed`, `energy_write_support_required`, `energy_action_unavailable` | 409 | Energy Manager switched off for the inverter, write access needed, action not available right now |
+| `energy_manager_off`, `energy_manager_not_external`, `energy_manager_external`, `energy_write_support_required`, `energy_action_unavailable` | 409 | Energy Manager off for the inverter; inverter in Manual mode (operator must select External); inverter in External mode (admin GUI refused); write access needed; action not available right now |
 | `invalid_request`, `invalid_parameter`, `batch_too_large`, `fresh_batch_too_large`, `value_out_of_range`, `value_type_mismatch`, `value_not_finite`, `value_step_mismatch` | 422 | Request body or parameters invalid (`unknown_metric` is 422 for a name from `names`) |
 | `rate_limited`, `device_budget_exhausted` | 429 | Request rate, failed-authentication limit or device work budget exceeded |
 | `internal_error` | 500 | Unexpected server error |

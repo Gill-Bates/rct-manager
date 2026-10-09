@@ -774,9 +774,27 @@ def test_energy_poll_is_bounded_keeps_panels_and_never_overwrites_a_running_acti
     # Panels of surviving devices are kept; polls requested before an action finished are dropped.
     assert "energyPanels.clear()" not in poll.split("const ordered")[0]
     assert "panel.acceptsPoll(requestedAt)" in poll
-    assert "pendingArmed ?? device.armed" in js
+    assert "pendingMode ?? device.mode" in js
     # The Setup step names the required writes that are not approved yet.
     assert "(device.required_write_names || []).filter((name) => !approved.has(name))" in js
+
+
+def test_energy_mode_is_a_three_state_radio_group_with_mode_dependent_controls():
+    js = JS.read_text(encoding="utf-8")
+    css = (ADMIN_DIR / "static/css/admin.css").read_text(encoding="utf-8")
+    # Off / Manual / External as a radio group; the old on/off switch and the /armed call are gone.
+    assert "setAttribute('role', 'radiogroup')" in js and "setAttribute('role', 'radio')" in js
+    assert "['off', 'Off'" in js and "['manual', 'Manual'" in js and "['external', 'External'" in js
+    assert "`${path}/mode`" in js and "/armed" not in js and "energy-armed" not in js
+    # Keyboard: arrows move the focus only, a selection needs Space/Enter/click; aria-disabled keeps focus.
+    assert "ArrowRight: 1" in js and "'Home'" in js and "aria-disabled" in js and "aria-checked" in js
+    # Controls are enabled in Manual only; External shows the info line and disabled controls.
+    assert "const enabled = operable && item.available && !busy && device.connected;" in js
+    assert "This inverter is controlled by an external app through the API (PAT required)." in js
+    assert "external: 'controlled by an external app'" in js and "mode_off:" in js
+    # Write access off: hint with a link to the Inverters page.
+    assert "modeLink.href = '/ui/inverters'" in js
+    assert ".energy-mode-option" in css and ".energy-mode-option:focus-visible" in css
 
 
 def test_destructive_actions_use_the_themed_confirm_modal_not_native_confirm():

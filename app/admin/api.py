@@ -138,7 +138,7 @@ def update_write_names(
     """The one shared critical section for every write-names allowlist mutation (M8).
 
     Serializes read-check-write-allowlist-update between the ``/parameters`` route's revoke and the
-    Energy Manager's add-only arming widen, which used to run under two independent locks
+    Energy Manager's add-only mode-switch widen, which used to run under two independent locks
     (``_PARAMETERS_LOCK`` here, ``EnergyManager._arm()``'s own ``asyncio.Lock`` there) and could
     interleave. ``mutator`` receives the currently persisted write_names and returns the new list
     (or raises to refuse); it runs under the lock, so its read of ``current`` is never stale by the

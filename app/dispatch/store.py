@@ -49,10 +49,10 @@ _SCHEMA_V2 = """
     PRAGMA user_version = 2;
 """
 
-# user_version 3 is strictly additive as well: it adds the Energy Manager's armed state and the
+# user_version 3 is strictly additive as well: it adds the Energy Manager's armed flag (superseded by `mode` in version 4) and the
 # per-device SoC-target derivation policy. `armed` and `mode` stay in cleartext for the same
 # documented reason `state`, `status` and `engineering_mode` do — an operator must be able to see
-# whether a device is armed, and how its target is derived, while the service is down or after an
+# whether a device is switched on, and how its target is derived, while the service is down or after an
 # HMAC_SECRET rotation. They are state names, not secrets.
 _SCHEMA_V3 = """
     CREATE TABLE energy_manager_state (

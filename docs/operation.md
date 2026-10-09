@@ -143,8 +143,8 @@ the admin dispatch API (`/admin/api/dispatch/...`, not part of the public, docum
   site, because a filled-in sheet holds operator measurements that belong with the operator, not
   on a published page.
 - **A removed device loses its dispatch state.** Removing a device (or re-addressing it under the
-  same id) resets all its capabilities to `unverified`, switches engineering mode off and disarms the
-  Energy Manager, so a device later added under that id starts unverified. The reset runs only
+  same id) resets all its capabilities to `unverified`, switches engineering mode off and sets the
+  Energy Manager mode to Off, so a device later added under that id starts unverified. The reset runs only
   after the new device graph was built.
 - **A capability or device-limit change is refused while an operation it affects is active.**
   Flipping a sign convention, re-verifying the write path, or changing the power limits/

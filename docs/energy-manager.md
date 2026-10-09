@@ -4,10 +4,42 @@ The Energy Manager turns one business decision ("charge to 80 % now") into a bat
 command. The admin GUI page **Energy Manager** and the REST API share one control path, so both
 behave identically.
 
+## How it works
+
+Three independent things decide whether a battery command is possible:
+
+| Switch | Where | What it does |
+| --- | --- | --- |
+| **Write access** | Inverters page (global) | Allows the service to write to inverters at all. It also opens the generic `PUT /api/v1/devices/{id}/metrics` routes, so it stays a deliberate, separate switch: choosing a mode never turns it on. |
+| **Mode** per inverter | Energy Manager page | **Off**, **Manual** or **External**: who may command this inverter. |
+| **Expert mode** | Energy Manager page | A display switch only: it shows hardware verification, limits and diagnostics. It changes no behaviour. |
+
+Who may call what, per mode:
+
+| Mode | Admin GUI (signed-in session, CSRF, no token) | REST API with a read/write token (`POST …/energy/command`) |
+| --- | --- | --- |
+| Off | refused, 409 `energy_manager_off` | refused, 409 `energy_manager_off` |
+| Manual | allowed: charge, keep idle, discharge, return to automatic | refused, 409 `energy_manager_not_external` (an operator must switch the inverter to External) |
+| External | refused, 409 `energy_manager_external` ("Controlled by an external app") | allowed |
+
+Reading the status (`GET …/energy`) works in every mode, with a session or a token. The mode itself
+can only be changed in the admin GUI (`PUT /admin/api/energy/devices/{id}/mode`, session and CSRF; a
+token gets 403). Changing the mode to Off, or between Manual and External, first hands the inverter
+back to automatic operation, so an operation started under one mode never outlives it.
+
+The expert endpoint `POST /api/v1/devices/{id}/battery/dispatch` is independent of the mode: it needs
+no mode and is not limited by it. External is therefore **not** the only way to control the battery
+through the API; it is the way for an app that should use the business actions (`charge`, `hold`, …)
+while the operator keeps the on/off decision. Manual and External share the same prerequisites,
+described under [Switching on](#switching-on).
+
 ## REST API
 
 Both endpoints need a read/write token and write support, like
-[battery dispatch](api/endpoints.md#battery-dispatch).
+[battery dispatch](api/endpoints.md#battery-dispatch). A command is accepted only while the
+inverter is in mode **External** (see [How it works](#how-it-works)). The status carries `mode`
+(`off`, `manual`, `external`), `accepts_commands_from` (`none`, `admin`, `api`) and the derived
+`armed` flag (`true` unless the mode is `off`), kept for compatibility.
 
 | Method | Path | Purpose |
 | --- | --- | --- |
@@ -32,8 +64,8 @@ curl -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/jso
   (`power_limit_clamped: true`).
 - The target must lie inside `target_soc_window` (7 % to 95 % with the defaults, narrowed by
   `DISPATCH_MIN_SOC` / `DISPATCH_MAX_SOC`); otherwise 422 `value_out_of_range`. It is never clamped.
-- Switching "Write access" on the **Inverters** page is live (no restart): off refuses writes, disarms every device and hands the
-  inverters back to automatic operation; on requires arming again. If a hand-back fails, the response lists
+- Switching "Write access" on the **Inverters** page is live (no restart): off refuses writes, sets every device to mode Off and hands the
+  inverters back to automatic operation; on requires choosing a mode again. If a hand-back fails, the response lists
   `write_restore_pending` and the automatic restore retry continues.
 - A command lives one hour and is not renewed; the status publishes `until`. A service restart hands
   every running command back to the inverter.
@@ -42,11 +74,14 @@ curl -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/jso
 
 ### Switching on
 
-The Energy Manager is off per inverter until an operator switches it on in the admin GUI. The public
-API cannot arm it. A command while it is off answers **409 `energy_manager_disarmed`**.
+The Energy Manager is **Off** per inverter until an operator selects **Manual** or **External** in the
+admin GUI. The public API cannot change the mode. A command while it is off answers **409
+`energy_manager_off`**. Selecting Manual or External needs Write access to be on (otherwise 409
+`energy_write_support_required`; the GUI points to the Inverters page), power limits, and the
+hardware-verification gate as before.
 
-Switching on adds the four dispatch register approvals to the write allowlist if missing (never
-removes any), which also opens them to the generic `PUT /api/v1/devices/{id}/metrics`. Switching off
+Selecting Manual or External adds the four dispatch register approvals to the write allowlist if missing (never
+removes any), which also opens them to the generic `PUT /api/v1/devices/{id}/metrics`. Selecting Off
 hands control back first and removes no approval. If the approvals are revoked on the **Inverters**
 page, the actions report `write_not_permitted` and commands answer 409 `energy_action_unavailable`.
 A custom `WRITE_ALLOWLIST_PATH` must contain `power_mng_soc_strategy`, `power_mng_soc_target_set`,
@@ -73,15 +108,18 @@ pure battery control. The dashboard refreshes approximately every 10 s; the Ener
 
 Two orthogonal facts are kept separate on the page:
 
-- **Manual control (Enabled / Disabled)** — whether manual commands are *allowed*. Enabling does not
-  by itself charge or discharge the battery; it is the arm toggle (`PUT …/armed`).
+- **Mode (Off / Manual / External)** — who may command the inverter, a three-state radio group in the
+  card header (`PUT …/mode`). Choosing a mode does not by itself charge or discharge the battery. The
+  charge, keep idle, discharge and return-to-automatic buttons are enabled in Manual only; in External
+  they are disabled and the card says "This inverter is controlled by an external app through the API
+  (PAT required)." With Write access off, a hint links to the Inverters page.
 - **Current mode** — what the battery is actually doing: Automatic / Charging to X % / Keeping battery
   idle / Discharging to X %, shown as one plain-language sentence (with the measured rate in kW while
   running).
 
 The page is layered by in-page progressive disclosure:
 
-- **Operate** (always shown) — device name and connection, the Manual-control toggle, the current
+- **Operate** (always shown) — device name and connection, the mode control, the current
   mode sentence, SoC, the actions **Charge battery / Keep battery idle / Discharge battery** with a
   contextual target-SoC slider and a primary button (e.g. "Charge battery to 80 %"), and **Return to
   automatic**. When the battery data is healthy nothing is shown about polling; a stale reading shows
@@ -98,7 +136,7 @@ The page is layered by in-page progressive disclosure:
   The first time **Write access** is switched on, these four registers are approved automatically
   (add-only, applied once). Clearing one later is respected: a later off/on toggle does not approve it
   again, the actions answer `write_not_permitted`, and the checklist step shows it missing. While a
-  device is armed or dispatching, clearing a required register is refused (HTTP 409), because the
+  device is not in mode Off or is dispatching, clearing a required register is refused (HTTP 409), because the
   handback writes it.
   Power limits are shown in **kW**.
 - **Expert** (the page-wide **Expert mode** switch next to the heading; off on every page load and

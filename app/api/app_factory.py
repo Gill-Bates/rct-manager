@@ -713,7 +713,7 @@ def _lifespan(
                     await runtime.dispatch.force_restore_or_raise(device_id)  # raises: abort, nothing torn down yet
                 # A removed id is reset like a re-addressed one: _normalize_devices hands a freed id
                 # (e.g. "main") to the next device added without an id, and that device must not
-                # inherit the removed hardware's capabilities, engineering mode or arming.
+                # inherit the removed hardware's capabilities, engineering mode or operating mode.
                 reset_ids = removed | readdressed
 
             selected_exposed = getattr(app.state, "active_exposed_names", None)
@@ -738,17 +738,17 @@ def _lifespan(
                 gateway.replace_devices(old_bindings)
 
             # Identity-bound resets run only now that the new graph built: a failed build above must
-            # leave evidence, engineering mode and arming exactly as they were.
+            # leave evidence, engineering mode and operating mode exactly as they were.
             #
             # These resets themselves are not yet one atomic store transaction (that would need
-            # reset_device_identity() to group capability reset, engineering mode and arming into a
+            # reset_device_identity() to group capability reset, engineering mode and operating mode into a
             # single DB write) — a durable fix left as a follow-up. For now, a failure partway
             # through is at least classified as rollback-capable like the _swap_graph() build
             # failure below, instead of being treated as a non-rollback (devices-already-persisted)
             # error by the admin API's generic exception path.
             try:
                 for device_id in reset_ids:
-                    # Evidence and arming were given for the old physical device, not the new one.
+                    # Evidence and the operating mode were given for the old physical device, not the new one.
                     # Every capability is reset, not only the VERIFIED ones: a revoke keeps its
                     # evidence (strategy code, byte widths, sign assumptions, ...) on an UNVERIFIED
                     # record, and that evidence must not survive onto whatever device now answers
@@ -1151,7 +1151,7 @@ def create_app(settings: Settings, *, clock: Clock | None = None, connector: Con
             Goes through the same shared critical section (``update_write_names``, M8) as the
             ``/parameters`` route's revoke, instead of its own unlocked write: without that, an
             add-only widen here could interleave with a concurrent revoke there and lose an update.
-            Offloaded: this runs on an operator arming action, and AdminStore can block up to ~5s
+            Offloaded: this runs on an operator mode change, and AdminStore can block up to ~5s
             on a SQLite lock (timeout=5, busy_timeout=5000), which must not stall the event loop
             (HTTP, heartbeats, periodic reads, dispatch, shutdown) while it waits.
             """

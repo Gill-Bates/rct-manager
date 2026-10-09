@@ -114,7 +114,8 @@ curl -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/jso
 
 ## Energy Manager
 
-Business-level control in front of battery dispatch: one action (`charge`, `discharge`, `hold`,
+Business-level control in front of battery dispatch, available while the operator has set the inverter
+to mode **External**: one action (`charge`, `discharge`, `hold`,
 `auto`) plus `target_soc_percent` where needed. Actions, errors and readings are described in
 [Energy Manager](../energy-manager.md).
 
@@ -124,5 +125,8 @@ curl -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/jso
   http://127.0.0.1:8000/api/v1/devices/main/energy/command
 ```
 
-- `409 energy_manager_disarmed` - switched off; an operator enables it in the admin GUI (the public API cannot).
+- `409 energy_manager_off` - the inverter is switched off; an operator selects a mode in the admin GUI (the public API cannot).
+- `409 energy_manager_not_external` - the inverter is in Manual mode, which only the admin GUI may command; an operator must switch it to External.
+- The status carries `mode` and `accepts_commands_from`; `armed` is derived (`mode != "off"`). The expert
+  endpoint `/battery/dispatch` above needs no mode.
 - `409 energy_action_unavailable` - the action is not available right now, for example after its register approvals were revoked.

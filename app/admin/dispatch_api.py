@@ -40,7 +40,7 @@ def _require_admin_read(request: Request) -> dict | None:
 
 def _require_admin_write(request: Request) -> dict | None:
     # session_only: these are privilege/capability controls (hardware verification, engineering
-    # mode, arming, energy commands, device limits, SoC-target policy). A leaked read/write PAT
+    # mode, energy mode and commands, device limits, SoC-target policy). A leaked read/write PAT
     # must not reach them, matching the session-only treatment of enable_write_support and the
     # write-allowlist widening in app.admin.api (SEC-01).
     return require_admin(request, mutation=True, session_only=True)

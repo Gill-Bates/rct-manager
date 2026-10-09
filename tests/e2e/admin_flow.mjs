@@ -13,7 +13,9 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const require = createRequire(path.join(process.env.PLAYWRIGHT_DIR, 'noop.js'));
-const { chromium } = require('playwright');
+const playwright = require('playwright');
+// BROWSER=chromium|webkit|firefox, VIEWPORT_WIDTH and COLOR_SCHEME=light|dark select the matrix cell.
+const engine = playwright[process.env.BROWSER || 'chromium'];
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const OUT = path.resolve(process.argv[2]);
 fs.mkdirSync(OUT, { recursive: true });
@@ -54,19 +56,31 @@ async function stop(server) { server.proc.kill('SIGTERM'); await new Promise((re
 
 const dbDir = fs.mkdtempSync(path.join(OUT, 'db-'));
 const db = path.join(dbDir, 'e2e.db');
+function firstStartPassword(output) {
+  const announced = /Password file:\s+(\S+)\s+\(0600\)/.exec(output)?.[1];
+  if (!announced) throw new Error('first-start password file was not announced');
+  const file = path.resolve(announced);
+  if (!file.startsWith(dbDir + path.sep) || path.basename(file) !== 'initial-admin-password') {
+    throw new Error('first-start password file is outside the isolated test database');
+  }
+  return fs.readFileSync(file, 'utf8').trim();
+}
 const httpPort = await freePort();
 const devicePort = await freePort();
 const base = `http://127.0.0.1:${httpPort}`;
 const fake = spawnPy(['tests.e2e.fake_inverter', String(devicePort)], path.join(OUT, 'fake.log'));
 await sleep(1500);
 let server = await startServer(db, httpPort, devicePort, 'first');
-// The banner carries the password itself (copy-pasteable from the console).
-const initial = /FIRST START - admin login[\s\S]*?Password:\s+(\S+)/.exec(server.output())?.[1];
-check('initial password printed once', Boolean(initial));
+// The banner names a private password file; the test reads only its own isolated fixture.
+const initial = firstStartPassword(server.output());
+check('initial password read from the private file', Boolean(initial));
 check('no admin token printed at first start', !/Initial admin token/.test(server.output()));
 
-const browser = await chromium.launch();
-const context = await browser.newContext({ viewport: { width: 1280, height: 800 }, locale: 'en-GB' });
+const browser = await engine.launch();
+const context = await browser.newContext({
+  viewport: { width: Number(process.env.VIEWPORT_WIDTH || 1280), height: 800 }, locale: 'en-GB',
+  colorScheme: process.env.COLOR_SCHEME || 'light',
+});
 const page = await context.newPage();
 page.on('console', (m) => { if (['error', 'warning'].includes(m.type())) problems.push(`console ${m.type()}: ${m.text()}`); });
 page.on('pageerror', (e) => problems.push(`pageerror: ${e.message}`));
@@ -1069,7 +1083,7 @@ await clearToasts();
 await page.click('#device-apply');
 await page.waitForSelector('#confirm-modal.show', { timeout: 5000 });
 const confirmText = await page.locator('#confirm-modal .modal-body').innerText();
-check('re-addressing asks for confirmation that names the reset', confirmText.includes('Verification evidence, Engineering Mode and arming') && confirmText.includes('192.0.2.10:18899'), confirmText);
+check('re-addressing asks for confirmation that names the reset', confirmText.includes('Verification evidence, Engineering Mode and operating mode') && confirmText.includes('192.0.2.10:18899'), confirmText);
 check('the confirmation focuses the safe button', await page.waitForFunction(() => document.activeElement?.id === 'confirm-cancel', null, { timeout: 3000 }).then(() => true).catch(() => false));
 await page.click('#confirm-cancel');
 await page.waitForSelector('#confirm-modal.show', { state: 'detached', timeout: 5000 }).catch(() => { });
@@ -1414,7 +1428,7 @@ await shot('prometheus-master-toggle-on');
     try { if ((await fetch(`${energyBase}/health`)).ok) break; } catch { /* not up yet */ }
     await sleep(200);
   }
-  const energyPassword = /Password:\s+(\S+)/.exec(spawned.output())?.[1];
+  const energyPassword = firstStartPassword(spawned.output());
   const energyContext = await browser.newContext({ viewport: { width: 1280, height: 900 }, locale: 'en-GB' });
   const ep = await energyContext.newPage();
   const energyProblems = [];
@@ -1554,12 +1568,50 @@ await shot('prometheus-master-toggle-on');
   check('hardware verification endpoint accepts the evidence', verification.ok(), String(verification.status()));
   await ep.reload();
   await ep.waitForSelector('.energy-panel');
-  const armToggle = ep.locator('.energy-switch input');
-  await armToggle.click(); // the switch re-renders from the server state, so check() would see it revert first
-  await ep.waitForFunction(() => document.querySelector('.energy-switch input')?.checked
-    && [...document.querySelectorAll('.energy-actions button')].some((b) => !b.disabled), null, { timeout: 15000 }).catch(() => { });
+  // Operating mode: a three-state radio group. Off is the initial state; Write access is already on here.
+  const radios = ep.locator('.energy-mode-switch [role=radio]');
+  const checkedMode = () => ep.evaluate(() => document.querySelector('.energy-mode-switch [aria-checked=true]')?.textContent.trim());
+  check('the mode control is a radio group with Off, Manual and External',
+    (await ep.locator('.energy-mode-switch[role=radiogroup]').count()) === 1
+    && (await radios.allInnerTexts()).map((text) => text.replace(/\s+/g, ' ').trim().replace(/^\S+ /, '')).join('|') === 'Off|Manual|External',
+    JSON.stringify(await radios.allInnerTexts()));
+  check('initially Off is selected and the only tab stop', (await checkedMode()) === 'power_settings_new Off' || /Off$/.test(await checkedMode()),
+    String(await checkedMode()));
+  check('roving tabindex: exactly one radio is tabbable', (await ep.locator('.energy-mode-switch [role=radio][tabindex="0"]').count()) === 1);
+  check('every radio has an aria-label that starts with its visible text',
+    (await radios.evaluateAll((nodes) => nodes.every((n) => n.getAttribute('aria-label').startsWith(n.textContent.trim().split(/\s+/).pop())))));
+  const initialStates = await states();
+  check('Off: the operate buttons are disabled and name the reason', initialStates.every(Boolean)
+    && /switched off/.test(await buttons[0].getAttribute('title') || ''), JSON.stringify(initialStates));
+  // Keyboard: arrows only move the focus; Space selects.
+  const modeCalls = [];
+  ep.on('request', (r) => { if (r.method() === 'PUT' && r.url().endsWith('/mode')) modeCalls.push(r.postDataJSON()); });
+  await radios.first().focus();
+  await ep.keyboard.press('ArrowRight');
+  check('ArrowRight moves the focus to Manual without selecting it',
+    (await ep.evaluate(() => document.activeElement?.textContent.trim().endsWith('Manual'))) && modeCalls.length === 0 && /Off$/.test(await checkedMode()));
+  await ep.keyboard.press('Space');
+  await ep.waitForFunction(() => /Manual$/.test(document.querySelector('.energy-mode-switch [aria-checked=true]')?.textContent.trim() || ''), null, { timeout: 15000 }).catch(() => { });
+  check('Space selects Manual and the focus stays on the control',
+    /Manual$/.test(await checkedMode()) && modeCalls.length === 1 && modeCalls[0].mode === 'manual'
+    && (await ep.evaluate(() => document.activeElement?.closest('.energy-mode-switch') !== null)), JSON.stringify(modeCalls));
+  await ep.waitForFunction(() => [...document.querySelectorAll('.energy-actions button')].some((b) => !b.disabled), null, { timeout: 15000 }).catch(() => { });
   const afterArm = await states();
-  check('arming through the switch enables the available actions', await armToggle.isChecked() && afterArm.some((disabled) => !disabled), JSON.stringify(afterArm));
+  check('Manual enables the available actions', afterArm.some((disabled) => !disabled), JSON.stringify(afterArm));
+
+  // A token cannot command a Manual inverter: 409 energy_manager_not_external (the PAT is created below via the API).
+  const patBody = await ep.evaluate(async () => {
+    const token = await (await fetch('/admin/api/tokens', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': (await (await fetch('/admin/api/session')).json()).csrf_token }, body: JSON.stringify({ name: 'e2e-mode', role: 'read/write' }) })).json();
+    return token;
+  });
+  const secret = patBody.token || patBody.secret || '';
+  if (secret) {
+    const viaPat = await ep.request.post(`${energyBase}/api/v1/devices/sim/energy/command`, { headers: { Authorization: `Bearer ${secret}` }, data: { action: 'hold' } });
+    check('a PAT command on a Manual inverter answers 409 energy_manager_not_external',
+      viaPat.status() === 409 && (await viaPat.json()).code === 'energy_manager_not_external', String(viaPat.status()));
+    // The scripted refusal is intended, not an application problem.
+    scrub(/http 409/);
+  } else check('a PAT could be created for the Manual-mode check', false, JSON.stringify(patBody).slice(0, 200));
 
   const cmd = async (action) => {
     const before = commands.length;
@@ -1573,17 +1625,37 @@ await shot('prometheus-master-toggle-on');
     check('Charge opens the target SoC area', await ep.locator('.energy-target').isVisible());
     const charge = await cmd(() => ep.locator('.energy-target button').click());
     check('Charge sends a command with a target SoC', charge?.action === 'charge' && Number.isFinite(charge.target_soc_percent), JSON.stringify(charge));
-  } else check('Charge is available once armed', false, 'disabled after arming');
+  } else check('Charge is available in Manual', false, 'disabled in Manual');
   await ep.waitForFunction(() => [...document.querySelectorAll('.energy-actions button')].some((b) => b.textContent.trim() === 'Keep battery idle' && !b.disabled), null, { timeout: 10000 }).catch(() => { });
   const hold = !(await states())[1] ? await cmd(() => buttons[1].click()) : null;
   check('Keep battery idle sends a hold command without a target SoC', hold?.action === 'hold' && !('target_soc_percent' in hold), JSON.stringify(hold));
   const auto = await cmd(() => ep.locator('.energy-actions button', { hasText: 'Return to automatic' }).click());
   check('Return to automatic sends auto', auto?.action === 'auto', JSON.stringify(auto));
 
+  // External: the GUI is refused and the controls are disabled with an info line; a PAT may command.
+  await radios.nth(2).click();
+  await ep.waitForFunction(() => /External$/.test(document.querySelector('.energy-mode-switch [aria-checked=true]')?.textContent.trim() || ''), null, { timeout: 15000 }).catch(() => { });
+  await ep.waitForFunction(() => [...document.querySelectorAll('.energy-actions button')].every((b) => b.disabled), null, { timeout: 5000 }).catch(() => { });
+  const externalText = await operateText();
+  check('External: the controls are disabled and the panel says an external app is in control',
+    (await states()).every(Boolean) && /controlled by an external app through the API \(PAT required\)\./.test(externalText), externalText.slice(0, 300));
+  check('External: a disabled control names the reason', /external app/.test(await buttons[0].getAttribute('title') || ''));
+  const csrfNow = await ep.evaluate(async () => (await (await fetch('/admin/api/session')).json()).csrf_token);
+  const viaGui = await ep.request.post(`${energyBase}/admin/api/energy/devices/sim/command`, { headers: { 'X-CSRF-Token': csrfNow }, data: { action: 'hold' } });
+  check('External: a GUI command answers 409 energy_manager_external', viaGui.status() === 409 && (await viaGui.json()).code === 'energy_manager_external', String(viaGui.status()));
+  if (secret) {
+    const viaPat = await ep.request.post(`${energyBase}/api/v1/devices/sim/energy/command`, { headers: { Authorization: `Bearer ${secret}` }, data: { action: 'hold' } });
+    check('External: a PAT command is accepted', viaPat.status() === 200, String(viaPat.status()));
+  }
+  scrub(/http 409/);
+  // Back to Manual so the remaining checks see the operable controls.
+  await radios.nth(1).click();
+  await ep.waitForFunction(() => /Manual$/.test(document.querySelector('.energy-mode-switch [aria-checked=true]')?.textContent.trim() || ''), null, { timeout: 15000 }).catch(() => { });
+
   // The relabels are visible on Operate (presentation-only; the REST action names stayed on the wire
   // above: hold/charge/auto). Manual-control enable/disable wording replaces the old ON/OFF switch.
   const operate = await operateText();
-  check('Operate shows the Manual control relabel', /Manual control:/.test(operate), operate.slice(0, 400));
+  check('Operate shows the mode control', /Manual/.test(operate) && /External/.test(operate), operate.slice(0, 400));
   check('Operate shows the relabelled battery actions',
     /Charge battery/.test(operate) && /Keep battery idle/.test(operate) && /Discharge battery/.test(operate), operate.slice(0, 400));
 
