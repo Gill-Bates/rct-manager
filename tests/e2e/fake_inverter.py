@@ -31,10 +31,10 @@ VALUES = {"solar_a_power": 1234.5, "solar_b_power": 800.0, "grid_power": -250.0,
           "battery_temperature": 28.5,
           # Control registers and a moving battery, so the guided hardware verification can run: the
           # battery follows the written setpoint once the external strategy (code 2) is active.
-          "power_mng_soc_target_set": 0.5, "battery_power": 400.0,
-          # Consistent with the figures above (solar 2034.5 W + grid export -250 W + battery 400 W), so the
+          "power_mng_soc_target_set": 0.5, "battery_power": 800.0,
+          # Consistent with the figures above (solar 2034.5 W + grid -250 W + battery 800 W), so the
           # assistant can prove both sign conventions from the power balance.
-          "household_load_power": 2184.5,
+          "household_load_power": 2584.5,
           # The second battery tower reports its own SoC and temperature. The values differ from the
           # first tower's on purpose: a card that falls back to the shared battery_* names would then
           # show two identical towers, which the browser test asserts against.

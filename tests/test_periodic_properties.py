@@ -414,13 +414,14 @@ async def test_pushed_values_cause_no_refresh_reads_and_the_cycle_is_limited() -
     async with running_app(settings, settle=False) as h:
         await _registered(h)
         gateway = h.runtime.gateway
+        serial_id = gateway._catalog.object_entry("inverter_serial").object_id
         # The startup heartbeat, name and serial reads are not part of the refresh cycle; under load
         # the serial read (queued right after the name) would land inside the counted window.
         async with asyncio.timeout(5):
             while (
                 gateway._device("main").last_heartbeat_at is None
                 or gateway.reported_name("main") is None
-                or gateway.reported_serial("main") is None
+                or not _reads(h.net, 0, serial_id)  # the fake answers an empty serial, so none is recorded
             ):
                 await asyncio.sleep(0.01)
         start = len(h.net.frames)

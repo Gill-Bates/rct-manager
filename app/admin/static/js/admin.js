@@ -3778,6 +3778,7 @@
     if (!list) return;
     const devices = settingsDraft.devices || [];
     list.replaceChildren(...devices.map((device) => deviceItem(device)));
+    list.hidden = devices.length === 0; // an empty <ul> would still take a grid gap
     scope.querySelector('#device-empty').hidden = devices.length > 0;
   }
 

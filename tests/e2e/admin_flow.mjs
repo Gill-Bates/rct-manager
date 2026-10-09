@@ -94,11 +94,11 @@ const page = await context.newPage();
 trackProblems(page, problems);
 const external = new Set();
 page.on('request', (r) => { if (!r.url().startsWith(base) && !r.url().startsWith('data:')) external.add(r.url()); });
-// confirm() answers are scripted: the device Apply asks before re-addressing or removing an inverter.
+// Native dialogs are answered by script; the inverter dialog uses the themed confirm modal instead.
 const dialogs = [];
 let dialogAnswer = true;
 page.on('dialog', (d) => { dialogs.push(d.message()); return dialogAnswer ? d.accept() : d.dismiss(); });
-// Every request that sends the device list; the Apply-only contract is asserted against this.
+// Every request that sends the device list; the add and delete contract is asserted against this.
 const devicePuts = [];
 page.on('request', (r) => {
   if (r.method() !== 'PUT' || !r.url().endsWith('/admin/api/settings')) return;
@@ -333,6 +333,13 @@ check('no external requests', external.size === 0, [...external].join(','));
 // Two simulated battery towers (primary + battery_placeholder_0, tests/e2e/fake_inverter.py) must
 // render as two distinct battery subcards with their own soc/temperature, not two copies of the
 // same reading (the duplicate-values regression this harness exists to catch).
+// The forced-stale poll loop above leaves the last (stale-marked) render on screen; poll once for
+// real and wait until both towers show a reading instead of sampling whatever is drawn right now.
+await forceDashboardPoll();
+await page.waitForFunction(() => {
+  const cards = [...document.querySelectorAll('.device-subcard-battery')];
+  return cards.length === 2 && cards.every((card) => /\d/.test(card.querySelector('.device-charge-value')?.textContent || ''));
+}, null, { timeout: 20000 }).catch(() => { /* the check below reports what is rendered */ });
 const towerInfo = await page.evaluate(() => {
   const batteries = [...document.querySelectorAll('.device-subcard-battery')];
   return batteries.map((card) => ({
@@ -1290,7 +1297,8 @@ check('no id or name fields', (await page.locator('.device-settings-item input[d
 const modalButtons = await page.$$eval('#inverters-modal button', (nodes) => nodes.map((node) => node.id || node.className));
 check('the only buttons are close, add and one trash per saved inverter', modalButtons.length === 2 + (await savedRows())
   && modalButtons.filter((name) => name.includes('btn-close')).length === 1 && modalButtons.includes('device-add'), JSON.stringify(modalButtons));
-const modalText = await page.locator('#inverters-modal').innerText();
+// The pending-restart notice of another setting may sit in the dialog; it is not part of the inverter UI.
+const modalText = await page.evaluate(() => { const copy = document.getElementById('inverters-modal').cloneNode(true); copy.querySelector('#restart-notice')?.remove(); return copy.textContent; });
 check('no Apply anywhere in the modal', !/apply/i.test(modalText) && (await page.locator('#device-apply, #inverters-modal .apply-bar, #inverters-modal .modal-footer').count()) === 0, modalText);
 check('the subtitle says each change takes effect immediately', modalText.includes('Each change takes effect immediately'));
 const addStyle = await page.evaluate(() => {
@@ -1396,10 +1404,10 @@ await page.waitForSelector('#confirm-modal.show', { timeout: 5000 });
 const confirmText = await page.locator('#confirm-modal .modal-body').innerText();
 check('the confirmation names the inverter and the reset', confirmText.includes('192.0.2.77:18877') && /Engineering Mode/.test(confirmText), confirmText);
 await page.click('#confirm-cancel');
-await page.waitForSelector('#confirm-modal.show', { state: 'detached', timeout: 5000 }).catch(() => { });
-await sleep(300);
+await page.waitForSelector('#confirm-modal', { state: 'hidden', timeout: 5000 });
+await page.waitForFunction(() => document.activeElement?.getAttribute('aria-label')?.startsWith('Remove inverter'), null, { timeout: 3000 }).catch(() => { });
 check('cancelling sends nothing, keeps the row and returns focus to its trash icon', devicePuts.length === putsAtDelete && (await trashFor('192.0.2.77').count()) === 1
-  && (await focusedLabel()) === 'Remove inverter 192.0.2.77:18877', await focusedLabel());
+  && (await focusedLabel()) === 'Remove inverter 192.0.2.77:18877', `${await focusedLabel()} puts=${devicePuts.length - putsAtDelete}`);
 await page.route('**/admin/api/settings', (route) => route.request().method() === 'PUT'
   ? route.fulfill({ status: 409, contentType: 'application/json', body: JSON.stringify({ detail: 'Active battery dispatch' }) })
   : route.continue());
@@ -1935,7 +1943,7 @@ await shot('prometheus-master-toggle-on');
       await dialog.getByRole('heading', { name: 'Run the short test' }).waitFor({ timeout: 15000 });
       const provenText = await dialog.innerText();
       check('proven directions are explained in plain words and nobody is asked',
-        /Checked automatically: the battery is discharging with 400 W \(from the power balance\)/.test(provenText)
+        /Checked automatically: the battery is discharging with 800 W \(from the power balance\)/.test(provenText)
         && /Checked automatically: the house is feeding 250 W into the grid \(from the power balance\)/.test(provenText)
         && (await dialog.getByRole('button', { name: /^The (battery|house) / }).count()) === 0, provenText.slice(0, 400));
       check('the assistant reaches the test step and offers no register names',
@@ -2001,7 +2009,7 @@ await shot('prometheus-master-toggle-on');
       await dialog.getByRole('button', { name: /^The battery is discharging/ }).click();
       await dialog.getByRole('heading', { name: 'Grid: import or export?' }).waitFor({ timeout: 5000 });
       check('a confirmed answer is summarised and the grid question follows',
-        /Confirmed by you: the battery is discharging with 400 W/.test(await dialog.innerText()) && (await dialog.locator('.modal-body button').count()) === 3);
+        /Confirmed by you: the battery is discharging with 800 W/.test(await dialog.innerText()) && (await dialog.locator('.modal-body button').count()) === 3);
       await dialog.getByRole('button', { name: /^The house is feeding power into the grid/ }).click();
       await dialog.getByRole('heading', { name: 'Run the short test' }).waitFor({ timeout: 5000 });
       await closeAssistant();
@@ -2032,7 +2040,7 @@ await shot('prometheus-master-toggle-on');
       setScenario({}); // the battery starts moving with a consistent balance
       await dialog.getByRole('heading', { name: 'Run the short test' }).waitFor({ timeout: 20000 });
       check('the assistant continues by itself once the battery moves',
-        /Checked automatically: the battery is discharging with 400 W/.test(await dialog.innerText()));
+        /Checked automatically: the battery is discharging with 800 W/.test(await dialog.innerText()));
       await closeAssistant();
 
       // The Expert form checks below need the Expert section.
