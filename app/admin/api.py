@@ -22,7 +22,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from app.admin.store import SESSION_SECONDS
 from app.admin.updates import check_for_updates
-from app.api.restart import probe_listener
+from app.api.restart import in_container, probe_listener
 from app.cache import CacheFreshness
 from app.catalog.base import is_numeric
 from app.config import DISPLAY_NAME_MAX, Settings
@@ -105,17 +105,14 @@ _LIVE = frozenset({
     "log_level", "trusted_proxies", "forwarded_header",
 }) | _EXPORT_RESTART_KEYS | _DEVICE_LIVE_KEYS
 _SECRET_EDITABLE = frozenset({"influxdb_token", "questdb_password"})
-# Authentication and proxy-trust settings: changing them with a PAT would let a leaked token
-# switch authentication off or widen who is trusted, so they need the cookie session.
+# Auth and proxy-trust settings: a PAT could switch auth off or widen trust, so cookie session only.
 _SESSION_ONLY_SETTINGS = frozenset({
     "auth_required", "trusted_proxies", "bind_address", "behind_reverse_proxy", "forwarded_header",
     "metrics_require_token", "metrics_trusted_sources", "enable_write_support", "devices", "docs_public",
     "bind_port", "log_level",
 })
-# Export destination and credential keys: a PAT that could change them could send metrics (and the
-# stored credentials) to an attacker-controlled host. Unlike _SESSION_ONLY_SETTINGS they stay visible
-# to a PAT on read. The retention days and the downsampling preset (which sets raw retention) are
-# here too: a PAT must not be able to shorten them and thereby make the TSDB drop history.
+# Export target and credentials: a PAT could redirect metrics and stored credentials to another host.
+# Still readable with a PAT. Retention settings stay here too, so a PAT cannot make the TSDB drop history.
 _EXPORT_TARGET_SETTINGS = frozenset({
     "db_type", "influxdb_hostname", "influxdb_port", "influxdb_tls_enabled", "influxdb_verify_tls",
     "influxdb_allow_plaintext_credentials", "influxdb_organization", "influxdb_bucket", "influxdb_token",
@@ -438,7 +435,12 @@ def repair_device_names(store, desired: Settings) -> Settings:
 @router.get("/settings")
 def get_settings(request: Request) -> dict:
     session = require_admin(request, sensitive=True)
-    return {"settings": _pat_safe_view(request.app.state.admin_desired_settings, session), "live": sorted(_LIVE)}
+    return {
+        "settings": _pat_safe_view(request.app.state.admin_desired_settings, session),
+        "live": sorted(_LIVE),
+        # The UI warns that a listener port change does not follow the Docker port mapping.
+        "in_container": in_container(),
+    }
 
 
 # Mirrors app.config._DEVICE_ID (DeviceEntry._check_id): validated here too so a bad device_id
@@ -976,19 +978,9 @@ def _device_card_label(catalog, name: str, value: Any) -> str | None:
 # exists on this device; _battery_tower_present answers that from readings.
 _BATTERY_TOWER_PREFIXES = ("battery", "battery_placeholder_0")
 
-# Two different limits that must not be conflated.
-#
-# RCT_MAX_MODULES_PER_TOWER is hardware: RCT documents the Power Battery / BMS V2 as 2 to 6 battery
-# modules per tower - the 3.8 / 5.7 / 7.6 / 9.6 / 11.5 kWh variants correspond to 2 / 3 / 4 / 5 / 6
-# modules, and a double-tower installation also allows up to 6 modules per tower.
-#
-# RCT_MODULE_SN_SLOTS is the protocol/catalog side: battery_module_sn_0 .. battery_module_sn_6 is an
-# array with seven elements (indices 0-6). That is the size of the data structure and nothing else;
-# "seven slots" does not mean "seven modules can be installed". Why the vendor sized the array at
-# seven is not answered by any documentation available here, and no claim is made about it.
-#
-# The device has no module-count register, so the count is derived from the populated slots - but
-# counting and hardware validation stay separate, see _battery_module_report.
+# RCT_MAX_MODULES_PER_TOWER is hardware (2 to 6 modules per tower, per RCT docs).
+# RCT_MODULE_SN_SLOTS is the protocol array size (indices 0-6), not an installable module count.
+# The device has no module-count register; counting and hardware validation stay separate, see _battery_module_report.
 RCT_MAX_MODULES_PER_TOWER = 6
 RCT_MODULE_SN_SLOTS = 7
 # One populated serial slot per tower belongs to the tower's base/top part, not to a battery module
@@ -1124,16 +1116,8 @@ def _raw_battery_module_report(states: list[str]) -> dict:
             "populated_module_slots": populated, "_complete": True}
 
 
-# How many consecutive reads of a *changed* classification are required before the reported count
-# is allowed to replace the previously trusted one. The periodic loop refreshes the seven
-# module_sn string slots over several read/refresh cycles (PeriodicManager.setup and
-# RctGateway.refresh_stale_periodic in app/gateway/rct.py bound a single catch-up pass to
-# REFRESH_MAX_PER_CYCLE stale entries every _REFRESH_CYCLE_SECONDS), and a cache entry for one slot
-# can also simply expire (app/cache.py) between two polls while a sibling slot's does not. Both
-# make cached_reading() answer differently for the same still-unchanged tower from one admin API
-# call to the next. A single changed read is therefore not enough to flip the reported count; it
-# must repeat before it is believed, while a sustained real change - an actual module added or
-# removed - still takes effect rather than being frozen out forever.
+# A changed module count must be read twice in a row before it replaces the trusted one, because
+# cache expiry and staggered refreshes can flip cached_reading() between calls.
 _BATTERY_MODULE_STABILITY_READS = 2
 
 _battery_module_lock = threading.Lock()

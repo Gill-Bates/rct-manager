@@ -758,15 +758,8 @@ def _lifespan(
             finally:
                 gateway.replace_devices(old_bindings)
 
-            # Identity-bound resets run only now that the new graph built: a failed build above must
-            # leave evidence, engineering mode and operating mode exactly as they were.
-            #
-            # These resets themselves are not yet one atomic store transaction (that would need
-            # reset_device_identity() to group capability reset, engineering mode and operating mode into a
-            # single DB write) — a durable fix left as a follow-up. For now, a failure partway
-            # through is at least classified as rollback-capable like the _swap_graph() build
-            # failure below, instead of being treated as a non-rollback (devices-already-persisted)
-            # error by the admin API's generic exception path.
+            # Identity-bound resets run only after the new graph built, so a failed build leaves state untouched.
+            # Not one atomic store transaction yet (follow-up); a partial failure counts as rollback-capable.
             try:
                 for device_id in reset_ids:
                     # Evidence and the operating mode were given for the old physical device, not the new one.
@@ -886,14 +879,8 @@ def _lifespan(
             async with reconfigure_lock:  # concurrent settings saves must not interleave teardown/rebuild
                 await _reconfigure_devices_unlocked()
 
-        # One shared async state for the write-support transitions. enable_dispatch() and
-        # disable_dispatch() run on the event loop but across several awaits each; the admin API
-        # already serializes transitions on the worker side (one live_transition at a time), yet a
-        # settings save flips enable_write_support under its own lock, independent of that guard. A
-        # single transition lock plus a generation that every switch flip bumps lets enable_dispatch
-        # recognize, after its slow build, that write support was turned off meanwhile and refuse to
-        # bring up the write-active recovery/dispatch loops (single-owner serialized transition
-        # rather than a thread-side lock).
+        # Serializes write-support transitions on the event loop. The generation is bumped on every switch
+        # flip, so enable_dispatch() can detect after its slow build that write support was turned off meanwhile.
         dispatch_transition_lock = asyncio.Lock()
 
         def _write_support_live() -> bool:

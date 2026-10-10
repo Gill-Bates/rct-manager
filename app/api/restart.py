@@ -31,6 +31,13 @@ DEBOUNCE_SECONDS = 1.5
 MIN_INTERVAL_SECONDS = 30.0
 
 
+def in_container() -> bool:
+    """True inside a container; RCT_API_CONTAINER is set by the Dockerfile, the marker files cover other runtimes."""
+    return os.environ.get("RCT_API_CONTAINER") == "1" or any(
+        os.path.exists(marker) for marker in ("/.dockerenv", "/run/.containerenv")
+    )
+
+
 def last_restart_at() -> float:
     """Wall-clock time of the previous re-exec (0 when this process was started normally)."""
     try:

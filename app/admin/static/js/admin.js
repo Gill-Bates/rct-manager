@@ -1561,8 +1561,7 @@
     }
 
     // state is [text, favourable] or null when the reading is unknown (badge hidden, no invented state).
-    // Tone per state: favourable -> success; every other normal state and n/a -> neutral. No flow
-    // state is a fault, so warning/danger are never used here.
+    // Tone: favourable -> success, everything else -> neutral; flow states are never faults.
     //   Generation:  Generating success | No generation neutral
     //   Consumption: Independent success | Grid supplied neutral
     //   Grid:        Feed-in success | Idle neutral | Import neutral
@@ -2938,6 +2937,11 @@
     window.RCTReconnect?.applying(moved ? `${location.protocol}//${location.hostname}:${port}` : null);
   }
 
+  // Inside a container the listener port is internal; see CONTAINER_PORT_NOTE.
+  let runningInContainer = false;
+  const CONTAINER_PORT_NOTE = 'This service runs in a container: changing the internal port changes neither the published Docker port mapping nor the BIND_PORT used by the container health check.';
+  const CONTAINER_PORT_CONSEQUENCE = ' The container reports unhealthy, and the published port no longer reaches the service, until BIND_PORT in the environment or compose file matches and the port mapping is updated.';
+
   // Changes that can lock the operator out of this UI or widen trust: confirmed before they autosave.
   // Returns the confirmation text, or null when the field is harmless or the value did not change.
   function riskyChange(key, next) {
@@ -2946,7 +2950,8 @@
     if (key === 'bind_address' || key === 'bind_port') {
       return {
         title: 'Change listen address?',
-        message: `The service switches to ${target()} in the background. If that address is not reachable from your network, you can no longer open this admin interface.`,
+        message: `The service switches to ${target()} in the background. If that address is not reachable from your network, you can no longer open this admin interface.`
+          + (runningInContainer && key === 'bind_port' ? ` ${CONTAINER_PORT_NOTE}${CONTAINER_PORT_CONSEQUENCE}` : ''),
         confirmLabel: 'Switch listen address',
       };
     }
@@ -3301,7 +3306,7 @@
       if (field.type === 'number') { control.min = String(field.min); control.max = String(field.max); control.inputMode = 'numeric'; }
     }
     control.id = id;
-    const help = element('div', 'form-text', field.help);
+    const help = element('div', 'form-text', runningInContainer && field.key === 'bind_port' ? `${field.help} ${CONTAINER_PORT_NOTE}` : field.help);
     help.id = `${id}-help`;
     control.setAttribute('aria-describedby', help.id);
     if (field.type === 'toggle') {
@@ -4053,6 +4058,7 @@
     ]);
     settingsCommitted = structuredClone(result.settings || {});
     settingsDraft = structuredClone(settingsCommitted);
+    runningInContainer = result.in_container === true;
     if (devices) tsdbRuntimeStatus = devices.tsdb || null;
     // The one place that mints a device identity, besides the blank trailing row.
     if (Object.hasOwn(settingsDraft, 'devices')) adoptDevices(settingsDraft.devices);

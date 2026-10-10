@@ -18,6 +18,7 @@ from types import FrameType
 import uvicorn
 from fastapi import FastAPI
 
+from app.api.restart import in_container as _in_container
 from app.api.restart import reexec as _reexec
 from app.api.runtime import Runtime
 from app.config import Settings, url_host
@@ -145,13 +146,6 @@ def first_start_banner(settings: Settings, password_file: Path) -> str:
         "                (one-time; change it at first login)",
         f" Open:          http://{host}:{settings.bind_port}/", rule, "",
     ))
-
-
-def _in_container() -> bool:
-    # RCT_API_CONTAINER is set by the Dockerfile; the marker files cover other runtimes.
-    return os.environ.get("RCT_API_CONTAINER") == "1" or any(
-        os.path.exists(marker) for marker in ("/.dockerenv", "/run/.containerenv")
-    )
 
 
 def warn_if_loopback_in_container(settings: Settings) -> None:

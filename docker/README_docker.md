@@ -49,7 +49,9 @@ Compose sets `BIND_ADDRESS=0.0.0.0` and `ALLOW_NON_LOOPBACK_BIND=true` for the
 container listener. Enable the GUI option "behind reverse proxy" when requests
 arrive through a TLS proxy, and keep `BIND_PORT` equal to the container port of the
 mapping in `compose.yaml` (default `8000`; `127.0.0.1:8000:8000`). If you change `BIND_PORT`,
-change the published port as well. A loopback `BIND_ADDRESS` inside the container (including
+change the published port as well. The same holds for the GUI port setting: it moves only the
+internal listener, not the mapping or the `BIND_PORT` used by the health check, so the container
+turns unhealthy until both match the new port. A loopback `BIND_ADDRESS` inside the container (including
 the default `127.0.0.1`) makes the service unreachable through the port mapping; the start
 then logs a WARNING and the health check fails.
 

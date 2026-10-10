@@ -35,6 +35,13 @@ are persisted in the `rct-data` volume at `/app/data/rct.db`.
     `8000`). A loopback bind makes the service unreachable through the
     published port; the start logs a warning and the health check fails.
 
+!!! warning "Changing the port in the GUI"
+    The GUI port setting moves only the listener inside the container. It changes
+    neither the published port mapping nor the `BIND_PORT` that the health check
+    uses, so the container reports unhealthy and the published port stops reaching
+    the service until `BIND_PORT` and the mapping match the new port. The GUI
+    shows this before it applies the change.
+
 The shell variables `RCT_API_PORT` (host port, default `8000`), `RCT_API_TAG` (image tag, required: Compose stops
 without it) and `TZ` (default `Etc/UTC`) are read by `docker/compose.yaml` itself.
 

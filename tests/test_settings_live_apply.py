@@ -17,7 +17,7 @@ import uvicorn
 
 from app.admin.store import AdminStore
 from app.api import server
-from app.api.restart import BackgroundRestart, probe_listener
+from app.api.restart import BackgroundRestart, in_container, probe_listener
 from app.errors import ReconfigurationBuildError
 from tests.api_helpers import admin_session_headers, make_settings, running_app
 
@@ -177,6 +177,21 @@ async def test_unbindable_listener_is_refused_and_nothing_changes(tmp_path):
         assert h.app.state.admin_store.get("operator_settings").get("bind_port") != busy
         await asyncio.sleep(0.2)
         assert calls == []
+
+
+async def test_settings_view_tells_the_ui_whether_the_service_runs_in_a_container(tmp_path, monkeypatch):
+    async with _admin(tmp_path) as (h, _headers):
+        monkeypatch.setattr("app.admin.api.in_container", lambda: False)
+        assert (await h.client.get("/admin/api/settings")).json()["in_container"] is False
+        monkeypatch.setattr("app.admin.api.in_container", lambda: True)
+        assert (await h.client.get("/admin/api/settings")).json()["in_container"] is True
+
+
+@pytest.mark.parametrize(("env", "marker", "expected"), [("1", False, True), ("", True, True), ("", False, False)])
+def test_container_detection_uses_the_image_flag_or_a_runtime_marker(monkeypatch, env, marker, expected):
+    monkeypatch.setenv("RCT_API_CONTAINER", env)
+    monkeypatch.setattr("os.path.exists", lambda path: marker and path == "/.dockerenv")
+    assert in_container() is expected
 
 
 def test_probe_tolerates_the_own_port_and_refuses_a_foreign_address():
