@@ -55,8 +55,9 @@ asyncio_default_fixture_loop_scope = "function"
 line-length = 120
 
 [tool.ruff.lint]
-# FAST: FastAPI-specific rules (not in the 0.16 default set). S: flake8-bandit, deliberately not a
-# default; this is an authenticated REST gateway with password hashing and a TLS/token client.
+# FAST: FastAPI-specific rules (not in Ruff's default set, checked for 0.16 and 0.17). S: flake8-bandit,
+# only S102/S110/S112 are default; this is an authenticated REST gateway with password hashing and a
+# TLS/token client.
 extend-select = ["FAST", "S"]
 # EXE001: modules carry a shebang in their file header but are run via `python -m app`.
 # S101: the app's asserts only narrow Optional types or state an invariant that the code path above

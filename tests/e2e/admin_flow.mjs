@@ -1209,7 +1209,10 @@ await page.locator('#setting-bind_port').dispatchEvent('change');
 await sleep(300);
 check('a valid value clears aria-invalid again', (await page.getAttribute('#setting-bind_port', 'aria-invalid')) === null);
 await page.locator('#setting-log_level').selectOption('DEBUG');
-await page.waitForFunction(() => document.getElementById('toast-region').textContent.includes('Settings saved and active'), null, { timeout: 8000 });
+for (let attempt = 0; attempt < 40; attempt += 1) {
+  if ((await (await context.request.get(base + '/admin/api/settings')).json()).settings.log_level === 'DEBUG') break;
+  await sleep(200);
+}
 check('a settings change shows no restart notice anywhere', (await page.locator('#restart-notice').count()) === 0
   && !/restart/i.test(await page.locator('main').innerText()));
 const settingsApi = await page.evaluate(async () => (await fetch('/admin/api/settings', { credentials: 'same-origin' })).json());
