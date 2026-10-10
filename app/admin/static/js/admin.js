@@ -448,17 +448,9 @@
   const BATTERY_PRESENCE = ['battery_soc', 'battery_temperature', 'battery_cycles', 'battery_status2',
     'battery_placeholder_0_status2'];
 
-  // Describes the battery cards to render for one device. /admin/api/devices (app/admin/api.py,
-  // devices()) returns a `batteries` list, one entry per physical tower sharing the inverter. Each
-  // entry carries its own title, its own role->metric-name map and its own module report, so every
-  // tower is rendered from its own readings instead of from shared `battery_*` names.
-  //
-  // `module_count` is the number of modules *in that one tower*, not the number of towers, and it is
-  // null whenever the server could not derive a trustworthy count; `module_count_status` says which
-  // case it is ("ok" / "pending" / "anomaly", see _battery_module_report).
-  //
-  // A registry without any module_sn slots reports no `batteries` entries at all; BATTERY_PRESENCE
-  // then falls back to a single descriptor so older/simpler registries still show one battery card.
+  // One descriptor per physical tower from /admin/api/devices (`batteries`). module_count is per tower and
+  // null when untrustworthy (module_count_status: ok / pending / anomaly, see _battery_module_report).
+  // Without module_sn slots there are no `batteries` entries; BATTERY_PRESENCE falls back to one card.
   function batteryTowers(metrics, batteries) {
     if (Array.isArray(batteries) && batteries.length) {
       return batteries.map((battery, index) => ({

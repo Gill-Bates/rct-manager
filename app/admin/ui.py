@@ -6,9 +6,11 @@
 
 """Server-rendered administration pages."""
 
+import re
 import sys
 from datetime import UTC, datetime
 from importlib.metadata import PackageNotFoundError, version
+from ipaddress import ip_address
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
@@ -35,6 +37,29 @@ _HEADERS = {
 }
 
 
+_HOST = re.compile(r"[A-Za-z0-9.-]{1,253}")
+
+
+def _page_headers(request: Request) -> dict[str, str]:
+    """Pages may probe their own host on any port, so a listener port change can be followed.
+
+    The reconnect monitor checks /health on the new port; 'self' alone would block that request.
+    """
+    host = request.url.hostname or ""
+    if ":" in host:
+        try:
+            ip_address(host)
+        except ValueError:
+            return _HEADERS
+        host = f"[{host}]"
+    elif not _HOST.fullmatch(host):
+        return _HEADERS
+    policy = _HEADERS["Content-Security-Policy"].replace(
+        "connect-src 'self';", f"connect-src 'self' {request.url.scheme}://{host}:*;"
+    )
+    return {**_HEADERS, "Content-Security-Policy": policy}
+
+
 class _AdminStaticFiles(StaticFiles):
     async def get_response(self, path, scope):
         # Dotfiles (e.g. local tool state such as .omc/) are never public.
@@ -57,7 +82,7 @@ def _render(request: Request, template: str, context: dict):
         **context,
     }
     return _TEMPLATES.TemplateResponse(
-        request, template, context, headers={**_HEADERS, "Cache-Control": "no-store"}
+        request, template, context, headers={**_page_headers(request), "Cache-Control": "no-store"}
     )
 
 

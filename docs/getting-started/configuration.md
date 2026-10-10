@@ -75,7 +75,8 @@ The port can also be changed in the GUI; the service then re-binds in the backgr
 container this moves only the internal listener: the published Docker port mapping and the
 `BIND_PORT` used by the container health check stay as they are, so the container reports
 unhealthy and the published port stops reaching the service until the environment (or compose)
-value and the port mapping match the new port. The GUI says so before it applies the change.
+value and the port mapping match the new port. The GUI says so before it applies the change. After the first start the value saved in the GUI takes
+precedence over `BIND_PORT`.
 
 ### Behind reverse proxy
 GUI only. Confirms a TLS-terminating proxy in front of the service and sets the secure flag on session cookies. It does not trust any forwarded header; that is `TRUSTED_PROXIES` below. A `BEHIND_REVERSE_PROXY` variable is ignored with a warning. A consented non-loopback bind logs a warning until this option is enabled in the GUI.

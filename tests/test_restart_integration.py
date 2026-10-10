@@ -186,3 +186,24 @@ def test_listener_change_replaces_the_process_image_and_serves_on_the_new_port(s
     assert service.log().count("Shutdown finished") == 2
     assert not _answers(first)
     client.close()
+
+
+def test_quick_changes_collapse_into_one_restart_and_a_revert_cancels_it(service):
+    client, headers = _login(service)
+    original = service.port
+
+    # Setting the port back before the debounce ends leaves the listener alone.
+    assert client.put("/admin/api/settings", headers=headers, json={"bind_port": _free_port()}).json()["applying"]
+    assert client.put("/admin/api/settings", headers=headers, json={"bind_port": original}).json()["applying"] is False
+    time.sleep(3)
+    assert _answers(original) and "Restarting in the background" not in service.log()
+
+    # Two quick changes end in one restart onto the last value; the stored value, not the
+    # BIND_PORT of settings.env, decides the listener of the new process.
+    skipped, last = _free_port(), _free_port()
+    client.put("/admin/api/settings", headers=headers, json={"bind_port": skipped})
+    assert client.put("/admin/api/settings", headers=headers, json={"bind_port": last}).json()["applying"]
+    _wait_until(lambda: _answers(last), "the last port to answer")
+    assert not _answers(skipped) and not _answers(original)
+    assert service.log().count("Restarting in the background") == 1
+    client.close()

@@ -84,6 +84,25 @@ async def test_pages_render_with_the_new_menu(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_pages_may_probe_their_own_host_on_another_port_only(tmp_path):
+    # The reconnect monitor checks /health on the new port after a listener change.
+    async with _logged_in(tmp_path) as client:
+        policy = (await client.get("/ui/settings")).headers["content-security-policy"]
+        connect = next(part for part in policy.split(";") if "connect-src" in part)
+        assert connect.split() == ["connect-src", "'self'", f"{client.base_url.scheme}://{client.base_url.host}:*"]
+        assert "default-src 'self'" in policy and "script-src 'self'" in policy
+    from types import SimpleNamespace
+
+    from app.admin.ui import _page_headers
+
+    for host in ("evil.example;script-src *", "a b", "", "::1;x"):
+        hostile = _page_headers(SimpleNamespace(url=SimpleNamespace(hostname=host, scheme="http")))
+        assert "connect-src 'self';" in hostile["Content-Security-Policy"], host
+    ipv6 = _page_headers(SimpleNamespace(url=SimpleNamespace(hostname="::1", scheme="http")))
+    assert "connect-src 'self' http://[::1]:*;" in ipv6["Content-Security-Policy"]
+
+
+@pytest.mark.asyncio
 async def test_about_update_check_requires_login_and_renders_release_controls(tmp_path, monkeypatch):
     calls = []
 
