@@ -6,6 +6,7 @@
 
 """Security and persistence regressions of the administration backend."""
 
+import logging
 import re
 import stat
 import threading
@@ -20,6 +21,14 @@ from app.api.app_factory import create_app
 from app.config import Settings
 
 PASSWORD2 = "a much stronger password"
+
+
+@pytest.fixture(autouse=True)
+def _restore_root_log_level():
+    """The log level is applied live to the root logger; keep it from leaking into other tests."""
+    level = logging.getLogger().level
+    yield
+    logging.getLogger().setLevel(level)
 
 
 def _settings(tmp_path, **extra):
@@ -318,19 +327,20 @@ def test_existing_secret_file_behind_a_symlink_is_not_chmodded_through_it(tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_settings_report_live_versus_restart_required(booted):
+async def test_settings_apply_in_place_and_never_report_a_pending_restart(booted):
     _, app, password = booted
     async with _ready(app, password) as (client, csrf):
         h = {"X-CSRF-Token": csrf}
-        assert (await client.get("/admin/api/settings")).json()["restart_required"] == []
+        assert "restart_required" not in (await client.get("/admin/api/settings")).json()
         live = await client.put("/admin/api/settings", headers=h, json={"docs_public": True})
-        assert live.json()["restart_required"] == [] and "docs_public" in live.json()["live"]
+        assert "restart_required" not in live.json() and "docs_public" in live.json()["live"]
         assert app.state.runtime.settings.docs_public is True
-        slow = await client.put("/admin/api/settings", headers=h, json={"log_level": "DEBUG"})
-        assert slow.json()["restart_required"] == ["log_level"]
-        assert app.state.runtime.settings.log_level != "DEBUG"
+        level = await client.put("/admin/api/settings", headers=h, json={"log_level": "DEBUG"})
+        assert "restart_required" not in level.json() and level.json()["applying"] is False
+        assert app.state.runtime.settings.log_level == "DEBUG"
+        assert logging.getLogger().level == logging.DEBUG
         again = (await client.get("/admin/api/settings")).json()
-        assert again["restart_required"] == ["log_level"] and again["settings"]["log_level"] == "DEBUG"
+        assert "restart_required" not in again and again["settings"]["log_level"] == "DEBUG"
         bad = await client.put("/admin/api/settings", headers=h, json={"bind_port": 70000})
         assert bad.status_code == 400
         assert (await client.get("/admin/api/settings")).json()["settings"]["bind_port"] != 70000
@@ -357,21 +367,21 @@ async def test_concurrent_autosaves_of_different_fields_are_kept(booted):
 
 
 @pytest.mark.asyncio
-async def test_parameter_selection_limits_and_restart_reporting(tmp_path):
+async def test_parameter_selection_limits_and_live_application(tmp_path):
     settings = _settings(tmp_path)
     app = create_app(settings)
     password = app.state.first_start_password
     async with _ready(app, password) as (client, csrf):
         h = {"X-CSRF-Token": csrf}
         view = (await client.get("/admin/api/parameters")).json()
-        assert view["restart_required"] == []
+        assert "restart_required" not in view
         numeric = [p["name"] for p in view["available"] if p["exportable"]]
         too_many = await client.put("/admin/api/parameters", headers=h,
                                     json={"exposed_names": numeric[:65], "write_names": []})
         assert too_many.status_code == 422
         exactly = await client.put("/admin/api/parameters", headers=h,
                                    json={"exposed_names": numeric[:64], "write_names": []})
-        assert exactly.status_code == 200 and exactly.json()["restart_required"] == ["exposed_names"]
+        assert exactly.status_code == 200 and "restart_required" not in exactly.json()
         dup = await client.put("/admin/api/parameters", headers=h,
                                json={"exposed_names": [numeric[0], numeric[0]], "write_names": []})
         assert dup.status_code == 400
@@ -395,7 +405,7 @@ async def test_parameter_selection_limits_and_restart_reporting(tmp_path):
     assert restarted.state.admin_store.get("write_names") == []
     async with _client(restarted) as client:
         assert (await _login(client, PASSWORD2)).status_code == 200
-        assert (await client.get("/admin/api/parameters")).json()["restart_required"] == []
+        assert "restart_required" not in (await client.get("/admin/api/parameters")).json()
 
 
 def test_concurrent_store_writes_do_not_lose_updates(tmp_path):

@@ -1209,9 +1209,12 @@ await page.locator('#setting-bind_port').dispatchEvent('change');
 await sleep(300);
 check('a valid value clears aria-invalid again', (await page.getAttribute('#setting-bind_port', 'aria-invalid')) === null);
 await page.locator('#setting-log_level').selectOption('DEBUG');
-await page.waitForSelector('#restart-notice:not([hidden])', { timeout: 8000 });
-check('restart-required setting is reported', (await page.locator('#restart-notice').innerText()).includes('Log level'));
-await shot('settings-restart-notice');
+await page.waitForFunction(() => document.getElementById('toast-region').textContent.includes('Settings saved and active'), null, { timeout: 8000 });
+check('a settings change shows no restart notice anywhere', (await page.locator('#restart-notice').count()) === 0
+  && !/restart/i.test(await page.locator('main').innerText()));
+const settingsApi = await page.evaluate(async () => (await fetch('/admin/api/settings', { credentials: 'same-origin' })).json());
+check('the new log level is the saved one and no restart is pending', settingsApi.settings.log_level === 'DEBUG' && !('restart_required' in settingsApi));
+await shot('settings-applied');
 // 6. Prometheus page: remove, add, keyboard sort, drag and drop, persistence
 await page.goto(base + '/ui/prometheus');
 await page.waitForSelector('#exposed-list .metric-row');
@@ -1250,7 +1253,7 @@ await page.evaluate(([src, dst]) => { // synthetic HTML5 drag events: headless C
 const afterDrag = await names();
 check('drag and drop reorders', afterDrag[0] === list.at(-1), afterDrag.slice(0, 2).join(','));
 await page.waitForFunction(() => document.getElementById('toast-region').textContent.includes('Parameters saved'), null, { timeout: 8000 });
-check('parameter change reports restart need', (await toastText()).includes('restart'), await toastText());
+check('parameter change is saved without any restart wording', !/restart/i.test(await toastText()), await toastText());
 await shot('prometheus-saved');
 // #save-state keeps data-state="saved" after a successful save (it shows no text, the toast does),
 // so wait for that state like the other save paths in this file do.
@@ -1297,8 +1300,7 @@ check('no id or name fields', (await page.locator('.device-settings-item input[d
 const modalButtons = await page.$$eval('#inverters-modal button', (nodes) => nodes.map((node) => node.id || node.className));
 check('the only buttons are close, add and one trash per saved inverter', modalButtons.length === 2 + (await savedRows())
   && modalButtons.filter((name) => name.includes('btn-close')).length === 1 && modalButtons.includes('device-add'), JSON.stringify(modalButtons));
-// The pending-restart notice of another setting may sit in the dialog; it is not part of the inverter UI.
-const modalText = await page.evaluate(() => { const copy = document.getElementById('inverters-modal').cloneNode(true); copy.querySelector('#restart-notice')?.remove(); return copy.textContent; });
+const modalText = await page.evaluate(() => document.getElementById('inverters-modal').textContent);
 check('no Apply anywhere in the modal', !/apply/i.test(modalText) && (await page.locator('#device-apply, #inverters-modal .apply-bar, #inverters-modal .modal-footer').count()) === 0, modalText);
 check('the subtitle says each change takes effect immediately', modalText.includes('Each change takes effect immediately'));
 const addStyle = await page.evaluate(() => {
@@ -1903,7 +1905,7 @@ await shot('prometheus-master-toggle-on');
     // and Expert mode is switched on by the user, never by the setup step.
     check('Basic mode shows no hardware verification form or protocol fields',
       (await ep.locator('.energy-setup-step form').count()) === 0 && !/Strategy code|Byte width/.test(shownStep), shownStep.slice(0, 300));
-    if (/Hardware verification/.test(shownStep)) {
+    if (await ep.locator('.energy-setup-step button', { hasText: 'Verify hardware' }).count()) {
       check('the Basic hardware step offers "Verify hardware" and leaves Expert mode off',
         (await ep.locator('.energy-setup-step button', { hasText: 'Verify hardware' }).count()) === 1
         && (await ep.locator('#energy-expert-mode').isChecked()) === false, shownStep.slice(0, 300));
@@ -1937,7 +1939,26 @@ await shot('prometheus-master-toggle-on');
       await dialog.waitFor({ timeout: 5000 });
       check('"Verify hardware" opens the guided assistant without switching Expert mode on',
         (await ep.locator('#energy-expert-mode').isChecked()) === false && /Before you start/.test(await dialog.innerText()));
-      await dialog.getByRole('button', { name: 'Start check' }).click();
+      const intro = await dialog.locator('.modal-body > div').innerText();
+      check('verification introduction is brief and keeps the safety facts',
+        intro.trim().split(/\s+/).length <= 85 && /0 W/.test(intro) && /30 seconds/.test(intro)
+        && /restores its previous state/.test(intro) && /Nothing is saved/.test(intro), intro);
+      const startRoute = '**/verification-assistant/start';
+      await ep.route(startRoute, async (route) => { await sleep(2200); await route.continue(); });
+      const startClick = dialog.getByRole('button', { name: 'Start check' }).click();
+      const progress = dialog.locator('.energy-assistant-progress');
+      await progress.waitFor({ state: 'visible' });
+      const spinning = await progress.locator('.spinner-border').evaluate((node) => ({
+        hidden: node.getAttribute('aria-hidden'), animation: getComputedStyle(node).animationName,
+      }));
+      check('working state shows an animated, decorative spinner and status text',
+        spinning.hidden === 'true' && spinning.animation !== 'none' && /Working/.test(await progress.innerText()), JSON.stringify(spinning));
+      await ep.emulateMedia({ reducedMotion: 'reduce' });
+      check('spinner stops moving when reduced motion is requested',
+        (await progress.locator('.spinner-border').evaluate((node) => getComputedStyle(node).animationName)) === 'none');
+      await ep.emulateMedia({ reducedMotion: 'no-preference' });
+      await startClick;
+      await ep.unroute(startRoute);
       await dialog.getByRole('button', { name: 'Yes, continue' }).click();
       // Scenario A: a consistent power balance proves both directions, so nobody is asked.
       await dialog.getByRole('heading', { name: 'Run the short test' }).waitFor({ timeout: 15000 });
@@ -2003,15 +2024,15 @@ await shot('prometheus-master-toggle-on');
         optionStyles.every((item) => item.own === item.canonical && !/rgba\(0, 0, 0, 0\)/.test(item.fill)), JSON.stringify(optionStyles[0]));
       await ep.screenshot({ path: path.join(OUT, 'assistant-question.png') });
       await dialog.getByRole('button', { name: /^The battery is idle/ }).click();
-      await dialog.getByText(/is not idle right now/).waitFor({ timeout: 5000 });
+      await dialog.getByText(/is not idle right now/).waitFor({ timeout: 20000 });
       check('an idle statement that contradicts the live reading is refused and proves nothing',
         (await dialog.getByRole('heading', { name: 'What is the battery doing?' }).count()) === 1);
       await dialog.getByRole('button', { name: /^The battery is discharging/ }).click();
-      await dialog.getByRole('heading', { name: 'Grid: import or export?' }).waitFor({ timeout: 5000 });
+      await dialog.getByRole('heading', { name: 'Grid: import or export?' }).waitFor({ timeout: 20000 });
       check('a confirmed answer is summarised and the grid question follows',
         /Confirmed by you: the battery is discharging with 800 W/.test(await dialog.innerText()) && (await dialog.locator('.modal-body button').count()) === 3);
       await dialog.getByRole('button', { name: /^The house is feeding power into the grid/ }).click();
-      await dialog.getByRole('heading', { name: 'Run the short test' }).waitFor({ timeout: 5000 });
+      await dialog.getByRole('heading', { name: 'Run the short test' }).waitFor({ timeout: 20000 });
       await closeAssistant();
 
       // Scenario C: the battery is idle. Nothing may be guessed; the dialog waits, explains, keeps

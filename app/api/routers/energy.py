@@ -193,7 +193,6 @@ def _manager(runtime: RuntimeDep):
 
 @router.get(
     "",
-    response_model=EnergyStatusResponse,
     summary="Read the Energy Manager state of one inverter",
     responses=problem_responses(*_COMMON),
 )
@@ -211,7 +210,6 @@ async def get_energy(
 
 @router.post(
     "/command",
-    response_model=EnergyStatusResponse,
     summary="Charge, discharge, hold, or return to automatic operation",
     responses=problem_responses(*_COMMON),
 )

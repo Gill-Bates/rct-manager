@@ -525,7 +525,7 @@ class Settings(BaseSettings):
             _warn_once(
                 "BEHIND_REVERSE_PROXY=true but TRUSTED_PROXIES is empty. HTTPS admin requests through an HTTP "
                 "upstream proxy may fail CSRF validation (403). Configure TRUSTED_PROXIES for the reverse "
-                "proxy and restart."
+                "proxy."
             )
         if any(
             scrape.version == proxy.version and scrape.overlaps(proxy)

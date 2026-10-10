@@ -38,6 +38,7 @@ from app.api.body_limit import BodyLimitMiddleware
 from app.api.docs_nav import SIDEBAR_HTML
 from app.api.middleware import RequestContextMiddleware
 from app.api.problems import ErrorCode, ProblemError, register_handlers
+from app.api.restart import BackgroundRestart
 from app.api.routers import catalog as catalog_router
 from app.api.routers import dispatch, energy, health, metrics, values, vendor, writes
 from app.api.runtime import Runtime
@@ -736,8 +737,8 @@ def _lifespan(
                 # inherit the removed hardware's capabilities, engineering mode or operating mode.
                 reset_ids = removed | readdressed
 
-            selected_exposed = getattr(app.state, "active_exposed_names", None)
-            if selected_exposed is None and store is not None:
+            selected_exposed = None
+            if store is not None:
                 selected_exposed = await asyncio.to_thread(store.get, "exposed_names")
             if is_closing():
                 return  # nothing has been built or torn down yet
@@ -1191,6 +1192,19 @@ def create_app(settings: Settings, *, clock: Clock | None = None, connector: Con
     app.state.runtime = runtime
     app.state.admin_desired_settings = settings
     app.state.admin_store = admin_store
+
+    def _restart_listener() -> None:
+        hook = getattr(app.state, "server_restart", None)  # set by run_server
+        if hook is None:
+            log.warning("The listener settings changed, but this server was not started by run_server")
+            return
+        hook()
+
+    def _listener_differs() -> bool:
+        desired, running = app.state.admin_desired_settings, app.state.runtime.settings
+        return (desired.bind_address, desired.bind_port) != (running.bind_address, running.bind_port)
+
+    app.state.background_restart = BackgroundRestart(_restart_listener, needed=_listener_differs)
     app.state.dispatch_store = dispatch_store
     app.state.dispatch_config = dispatch_config
     app.state.first_start_password = bootstrap_password  # printed by the server once it is listening

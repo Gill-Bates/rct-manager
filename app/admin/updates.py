@@ -99,7 +99,7 @@ def _fetch() -> dict:
         "User-Agent": f"rct-manager/{__version__}",
     })
     try:
-        with urlopen(request, timeout=10) as response:
+        with urlopen(request, timeout=10) as response:  # noqa: S310 - _RELEASE_API is a fixed https URL
             data = json.load(response)
         if not isinstance(data, dict) or not isinstance(data.get("tag_name"), str):
             raise TypeError("GitHub returned an invalid release")

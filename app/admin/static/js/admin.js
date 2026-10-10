@@ -2318,8 +2318,8 @@
         footerButtons.push(button('Check again', 'btn-primary', guarded(async () => { state = await post('start'); identified = false; })));
       } else if (stage === 0 && !(state && state.started)) {
         main.append(heading('Before you start'),
-          element('p', 'small', 'This guided check reads your inverter and works out from its power readings whether the battery and the grid report their direction the way this app assumes. Only where the readings cannot settle that, it asks you what the battery or the grid is doing right now. Then it runs one short test. Nothing is saved until the end, and you can cancel at any time.'),
-          element('p', 'small', 'The test briefly tells the inverter to hold the battery at 0 W (up to about 30 seconds) and then returns it to its previous state. The house keeps running; it may draw from the grid for that moment. The battery must be visibly charging or discharging when the test starts.'));
+          element('p', 'small', 'We check battery and grid direction from live readings. If they are unclear, we ask what you see. Nothing is saved until the end.'),
+          element('p', 'small', 'The short test holds the battery at 0 W for up to 30 seconds, then restores its previous state. The house stays powered but may briefly use the grid. Start while the battery is visibly charging or discharging.'));
         footerButtons.push(button('Start check', 'btn-primary', guarded(async () => { state = await post('start'); identified = false; })));
       } else if (stage === 0) {
         main.append(heading('Is this your inverter?'),
@@ -2338,7 +2338,7 @@
         }
       } else if (stage === 3) {
         main.append(heading('Run the short test'), findings() || '', stepMessage(2) || '',
-          element('p', 'small', 'The inverter will be told to hold the battery at 0 W for a few seconds, the result will be read back, and the previous state will be restored. Keep this window open until it finishes.'));
+          element('p', 'small', 'The battery holds at 0 W briefly. We read back the result and restore the previous state. Keep this window open.'));
         const consent = element('div', 'form-check mb-2');
         const box = element('input', 'form-check-input'); box.type = 'checkbox'; box.id = `${uid}-consent`;
         const label = element('label', 'form-check-label small', 'I understand the battery will pause briefly and want to run the test now.'); label.htmlFor = box.id;
@@ -2362,7 +2362,13 @@
           toast('Hardware verified. Manual battery control is available.');
         })));
       }
-      if (running) main.append(element('p', 'small text-secondary', 'Working… do not close this window.'));
+      if (running) {
+        const progress = element('p', 'small text-secondary d-flex align-items-center gap-2 mb-0 energy-assistant-progress');
+        const spinner = element('span', 'spinner-border spinner-border-sm');
+        spinner.setAttribute('aria-hidden', 'true');
+        progress.append(spinner, 'Working… keep this window open.');
+        main.append(progress);
+      }
       if (problem) main.append(note(problem, 'danger'));
       for (const node of footerButtons) node.disabled = node.disabled || running;
       body.replaceChildren(steps, main);
@@ -2724,7 +2730,7 @@
     const renderHardwareText = (expertOn) => {
       hardwareText.textContent = 'Hardware control must be verified on this inverter before it can be controlled. '
         + (expertOn ? 'Use the guided check below or enter the values you measured under Expert settings.'
-          : 'A guided check reads the inverter, asks two simple questions and runs one short, safe test. Nothing is guessed. Experienced administrators can instead enter measured values under Expert settings.');
+          : 'A guided check reads the inverter, checks the battery and grid directions from its power readings (asking you only where they cannot settle it) and runs one short, safe test. Nothing is guessed. Experienced administrators can instead enter measured values under Expert settings.');
       openVerifyButton.hidden = false;
     };
     // Plain wording first; the raw register names stay one click away for people who need them.
@@ -2918,9 +2924,13 @@
     { key: 'forwarded_header', label: 'Forwarded header', help: 'HTTP header carrying the original client address.', group: 'Network', type: 'text' },
   ];
 
-  // Field label for a settings key (the raw key is an implementation detail); unknown keys pass through.
-  function settingLabel(key) {
-    return [...settingFields, ...exportFields].find((field) => field.key === key)?.label || key;
+  // The service switches its listener in the background. The connection monitor shows a calm
+  // status and reloads once the service answers, on the new port if the port changed.
+  function followListenerChange(saved) {
+    const port = Number(saved.bind_port);
+    const current = Number(location.port || (location.protocol === 'https:' ? 443 : 80));
+    const moved = !saved.behind_reverse_proxy && Number.isInteger(port) && port !== current;
+    window.RCTReconnect?.applying(moved ? `${location.protocol}//${location.hostname}:${port}` : null);
   }
 
   // Changes that can lock the operator out of this UI or widen trust: confirmed before they autosave.
@@ -2931,8 +2941,8 @@
     if (key === 'bind_address' || key === 'bind_port') {
       return {
         title: 'Change listen address?',
-        message: `After the next restart the service listens on ${target()}. If that address is not reachable from your network, you can no longer open this admin interface.`,
-        confirmLabel: 'Save listen address',
+        message: `The service switches to ${target()} in the background. If that address is not reachable from your network, you can no longer open this admin interface.`,
+        confirmLabel: 'Switch listen address',
       };
     }
     if (key === 'behind_reverse_proxy' || key === 'trusted_proxies') {
@@ -3104,12 +3114,12 @@
   }
 
   // Only the autosaving 'general' settings use the debounce; the export group is sent by its Apply button.
-  function restartDebounce() { clearTimeout(settingsTimer); settingsTimer = setTimeout(() => { flushSettings({ sections: ['general'] }).catch(() => { }); }, 450); }
+  function scheduleSettingsFlush() { clearTimeout(settingsTimer); settingsTimer = setTimeout(() => { flushSettings({ sections: ['general'] }).catch(() => { }); }, 450); }
 
   function queueSettings(key) {
     pendingKeys.add(key);
     setSectionState(sectionOf(key), 'unsaved');
-    restartDebounce();
+    scheduleSettingsFlush();
   }
 
   function incompleteSections() {
@@ -3213,7 +3223,6 @@
         const control = $(`setting-${key}`);
         if (control) { control.value = ''; control.placeholder = SECRET_PLACEHOLDER; }
       }
-      showRestartNotice(result.restart_required);
       // Switching write access on makes the server approve the registers manual control needs.
       if (keys.includes('enable_write_support') && payload.enable_write_support) refreshWriteApprovals();
       if (page === 'prometheus') markPrometheusSaved();
@@ -3221,8 +3230,7 @@
       if (page === 'tsdb' && sentSections.has('export')) {
         refreshTsdbRuntimeStatus().catch((error) => console.warn('Could not refresh TSDB status:', messageFrom(error)));
       }
-      const restartKeys = keys.filter((key) => result.restart_required?.includes(key));
-      if (restartKeys.length) toast(`Saved, but not active yet. The service must be restarted to apply: ${restartKeys.map(settingLabel).join(', ')}.`, 'warning');
+      if (result.applying) followListenerChange(result.settings || settingsCommitted);
       else toast('Settings saved and active.');
       return true;
     } catch (error) {
@@ -3252,7 +3260,7 @@
       settingsInFlight = null;
       sendRevisions.clear();               // the map's lifetime is exactly this request
       renderSaveState();
-      if (hasPending(['general'])) restartDebounce(); // re-arm the 450 ms timer, no recursion
+      if (hasPending(['general'])) scheduleSettingsFlush(); // re-arm the 450 ms timer, no recursion
     }
   }
 
@@ -3731,7 +3739,6 @@
     const result = await api('settings', { method: 'PUT', body: JSON.stringify(payload) });
     settingsCommitted = result.settings || { ...settingsCommitted, ...payload };
     adoptDevices(structuredClone(settingsCommitted.devices || payload.devices));
-    showRestartNotice(result.restart_required);
     if (page === 'dashboard') { loadDashboard().catch((error) => toast(messageFrom(error), 'danger')); loadMetricCount(); }
   }
 
@@ -4034,19 +4041,6 @@
     body.append(change);
   }
 
-  function showRestartNotice(keys) {
-    if (page === 'tsdb') return; // no persistent banner there; the save toast carries the same text
-    let notice = $('restart-notice');
-    if (!notice) {
-      notice = element('div', 'alert alert-warning mt-3 mb-0');
-      notice.id = 'restart-notice';
-      notice.setAttribute('role', 'status');
-      $('settings-sections').before(notice);
-    }
-    notice.hidden = !keys?.length;
-    notice.textContent = keys?.length ? `Saved, but not active yet. The service must be restarted to apply: ${keys.map(settingLabel).join(', ')}.` : '';
-  }
-
   async function initSettings() {
     const [result, devices] = await Promise.all([
       api('settings'),
@@ -4058,7 +4052,6 @@
     // The one place that mints a device identity, besides the blank trailing row.
     if (Object.hasOwn(settingsDraft, 'devices')) adoptDevices(settingsDraft.devices);
     renderSettings();
-    showRestartNotice(result.restart_required);
     renderPrometheusSummary();
   }
 
@@ -4123,7 +4116,7 @@
       const result = await api('parameters', { method: 'PUT', body: JSON.stringify(payload) });
       markPrometheusSaved();
       setSectionState('parameters', 'saved');
-      toast(result.restart_required?.length ? 'Parameters saved, but not active yet. The service must be restarted to apply them.' : 'Parameters saved.', result.restart_required?.length ? 'warning' : 'success');
+      toast('Parameters saved.', 'success');
     } catch (error) {
       // The reload re-establishes server truth, and it is exactly why this section gets no Retry:
       // by then parameterData holds the server's list, so a retry would re-PUT the server's own

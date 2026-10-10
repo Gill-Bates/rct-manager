@@ -7,7 +7,7 @@ Other settings are managed in the administration GUI and persisted in `data/rct.
 (for example in automated deployments).
 Changes autosave and show a toast; only the inverter list and the TSDB export form are applied
 explicitly with **Apply changes** (see [Devices](#devices)). Leaving a page with unapplied changes
-discards them without a browser warning. Settings requiring a server restart are marked in the GUI.
+discards them without a browser warning. Every setting takes effect on its own; a changed listen address or port is switched in the background and the page reconnects by itself.
 Internal tuning (timeouts, retries, cache, limits and intervals) remains fixed in code.
 
 ## Administration storage

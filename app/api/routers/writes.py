@@ -83,7 +83,6 @@ class ValueBody(BaseModel):
 @router.put(
     "/metrics/{metric_name}",
     summary="Write one metric",
-    response_model=WriteResult,
     responses=problem_responses(
         *_COMMON, ErrorCode.METRIC_IS_ACTION, ErrorCode.DISPATCH_REGISTER_LOCKED, ErrorCode.WRITE_OUTCOME_UNKNOWN
     ),
@@ -135,7 +134,6 @@ async def put_metric(
 @router.post(
     "/actions/{action_name}",
     summary="Trigger an action",
-    response_model=ActionResult,
     responses=problem_responses(*_COMMON, ErrorCode.ACTION_OUTCOME_UNKNOWN),
 )
 async def post_action(

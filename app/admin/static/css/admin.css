@@ -2052,3 +2052,9 @@ body.is-reconnecting #reconnect-modal.show .reconnect-pulse {
     margin-bottom: 1rem;
     color: var(--bs-success-text-emphasis);
 }
+
+@media (prefers-reduced-motion: reduce) {
+    .energy-assistant-progress .spinner-border {
+        animation: none;
+    }
+}

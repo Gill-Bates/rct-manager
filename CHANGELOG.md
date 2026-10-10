@@ -1,5 +1,12 @@
 ## [1.0.1] - 2026-xx-xx
 
+- Settings never need a restart any more. Log level, trusted proxies and forwarded header are applied to the
+  running service, a changed metric selection rebuilds the collection in place, and a changed listen address or
+  port is switched in the background: the service shuts down gracefully (in-flight requests drain, batteries are
+  handed back) and re-executes itself with the same command line, one restart for several quick changes and at
+  most one per 30 s. A listener that cannot be bound is refused before anything is saved. The GUI shows
+  "Applying settings" and reconnects by itself. The `restart_required` field and the restart notice are removed
+  from the settings and parameters API and the GUI.
 - Energy Manager admin page: manual charge/hold/discharge/automatic control per inverter, a setup
   checklist that leads to the first missing step, and an **Expert mode** switch for hardware
   verification, power limits, engineering mode, SoC target policy and diagnostics.

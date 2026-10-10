@@ -82,7 +82,8 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 def _request(target: Target, path: str, data: bytes | None) -> bytes:
-    request = urllib.request.Request(target.base_url + path, data=data, headers=target.headers)
+    # base_url is built by Endpoint.base_url and is always http or https.
+    request = urllib.request.Request(target.base_url + path, data=data, headers=target.headers)  # noqa: S310
     if data is not None:
         request.add_header("Content-Type", "text/plain; charset=utf-8")
     context = None

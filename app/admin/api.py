@@ -13,6 +13,7 @@ import re
 import threading
 import time
 from datetime import UTC, datetime
+from ipaddress import ip_address
 from secrets import token_urlsafe
 from typing import Any
 
@@ -21,6 +22,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from app.admin.store import SESSION_SECONDS
 from app.admin.updates import check_for_updates
+from app.api.restart import probe_listener
 from app.cache import CacheFreshness
 from app.catalog.base import is_numeric
 from app.config import DISPLAY_NAME_MAX, Settings
@@ -30,6 +32,7 @@ from app.energy.models import EnergyMode
 from app.energy.readings import EnergyReadings, absent_readings
 from app.errors import ConfigError, ReconfigurationBuildError
 from app.gateway.rct_dispatch import RctDispatchGateway
+from app.security.client_ip import ClientIpResolver
 from app.security.dependencies import source_address
 
 router = APIRouter(prefix="/admin/api", include_in_schema=False)
@@ -74,7 +77,7 @@ def _humanize_enum_label(label: str) -> str:
 
 
 # The push exporter task reads these from runtime.settings only when it (re)starts, so a saved
-# change needs the exporter restarted (not a full process restart) to take effect.
+# change swaps the exporter task in place; the process keeps running.
 _EXPORT_RESTART_KEYS = frozenset({
     "db_type", "metrics_export_enabled", "metrics_export_interval_seconds", "influxdb_hostname", "influxdb_port",
     "influxdb_tls_enabled", "influxdb_verify_tls", "influxdb_measurement_name",
@@ -91,12 +94,15 @@ _EDITABLE = frozenset({
     "metrics_rate_limit_requests", "metrics_rate_limit_window_seconds",
 }) | _EXPORT_RESTART_KEYS
 # The device/endpoint/scheduling graph is rebuilt in place by reconfigure_devices(), so a saved
-# devices list needs that targeted rebuild (not a full process restart) to take effect.
+# devices list is applied by that targeted rebuild.
 _DEVICE_LIVE_KEYS = frozenset({"devices"})
+# The one listener per process: applied by a debounced background re-exec after a graceful shutdown.
+_LISTENER_KEYS = frozenset({"bind_address", "bind_port"})
 _LIVE = frozenset({
     "auth_required", "docs_public", "enable_metrics_endpoint", "behind_reverse_proxy",
     "metrics_require_token", "metrics_trusted_sources", "metrics_rate_limit_requests",
     "metrics_rate_limit_window_seconds", "enable_write_support",
+    "log_level", "trusted_proxies", "forwarded_header",
 }) | _EXPORT_RESTART_KEYS | _DEVICE_LIVE_KEYS
 _SECRET_EDITABLE = frozenset({"influxdb_token", "questdb_password"})
 # Authentication and proxy-trust settings: changing them with a PAT would let a leaked token
@@ -398,16 +404,6 @@ def _settings_persisted(settings: Settings) -> dict[str, Any]:
     return result
 
 
-def _pending_restart(request: Request, session: dict | None) -> list[str]:
-    """Settings whose saved value differs from the one the running server uses."""
-    desired = _settings_persisted(request.app.state.admin_desired_settings)
-    active = _settings_persisted(request.app.state.runtime.settings)
-    pending = sorted(key for key in desired if key not in _LIVE and desired[key] != active.get(key))
-    if session is None:  # same visibility rule as _pat_safe_view: a PAT must not learn session-only key names
-        pending = [key for key in pending if key not in _SESSION_ONLY_SETTINGS]
-    return pending
-
-
 _NAME_MIGRATION = "devices_display_name_repaired"
 
 
@@ -442,8 +438,7 @@ def repair_device_names(store, desired: Settings) -> Settings:
 @router.get("/settings")
 def get_settings(request: Request) -> dict:
     session = require_admin(request, sensitive=True)
-    return {"settings": _pat_safe_view(request.app.state.admin_desired_settings, session),
-            "restart_required": _pending_restart(request, session), "live": sorted(_LIVE)}
+    return {"settings": _pat_safe_view(request.app.state.admin_desired_settings, session), "live": sorted(_LIVE)}
 
 
 # Mirrors app.config._DEVICE_ID (DeviceEntry._check_id): validated here too so a bad device_id
@@ -583,7 +578,7 @@ def _reconfigure_devices(request: Request, updated: Settings, previous: Settings
     except Exception as exc:
         log.exception("Reconfiguring devices after a settings change failed")
         raise _ReconfigureFailed(
-            500, "Applying the device list failed; devices may be offline until the service is restarted.",
+            500, "Applying the device list failed; devices may be offline; save again to retry.",
             rollback=False,
         ) from exc
 
@@ -652,6 +647,8 @@ def put_settings(body: dict[str, Any], request: Request) -> dict:
     if _TRANSITION_KEYS & set(body) and _transition_running(request):
         raise HTTPException(409, _BUSY_DETAIL)
     runtime = request.app.state.runtime
+    if _LISTENER_KEYS & set(body):
+        _check_listener(runtime.settings, request.app.state.admin_desired_settings, body)
     write_generation = 0
     with _SETTINGS_LOCK:  # keeps concurrent autosaves from publishing an older merge last
         previous = request.app.state.admin_desired_settings
@@ -669,6 +666,13 @@ def put_settings(body: dict[str, Any], request: Request) -> dict:
             update={key: getattr(updated, key) for key in _LIVE}
         )
         request.app.state.security.tokens.set_auth_required(updated.auth_required)
+        if "log_level" in body:
+            _apply_log_level(previous.log_level, updated.log_level)
+        if {"trusted_proxies", "forwarded_header"} & set(body):
+            # One reference swap: a request sees the old or the new trust list, never a mix.
+            request.app.state.security.client_ip = ClientIpResolver(
+                updated.trusted_proxies, updated.forwarded_header
+            )
         # Same lock, same moment as runtime.settings: the write routers refuse from here on.
         request.app.state.security.write_enabled = updated.enable_write_support
         if updated.enable_write_support != previous.enable_write_support:
@@ -694,24 +698,57 @@ def put_settings(body: dict[str, Any], request: Request) -> dict:
         if pending:
             write_warnings = {"write_restore_pending": pending}
     # The slow live reloads run outside _SETTINGS_LOCK so they cannot stall other settings requests.
+    listener_changed = bool(_LISTENER_KEYS & set(body)) and (
+        (updated.bind_address, updated.bind_port) != (runtime.settings.bind_address, runtime.settings.bind_port)
+    )
     export_failure: HTTPException | None = None
-    if changed_export_keys:
-        try:
-            _restart_export(request)
-        except HTTPException as exc:
-            export_failure = exc  # the device reconfiguration below must still run
-    if devices_changed:
-        with _RECONFIGURE_LOCK:
+    try:
+        if changed_export_keys:
             try:
-                _reconfigure_devices(request, updated, previous)
-            except _ReconfigureFailed as exc:
-                if exc.rollback:
-                    _revert_devices(request, updated, previous)
-                raise
-    if export_failure is not None:
-        raise export_failure
-    return {"settings": _pat_safe_view(updated, session), "restart_required": _pending_restart(request, session),
-            "live": sorted(_LIVE), **write_warnings}
+                _restart_export(request)
+            except HTTPException as exc:
+                export_failure = exc  # the device reconfiguration below must still run
+        if devices_changed:
+            with _RECONFIGURE_LOCK:
+                try:
+                    _reconfigure_devices(request, updated, previous)
+                except _ReconfigureFailed as exc:
+                    if exc.rollback:
+                        _revert_devices(request, updated, previous)
+                    raise
+        if export_failure is not None:
+            raise export_failure
+    finally:
+        # After the live reloads, so the graceful shutdown never overlaps a graph rebuild.
+        if listener_changed:
+            request.app.state.background_restart.request(
+                f"listener {updated.bind_address}:{updated.bind_port}", getattr(request.app.state, "loop", None)
+            )
+    return {"settings": _pat_safe_view(updated, session), "live": sorted(_LIVE), "applying": listener_changed, **write_warnings}
+
+
+def _apply_log_level(previous: str, level: str) -> None:
+    """Set the root logger level at runtime; logged at the old level too so the audit line survives."""
+    log.info("Log level changing from %s to %s", previous, level)
+    logging.getLogger().setLevel(level)
+    log.info("Log level is now %s", level)
+
+
+def _check_listener(running: Settings, desired: Settings, body: dict[str, Any]) -> None:
+    """Refuse a listener that cannot be bound, before anything is saved or applied."""
+    address = str(body.get("bind_address", desired.bind_address))
+    port = body.get("bind_port", desired.bind_port)
+    if not isinstance(port, int) or isinstance(port, bool):
+        return  # the model validation of the merge reports the malformed value
+    try:
+        ip_address(address)
+    except ValueError:
+        return  # the model validation of the merge reports the malformed value
+    if (address, port) == (str(running.bind_address), running.bind_port):
+        return
+    reason = probe_listener(address, port, port_unchanged=port == running.bind_port)
+    if reason is not None:
+        raise HTTPException(409, f"{reason} The previous listener stays active.")
 
 
 class _TransitionBusy(RuntimeError):
@@ -1307,9 +1344,6 @@ def _parameter_view(request: Request) -> dict:
     store = _store(request)
     entries = list(runtime.catalog.entries())
     exposed = _exposed_names(runtime, store)
-    if not hasattr(request.app.state, "active_exposed_names"):
-        request.app.state.active_exposed_names = list(exposed)
-    active = request.app.state.active_exposed_names
     write = store.get("write_names") or []
     return {
         # help_text is "" for every parameter whose meaning the catalog does not document; the GUI
@@ -1318,9 +1352,6 @@ def _parameter_view(request: Request) -> dict:
                        "help_text": entry.help_text,
                        "writable": entry.name in request.app.state.default_write_entries, "exportable": is_numeric(entry.value_type)} for entry in entries],
         "exposed_names": list(exposed), "write_names": list(write),
-        # Collection runs with the selection loaded at startup; write permissions apply immediately.
-        "restart_required": ["exposed_names"] if list(exposed) != list(active) else [],
-        "live": ["write_names"],
     }
 
 
@@ -1355,6 +1386,11 @@ def put_parameters(body: ParameterSelection, request: Request) -> dict:
     if len(set(body.write_names)) != len(body.write_names) or set(body.write_names) - write_allowed:
         raise HTTPException(400, "Invalid writable metrics")
     store = _store(request)
+    before = list(_exposed_names(runtime, store))
+    selection_changed = list(body.exposed_names) != before
+    # Refused before anything is persisted: a transition that outlived its wait is still running.
+    if selection_changed and _transition_running(request):
+        raise HTTPException(409, _BUSY_DETAIL)
 
     def _mutate(current: list[str]) -> list[str]:
         # The in-use check and the revoke must not be separated by another save: both run inside
@@ -1368,7 +1404,6 @@ def put_parameters(body: ParameterSelection, request: Request) -> dict:
             raise HTTPException(
                 409, "Required dispatch writes cannot be revoked while a device is not switched off or is dispatching"
             )
-        _parameter_view(request)  # pins the selection the running collector started with
         return body.write_names
 
     def _after(new_write_names: list[str]) -> None:
@@ -1383,7 +1418,29 @@ def put_parameters(body: ParameterSelection, request: Request) -> dict:
         extra={"exposed_names": body.exposed_names},
         after_persist=_after,
     )
+    if selection_changed:
+        _apply_exposed_names(request, before)
     return _parameter_view(request)
+
+
+def _apply_exposed_names(request: Request, before: list[str]) -> None:
+    """Rebuild the collection graph so the saved metric selection is the one being collected.
+
+    The rebuild reads the persisted selection. If the old graph is still the live one afterwards
+    (build or restore refused), the previous selection is saved back so store and collector agree.
+    """
+    runtime = request.app.state.runtime
+    settings = request.app.state.admin_desired_settings
+    with _RECONFIGURE_LOCK:
+        try:
+            _reconfigure_devices(request, settings, settings)
+        except _ReconfigureFailed as exc:
+            if exc.rollback:
+                with _PARAMETERS_LOCK:
+                    _store(request).put("exposed_names", before)
+                    if runtime.exporter is not None:
+                        runtime.exporter.set_exposed(before)
+            raise
 
 
 @router.get("/tokens")

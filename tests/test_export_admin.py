@@ -45,7 +45,7 @@ async def test_export_settings_round_trip(tmp_path):
         assert saved.json()["settings"]["questdb_password_configured"] is True
         # TSDB target/connection/retention settings restart the push exporter task in place,
         # not the whole application: none of them appear in restart_required any more.
-        assert saved.json()["restart_required"] == []
+        assert "restart_required" not in saved.json()
         assert "db_type" in saved.json()["live"]
         # an empty secret keeps the stored one; an invalid raw retention is rejected
         keep = await client.put("/admin/api/settings", headers=headers,
@@ -85,7 +85,7 @@ async def test_metrics_export_enabled_toggle_is_orthogonal_to_db_type(tmp_path):
         paused = await client.put("/admin/api/settings", headers=headers,
                                   json={"metrics_export_enabled": False})
         assert paused.status_code == 200
-        assert paused.json()["restart_required"] == []
+        assert "restart_required" not in paused.json()
         assert "metrics_export_enabled" in paused.json()["live"]
         after_pause = (await client.get("/admin/api/settings")).json()["settings"]
         # db_type and the hostname are still there: pausing does not reset the connection config.
@@ -220,7 +220,7 @@ async def test_export_target_change_takes_effect_without_a_restart(tmp_path):
                 json={"questdb_hostname": second.url},
             )
             assert response.status_code == 200, response.text
-            assert response.json()["restart_required"] == []
+            assert "restart_required" not in response.json()
             assert "questdb_hostname" in response.json()["live"]
             assert h.app.state.runtime.settings.questdb_hostname == second.url
 
@@ -320,7 +320,7 @@ async def test_disabling_export_stops_the_running_task_without_a_restart(tmp_pat
                     json={"metrics_export_enabled": False},
                 )
                 assert paused.status_code == 200, paused.text
-                assert paused.json()["restart_required"] == []
+                assert "restart_required" not in paused.json()
                 for _ in range(100):
                     if running_task.cancelled() or running_task.done():
                         break

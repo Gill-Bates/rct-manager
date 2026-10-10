@@ -1006,7 +1006,7 @@ async def test_write_support_switches_on_and_off_live_without_a_restart(tmp_path
 
         on = await _put_write_support(harness, headers, True)
         assert on.status_code == 200, on.text
-        assert on.json()["restart_required"] == []
+        assert "restart_required" not in on.json()
         assert "enable_write_support" in on.json()["live"]
         assert harness.runtime.dispatch is not None
 
@@ -1020,7 +1020,7 @@ async def test_write_support_switches_on_and_off_live_without_a_restart(tmp_path
         headers = await admin_session(harness)  # arm() logged in again and rotated the CSRF token
         off = await _put_write_support(harness, headers, False)
         assert off.status_code == 200, off.text
-        assert off.json()["restart_required"] == []
+        assert "restart_required" not in off.json()
         assert "write_restore_pending" not in off.json()
         refused = await command(harness, {"action": "auto"})
         assert refused.status_code == 404 and refused.json()["code"] == "write_disabled"

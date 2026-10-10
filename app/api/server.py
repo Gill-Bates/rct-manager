@@ -18,6 +18,7 @@ from types import FrameType
 import uvicorn
 from fastapi import FastAPI
 
+from app.api.restart import reexec as _reexec
 from app.api.runtime import Runtime
 from app.config import Settings, url_host
 
@@ -35,6 +36,16 @@ class GracefulServer(uvicorn.Server):
         self._drained = False
         self._drain_requested = False
         self._early_signal = False
+        self.restart_requested = False
+
+    def request_restart(self) -> None:
+        """Run the normal shutdown, then let ``run_server`` re-exec; call on the event loop."""
+        if self._drain_requested:
+            return
+        log.info("Restarting in the background to apply the changed listener settings")
+        self.restart_requested = True
+        self._drain_requested = True
+        self._start_drain()
 
     def handle_exit(self, sig: int, frame: FrameType | None) -> None:
         # Not calling super() keeps uvicorn from re-raising the signal after a clean exit (exit code 0).
@@ -84,7 +95,7 @@ class GracefulServer(uvicorn.Server):
         await super().serve(sockets)
 
 
-FIRST_START_PASSWORD_FILE = "initial-admin-password"
+FIRST_START_PASSWORD_FILE = "initial-admin-password"  # noqa: S105 - a file name, not a password
 
 
 def write_first_start_password(settings: Settings, password: str) -> Path:
@@ -177,5 +188,13 @@ def run_server(app: FastAPI, settings: Settings, sock: socket.socket | None = No
         proxy_headers=False,
     )
     server = GracefulServer(config, app.state.runtime)
+    app.state.server_restart = server.request_restart
     asyncio.run(server.serve(sockets=[sock] if sock is not None else None))
+    if server.restart_requested:
+        try:
+            _reexec()
+        except OSError:
+            # A non-zero exit lets the supervisor's restart policy start the service instead.
+            log.exception("Re-exec failed; exiting so the supervisor starts the service again")
+            return 1
     return 0

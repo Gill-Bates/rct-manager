@@ -126,7 +126,6 @@ def _port(runtime: RuntimeDep):
 
 @router.post(
     "",
-    response_model=DispatchStatusResponse,
     summary="Create or replace a battery dispatch operation",
     responses=problem_responses(*_COMMON),
 )
@@ -145,7 +144,6 @@ async def post_dispatch(
 
 @router.get(
     "",
-    response_model=DispatchStatusResponse,
     summary="Read the battery dispatch state",
     responses=problem_responses(*_COMMON),
 )
@@ -161,7 +159,6 @@ async def get_dispatch(
 
 @router.delete(
     "",
-    response_model=DispatchStatusResponse,
     summary="Stop dispatch and restore the previous device state",
     responses=problem_responses(*_COMMON, ErrorCode.DISPATCH_NOT_FOUND),
 )

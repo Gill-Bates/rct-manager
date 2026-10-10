@@ -32,7 +32,6 @@ async def health(runtime: RuntimeDep) -> dict[str, str]:
 @business.get(
     "/readiness",
     summary="Device readiness",
-    response_model=ReadinessResponse,
     responses=problem_responses(
         ErrorCode.MISSING_TOKEN, ErrorCode.INVALID_TOKEN, ErrorCode.RATE_LIMITED, ErrorCode.NOT_READY
     ),

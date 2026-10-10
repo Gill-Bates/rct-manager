@@ -39,7 +39,7 @@ async def test_prometheus_settings_apply_live_and_persist(tmp_path):
         assert result["settings"]["metrics_rate_limit_requests"] == 300
         assert result["settings"]["metrics_rate_limit_window_seconds"] == 120
         # Applied to the running server immediately, no restart needed.
-        assert result["restart_required"] == []
+        assert "restart_required" not in result
         assert set(updates).issubset(result["live"])
         assert app.state.runtime.settings.metrics_require_token is False
         assert [str(n) for n in app.state.runtime.settings.metrics_trusted_sources] == [
@@ -56,7 +56,7 @@ async def test_prometheus_settings_apply_live_and_persist(tmp_path):
         # immediately, which could only happen if the running counter picked up the new value.
         tight = await client.put("/admin/api/settings", headers=headers,
                                  json={"metrics_rate_limit_requests": 1, "metrics_rate_limit_window_seconds": 60})
-        assert tight.json()["restart_required"] == []
+        assert "restart_required" not in tight.json()
         assert (await client.get("/metrics")).status_code == 429
 
         for invalid in (
@@ -76,7 +76,7 @@ async def test_prometheus_settings_apply_live_and_persist(tmp_path):
         # Re-enabling the token requirement is live too: the next unauthenticated scrape is
         # rejected for missing auth (checked before the already-spent scrape limit).
         reenabled = await client.put("/admin/api/settings", headers=headers, json={"metrics_require_token": True})
-        assert reenabled.json()["restart_required"] == []
+        assert "restart_required" not in reenabled.json()
         assert (await client.get("/metrics")).status_code == 401
 
     restarted = create_app(settings)

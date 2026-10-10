@@ -362,7 +362,7 @@ def test_export_group_is_withheld_as_a_group_and_revalidated_at_send_time():
     assert "let pendingExportGroup = false;" in js
     queue = js[js.index("function queueExportSettings()"):js.index("function refreshExportBar()")]
     assert "setSectionState('export', 'incomplete', missingExportHint(type));" in queue
-    assert "restartDebounce" not in queue and "flushSettings" not in queue  # no autosave for the export form
+    assert "scheduleSettingsFlush" not in queue and "flushSettings" not in queue  # no autosave for the export form
     apply = js[js.index("async function applyExport()"):js.index("function tsdbStatusView()")]
     assert "if (!exportReady(type)) { queueExportSettings(); return; }" in apply
     assert "pendingExportGroup = true;" in apply and "flushSettings({ sections: ['export'] })" in apply
@@ -564,7 +564,7 @@ def test_the_settings_request_is_scoped_to_the_keys_it_carries():
     assert "isSecretKey(key) && !settingsDraft[key]" in keys_for
     # The finally re-arms the debounce instead of recursing.
     finally_block = js[js.index("sendRevisions.clear();"):js.index("// Shared by settingControl() and exportControl(): builds")]
-    assert "if (hasPending(['general'])) restartDebounce();" in finally_block
+    assert "if (hasPending(['general'])) scheduleSettingsFlush();" in finally_block
     assert "flushSettings(" not in finally_block
     # Exactly one declaration, re-shaped from a bare promise rather than declared a second time.
     assert js.count("let settingsInFlight") == 1
@@ -611,7 +611,7 @@ def test_save_state_has_one_writer_and_five_distinguishable_states():
     assert "host.parentElement.insertBefore(node, host);" in alert
     assert "aria-live', 'off'" in alert
     # The danger toast stays as the visibility floor next to the persistent alert.
-    report = js[js.index("function reportSaveFailure(section, message)"):js.index("function restartDebounce()")]
+    report = js[js.index("function reportSaveFailure(section, message)"):js.index("function scheduleSettingsFlush()")]
     assert "toast(message, 'danger');" in report
     # No Retry for general or parameters; devices additionally offers Discard changes.
     retries = js[js.index("const RETRY_ACTIONS = {"):js.index("function renderSectionAlert(")]

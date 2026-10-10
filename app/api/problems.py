@@ -29,8 +29,8 @@ INTERNAL_ERROR_DETAIL = "An internal error occurred. Quote the correlation id wh
 
 
 class ErrorCode(StrEnum):
-    MISSING_TOKEN = "missing_token"
-    INVALID_TOKEN = "invalid_token"
+    MISSING_TOKEN = "missing_token"  # noqa: S105 - an error code, not a credential
+    INVALID_TOKEN = "invalid_token"  # noqa: S105 - an error code, not a credential
     INSUFFICIENT_SCOPE = "insufficient_scope"
     WRITE_NOT_ALLOWED = "write_not_allowed"
     NOT_FOUND = "not_found"

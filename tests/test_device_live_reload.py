@@ -81,7 +81,7 @@ async def test_adding_a_device_takes_effect_without_a_restart(tmp_path):
         )
         assert response.status_code == 200, response.text
         body = response.json()
-        assert body["restart_required"] == []
+        assert "restart_required" not in body
         assert "devices" in body["live"]
         devices = body["settings"]["devices"]
         assert len(devices) == 2
@@ -110,7 +110,7 @@ async def test_removing_a_device_takes_effect_without_a_restart_and_closes_its_c
 
         response = await h.client.put("/admin/api/settings", headers=HEADERS, json={"devices": kept})
         assert response.status_code == 200, response.text
-        assert response.json()["restart_required"] == []
+        assert "restart_required" not in response.json()
 
         assert removed_endpoint.state is EndpointState.DISCONNECTED
         assert "extra" not in h.runtime.devices

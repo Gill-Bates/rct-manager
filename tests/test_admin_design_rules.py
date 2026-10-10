@@ -37,6 +37,9 @@ Rules:
      footer, the pager is pinned at the card bottom, and the page does not exceed the viewport
      because of this card. That behaviour lives only in the shared macro (`param-card`) and the
      shared CSS (`#main-content>.param-card`, `.param-table-wrap`); pages set no heights of their own.
+ R12 The administration never tells the operator to restart anything: no restart notice element,
+     no `restart_required` field and no "restart to apply" wording in templates, scripts or the
+     admin API. Settings apply on their own; the service switches over in the background.
 """
 
 import re
@@ -297,3 +300,32 @@ def test_r11_param_table_pages_share_the_inverters_viewport_height() -> None:
     assert check_r11_param_card_height(css, macro.replace("card param-card", "card"), pages)
     assert check_r11_param_card_height(css, macro, {**pages, "prometheus.html": '<div style="height: 30rem"></div>'})
     assert check_r11_param_card_height(css, macro, {**pages, "inverters.html": "<section class=\"card\"></section>"})
+
+
+R12_FORBIDDEN = re.compile(
+    r"restart[_-]notice|restart_required|restart(?:ed)? to apply|requires? (?:a )?(?:server |service )?restart"
+    r"|must be restarted|(?:after|until) the next restart|pending restart|needs? (?:a )?restart",
+    re.IGNORECASE,
+)
+
+
+def check_r12_no_restart_instruction(sources: dict[str, str]) -> list[str]:
+    problems = []
+    for name, text in sources.items():
+        for match in R12_FORBIDDEN.finditer(text):
+            problems.append(f"{name}:{_line(text, match.start())}: R12 - '{match.group(0)}': settings apply on their own, never ask for a restart")
+    return problems
+
+
+def test_r12_the_gui_never_asks_for_a_restart() -> None:
+    sources = {path.name: _read(path) for path in (*TEMPLATES.glob("*.html"), *JS_DIR.glob("*.js"), ADMIN / "api.py", CSS_FILE)}
+    assert check_r12_no_restart_instruction(sources) == []
+    for sample in (
+        "Saved, but not active yet. The service must be restarted to apply: Log level.",
+        "<div id=\"restart-notice\"></div>",
+        "After the next restart the service listens on 0.0.0.0:80.",
+        "This setting requires a restart.",
+        "return {'restart_required': []}",
+        "Restart to apply",
+    ):
+        assert check_r12_no_restart_instruction({"sample.html": sample}), sample

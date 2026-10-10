@@ -29,6 +29,12 @@
     lastCheck: null,
   };
 
+  // Set by RCTReconnect.applying(): the service re-binds its listener in the background, so the
+  // outage is expected. An answer only counts once the service was seen down (or the wait is over).
+  const APPLY_GRACE_MS = 25000;
+  const APPLY_PATIENCE_MS = 60000;
+  const applyState = { active: false, target: null, startedAt: 0, sawDown: false };
+
   const heartbeatState = {
     timer: null,
     delayMs: 15000,
@@ -40,6 +46,7 @@
   window.RCTReconnect = Object.freeze({
     isActive: () => reconnectState.active,
     start: () => startReconnectMode(true),
+    applying: beginApplying,
     stop: stopReconnectMode,
     destroy: destroyReconnect,
   });
@@ -89,6 +96,7 @@
     try {
       return await fetch(reconnectState.pingUrl, {
         method: 'GET',
+        ...(applyState.target ? { mode: 'no-cors' } : {}), // another origin: only "it answers" is visible
         headers: { 'Cache-Control': 'no-cache' },
         credentials: 'same-origin',
         cache: 'no-store',
@@ -111,7 +119,14 @@
       redirectToLoginIfNeeded();
       return 'handled';
     }
-    if (response.ok) {
+    if (response.ok || response.type === 'opaque') {
+      if (applyState.active && !applyState.sawDown && Date.now() - applyState.startedAt < APPLY_GRACE_MS) {
+        return 'error'; // still the old listener: keep waiting for the switch
+      }
+      if (applyState.target) {
+        window.location.replace(`${applyState.target}${window.location.pathname}`);
+        return 'handled';
+      }
       if (reconnectState.active) {
         // The server is back: reload so the page starts from fresh state instead of resuming stale.
         reloadPage();
@@ -156,6 +171,11 @@
   function updateReconnectHint() {
     const hint = document.getElementById('reconnect-hint');
     if (!hint) return;
+    if (applyState.active && Date.now() - applyState.startedAt > APPLY_PATIENCE_MS) {
+      const where = applyState.target || window.location.origin;
+      hint.textContent = `Still waiting for the service at ${where}. If that address is not reachable from this browser, open it directly.`;
+      return;
+    }
     hint.textContent = reconnectState.lastCheck
       ? `Attempt ${reconnectState.attempts}, last check ${reconnectState.lastCheck.toLocaleTimeString('en-GB')}.`
       : 'Waiting for the first attempt …';
@@ -190,6 +210,7 @@
       if (handlePingResponse(response) === 'handled') return;
     } catch (error) {
       // Keep polling while the server is down.
+      if (applyState.active) applyState.sawDown = true;
       debugError('probe error', error);
     } finally {
       reconnectState.inFlight = false;
@@ -237,6 +258,21 @@
     }
 
     if (!startReconnectMode()) scheduleCompensatedHeartbeat(startedAt);
+  }
+
+  // Calm status for an intended switch: the page keeps its state and reloads once the service answers.
+  function beginApplying(target) {
+    if (applyState.active) return;
+    applyState.active = true;
+    applyState.target = target || null;
+    applyState.startedAt = Date.now();
+    applyState.sawDown = false;
+    reconnectState.pingUrl = applyState.target ? `${applyState.target}/health` : '/health';
+    const title = document.getElementById('reconnect-title');
+    const text = document.getElementById('reconnect-text');
+    if (title) title.textContent = 'Applying settings …';
+    if (text) text.textContent = 'The service is switching over. This page reconnects and reloads automatically.';
+    startReconnectMode(true);
   }
 
   function startReconnectMode(force = false) {
