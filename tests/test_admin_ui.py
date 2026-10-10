@@ -1001,6 +1001,29 @@ def test_hardware_step_text_names_the_guided_check_and_the_expert_path():
     assert "Experienced administrators can instead enter measured values under Expert settings" in js
 
 
+def test_verification_assistant_explains_a_missing_route_without_calling_the_inverter_missing():
+    js = JS.read_text(encoding="utf-8")
+    assistant = js[js.index("function openVerificationAssistant("):js.index("function energyAdvanced(")]
+    assert "error?.status === 404" in assistant
+    assert "The verification service is unavailable" in assistant
+    assert "The inverter may still be online" in assistant
+    assert assistant.count("assistantError(error)") >= 2
+
+
+def test_about_and_verification_assistant_share_the_inline_code_style():
+    css = (ADMIN_DIR / "static/css/admin.css").read_text(encoding="utf-8")
+    about_css = (ADMIN_DIR / "static/css/about.css").read_text(encoding="utf-8")
+    js = JS.read_text(encoding="utf-8")
+    shared = re.search(r"\.about-page code,\s*\.energy-assistant code\s*\{([^}]*)\}", css)
+    assert shared
+    for declaration in ("color: var(--bs-body-color)", "background: var(--bs-secondary-bg)",
+                        "border-radius: .25rem", "padding: .15rem .35rem", "overflow-wrap: anywhere"):
+        assert declaration in shared.group(1)
+    assert ".about-page code" not in about_css
+    assistant = js[js.index("function openVerificationAssistant("):js.index("function energyAdvanced(")]
+    assert assistant.count("element('code', null,") == 2
+
+
 def test_tsdb_page_uses_the_shared_page_heading_cards_and_setting_rows():
     css = (ADMIN_DIR / "static/css/admin.css").read_text(encoding="utf-8")
     js = (ADMIN_DIR / "static/js/admin.js").read_text(encoding="utf-8")

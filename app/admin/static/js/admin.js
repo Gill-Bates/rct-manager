@@ -2156,6 +2156,9 @@
     let renderedStage = -1;
     let liveNode = null;
     let renderedKey = '';
+    const assistantError = (error) => error?.status === 404
+      ? 'The verification service is unavailable. Reload this page and start the check again. The inverter may still be online.'
+      : messageFrom(error);
     const power = (value) => (Number.isFinite(value) ? `${Math.round(Math.abs(value)).toLocaleString('en-GB')} W` : 'unknown');
     const powerShort = (value) => (Math.abs(value) >= 1000
       ? `${(Math.abs(value) / 1000).toLocaleString('en-GB', { maximumFractionDigits: 1 })} kW` : power(value));
@@ -2199,7 +2202,7 @@
       running = true;
       epoch += 1;
       render();
-      try { await task(); } catch (error) { problem = messageFrom(error); } finally { running = false; render(); }
+      try { await task(); } catch (error) { problem = assistantError(error); } finally { running = false; render(); }
     };
     const note = (text, kind) => { const n = element('div', `alert alert-${kind} small`, text); n.setAttribute('role', kind === 'danger' ? 'alert' : 'status'); return n; };
     // What an established sign step says in plain words, e.g. "the battery is charging with 1.2 kW".
@@ -2290,7 +2293,7 @@
       } catch (error) {
         if (mine !== epoch || !modalEl.isConnected) return;
         pollStopped = true;
-        problem = messageFrom(error);
+        problem = assistantError(error);
         render();
       }
     }
@@ -2322,8 +2325,10 @@
           element('p', 'small', 'The short test holds the battery at 0 W for up to 30 seconds, then restores its previous state. The house stays powered but may briefly use the grid. Start while the battery is visibly charging or discharging.'));
         footerButtons.push(button('Start check', 'btn-primary', guarded(async () => { state = await post('start'); identified = false; })));
       } else if (stage === 0) {
-        main.append(heading('Is this your inverter?'),
-          element('p', 'small', `The inverter reports itself as "${state.model}" with software "${state.firmware}".`));
+        const identity = element('p', 'small');
+        identity.append('The inverter reports itself as ', element('code', null, state.model),
+          ' with software ', element('code', null, state.firmware), '.');
+        main.append(heading('Is this your inverter?'), identity);
         footerButtons.push(button('Yes, continue', 'btn-primary', guarded(async () => { identified = true; pollCount = 0; pollStopped = false; state = await post('auto-check'); })));
       } else if (stage === 1 || stage === 2) {
         const index = stage - 1;

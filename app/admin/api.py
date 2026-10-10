@@ -738,7 +738,7 @@ def _check_listener(running: Settings, desired: Settings, body: dict[str, Any]) 
     """Refuse a listener that cannot be bound, before anything is saved or applied."""
     address = str(body.get("bind_address", desired.bind_address))
     port = body.get("bind_port", desired.bind_port)
-    if not isinstance(port, int) or isinstance(port, bool):
+    if not isinstance(port, int) or isinstance(port, bool) or not 1024 <= port <= 65535:
         return  # the model validation of the merge reports the malformed value
     try:
         ip_address(address)

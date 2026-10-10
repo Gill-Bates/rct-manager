@@ -16,6 +16,14 @@ const base = `http://127.0.0.1:${httpPort}`;
 const fake = spawnPy(['tests.e2e.fake_inverter', String(devicePort)], path.join(OUT, 'fake.log'));
 await sleep(1000);
 const server = spawnPy(['tests.e2e.run_server', path.join(dbDir, 'e2e.db'), String(httpPort), String(devicePort), 'energy'], path.join(OUT, 'server.log'));
+const stop = async (proc) => {
+  if (proc.exitCode !== null || proc.signalCode !== null) return;
+  await new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => { proc.kill('SIGKILL'); reject(new Error(`test process ${proc.pid} did not stop`)); }, 5000);
+    proc.once('exit', () => { clearTimeout(timeout); resolve(); });
+    proc.kill('SIGTERM');
+  });
+};
 let browser;
 try {
   let ready = false;
@@ -47,6 +55,13 @@ try {
   await page.locator('#change-password-form button[type=submit]').click();
   await page.waitForURL('**/ui/dashboard');
   await page.goto(`${base}/ui/energy`);
+  await page.waitForSelector('.energy-panel');
+  const manualResponse = page.waitForResponse((response) => response.request().method() === 'PUT' && response.url().endsWith('/mode'));
+  await page.locator('.energy-mode-switch [role=radio]').nth(1).click();
+  if (!(await manualResponse).ok()) throw new Error('isolated Manual mode setup failed');
+  const offResponse = page.waitForResponse((response) => response.request().method() === 'PUT' && response.url().endsWith('/mode'));
+  await page.locator('.energy-mode-switch [role=radio]').first().click();
+  if (!(await offResponse).ok()) throw new Error('isolated Off mode reset failed');
   const verify = page.getByRole('button', { name: 'Verify hardware' });
   await verify.waitFor({ state: 'visible', timeout: 20000 });
   await verify.click();
@@ -59,7 +74,12 @@ try {
   await page.screenshot({ path: path.join(OUT, 'assistant-intro.png') });
 
   const startRoute = '**/verification-assistant/start';
-  await page.route(startRoute, async (route) => { await sleep(2200); await route.continue(); });
+  await page.route(startRoute, async (route) => {
+    const response = await route.fetch();
+    await sleep(2200);
+    await route.fulfill({ response });
+  });
+  const startResponse = page.waitForResponse((response) => response.url().endsWith('/verification-assistant/start'));
   const startClick = dialog.getByRole('button', { name: 'Start check' }).click();
   const progress = dialog.locator('.energy-assistant-progress');
   await progress.waitFor({ state: 'visible' });
@@ -75,16 +95,40 @@ try {
     await spinner.evaluate((node) => getComputedStyle(node).animationName) === 'none'
     && /Working/.test(await progress.innerText()));
   await page.emulateMedia({ reducedMotion: 'no-preference' });
+  if (!(await startResponse).ok()) throw new Error('verification start request failed');
   await startClick;
   await page.unroute(startRoute);
   await progress.waitFor({ state: 'detached', timeout: 10000 });
   check('spinner disappears after the step finishes', true);
+  const identity = await dialog.locator('code').evaluateAll((nodes) => nodes.map((node) => {
+    const style = getComputedStyle(node);
+    return {
+      text: node.textContent.trim(), font: style.fontFamily, background: style.backgroundColor,
+      paddingLeft: parseFloat(style.paddingLeft), radius: parseFloat(style.borderRadius),
+    };
+  }));
+  check('model and firmware use the shared monospace code treatment', identity.length === 2
+    && identity.every((item) => item.text && /mono/i.test(item.font)
+      && !/rgba\(0, 0, 0, 0\)|transparent/.test(item.background)
+      && item.paddingLeft > 0 && item.radius > 0), JSON.stringify(identity));
+  await page.screenshot({ path: path.join(OUT, 'assistant-identity.png') });
+  await page.route('**/verification-assistant/auto-check', (route) => route.fulfill({
+    status: 404, contentType: 'application/json', body: JSON.stringify({ detail: 'Not Found' }),
+  }));
+  await dialog.getByRole('button', { name: 'Yes, continue' }).click();
+  const missingRoute = dialog.locator('.alert-danger');
+  await missingRoute.waitFor({ state: 'visible' });
+  const missingText = await missingRoute.innerText();
+  check('a missing assistant route does not claim the inverter is missing',
+    /verification service is unavailable/.test(missingText) && /inverter may still be online/.test(missingText)
+    && missingText.trim() !== 'Not Found', missingText);
+  await page.unroute('**/verification-assistant/auto-check');
   check('dialog has no script errors', errors.length === 0, errors.join('; '));
   fs.writeFileSync(path.join(OUT, 'results.json'), JSON.stringify({ results, errors }, null, 2));
   process.exitCode = results.some((result) => !result.ok) ? 1 : 0;
 } finally {
   await browser?.close();
-  server.proc.kill('SIGTERM');
-  fake.proc.kill('SIGTERM');
+  await stop(server.proc);
+  await stop(fake.proc);
   fs.rmSync(dbDir, { recursive: true, force: true });
 }

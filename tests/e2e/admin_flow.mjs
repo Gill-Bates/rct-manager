@@ -1944,7 +1944,12 @@ await shot('prometheus-master-toggle-on');
         intro.trim().split(/\s+/).length <= 85 && /0 W/.test(intro) && /30 seconds/.test(intro)
         && /restores its previous state/.test(intro) && /Nothing is saved/.test(intro), intro);
       const startRoute = '**/verification-assistant/start';
-      await ep.route(startRoute, async (route) => { await sleep(2200); await route.continue(); });
+      await ep.route(startRoute, async (route) => {
+        const response = await route.fetch();
+        await sleep(2200);
+        await route.fulfill({ response });
+      });
+      const startResponse = ep.waitForResponse((response) => response.url().endsWith('/verification-assistant/start'));
       const startClick = dialog.getByRole('button', { name: 'Start check' }).click();
       const progress = dialog.locator('.energy-assistant-progress');
       await progress.waitFor({ state: 'visible' });
@@ -1957,6 +1962,7 @@ await shot('prometheus-master-toggle-on');
       check('spinner stops moving when reduced motion is requested',
         (await progress.locator('.spinner-border').evaluate((node) => getComputedStyle(node).animationName)) === 'none');
       await ep.emulateMedia({ reducedMotion: 'no-preference' });
+      if (!(await startResponse).ok()) throw new Error('verification start request failed');
       await startClick;
       await ep.unroute(startRoute);
       await dialog.getByRole('button', { name: 'Yes, continue' }).click();

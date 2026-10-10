@@ -27,7 +27,7 @@ dev = [
     "hypothesis>=6.156",
     "pytest>=8.3",
     "pytest-asyncio>=1.4",
-    "ruff>=0.16,<0.17",
+    "ruff>=0.17",
 ]
 docs = [
     "markdown==3.11",

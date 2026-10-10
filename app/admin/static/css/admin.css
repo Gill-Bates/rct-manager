@@ -318,6 +318,16 @@ body {
     box-shadow: 0 2px 9px rgb(0 0 0 / 4%);
 }
 
+/* Inline machine values use one shared treatment on About and in verification dialogs. */
+.about-page code,
+.energy-assistant code {
+    color: var(--bs-body-color);
+    background: var(--bs-secondary-bg);
+    border-radius: .25rem;
+    padding: .15rem .35rem;
+    overflow-wrap: anywhere;
+}
+
 .card-header {
     border-color: var(--rct-line);
 }
