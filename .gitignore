@@ -15,10 +15,10 @@ data/
 .hypothesis/
 .pytest_cache/
 .ruff_cache/
+*.zip
 
 # Documentation build output
 /site/
-*.zip/
 
 # Local agent state
 .omc/
@@ -26,6 +26,10 @@ data/
 **/.omc/
 **/.omx/
 .agents/
+.claude/
+.aws/
+.codex/
+.kiro/
 
 # Git worktrees created for isolated task branches. Never commit these: git records a
 # live worktree as a gitlink (mode 160000), which looks like a stray submodule.

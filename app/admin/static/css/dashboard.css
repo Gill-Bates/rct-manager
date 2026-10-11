@@ -1,0 +1,173 @@
+/*
+ * app/admin/static/css/dashboard.css
+ * Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
+ *
+ * GridStack layer for the overview page: positioning only. Widget appearance stays Bootstrap's;
+ * nothing here sets a hardcoded light background, so dark mode (data-bs-theme) is unaffected.
+ */
+
+.dashboard-grid {
+    min-height: 4rem;
+    /* GridStack insets every tile by its item margin on all sides. Pulling the grid out by that
+       margin puts the outer tile edges flush with the page heading; the gutters between tiles stay. */
+    margin-inline: calc(-1 * var(--gs-item-margin-left, 10px)) calc(-1 * var(--gs-item-margin-right, 10px));
+}
+
+/* Hidden until dashboard.js has applied the stored layout. The delayed keyframe is the failsafe
+   (no JS, failed script, stalled request): the grid shows itself after 4s regardless. */
+.dashboard-grid--loading {
+    visibility: hidden;
+    animation: dashboard-grid-failsafe 0s 4s forwards;
+}
+
+@keyframes dashboard-grid-failsafe {
+    to { visibility: visible; }
+}
+
+.dashboard-grid .grid-stack-item-content {
+    display: flex;
+    /* inset/margins come from GridStack's margin option; overriding them removes the tile gutters. */
+    border-radius: var(--bs-border-radius-lg, .5rem);
+}
+
+.dashboard-grid .card,
+.dashboard-grid .dashboard-widget-section {
+    width: 100%;
+}
+
+.dashboard-widget-section {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+}
+
+/* View mode: no drag handles, no resize affordance, no hint that this is a grid at all. */
+.dashboard-drag-handle {
+    cursor: grab;
+    color: var(--bs-secondary-color);
+}
+
+.dashboard-widget-header {
+    /* Overlay strip: out of flow so toggling edit mode never shifts the tile content. */
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    z-index: 2;
+    height: 1.1rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: grab;
+    touch-action: none;
+}
+
+.dashboard-widget-header .dashboard-drag-handle {
+    font-size: 1rem;
+    line-height: 1;
+    opacity: .6;
+}
+
+.dashboard-widget-header:active {
+    cursor: grabbing;
+}
+
+.dashboard-grid:not(.dashboard-editing) .ui-resizable-handle {
+    display: none !important;
+}
+
+/* Edit mode: a subtle outline marks a movable/resizable widget without looking like a separate app. */
+.dashboard-editing .grid-stack-item-content {
+    outline: 1px dashed var(--bs-border-color);
+    outline-offset: 2px;
+    border-radius: var(--bs-border-radius-lg, .5rem);
+}
+
+/* Dragging/resizing must not select text or icons inside tiles. */
+.dashboard-editing .grid-stack-item,
+.dashboard-editing .grid-stack-item * {
+    user-select: none;
+    -webkit-user-select: none;
+}
+
+.dashboard-editing .ui-resizable-handle {
+    opacity: .45;
+}
+
+/* Inset the corner grip from the tile's rounded edge and keep a 24px touch target. */
+.dashboard-editing.dashboard-grid .grid-stack-item > .ui-resizable-se {
+    width: 24px;
+    height: 24px;
+    right: calc(var(--gs-item-margin-right, 10px) + 6px);
+    bottom: calc(var(--gs-item-margin-bottom, 10px) + 6px);
+    background-size: 16px 16px;
+}
+
+.dashboard-editing .ui-resizable-handle:hover {
+    opacity: 1;
+}
+
+.dashboard-editing .dashboard-widget-header {
+    display: flex !important;
+}
+
+.dashboard-editing .grid-stack-item.ui-draggable-dragging .grid-stack-item-content {
+    outline-color: var(--bs-primary);
+}
+
+.dashboard-edit-hint {
+    display: none;
+}
+
+@media (max-width: 767.98px) {
+    .dashboard-toolbar {
+        flex-wrap: wrap;
+    }
+
+    /* Layout editing needs the 12-column grid; the stacked phone layout ignores positions. */
+    #dashboard-edit-toggle,
+    #dashboard-add-widget,
+    #dashboard-reset-layout,
+    #dashboard-edit-done {
+        display: none !important;
+    }
+
+    .dashboard-edit-hint {
+        display: block;
+    }
+
+    /* A 12-column grid with fixed row heights squeezes the widgets and clips the inverter cards on
+       a phone; stack them in document order instead. The saved layout is untouched. */
+    .dashboard-grid {
+        height: auto !important;
+        /* The stacked tiles carry no GridStack inset, so the grid keeps the page edges. */
+        margin-inline: 0;
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: .5rem;
+    }
+
+    .dashboard-grid > .grid-stack-item {
+        position: static !important;
+        width: auto !important;
+        height: auto !important;
+        grid-column: span 1;
+        transform: none !important;
+    }
+
+    .dashboard-grid > .grid-stack-item[data-widget-id="devices"] {
+        grid-column: 1 / -1;
+    }
+
+    .dashboard-grid > .grid-stack-item > .grid-stack-item-content {
+        position: relative !important;
+        inset: auto;
+        margin: 0 !important;
+        overflow: visible !important;
+    }
+}
+
+/* Inverter overview grows with its content (see dashboard.js fitAutoHeight): never scrolls. */
+.dashboard-grid .grid-stack-item[data-widget-id="devices"] > .grid-stack-item-content {
+    overflow: visible;
+}

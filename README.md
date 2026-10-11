@@ -3,27 +3,36 @@
   <img src=".github/img/rct-logo-white.svg#gh-dark-mode-only" width="300">
 </p>
 
-<h2 align="center">Your RCT Power inverter, one REST call away.</h2>
+<h2 align="center">Your RCT Power inverter is just one REST call away.</h2>
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License"></a>
   <img src="https://img.shields.io/badge/Python-3.13%2B-3776AB?logo=python&logoColor=white" alt="Python 3.13+">
   <img src="https://img.shields.io/badge/Platform-linux%2Famd64%20%7C%20linux%2Farm64-lightgrey?logo=linux&logoColor=white" alt="Platform">
+  <a href="https://hub.docker.com/r/giiibates/rct-manager"><img src="https://img.shields.io/docker/pulls/giiibates/rct-manager?logo=docker&label=pulls" alt="Docker Pulls"></a>
 </p>
 
 <p align="center">
-  <a href="https://gill-bates.github.io/rct-rest-api/"><img src="https://img.shields.io/badge/Documentation-2ea44f?style=for-the-badge&logo=readthedocs&logoColor=white" alt="Documentation"></a>
-  <a href="https://gill-bates.github.io/rct-rest-api/getting-started/quick-start/"><img src="https://img.shields.io/badge/Quick%20Start-0a7bbb?style=for-the-badge&logo=docker&logoColor=white" alt="Quick Start"></a>
+  <a href="https://gill-bates.github.io/rct-manager/"><img src="https://img.shields.io/badge/Documentation-2ea44f?style=for-the-badge&logo=readthedocs&logoColor=white" alt="Documentation"></a>
+  <a href="https://gill-bates.github.io/rct-manager/getting-started/quick-start/"><img src="https://img.shields.io/badge/Quick%20Start-0a7bbb?style=for-the-badge&logo=docker&logoColor=white" alt="Quick Start"></a>
 </p>
 
 ---
 
-## What it is
+## What is RCT Manager?
 
-A vendor-neutral REST gateway for RCT Power inverters. It speaks the RCT serial
-protocol over TCP to one or more inverters and turns it into clean JSON, a
-Prometheus endpoint and optional, guarded write access. No vendor app, no
-protocol knowledge needed.
+Do you have an RCT inverter and want to do more than the manufacturer’s app
+allows? RCT Manager connects to one or more inverters via TCP, providing access
+to readings and controls via a REST API. This means you can build your own
+integrations without having to work directly with the proprietary RCT protocol.
+
+Built independently from the ground up, it combines the API, monitoring, data
+export and an administration interface in a single service. No vendor app is
+required.
+
+<p align="center">
+  <img src=".github/img/screenshot_01.png" width="800" alt="RCT Manager administration GUI">
+</p>
 
 ---
 
@@ -31,18 +40,17 @@ protocol knowledge needed.
 
 | Category | Highlights |
 |---|---|
-| **REST API** | Read any metric from the full protocol catalog (894 of 895 IDs), partial success on multi-metric requests, RFC 9457 error responses |
-| **Administration GUI** | Overview, Inverters, TSDB, Prometheus, API tokens, Settings and About pages with autosave; first-login password change |
-| **Prometheus** | Ready-made `/metrics` endpoint for Telegraf, Grafana and friends; a scrape never touches the inverter |
-| **Safe by default** | API token authentication, separate admin sessions, `read` and `read/write` roles, encrypted SQLite administration storage |
-| **Guarded writes** | Off by default, allowlist-based, with readback confirmation |
-| **Multi-device** | Several inverters behind one API, requests per endpoint serialized so the device never sees a conflict |
-| **Hardened container** | Read-only root filesystem, all capabilities dropped, non-root user, built-in health check |
-| **Vendor-neutral contract** | Another device adapter can fill the same fields without changing paths or error keys |
+| **REST API** | Read values from the full protocol catalogue and control approved functions programmatically with JSON responses and standard error messages. |
+| **Your own analytics** | Use the Prometheus `/metrics` endpoint or export data to your own InfluxDB 2 or QuestDB for Grafana, Telegraf, and custom analysis. |
+| **Dynamic electricity tariffs** | Use the API to automate your own tariff and charge the battery from the grid or discharge it to supply your home, setting a target state of charge, power limit and duration. |
+| **Administration GUI** | Manage the overview, inverters, Energy Manager, TSDB, Prometheus, API tokens and settings all in one place. |
+| **Guarded controls** | Writes are disabled by default and checked after execution; access is protected by tokens and separate admin sessions. |
+| **Multiple devices** | Connect several inverters to one API. Requests to each endpoint are coordinated to avoid conflicts at the device level. |
+| **Hardened container** | The container uses a read-only root file system, drops capabilities for the server process and runs it as a non-root user. It also includes a health check. |
 
 ---
 
-## 🚀 Getting Started
+## 🚀 Quick start
 
 ```sh
 cp settings.env.example settings.env   # set HMAC_SECRET (openssl rand -base64 32) for Docker
@@ -57,27 +65,31 @@ python -m app validate
 python -m app
 ```
 
-Open `http://127.0.0.1:8080/`. The first start prints a boxed `FIRST START - admin login` block
-with the one-time `admin` password in clear text (also saved to `data/initial-admin-password` as
-a fallback); the first login requires a password change
-([details](docs/configuration/authentication.md)). Until then, periodic reads, heartbeat and
-metric export stay paused; they start automatically afterwards. Manage inverters, TSDB export, Prometheus metrics,
-PATs and settings in the GUI. Changes autosave with a toast.
-Settings are stored in `data/rct.db` using authenticated encryption with HMAC.
-The stable `HMAC_SECRET` stays in `settings.env`; local startup generates it
-when absent. For Docker, provide it before starting. Back up the database and
-secret together. See [Configuration](docs/getting-started/configuration.md).
+Open `http://127.0.0.1:8000/`. The one-time `admin` password appears in a
+`FIRST START - admin login` block on first startup and is also saved to
+`data/initial-admin-password`. You must change this password when you first log
+in.
 
-Installation, configuration, authentication and the full API reference are in the
-**[Documentation](https://gill-bates.github.io/rct-rest-api/)**. Container details
-are in [`docker/README_docker.md`](docker/README_docker.md).
+Settings are stored in `data/rct.db`, encrypted and authenticated with
+`HMAC_SECRET` from `settings.env` (generated on a local start, required for
+Docker). Back up the database and the secret together. See
+[Configuration](docs/getting-started/configuration.md).
+
+Documentation: <https://gill-bates.github.io/rct-manager/>.
+
+Container details are in [`docker/README_docker.md`](docker/README_docker.md).
+
+If RCT Manager works well for you, please leave a
+[star on GitHub](https://github.com/Gill-Bates/rct-manager). If something is
+missing or does not work as expected, open an
+[issue](https://github.com/Gill-Bates/rct-manager/issues/new/choose).
 
 ---
 
 > [!IMPORTANT]
 > **Disclaimer:** This is an independent open-source project. It is not affiliated
 > with, endorsed by or connected to RCT Power GmbH, Line-Eid-Str. 1, D-78467
-> Konstanz. "RCT Power" and related names are trademarks of their respective owner
+> Konstanz. "RCT Power" and related names are trademarks of their respective owners
 > and are used only to describe compatibility.
 
 ---

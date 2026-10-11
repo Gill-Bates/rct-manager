@@ -18,6 +18,8 @@ from types import FrameType
 import uvicorn
 from fastapi import FastAPI
 
+from app.api.restart import in_container as _in_container
+from app.api.restart import reexec as _reexec
 from app.api.runtime import Runtime
 from app.config import Settings, url_host
 
@@ -35,6 +37,16 @@ class GracefulServer(uvicorn.Server):
         self._drained = False
         self._drain_requested = False
         self._early_signal = False
+        self.restart_requested = False
+
+    def request_restart(self) -> None:
+        """Run the normal shutdown, then let ``run_server`` re-exec; call on the event loop."""
+        if self._drain_requested:
+            return
+        log.info("Restarting in the background to apply the changed listener settings")
+        self.restart_requested = True
+        self._drain_requested = True
+        self._start_drain()
 
     def handle_exit(self, sig: int, frame: FrameType | None) -> None:
         # Not calling super() keeps uvicorn from re-raising the signal after a clean exit (exit code 0).
@@ -73,7 +85,7 @@ class GracefulServer(uvicorn.Server):
         if password and self.started:  # after uvicorn's own log lines so the notice stays visible
             settings = app.state.runtime.settings
             path = write_first_start_password(settings, password)
-            print(first_start_banner(settings, password, path), flush=True)
+            print(first_start_banner(settings, path), flush=True)
 
     async def serve(self, sockets=None) -> None:
         self._loop = asyncio.get_running_loop()
@@ -84,45 +96,56 @@ class GracefulServer(uvicorn.Server):
         await super().serve(sockets)
 
 
-FIRST_START_PASSWORD_FILE = "initial-admin-password"
+FIRST_START_PASSWORD_FILE = "initial-admin-password"  # noqa: S105 - a file name, not a password
 
 
 def write_first_start_password(settings: Settings, password: str) -> Path:
     """Hand the bootstrap credential over through a 0600 file next to the admin DB.
 
     Stdout is persisted and centrally collected in systemd/Docker/Kubernetes, so it must not carry it.
+
+    The secret filename is never ``resolve()``d: a pre-planted ``initial-admin-password`` symlink
+    must not let an attacker redirect the unlink/create onto its target. The file is created with
+    ``O_NOFOLLOW`` through a directory fd so the final path component cannot be a symlink either.
     """
-    path = (settings.admin_db_path.parent / FIRST_START_PASSWORD_FILE).resolve()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.unlink(missing_ok=True)  # the mode must be owner-only from creation, never tightened afterwards
-    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    directory = settings.admin_db_path.parent
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    path = directory / FIRST_START_PASSWORD_FILE
+    dir_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        if os.fstat(dir_fd).st_mode & 0o077:
+            os.fchmod(dir_fd, 0o700)  # tighten a parent directory created with a looser umask
+        # Relative to the trusted directory fd and never following a symlink: unlink the plain name,
+        # then create it exclusively. The mode is owner-only from creation, never tightened afterwards.
+        try:
+            os.unlink(FIRST_START_PASSWORD_FILE, dir_fd=dir_fd)
+        except FileNotFoundError:
+            pass
+        descriptor = os.open(
+            FIRST_START_PASSWORD_FILE, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=dir_fd
+        )
+    finally:
+        os.close(dir_fd)
     with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
         handle.write(password + "\n")
     return path
 
 
-def first_start_banner(settings: Settings, password: str, password_file: Path) -> str:
-    """Boxed first-login notice carrying the one-time password in clear text.
+def first_start_banner(settings: Settings, password_file: Path) -> str:
+    """Boxed first-login notice naming where the one-time password was saved.
 
-    Deliberate product choice: the operator wants the password copy-pasteable straight from the
-    console on first start, not only a path to go read separately. It is also still saved to
-    `password_file` (0600) as a fallback for services run without a visible console (systemd/Docker).
+    The password itself is never printed: stdout is persisted and centrally collected in
+    systemd/Docker/Kubernetes, where it would remain as a permanent secret history. The password
+    file (0600, next to the admin DB) is the only place the operator reads it from.
     """
     host = url_host(settings.bind_address)
     rule = "=" * 61
     return "\n".join((
-        "", rule, " FIRST START - admin login", " User:     admin",
-        f" Password: {password}",
-        f"           (one-time; change it at first login; also saved to {password_file})",
-        f" Open:     http://{host}:{settings.bind_port}/", rule, "",
+        "", rule, " FIRST START - admin login", " User:          admin",
+        f" Password file: {password_file} (0600)",
+        "                (one-time; change it at first login)",
+        f" Open:          http://{host}:{settings.bind_port}/", rule, "",
     ))
-
-
-def _in_container() -> bool:
-    # RCT_API_CONTAINER is set by the Dockerfile; the marker files cover other runtimes.
-    return os.environ.get("RCT_API_CONTAINER") == "1" or any(
-        os.path.exists(marker) for marker in ("/.dockerenv", "/run/.containerenv")
-    )
 
 
 def warn_if_loopback_in_container(settings: Settings) -> None:
@@ -154,7 +177,18 @@ def run_server(app: FastAPI, settings: Settings, sock: socket.socket | None = No
         access_log=False,
         timeout_graceful_shutdown=5,
         server_header=False,
+        # One trust configuration only: TRUSTED_PROXIES/FORWARDED_HEADER decide who may speak for a
+        # client. Uvicorn's own forwarded-header handling would be a second, divergent list.
+        proxy_headers=False,
     )
     server = GracefulServer(config, app.state.runtime)
+    app.state.server_restart = server.request_restart
     asyncio.run(server.serve(sockets=[sock] if sock is not None else None))
+    if server.restart_requested:
+        try:
+            _reexec()
+        except OSError:
+            # A non-zero exit lets the supervisor's restart policy start the service instead.
+            log.exception("Re-exec failed; exiting so the supervisor starts the service again")
+            return 1
     return 0

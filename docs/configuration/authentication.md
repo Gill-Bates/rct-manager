@@ -23,12 +23,26 @@ issued automatically; PATs are created only by the admin in the GUI.
 ## Personal access tokens
 
 A PAT has the form `pat_` followed by 40 base62 characters and a 6 character CRC32 checksum
-(base62), so a mistyped token is rejected without a lookup. The former `API_TOKENS`,
-`API_TOKENS_FILE` and the `tokens` CLI no longer exist. Admin settings endpoints accept a session or a `read/write` PAT; `read` tokens get 403.
+(base62), so a mistyped token is rejected without a lookup. The administration API
+(`/admin/api/...`) accepts a session or a PAT. `read` tokens get 403 on the settings and token
+endpoints and on every change; listing, creating or deleting tokens needs a signed-in session.
+
+`GET /admin/api/settings` is readable with a `read/write` PAT but omits the session-only values.
+A real change of the following needs a signed-in session; a PAT gets 403 (re-sending the
+current value is accepted):
+
+- authentication and proxy trust: `auth_required`, `trusted_proxies`, `bind_address`,
+  `behind_reverse_proxy`, `forwarded_header`, `metrics_require_token`, `metrics_trusted_sources`,
+  `docs_public`;
+- `enable_write_support`, `devices`, `bind_port`, `log_level`;
+- export target and credentials: `db_type`, the InfluxDB/QuestDB host, port, TLS and credential
+  settings, and the QuestDB retention days (a PAT must not redirect metrics or shorten retention).
+  These stay readable for a PAT;
+- `enable_metrics_endpoint` while scrapes would not require a token.
 
 Create named PATs with a `read` or `read/write` role and an expiry of 30 days, 90 days (the
-preselected value), 1 year or never on the **API tokens** page. Copy the secret when it is shown: it cannot be retrieved
-later. Revoke a token on the same page. The list shows when each token was created, last used (at most
+preselected value), 1 year or never on the **API tokens** page. Copy the secret with the **Copy** button when it is shown: it cannot be retrieved
+later, and **Done** and the close button stay disabled until the copy succeeded. The list marks each token's role with a badge. Revoke a token on the same page. The list shows when each token was created, last used (at most
 once per minute; `Never` if unused) and expires. Records are persisted in the encrypted
 SQLite administration database; raw secrets are not stored.
 

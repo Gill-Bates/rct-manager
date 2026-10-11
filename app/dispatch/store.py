@@ -22,6 +22,8 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 from app.dispatch.capabilities import CapabilityRecord
 from app.dispatch.models import DeviceLimits, DispatchRecord, DispatchRecordCorrupt
+from app.dispatch.soc_policy import SocTargetMode, SocTargetPolicy
+from app.energy.models import EnergyMode, ModeRecord
 
 log = logging.getLogger(__name__)
 
@@ -30,7 +32,31 @@ log = logging.getLogger(__name__)
 # `restore_required` there: the two safety-deciding facts — is this device released, and does it
 # run in engineering mode — must remain readable when the service is down or HMAC_SECRET was
 # rotated. They are state names, not secrets.
+# The base schema (user_version 0 -> 1). Its own atomic migration like every later one, so a crash
+# between the CREATE TABLE and the version bump cannot leave the table present with the version
+# still at 0, which would fail the next start's CREATE TABLE with "already exists".
+_SCHEMA_V1 = """
+    BEGIN IMMEDIATE;
+    CREATE TABLE dispatch_operations (
+        device_id TEXT PRIMARY KEY,
+        state TEXT NOT NULL,
+        restore_required INTEGER NOT NULL CHECK(restore_required IN (0,1)),
+        updated_at TEXT NOT NULL,
+        record_version INTEGER NOT NULL,
+        encrypted BLOB NOT NULL
+    ) STRICT;
+    PRAGMA user_version = 1;
+    COMMIT;
+"""
+
+# Each migration is one transaction (BEGIN IMMEDIATE ... PRAGMA user_version=N ... COMMIT), so a
+# crash either leaves the whole step applied (tables created and version bumped together) or none
+# of it. executescript() commits any pending transaction before running the script, so the
+# explicit BEGIN here is the migration's own unit. user_version is part of the transaction and
+# rolls back with it. Without the transaction, a CREATE TABLE could commit in autocommit mode while
+# a crash before the version bump left the version stale, breaking the next start.
 _SCHEMA_V2 = """
+    BEGIN IMMEDIATE;
     CREATE TABLE dispatch_capabilities (
         device_id TEXT NOT NULL,
         name      TEXT NOT NULL,
@@ -45,6 +71,42 @@ _SCHEMA_V2 = """
         encrypted        BLOB NOT NULL
     ) STRICT;
     PRAGMA user_version = 2;
+    COMMIT;
+"""
+
+# user_version 3 is strictly additive as well: it adds the Energy Manager's armed flag (superseded by `mode` in version 4) and the
+# per-device SoC-target derivation policy. `armed` and `mode` stay in cleartext for the same
+# documented reason `state`, `status` and `engineering_mode` do — an operator must be able to see
+# whether a device is switched on, and how its target is derived, while the service is down or after an
+# HMAC_SECRET rotation. They are state names, not secrets.
+_SCHEMA_V3 = """
+    BEGIN IMMEDIATE;
+    CREATE TABLE energy_manager_state (
+        device_id TEXT PRIMARY KEY,
+        armed     INTEGER NOT NULL CHECK(armed IN (0,1)),
+        encrypted BLOB NOT NULL
+    ) STRICT;
+
+    CREATE TABLE dispatch_soc_target_policy (
+        device_id TEXT PRIMARY KEY,
+        mode      TEXT NOT NULL,
+        encrypted BLOB NOT NULL
+    ) STRICT;
+    PRAGMA user_version = 3;
+    COMMIT;
+"""
+
+# user_version 4 adds the Energy Manager's operating mode. The old `armed` column stays (SQLite
+# cannot drop its CHECK) and is kept as the derived flag `mode != 'off'`; the upgrade maps an armed
+# device to `manual`, which is what arming meant before the mode existed. One transaction, so a
+# crash cannot leave the column without its version bump.
+_SCHEMA_V4 = """
+    BEGIN;
+    ALTER TABLE energy_manager_state
+        ADD COLUMN mode TEXT NOT NULL DEFAULT 'off' CHECK(mode IN ('off','manual','external'));
+    UPDATE energy_manager_state SET mode = CASE WHEN armed = 1 THEN 'manual' ELSE 'off' END;
+    PRAGMA user_version = 4;
+    COMMIT;
 """
 
 
@@ -85,24 +147,23 @@ class DispatchStore:
         with self.connect() as db:
             db.execute("PRAGMA journal_mode = WAL")
             version = int(db.execute("PRAGMA user_version").fetchone()[0])
-            if version not in (0, 1, 2):
+            if version not in (0, 1, 2, 3, 4):
                 raise ValueError("unsupported dispatch database version")
             if version == 0:
-                db.executescript("""
-                    CREATE TABLE dispatch_operations (
-                        device_id TEXT PRIMARY KEY,
-                        state TEXT NOT NULL,
-                        restore_required INTEGER NOT NULL CHECK(restore_required IN (0,1)),
-                        updated_at TEXT NOT NULL,
-                        record_version INTEGER NOT NULL,
-                        encrypted BLOB NOT NULL
-                    ) STRICT;
-                """)
+                db.executescript(_SCHEMA_V1)
             if version in (0, 1):
                 # Upgrade 1 -> 2 adds the two capability tables and nothing else: the schema of
                 # dispatch_operations and every row in it stay exactly as they are, so an update
                 # cannot lose the restore duty a persisted operation carries.
                 db.executescript(_SCHEMA_V2)
+            if version in (0, 1, 2):
+                # Upgrade 2 -> 3: two new tables and the version bump, nothing else. A code
+                # downgrade afterwards is not supported — the older initialize() rejects the newer version,
+                # so a rollback means restoring the dispatch database from a backup.
+                db.executescript(_SCHEMA_V3)
+            if version in (0, 1, 2, 3):
+                # Upgrade 3 -> 4: the mode column, filled from `armed`. No downgrade, as above.
+                db.executescript(_SCHEMA_V4)
 
     def _encode(self, device_id: str, record: DispatchRecord, *, version: int | None = None) -> bytes:
         # `version` lets `put()` encode the pending next version without first writing it onto the
@@ -126,9 +187,9 @@ class DispatchStore:
         try:
             payload = json.loads(self._fernet.decrypt(encrypted))
         except (InvalidToken, UnicodeError, ValueError) as exc:
-            raise ValueError("dispatch database cannot be decrypted with HMAC_SECRET") from exc
+            raise DispatchRecordCorrupt("dispatch database cannot be decrypted with HMAC_SECRET") from exc
         if not isinstance(payload, dict) or payload.get("key") != key:
-            raise ValueError("dispatch database record integrity check failed")
+            raise DispatchRecordCorrupt("dispatch database record integrity check failed")
         return payload["value"]
 
     def get(self, device_id: str) -> DispatchRecord | None:
@@ -144,6 +205,9 @@ class DispatchStore:
         return record
 
     def all(self) -> list[DispatchRecord]:
+        return self.all_with_skipped()[0]
+
+    def all_with_skipped(self) -> tuple[list[DispatchRecord], list[str]]:
         """Every readable row. A row that fails ``DispatchRecord.from_dict()`` is skipped, not
         raised: a single corrupt record must not block ``recover()``/``shutdown_restore()`` from
         reaching every other device's restore duty. The caller is responsible for surfacing the
@@ -152,15 +216,17 @@ class DispatchStore:
         with self.connect() as db:
             rows = db.execute("SELECT device_id,record_version,encrypted FROM dispatch_operations").fetchall()
         records = []
+        skipped = []
         for row in rows:
             try:
                 record = self._decode(row["device_id"], row["encrypted"])
-            except DispatchRecordCorrupt:
-                log.error("Dispatch record for device %s is corrupt and was skipped", row["device_id"])
+            except ValueError:
+                log.error("Dispatch record for device %s is unreadable and was skipped", row["device_id"])
+                skipped.append(row["device_id"])
                 continue
             record.record_version = int(row["record_version"])
             records.append(record)
-        return records
+        return records, skipped
 
     def put(self, record: DispatchRecord) -> None:
         # The caller-supplied `record` must only be mutated after the write durably commits: a
@@ -197,23 +263,41 @@ class DispatchStore:
         record.record_version = next_version
 
     def get_capabilities(self) -> list[CapabilityRecord]:
+        """Every readable capability row. An unreadable row is skipped and reported, so that
+        capability reads as unverified — fail closed — and one bad row blocks no other device.
+        """
         with self.connect() as db:
             rows = db.execute("SELECT device_id,name,encrypted FROM dispatch_capabilities").fetchall()
-        return [
-            CapabilityRecord.from_dict(self._decrypt(f"{row['device_id']}/{row['name']}", row["encrypted"]))
-            for row in rows
-        ]
+        records = []
+        for row in rows:
+            try:
+                records.append(
+                    CapabilityRecord.from_dict(self._decrypt(f"{row['device_id']}/{row['name']}", row["encrypted"]))
+                )
+            except (ValueError, TypeError, KeyError):
+                log.error(
+                    "Capability %s of device %s is unreadable and was skipped; it reads as unverified",
+                    row["name"], row["device_id"],
+                )
+        return records
 
     def put_capability(self, record: CapabilityRecord) -> None:
-        encrypted = self._encrypt(f"{record.device_id}/{record.name.value}", record.to_dict())
+        self.put_capabilities([record])
+
+    def put_capabilities(self, records: list[CapabilityRecord]) -> None:
+        """Persist several capability rows in one transaction: all of them or none."""
+        rows = [
+            (r.device_id, r.name.value, r.status.value, self._encrypt(f"{r.device_id}/{r.name.value}", r.to_dict()))
+            for r in records
+        ]
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
-            db.execute(
+            db.executemany(
                 """INSERT INTO dispatch_capabilities(device_id,name,status,encrypted)
                    VALUES(?,?,?,?)
                    ON CONFLICT(device_id,name) DO UPDATE SET status=excluded.status,
                        encrypted=excluded.encrypted""",
-                (record.device_id, record.name.value, record.status.value, encrypted),
+                rows,
             )
 
     def get_device_configs(self) -> dict[str, DeviceLimits]:
@@ -223,12 +307,19 @@ class DispatchStore:
             ).fetchall()
         configs = {}
         for row in rows:
-            data = self._decrypt(row["device_id"], row["encrypted"])
-            configs[row["device_id"]] = DeviceLimits(
-                max_charge_power_w=float(data["max_charge_power_w"]),
-                max_discharge_power_w=float(data["max_discharge_power_w"]),
-                engineering_mode=bool(row["engineering_mode"]),
-            )
+            try:
+                data = self._decrypt(row["device_id"], row["encrypted"])
+                configs[row["device_id"]] = DeviceLimits(
+                    max_charge_power_w=float(data["max_charge_power_w"]),
+                    max_discharge_power_w=float(data["max_discharge_power_w"]),
+                    engineering_mode=bool(row["engineering_mode"]),
+                )
+            except (ValueError, TypeError, KeyError):
+                log.error(
+                    "Device configuration for %s is unreadable and was skipped; the environment limits "
+                    "apply and engineering mode stays off",
+                    row["device_id"],
+                )
         return configs
 
     def put_device_config(self, device_id: str, limits: DeviceLimits) -> None:
@@ -247,6 +338,94 @@ class DispatchStore:
                    ON CONFLICT(device_id) DO UPDATE SET engineering_mode=excluded.engineering_mode,
                        encrypted=excluded.encrypted""",
                 (device_id, int(limits.engineering_mode), encrypted),
+            )
+
+    def get_energy_states(self) -> dict[str, ModeRecord]:
+        """Every readable mode record. A row that cannot be decrypted or carries an unknown mode is
+        skipped and reported, so the device reads as mode ``off`` — fail closed, never silently
+        defaulted to a mode that accepts commands.
+        """
+        with self.connect() as db:
+            rows = db.execute("SELECT device_id,mode,encrypted FROM energy_manager_state").fetchall()
+        states: dict[str, ModeRecord] = {}
+        for row in rows:
+            device_id = row["device_id"]
+            try:
+                data = self._decrypt(device_id, row["encrypted"])
+                # `armed_at`/`armed_by` are the keys the pre-mode code wrote.
+                changed_at = data.get("changed_at") or data.get("armed_at")
+                states[device_id] = ModeRecord(
+                    device_id=device_id,
+                    mode=EnergyMode(row["mode"]),
+                    added_write_names=tuple(data.get("added_write_names") or ()),
+                    changed_at=datetime.fromisoformat(changed_at) if changed_at else None,
+                    changed_by=data.get("changed_by") or data.get("armed_by"),
+                )
+            except (ValueError, TypeError):
+                log.error(
+                    "Energy manager state for device %s is unreadable and was skipped; the device "
+                    "reads as mode off",
+                    device_id,
+                )
+        return states
+
+    def put_energy_state(self, record: ModeRecord) -> None:
+        encrypted = self._encrypt(
+            record.device_id,
+            {
+                "added_write_names": list(record.added_write_names),
+                "changed_at": record.changed_at.isoformat() if record.changed_at is not None else None,
+                "changed_by": record.changed_by,
+            },
+        )
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            db.execute(
+                """INSERT INTO energy_manager_state(device_id,armed,mode,encrypted)
+                   VALUES(?,?,?,?)
+                   ON CONFLICT(device_id) DO UPDATE SET armed=excluded.armed, mode=excluded.mode,
+                       encrypted=excluded.encrypted""",
+                (record.device_id, int(record.armed), record.mode.value, encrypted),
+            )
+
+    def get_soc_target_policies(self) -> dict[str, SocTargetPolicy]:
+        """Every readable derivation policy. An unreadable row is skipped and reported, so the
+        device falls back to the shipped ``BUSINESS_TARGET`` default (today's behaviour).
+        """
+        with self.connect() as db:
+            rows = db.execute("SELECT device_id,mode,encrypted FROM dispatch_soc_target_policy").fetchall()
+        policies: dict[str, SocTargetPolicy] = {}
+        for row in rows:
+            device_id = row["device_id"]
+            try:
+                data = self._decrypt(device_id, row["encrypted"])
+                policies[device_id] = SocTargetPolicy(
+                    device_id=device_id,
+                    mode=SocTargetMode(row["mode"]),
+                    below_margin_percent=float(data["below_margin_percent"]),
+                    note=data.get("note"),
+                )
+            except (ValueError, TypeError, KeyError):
+                log.error(
+                    "SoC target policy for device %s is unreadable and was skipped; the device "
+                    "falls back to the business target default",
+                    device_id,
+                )
+        return policies
+
+    def put_soc_target_policy(self, policy: SocTargetPolicy) -> None:
+        encrypted = self._encrypt(
+            policy.device_id,
+            {"below_margin_percent": policy.below_margin_percent, "note": policy.note},
+        )
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            db.execute(
+                """INSERT INTO dispatch_soc_target_policy(device_id,mode,encrypted)
+                   VALUES(?,?,?)
+                   ON CONFLICT(device_id) DO UPDATE SET mode=excluded.mode,
+                       encrypted=excluded.encrypted""",
+                (policy.device_id, policy.mode.value, encrypted),
             )
 
     def delete(self, device_id: str) -> None:

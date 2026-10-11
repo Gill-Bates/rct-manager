@@ -17,18 +17,18 @@ import platform
 import sys
 from importlib import metadata
 
-from app import __version__
+from app import __build__, __version__
 from app.logging_setup import use_colors
 
-DISTRIBUTION = "rct-rest-api"
+DISTRIBUTION = "rct-manager"
 
 _WORDMARK = r"""
-          _                     _
- _ __ ___| |_        __ _ _ __ (_)      ___  ___ _ ____   _____ _ __
-| '__/ __| __|      / _` | '_ \| |     / __|/ _ \ '__\ \ / / _ \ '__|
-| | | (__| |_   _  | (_| | |_) | |  _  \__ \  __/ |   \ V /  __/ |
-|_|  \___|\__| (_)  \__,_| .__/|_| (_) |___/\___|_|    \_/ \___|_|
-                         |_|
+          _                                                     
+ _ __ ___| |_       _ __ ___   __ _ _ __   __ _  __ _  ___ _ __ 
+| '__/ __| __|     | '_ ` _ \ / _` | '_ \ / _` |/ _` |/ _ \ '__|
+| | | (__| |_   _  | | | | | | (_| | | | | (_| | (_| |  __/ |   
+|_|  \___|\__| (_) |_| |_| |_|\__,_|_| |_|\__,_|\__, |\___|_|   
+                                                |___/
 """.strip("\n")
 
 _CYAN = "\033[96m"
@@ -47,7 +47,7 @@ def resolve_version() -> str:
 @functools.cache
 def build_info() -> str:
     """Short commit of the image build, or 'dev' outside one."""
-    return os.environ.get("GIT_SHA", "").strip()[:7] or "dev"
+    return __build__
 
 
 @functools.cache

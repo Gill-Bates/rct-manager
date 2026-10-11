@@ -4,16 +4,19 @@
 # Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
 #
 
-"""Push export against a local fake HTTP server; failures stay contained."""
+"""Push export against a local fake HTTP server (failures stay contained) and line protocol formatting."""
 
 import json
+import math
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
 
 from app.config import Settings
-from app.export.pusher import MAX_BACKOFF_SECONDS, PushExporter
+from app.export.lineprotocol import batches, build_lines, escape_key, escape_measurement
+from app.export.pusher import MAX_BACKOFF_SECONDS, PushError, PushExporter
+from app.observability.exporter import MetricsExporter, _labels
 from app.observability.stats import ServiceCounters
 
 BASE = {"devices": "wr1=10.0.0.5:8899"}
@@ -57,6 +60,9 @@ class _Metrics:
 
 
 class _Clock:
+    def monotonic(self) -> float:
+        return 0.0
+
     async def sleep(self, seconds: float) -> None:
         return None
 
@@ -124,6 +130,82 @@ async def test_questdb_basic_auth_and_provisioning(server) -> None:
     assert stats.export_success == 1
 
 
+async def test_rejected_provisioning_does_not_taint_a_stored_write(server) -> None:
+    exporter, stats = _exporter(db_type="questdb", questdb_hostname=server.url)
+    calls = []
+
+    def reject(*, ensure: bool = True) -> bool:
+        calls.append(ensure)
+        raise PushError("QuestDB rejected SQL: nope", retryable=False)
+
+    exporter._provisioner.run = reject
+    assert await exporter.cycle() == 30
+    assert await exporter.cycle() == 30  # still inside the provisioning backoff
+    assert (stats.export_success, stats.export_failures) == (2, 0)
+    assert calls == [False]
+
+
+async def test_provisioning_runs_once_per_column_set(server) -> None:
+    exporter, _ = _exporter(db_type="questdb", questdb_hostname=server.url)
+    runs = []
+    exporter._provisioner.run = lambda *, ensure=True: runs.append(ensure) or True
+    for _ in range(3):
+        await exporter.cycle()
+    assert len(runs) == 1  # within one recheck window and with the column set unchanged
+
+
+async def test_rollup_health_is_rechecked_after_the_recheck_window(server) -> None:
+    """P2: the rollup must keep being health-checked after it is provisioned. Once the recheck
+    window elapses, _provision re-invokes the provisioner even though the column set is unchanged,
+    so a view that later turns invalid or stops refreshing is noticed while the short raw TTL runs.
+    """
+
+    class AdvancingClock:
+        def __init__(self) -> None:
+            self.t = 0.0
+
+        def monotonic(self) -> float:
+            return self.t
+
+        async def sleep(self, seconds: float) -> None:
+            return None
+
+    from app.export.pusher import PROVISION_RECHECK_SECONDS
+
+    clock = AdvancingClock()
+    stats = ServiceCounters(export_enabled=True)
+    exporter = PushExporter(
+        Settings(_env_file=None, **BASE, db_type="questdb", questdb_hostname=server.url), _Metrics(), stats, clock
+    )
+    runs = []
+    exporter._provisioner.run = lambda *, ensure=True: runs.append(clock.t) or True
+    await exporter.cycle()
+    await exporter.cycle()  # same instant, unchanged columns: throttled
+    assert len(runs) == 1
+    clock.t += PROVISION_RECHECK_SECONDS + 1.0
+    await exporter.cycle()  # window elapsed: health is re-checked
+    assert len(runs) == 2
+
+
+async def test_an_empty_export_does_not_advance_the_last_success_timestamp() -> None:
+    """P2: build_lines() can legitimately return [] (no samples, or all non-finite). A cycle that
+    wrote nothing must not update export_last_success_unix — otherwise the TSDB status shows a
+    recent successful export when not a byte reached the database.
+    """
+
+    class _NoSamples:
+        def collect(self):
+            return []
+
+    stats = ServiceCounters(export_enabled=True)
+    exporter = PushExporter(
+        Settings(_env_file=None, **BASE, **INFLUX, influxdb_hostname="http://127.0.0.1:0"), _NoSamples(), stats, _Clock()
+    )
+    assert await exporter.cycle() == 30
+    assert stats.export_success == 1  # the cycle itself ran without error
+    assert stats.export_last_success_unix is None  # but nothing was written
+
+
 async def test_collect_runs_on_the_event_loop_thread(server) -> None:
     seen: list[int] = []
 
@@ -137,3 +219,41 @@ async def test_collect_runs_on_the_event_loop_thread(server) -> None:
     exporter = PushExporter(settings, Recording(), stats, _Clock())
     assert await exporter.cycle() == 30
     assert seen == [threading.get_ident()]
+
+
+def test_escaping() -> None:
+    assert escape_measurement("my table,x") == "my\\ table\\,x"
+    assert escape_key("a b,c=d") == "a\\ b\\,c\\=d"
+    assert "\n" not in escape_key("a\nb")
+    assert escape_key("a\\") == "a\\\\"
+    assert escape_measurement("m\\ x") == "m\\\\\\ x"
+    assert build_lines([("m", {"t": "a\\"}, 1.0)], "r", 1) == ["r,t=a\\\\ m=1.0 1"]
+
+
+def test_groups_fields_by_tag_set_and_writes_floats() -> None:
+    samples = [
+        ("rct_grid_power", {"device": "main"}, 5.0),
+        ("rct_battery_soc", {"device": "main"}, 0.5),
+        ("rct_api_requests_total", {}, 7.0),
+        ("rct_state", {"device": "main", "state": "on x"}, 1.0),
+        ("bad", {"device": "main"}, math.nan),
+        ("inf", {"device": "main"}, math.inf),
+    ]
+    lines = build_lines(samples, "rct", 42)
+    assert lines == [
+        "rct rct_api_requests_total=7.0 42",
+        "rct,device=main rct_battery_soc=0.5,rct_grid_power=5.0 42",
+        "rct,device=main,state=on\\ x rct_state=1.0 42",
+    ]
+
+
+def test_empty_tag_values_are_dropped_and_batches_split() -> None:
+    assert build_lines([("m", {"device": ""}, 1.0)], "t", 1) == ["t m=1.0 1"]
+    chunks = batches([f"l{i}" for i in range(5)], size=2)
+    assert chunks == ["l0\nl1\n", "l2\nl3\n", "l4\n"]
+
+
+def test_labels_keep_pairs_for_the_exporter() -> None:
+    assert _labels(device="a").pairs == {"device": "a"}
+    assert _labels() == ""
+    assert MetricsExporter.collect is not None

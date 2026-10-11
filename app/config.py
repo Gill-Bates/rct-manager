@@ -29,12 +29,25 @@ from pydantic import (
 from pydantic.dataclasses import dataclass
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from app.errors import ConfigError
 from app.export.endpoint import Endpoint, resolve_endpoint
 
 log = logging.getLogger(__name__)
+_WARNED: set[str] = set()
+
+
+def _warn_once(message: str, *args: object) -> None:
+    """Settings are re-validated on every admin save; a configuration warning belongs in the log once."""
+    if message not in _WARNED:
+        _WARNED.add(message)
+        log.warning(message, *args)
 
 MAX_DEVICES = 32
 MAX_PERIODIC_METRICS = 64
+# A restore is one stop write plus four framework writes, each followed by a bounded readback.
+DISPATCH_RESTORE_WRITES = 5
+SYSTEM_READBACK_TIMEOUT_SECONDS = 2.0  # readback bound while the shutdown restore runs
+DISPLAY_NAME_MAX = 64
 _DEVICE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
 _SECRET_FIELDS = frozenset({"influxdb_token", "questdb_password"})
 _MEASUREMENT = r"^[A-Za-z_][A-Za-z0-9_]{0,63}$"
@@ -95,6 +108,18 @@ class DeviceEntry(BaseModel):
     network_id: int | None = Field(None, ge=0, le=2**32 - 1)  # set -> addressed via the plant network
     display_name: str | None = None
 
+    @field_validator("display_name")
+    @classmethod
+    def _check_display_name(cls, value: str | None) -> str | None:
+        # Tolerant on purpose: a name saved by an older version must not stop the service from
+        # starting. The strict 400 for new input lives in the admin API.
+        if value is None:
+            return value
+        cleaned = "".join(c if c.isprintable() else " " for c in value)[:DISPLAY_NAME_MAX]
+        if cleaned != value:
+            log.warning("Device display name was shortened or cleaned of control characters: %r", cleaned)
+        return cleaned
+
     @field_validator("device_id")
     @classmethod
     def _check_id(cls, value: str) -> str:
@@ -107,9 +132,8 @@ class DeviceEntry(BaseModel):
     def _check_host(cls, value: str) -> str:
         value = value.strip()
         if value.startswith("[") and value.endswith("]"):
-            # Brackets are URL syntax for an IPv6 literal, not part of the socket host (Finding
-            # P3-2): stripping them here makes text config and structured/admin config agree on
-            # the same canonical value instead of relying on each caller to do it separately.
+            # Brackets are URL syntax for an IPv6 literal, not part of the socket host; strip them
+            # here so text and structured/admin config agree on one canonical value.
             value = value[1:-1]
         if not value or any(c.isspace() for c in value):
             raise ValueError("host must not be empty or contain whitespace")
@@ -274,7 +298,7 @@ class Settings(BaseSettings):
 
     # HTTP server and operating environment
     bind_address: IPvAnyAddress = IPv4Address("127.0.0.1")
-    bind_port: int = Field(8080, ge=1024, le=65535)
+    bind_port: int = Field(8000, ge=1024, le=65535)
     allow_non_loopback_bind: bool = False
     http_workers: int = Field(1, ge=1, le=1)
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
@@ -469,6 +493,20 @@ class Settings(BaseSettings):
                 f"SHUTDOWN_PERIODIC_RESERVE_SECONDS ({self.shutdown_periodic_reserve_seconds}) must be "
                 f"smaller than SHUTDOWN_GRACE_SECONDS ({self.shutdown_grace_seconds})"
             )
+        # Devices are restored one after the other, so the budget scales with their number.
+        restore_writes = (
+            max(1, len(self.devices))
+            * DISPATCH_RESTORE_WRITES
+            * (self.write_response_timeout_ms / 1000 + SYSTEM_READBACK_TIMEOUT_SECONDS)
+        )
+        if restore_writes > self.shutdown_grace_seconds - self.shutdown_periodic_reserve_seconds:
+            # A warning, not an error: it only matters while a dispatch is active at shutdown.
+            _warn_once(
+                "SHUTDOWN_GRACE_SECONDS minus SHUTDOWN_PERIODIC_RESERVE_SECONDS (%.1f s) is below the %.1f s "
+                "the battery restore of all devices can need; a shutdown during dispatch may leave one unrestored",
+                self.shutdown_grace_seconds - self.shutdown_periodic_reserve_seconds,
+                restore_writes,
+            )
         if self.dispatch_min_soc >= self.dispatch_max_soc:
             raise ValueError("DISPATCH_MIN_SOC must be smaller than DISPATCH_MAX_SOC")
         if self.dispatch_max_operation_duration_engineering_seconds > self.dispatch_max_operation_duration_seconds:
@@ -483,11 +521,26 @@ class Settings(BaseSettings):
             )
         if self.forwarded_header.strip().lower() == "forwarded":
             raise ValueError("FORWARDED_HEADER must name a single-address header such as X-Forwarded-For")
+        if self.behind_reverse_proxy and not self.trusted_proxies:
+            _warn_once(
+                "BEHIND_REVERSE_PROXY=true but TRUSTED_PROXIES is empty. HTTPS admin requests through an HTTP "
+                "upstream proxy may fail CSRF validation (403). Configure TRUSTED_PROXIES for the reverse "
+                "proxy."
+            )
+        if any(
+            scrape.version == proxy.version and scrape.overlaps(proxy)
+            for scrape in self.metrics_trusted_sources
+            for proxy in self.trusted_proxies
+        ):
+            # The scrape trust check uses the direct peer, so a proxy network listed here lets every
+            # client behind that proxy scrape without a token.
+            _warn_once("METRICS_TRUSTED_SOURCES overlaps TRUSTED_PROXIES: clients behind the proxy skip the scrape token")
         if self.forwarded_header and not self.trusted_proxies:
             raise ValueError("FORWARDED_HEADER requires a non-empty TRUSTED_PROXIES")
-        if not ip_address(str(self.bind_address)).is_loopback and not self.allow_non_loopback_bind:
+        loopback = ip_address(str(self.bind_address)).is_loopback
+        if not loopback and not self.allow_non_loopback_bind:
             raise ValueError("ALLOW_NON_LOOPBACK_BIND=true is required for a non-loopback BIND_ADDRESS")
-        if not ip_address(str(self.bind_address)).is_loopback and not self.behind_reverse_proxy:
+        if not loopback and not self.behind_reverse_proxy:
             log.warning(
                 "BIND_ADDRESS is not loopback and 'behind reverse proxy' is off: terminate TLS in front of "
                 "the service and enable it in the admin GUI"
@@ -660,8 +713,6 @@ def _legacy_secret_in_use(settings: Settings) -> bool:
 
 def load_settings(env_file: Path | str | None = None) -> Settings:
     """Load and validate settings; raises ConfigError with a sanitised message."""
-    from app.errors import ConfigError
-
     warn_ignored_settings(env_file)
     try:
         settings = Settings(_env_file=env_file) if env_file else Settings()

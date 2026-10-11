@@ -17,15 +17,16 @@ ignored.
 | `DISPATCH_MAX_CHARGE_POWER_W` | unset | Verified maximum grid-charge power; required for dispatch |
 | `DISPATCH_MAX_DISCHARGE_POWER_W` | unset | Verified maximum load-following discharge power; required for dispatch |
 | `BIND_ADDRESS` | `127.0.0.1` | Listen address |
-| `BIND_PORT` | `8080` | Listen port, 1024 to 65535 |
+| `BIND_PORT` | `8000` | Listen port, 1024 to 65535 |
 | `ALLOW_NON_LOOPBACK_BIND` | `false` | Explicit consent for a non-loopback listener; does not provide TLS or secure cookies. Compose sets it while publishing only on host loopback |
 | `DOCS_PUBLIC` | `false` | `true`: serve `/docs` and `/openapi.json` without a token; `false`: both return 404 on every bind address |
 | `LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING` or `ERROR` |
 | `TRUSTED_PROXIES` | empty | Networks (CIDR, comma separated, at most 32) of reverse proxies whose forwarding header is trusted |
 | `FORWARDED_HEADER` | empty | Single-address header set by the proxy, for example `X-Forwarded-For`; requires `TRUSTED_PROXIES`. `Forwarded` (RFC 7239) is rejected |
-| `ENABLE_METRICS_ENDPOINT` | `true` | `false`: the route `GET /metrics` is not mounted and answers 404 |
+| `ENABLE_METRICS_ENDPOINT` | `true` | `false`: `GET /metrics` answers 404 |
 | `DB_TYPE` and `INFLUXDB_*` / `QUESTDB_*` | unset | Optional push export, see [Push export](export.md) |
-| `METRICS_EXPORT_INTERVAL_SECONDS` | `30` | Export interval in seconds |
+| `METRICS_EXPORT_ENABLED` | `true` | `false` pauses the push export without losing its connection settings |
+| `METRICS_EXPORT_INTERVAL_SECONDS` | `30` | Export interval in seconds, 5 to 3600 |
 
 The dispatch values are deliberately not guessed. The strategy code and both sign conventions used
 to live as the three environment variables `DISPATCH_SOC_STRATEGY_EXTERNAL_CODE`,
@@ -39,7 +40,7 @@ The dispatch database must be backed up together with `HMAC_SECRET`, just like `
 
 ## GUI-only settings
 
-Authentication, API tokens, devices, write support and reverse-proxy mode are set in the admin GUI. The variables `AUTH_REQUIRED`, `API_TOKENS`, `API_TOKENS_FILE`, `DEVICES`, `BEHIND_REVERSE_PROXY` and `ENABLE_WRITE_SUPPORT` are ignored with a startup warning.
+Authentication, API tokens, devices, write support and reverse-proxy mode are set in the admin GUI. The variables `AUTH_REQUIRED`, `API_TOKENS`, `API_TOKENS_FILE`, `BEHIND_REVERSE_PROXY` and `ENABLE_WRITE_SUPPORT` are ignored with a startup warning; `DEVICES` is ignored with an `INFO` note.
 
 ## Validate a configuration
 

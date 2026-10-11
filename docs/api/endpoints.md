@@ -15,6 +15,8 @@
 | POST | `/api/v1/devices/{device_id}/battery/dispatch` | read/write | Start or atomically replace grid charging or load-following discharge |
 | GET | `/api/v1/devices/{device_id}/battery/dispatch` | read/write | Read the current dispatch and restore state |
 | DELETE | `/api/v1/devices/{device_id}/battery/dispatch` | read/write | Stop dispatch and restore the previous inverter settings |
+| GET | `/api/v1/devices/{device_id}/energy` | read/write | Energy Manager state, readings, target window and action availability |
+| POST | `/api/v1/devices/{device_id}/energy/command` | read/write | One business action: charge, discharge, hold, auto |
 | GET | `/api/v1/vendor/rct/objects`, `/transports`, `/devices/{device_id}/slaves` | read/write | RCT diagnostics |
 
 `/metrics` (Prometheus) and `/api/v1/metrics` (metric list) are different on
@@ -23,14 +25,14 @@ purpose.
 !!! note "Vendor diagnostics are off"
     The vendor routes answer 404 because the internal switch
     `ENABLE_VENDOR_DIAGNOSTICS` defaults to off and is not an operator
-    setting. Likewise the write routes only exist with write access enabled in the GUI
-    (404 `write_disabled` otherwise).
+    setting. Likewise the write, dispatch and Energy Manager routes answer 404 `write_disabled`
+    while write access is off in the GUI; switching it takes effect at once.
 
 ## Reading values
 
 ```sh
 curl -H "Authorization: Bearer $TOKEN" \
-  "http://127.0.0.1:8080/api/v1/devices/main/metrics?names=battery_soc,inverter_state"
+  "http://127.0.0.1:8000/api/v1/devices/main/metrics?names=battery_soc,inverter_state"
 ```
 
 - Without `names` the request returns all preselected metrics and is exempt
@@ -49,7 +51,7 @@ curl -H "Authorization: Bearer $TOKEN" \
 ```sh
 curl -X PUT -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
   -d '{"value": 80}' \
-  http://127.0.0.1:8080/api/v1/devices/main/metrics/<metric_name>
+  http://127.0.0.1:8000/api/v1/devices/main/metrics/<metric_name>
 ```
 
 - Needs write access enabled in the GUI, a `read/write` token and a metric approved on the
@@ -88,7 +90,7 @@ Grid charging:
 ```sh
 curl -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
   -d '{"mode":"charge_from_grid","target_soc_percent":80,"max_power_w":3000,"valid_until":"2026-10-05T23:00:00+02:00"}' \
-  http://127.0.0.1:8080/api/v1/devices/main/battery/dispatch
+  http://127.0.0.1:8000/api/v1/devices/main/battery/dispatch
 ```
 
 Load-following discharge:
@@ -96,12 +98,35 @@ Load-following discharge:
 ```sh
 curl -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
   -d '{"mode":"discharge_to_load","target_soc_percent":20,"max_power_w":5000,"valid_until":"2026-10-05T23:00:00+02:00"}' \
-  http://127.0.0.1:8080/api/v1/devices/main/battery/dispatch
+  http://127.0.0.1:8000/api/v1/devices/main/battery/dispatch
 ```
 
 - `max_power_w` is an upper bound and is clamped to the configured device limit.
+- `discharge_to_load` reduces the setpoint immediately when the grid is exporting; deadband and write interval do not delay the cut.
 - `valid_until` is mandatory and must include a timezone offset. The service also caps it at six hours.
 - A second `POST` replaces the active operation. Set `expected_operation_id` for compare-and-swap semantics.
 - `DELETE` first requests 0 W and then restores the captured pre-dispatch register values.
 - `FAULT_RESTORE_PENDING` means restoration could not be confirmed. New dispatches remain blocked until restore succeeds.
 - `export_to_grid` is reserved but currently returns `409 dispatch_mode_unavailable`.
+- `hold` is a valid `mode` as well: it pins the battery at 0 W under our control, takes no
+  `target_soc_percent` and no power budget, and is gated per device like every other mode. It is
+  **not verified on hardware** — see [Energy Manager](../energy-manager.md#hold-is-unverified).
+
+## Energy Manager
+
+Business-level control in front of battery dispatch, available while the operator has set the inverter
+to mode **External**: one action (`charge`, `discharge`, `hold`,
+`auto`) plus `target_soc_percent` where needed. Actions, errors and readings are described in
+[Energy Manager](../energy-manager.md).
+
+```sh
+curl -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"action":"charge","target_soc_percent":80}' \
+  http://127.0.0.1:8000/api/v1/devices/main/energy/command
+```
+
+- `409 energy_manager_off` - the inverter is switched off; an operator selects a mode in the admin GUI (the public API cannot).
+- `409 energy_manager_not_external` - the inverter is in Manual mode, which only the admin GUI may command; an operator must switch it to External.
+- The status carries `mode` and `accepts_commands_from`; `armed` is derived (`mode != "off"`). The expert
+  endpoint `/battery/dispatch` above needs no mode.
+- `409 energy_action_unavailable` - the action is not available right now, for example after its register approvals were revoked.

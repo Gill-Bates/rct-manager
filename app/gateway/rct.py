@@ -7,9 +7,10 @@
 """RctGateway: the only adapter that turns metric names into frames (Requirement 30.17)."""
 
 import asyncio
+import contextlib
 import logging
 import math
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -17,7 +18,13 @@ from app.allowlist import Allowlist
 from app.cache import CacheEntry, CacheFreshness, ValueStore, age_seconds
 from app.catalog.registry import RegistryCatalog, RegistryEntry
 from app.clock import Clock
-from app.config import DeviceEntry, DeviceKey, EndpointKey, FreshPeriodicMode
+from app.config import (
+    SYSTEM_READBACK_TIMEOUT_SECONDS,
+    DeviceEntry,
+    DeviceKey,
+    EndpointKey,
+    FreshPeriodicMode,
+)
 from app.errors import (
     ActionOutcomeUnknown,
     BudgetExhausted,
@@ -45,7 +52,7 @@ from app.gateway.base import (
 from app.gateway.vendor import SlaveDiscovery, TransportInfo
 from app.observability.stats import Histogram
 from app.protocol.frames import Frame
-from app.protocol.slave_data import decode_slave_data
+from app.protocol.slave_data import SlaveData, decode_slave_data
 from app.protocol.types import Command, DataType, FrameKind
 from app.protocol.values import ScalarValue, decode_string, decode_value, encode_value
 from app.scheduling.budget import BudgetHandle
@@ -69,7 +76,9 @@ from app.transport.types import (
 log = logging.getLogger(__name__)
 MAX_SLAVES = 31  # network ids the plant network can hold (Requirement 18.10)
 _INVERTER_NAME_OBJECT_ID = 0xEBC62737
+_INVERTER_SERIAL_OBJECT_ID = 0x7924ABD9
 REFRESH_MAX_PER_CYCLE = 8  # reads per refresh cycle and device (Requirement 17.28)
+REFRESH_FAILURES_CONFIRMED = 3  # consecutive failed refresh reads after which a value counts as unanswered
 
 _STALE_REASONS: tuple[tuple[type[DeviceApiError], StaleReason], ...] = (
     (DeviceMaintenance, StaleReason.DEVICE_MAINTENANCE),
@@ -99,6 +108,7 @@ class DeviceBinding:
     periodic: PeriodicManager | None = None
     last_heartbeat_at: datetime | None = None
     reported_name: str | None = None  # the device's own name, read once at startup
+    reported_serial: str | None = None  # the device's serial number, read once at startup
     cache_hits: int = 0
     cache_misses: int = 0
     errors: int = 0
@@ -140,11 +150,20 @@ class RctGateway:
         self._slave_max = slave_max_reads
         self._slave_cache: dict[str, tuple[float, SlaveDiscovery]] = {}
         self._slave_locks: dict[str, asyncio.Lock] = {}
+        self._shutdown_restore = False
         self._write_locks: dict[tuple[str, int], asyncio.Lock] = {}  # one write+readback per object id
         self._devices: dict[str, DeviceBinding] = {}
         self._by_address: dict[tuple[EndpointKey, int | None], str] = {}
         cache.extend_ttl_when(self._fresh_window)
         self._refresh_attempts: dict[tuple[str, str], float] = {}
+        self._refresh_failures: dict[tuple[str, str], int] = {}  # consecutive failed refresh reads per key
+
+    def read_failed(self, device_id: str, name: str, *, min_failures: int = REFRESH_FAILURES_CONFIRMED) -> bool:
+        """True once refresh reads of this value failed repeatedly in a row (each already retried).
+
+        Lets a consumer tell "the device does not answer this register" from "not read yet".
+        """
+        return self._refresh_failures.get((device_id, name), 0) >= min_failures
 
     def _fresh_window(self, key: tuple[str, str]) -> float | None:
         """Cache hook: bounded freshness window of a live periodic registration (Requirement 17.29)."""
@@ -165,7 +184,9 @@ class RctGateway:
         """
         binding = self._device(device_id)
         periodic = binding.periodic
-        if periodic is None or not periodic.available:
+        # A partial registration (some objects refused) must not switch refreshing off for the
+        # registered rest: their values would otherwise never reach the cache.
+        if periodic is None or not (periodic.available or periodic.registered_object_ids):
             return 0
         older_than = REFRESH_AFTER_FACTOR * periodic.interval_seconds
         now = self._clock.monotonic()
@@ -179,7 +200,9 @@ class RctGateway:
             age = age_seconds(cached, now) if cached is not None else math.inf
             if age > older_than and now - self._refresh_attempts.get(key, -math.inf) >= periodic.interval_seconds:
                 due.append((age, entry))
-        due.sort(key=lambda item: item[0], reverse=True)
+        # Keys that keep failing go last, so a few unanswered registers cannot starve the others
+        # behind the two-failure stop below.
+        due.sort(key=lambda item: (self._refresh_failures.get((device_id, item[1].name), 0) > 0, -item[0]))
         sent = failures = 0
         for _, entry in due[:limit]:
             parked = binding.endpoint.maintenance() and not binding.endpoint.probe_due()
@@ -190,8 +213,15 @@ class RctGateway:
             sent += 1
             if await self._read_into_cache(binding, entry, key, TransactionOrigin.SYSTEM_READ) is not None:
                 failures = 0
-            elif (failures := failures + 1) >= 2:
-                break
+                self._refresh_failures.pop(key, None)
+            else:
+                if not binding.endpoint.maintenance():  # an outage says nothing about this register
+                    count = self._refresh_failures.get(key, 0) + 1
+                    self._refresh_failures[key] = count
+                    if count == REFRESH_FAILURES_CONFIRMED:
+                        log.warning("Device %s does not answer %s (%d refresh reads failed)", device_id, entry.name, count)
+                if (failures := failures + 1) >= 2:
+                    break
         if sent:
             log.debug("Refreshed %d stale periodic value(s) on device %s (%d due)", sent, device_id, len(due))
         return sent
@@ -200,6 +230,26 @@ class RctGateway:
     def add_device(self, binding: DeviceBinding) -> None:
         self._devices[binding.entry.device_id] = binding
         self._by_address[(binding.entry.key.endpoint, binding.entry.network_id)] = binding.entry.device_id
+
+    @contextlib.asynccontextmanager
+    async def restore_barrier(self, device_id: str) -> AsyncIterator[None]:
+        """Hold off caller writes to ``device_id`` while a battery restore runs (lowered on any exit)."""
+        binding = self._devices.get(device_id)
+        if binding is None:
+            yield
+            return
+        await binding.serializer.raise_barrier(binding.entry.key)
+        try:
+            yield
+        finally:
+            binding.serializer.lower_barrier(binding.entry.key)
+
+    def begin_shutdown_restore(self) -> None:
+        """From now on system-write readbacks use the short shutdown bound."""
+        self._shutdown_restore = True
+
+    def device_bindings(self) -> list[DeviceBinding]:
+        return list(self._devices.values())
 
     def replace_devices(self, bindings: list[DeviceBinding]) -> None:
         """Swap the whole device/address map for a freshly built graph (live device-list reload)."""
@@ -409,7 +459,7 @@ class RctGateway:
     @staticmethod
     def _is_periodic(binding: DeviceBinding, entry: RegistryEntry) -> bool:
         periodic = binding.periodic
-        return periodic is not None and periodic.available and entry.object_id in periodic.object_ids
+        return periodic is not None and periodic.is_registered(entry.object_id)
 
     def _read_request(
         self, binding: DeviceBinding, entry: RegistryEntry, origin: TransactionOrigin, key: tuple[str, str] | None
@@ -486,11 +536,14 @@ class RctGateway:
         key: tuple[str, str],
         origin: TransactionOrigin,
         charge: BudgetHandle | None = None,
+        *,
+        total_timeout_seconds: float | None = None,
     ) -> tuple[ScalarValue, bytes] | None:
         """One uncached read whose result alone repopulates the cache (Requirement 9.13); None on failure."""
         try:
             request = self._read_request(binding, entry, origin, None)
             request.charge = charge
+            request.read_total_timeout_seconds = total_timeout_seconds
             result = await binding.serializer.submit(request)
             if result.error is not None or result.frame is None:
                 return None
@@ -520,7 +573,7 @@ class RctGateway:
             raise WriteRejected("value_type_mismatch") from None
 
     async def _write(
-        self, binding: DeviceBinding, entry: RegistryEntry, key: tuple[str, str], payload: bytes
+        self, binding: DeviceBinding, entry: RegistryEntry, key: tuple[str, str], payload: bytes, *, system: bool = False
     ) -> tuple[TransactionResult, tuple[ScalarValue, bytes] | None]:
         """Send the write, drop the cache entry and read back; raises only before anything was sent.
 
@@ -528,19 +581,21 @@ class RctGateway:
         """
         lock = self._write_locks.setdefault((binding.entry.device_id, entry.object_id), asyncio.Lock())
         async with lock:
-            return await self._write_locked(binding, entry, key, payload)
+            return await self._write_locked(binding, entry, key, payload, system=system)
 
     async def _write_locked(
-        self, binding: DeviceBinding, entry: RegistryEntry, key: tuple[str, str], payload: bytes
+        self, binding: DeviceBinding, entry: RegistryEntry, key: tuple[str, str], payload: bytes, *, system: bool = False
     ) -> tuple[TransactionResult, tuple[ScalarValue, bytes] | None]:
         if binding.endpoint.maintenance():
             raise DeviceMaintenance()
-        charge = binding.serializer.reserve_budget(2)  # write plus readback, all or nothing (Requirement 6.10)
+        # System writes (dispatch/restore) are budget-exempt so a drained budget cannot block a restore.
+        origin = TransactionOrigin.SYSTEM_WRITE if system else TransactionOrigin.CALLER
+        charge = None if system else binding.serializer.reserve_budget(2)  # all or nothing (Requirement 6.10)
         write_charge = charge.take(1) if charge is not None else None
         request = TransactionRequest(
             binding.entry.key,
             make_frame(binding.entry.network_id, Command.WRITE, entry.object_id, payload),
-            TransactionOrigin.CALLER,
+            origin,
             "write",
             self._clock.now(),
             idempotent=entry.idempotent_write,
@@ -554,7 +609,12 @@ class RctGateway:
                 self._cache.invalidate(key)  # also when the outcome is unclear (Requirement 9.12)
             if not result.ok and not result.committed:
                 raise result.error or DeviceApiError()  # nothing left the send path: final and safe
-            return result, await self._read_into_cache(binding, entry, key, TransactionOrigin.CALLER, charge)
+            # Only during the shutdown restore is the readback bounded tightly: it runs against the
+            # work deadline. In normal operation a lost frame must not fail a dispatch step.
+            readback_timeout = SYSTEM_READBACK_TIMEOUT_SECONDS if system and self._shutdown_restore else None
+            return result, await self._read_into_cache(
+                binding, entry, key, origin, charge, total_timeout_seconds=readback_timeout
+            )
         finally:
             for handle in (write_charge, charge):
                 if handle is not None:
@@ -567,13 +627,15 @@ class RctGateway:
             value *= entry.scale
         return value
 
-    async def write_metric(self, device_id: str, name: str, value: ScalarValue) -> WriteOutcome:
+    async def write_metric(
+        self, device_id: str, name: str, value: ScalarValue, *, system: bool = False
+    ) -> WriteOutcome:
         binding = self._device(device_id)
         entry = self._metric(name)
         self._allowlist.check(name, value, action=False)  # before the serializer is touched
         payload = self._encode(entry, value)
         log.info("Write requested: device=%s metric=%s", device_id, name)
-        result, readback = await self._write(binding, entry, (device_id, name), payload)
+        result, readback = await self._write(binding, entry, (device_id, name), payload, system=system)
         read_value = readback[0] if readback else None
         matches = readback is not None and (
             read_value == value
@@ -612,10 +674,17 @@ class RctGateway:
     # ---- liveness and status ---------------------------------------------------------------
     async def read_inverter_name(self, device_id: str) -> str:
         """Read the device's own name through its existing serialized connection."""
+        return await self._read_string_object(device_id, _INVERTER_NAME_OBJECT_ID)
+
+    async def read_inverter_serial(self, device_id: str) -> str:
+        """Read the device's serial number through its existing serialized connection."""
+        return await self._read_string_object(device_id, _INVERTER_SERIAL_OBJECT_ID)
+
+    async def _read_string_object(self, device_id: str, object_id: int) -> str:
         binding = self._device(device_id)
         request = TransactionRequest(
             binding.entry.key,
-            make_frame(binding.entry.network_id, Command.READ, _INVERTER_NAME_OBJECT_ID),
+            make_frame(binding.entry.network_id, Command.READ, object_id),
             TransactionOrigin.HEARTBEAT,
             "read",
             self._clock.now(),
@@ -651,17 +720,34 @@ class RctGateway:
     def reported_name(self, device_id: str) -> str | None:
         return self._device(device_id).reported_name
 
+    def set_reported_serial(self, device_id: str, serial: str) -> None:
+        """Record the device's serial number, read once at startup via ``read_inverter_serial``."""
+        self._device(device_id).reported_serial = serial
+
+    def reported_serial(self, device_id: str) -> str | None:
+        return self._device(device_id).reported_serial
+
     def set_allowlist(self, allowlist: Allowlist) -> None:
         self._allowlist = allowlist
 
     def cached_reading(self, device_id: str, name: str) -> tuple[ScalarValue, CacheFreshness] | None:
         """Cached value with its freshness; None when absent or expired."""
+        sample = self.cached_sample(device_id, name)
+        return None if sample is None else (sample[0], sample[2])
+
+    def cached_sample(self, device_id: str, name: str) -> tuple[ScalarValue, float, CacheFreshness] | None:
+        """Cached value, its age and its freshness; None when the entry is absent or expired.
+
+        Reads the cache only and never queues a device transaction.
+        """
         key = (device_id, name)
         cached = self._cache.get(key)
         if cached is None:
             return None
         freshness = self._classify(key, cached)
-        return None if freshness is CacheFreshness.EXPIRED else (cached.value, freshness)
+        if freshness is CacheFreshness.EXPIRED:
+            return None
+        return cached.value, age_seconds(cached, self._clock.monotonic()), freshness
 
     def device_status(self, device_id: str) -> DeviceStatus:
         binding = self._device(device_id)
@@ -697,6 +783,8 @@ class RctGateway:
             counters.failures,
             binding.cache_hits,
             binding.cache_misses,
+            None if binding.periodic is None else binding.periodic.live,
+            0 if binding.periodic is None else binding.periodic.consecutive_failures,
         )
 
     # ---- vendor diagnostics (Requirement 18, 30) ---------------------------------------------
@@ -719,12 +807,17 @@ class RctGateway:
                     tuple(b.entry.device_id for b in bindings),
                     tuple(b.entry.network_id for b in bindings if b.entry.network_id is not None),
                     status.counters.discarded_bytes,
+                    status.counters.crc_errors,
+                    status.counters.framing_errors,
+                    status.connection_epoch,
                     status.counters.unexpected_frames,
                     status.lock_reason is not None,
                     status.lock_reason,
                     status.counters.last_frame_at,
                     {b.entry.device_id: b.periodic.registrations if b.periodic else 0 for b in bindings},
                     {b.entry.device_id: bool(b.periodic and b.periodic.available) for b in bindings},
+                    {b.entry.device_id: b.periodic.consecutive_failures if b.periodic else 0 for b in bindings},
+                    {b.entry.device_id: b.periodic.last_failure if b.periodic else None for b in bindings},
                 )
             )
         return result
@@ -744,7 +837,7 @@ class RctGateway:
         entry = next((e for e in self._catalog.entries() if e.struct is not None), None)
         if entry is None:  # rejected at startup already; a mapped error beats a bare StopIteration
             raise ConfigError("invalid_object_registry", detail="the slave_data registry object is missing")
-        found: dict[int, object] = {}
+        found: dict[int, SlaveData] = {}
         stable = 0
         for _ in range(self._slave_max):
             try:
@@ -764,7 +857,7 @@ class RctGateway:
                     raise DeviceApiError()
                 data = decode_slave_data(result.frame.payload, encoding=self._encoding)
             except DeviceApiError as exc:
-                return SlaveDiscovery(tuple(found.values()), False, exc.code)  # type: ignore[arg-type]
+                return SlaveDiscovery(tuple(found.values()), False, exc.code)
             stable = 0 if data.network_id not in found else stable + 1
             found.setdefault(data.network_id, data)
             if stable >= self._slave_stable or len(found) >= MAX_SLAVES:
@@ -772,4 +865,4 @@ class RctGateway:
         # Requirement 18.10 ends the reads at the latest after the configured maximum, and 18.12
         # reserves complete=false for a read that *failed*; reaching the limit is an error-free end
         # and therefore complete=true per Requirement 18.13.
-        return SlaveDiscovery(tuple(found.values()), True)  # type: ignore[arg-type]
+        return SlaveDiscovery(tuple(found.values()), True)

@@ -16,15 +16,21 @@ import pytest
 from app.allowlist import Allowlist
 from app.cache import MemoryCache
 from app.catalog.registry import RegistryCatalog
-from app.config import DeviceEntry, DeviceKey, EndpointKey
-from app.errors import BudgetExhausted, QueueFullError, QueueTimeout
+from app.config import (
+    SYSTEM_READBACK_TIMEOUT_SECONDS,
+    DeviceEntry,
+    DeviceKey,
+    EndpointKey,
+)
+from app.errors import BudgetExhausted, DeviceApiError, QueueFullError, QueueTimeout
 from app.gateway.rct import DeviceBinding, RctGateway
 from app.protocol.frames import Frame
 from app.protocol.types import Command
 from app.scheduling.budget import WorkBudget
 from app.scheduling.heartbeat import Heartbeat, LivenessSource
-from app.scheduling.retry import RetryConfig
+from app.scheduling.retry import RetryConfig, execute_read
 from app.scheduling.serializer import AccessSerializer
+from app.transport.counters import DeviceCounters
 from app.transport.endpoint import EndpointConfig, TransportEndpoint
 from app.transport.types import (
     SendOutcome,
@@ -156,6 +162,162 @@ def test_timed_out_entries_free_their_queue_slot_immediately() -> None:
     assert asyncio.run(scenario()) == [True, True, True]
 
 
+def test_system_writes_jump_the_queue_and_survive_a_full_queue_and_stop_unblocks_drain() -> None:
+    """A restore write must not queue behind caller reads (or time out in them); stop() must not
+    leave drain() waiting for items it removed.
+    """
+
+    async def scenario() -> list[str]:
+        _budget, serializer, release = await _skipped_and_blocked(queue_max_length=1)
+        order: list[str] = []
+        running = asyncio.create_task(serializer.submit(_request(serializer)))
+        async with asyncio.timeout(1):
+            while serializer._current is None:
+                await asyncio.sleep(0)
+        queued_read = asyncio.create_task(serializer.submit(_request(serializer)))
+        await asyncio.sleep(0)  # fills the single slot; its 0.05 s wait is about to run out
+        write = TransactionRequest(
+            DeviceKey(KEY), Frame(Command.WRITE, 1), TransactionOrigin.SYSTEM_WRITE, "write"
+        )
+        write_task = asyncio.create_task(serializer.submit(write))
+        await asyncio.sleep(0.1)  # longer than queue_max_wait_seconds
+        assert not write_task.done() and serializer._queue._items[0].request is write
+        order.append("write-waits-ahead")
+        with pytest.raises(QueueTimeout):
+            await queued_read
+        release.set()
+        await running
+        await write_task
+        await serializer.stop()
+        async with asyncio.timeout(1):
+            await serializer.drain()
+        order.append("drain-returns")
+        return order
+
+    assert asyncio.run(scenario()) == ["write-waits-ahead", "drain-returns"]
+
+
+def test_priority_write_overtakes_reads_but_never_a_queued_caller_write() -> None:
+    """A restore must not be overwritten by an older caller write queued before it."""
+
+    async def scenario() -> list[tuple[str, str]]:
+        _budget, serializer, release = await _skipped_and_blocked(queue_max_length=8)
+        serializer._max_wait = 5.0
+        running = asyncio.create_task(serializer.submit(_request(serializer)))
+        async with asyncio.timeout(1):
+            while serializer._current is None:
+                await asyncio.sleep(0)
+
+        def request(origin: TransactionOrigin, kind: str) -> TransactionRequest:
+            return TransactionRequest(DeviceKey(KEY), Frame(Command.WRITE, 1), origin, kind)
+
+        tasks = [
+            asyncio.create_task(serializer.submit(request(origin, kind)))
+            for origin, kind in (
+                (TransactionOrigin.CALLER, "write"),
+                (TransactionOrigin.CALLER, "read"),
+                (TransactionOrigin.SYSTEM_WRITE, "write"),
+            )
+        ]
+        await asyncio.sleep(0.01)
+        order = [(item.request.origin.value, item.request.kind) for item in serializer._queue._items]
+        release.set()
+        await asyncio.gather(running, *tasks)
+        await serializer.stop()
+        return order
+
+    assert asyncio.run(scenario()) == [("caller", "write"), ("system_write", "write"), ("caller", "read")]
+
+
+def test_submit_after_stop_is_refused_instead_of_queued_behind_a_dead_worker() -> None:
+    async def scenario() -> str:
+        _budget, serializer, _release = await _skipped_and_blocked()
+        await serializer.stop()
+        with pytest.raises(DeviceApiError) as excinfo:
+            await serializer.submit(_request(serializer))
+        return str(excinfo.value.code)
+
+    assert asyncio.run(scenario()) == "not_ready"
+
+
+def test_readback_is_bounded_only_while_the_shutdown_restore_runs() -> None:
+    async def scenario() -> list[float | None]:
+        gateway, binding, _budget, _net, catalog = await _gateway(5)
+        entry = next(iter(catalog.entries()))
+        seen: list[float | None] = []
+        real_submit = binding.serializer.submit
+
+        async def spy(request):
+            if request.kind == "read":
+                seen.append(request.read_total_timeout_seconds)
+            return await real_submit(request)
+
+        binding.serializer.submit = spy
+        await gateway._write(binding, entry, ("inv1", entry.name), b"\x00\x00\x00\x01", system=True)
+        gateway.begin_shutdown_restore()
+        await gateway._write(binding, entry, ("inv1", entry.name), b"\x00\x00\x00\x01", system=True)
+        await binding.serializer.stop()
+        return seen
+
+    assert asyncio.run(scenario()) == [None, SYSTEM_READBACK_TIMEOUT_SECONDS]
+
+
+def test_restore_barrier_drops_queued_caller_writes_and_refuses_new_ones_until_lowered() -> None:
+    """Race: caller write A queued, restore R starts. A must never run after R restored the device."""
+
+    async def scenario() -> list[str]:
+        _budget, serializer, release = await _skipped_and_blocked(queue_max_length=8)
+        serializer._max_wait = 5.0
+        key = DeviceKey(KEY)
+        running = asyncio.create_task(serializer.submit(_request(serializer)))
+        async with asyncio.timeout(1):
+            while serializer._current is None:
+                await asyncio.sleep(0)
+
+        def caller(kind: str) -> TransactionRequest:
+            return TransactionRequest(key, Frame(Command.WRITE, 1), TransactionOrigin.CALLER, kind)
+
+        queued_write = asyncio.create_task(serializer.submit(caller("write")))
+        await asyncio.sleep(0.01)
+        outcome: list[str] = []
+        await serializer.raise_barrier(key)
+        with pytest.raises(DeviceApiError) as dropped:
+            await queued_write  # rejected at the barrier, not executed after the restore
+        outcome.append(dropped.value.code)
+        with pytest.raises(DeviceApiError) as refused:
+            await serializer.submit(caller("write"))
+        outcome.append(refused.value.code)
+        read = asyncio.create_task(serializer.submit(caller("read")))  # reads pass the barrier
+        await asyncio.sleep(0.01)
+        outcome.append("read-queued" if serializer.queue_length() == 1 else "read-lost")
+        release.set()
+        await asyncio.gather(running, read)
+        serializer.lower_barrier(key)
+        await serializer.submit(caller("write"))  # accepted again
+        outcome.append("write-after-barrier-ok")
+        await serializer.stop()
+        return outcome
+
+    assert asyncio.run(scenario()) == [
+        "restore_in_progress", "restore_in_progress", "read-queued", "write-after-barrier-ok",
+    ]
+
+
+def test_gateway_restore_barrier_is_lowered_when_the_restore_fails() -> None:
+    async def scenario() -> list[int]:
+        gateway, binding, _budget, _net, _catalog = await _gateway(5)
+        sizes = []
+        with pytest.raises(RuntimeError):
+            async with gateway.restore_barrier("inv1"):
+                sizes.append(len(binding.serializer._barriers))
+                raise RuntimeError("restore failed")
+        sizes.append(len(binding.serializer._barriers))
+        await binding.serializer.stop()
+        return sizes
+
+    assert asyncio.run(scenario()) == [1, 0]
+
+
 async def _gateway(limit: int, fail_connects: int = 0):
     clock = AutoClock()
     net = FakeNetwork(clock, fail_connects=fail_connects)
@@ -276,3 +438,56 @@ def test_one_slave_does_not_hide_a_silent_one() -> None:
 
     total, a_count, b_count, probes, b_never, source = asyncio.run(scenario())
     assert (total, a_count, b_count, probes, b_never, source) == (1, 1, 0, 1, True, LivenessSource.HEARTBEAT)
+
+
+def test_failed_tick_clears_the_liveness_source() -> None:
+    """A failed heartbeat must not keep reporting the last successful source as the current one."""
+
+    async def scenario() -> tuple[LivenessSource | None, int, LivenessSource | None, int]:
+        clock = AutoClock()
+        counters = DeviceCounters(last_success_monotonic=clock.monotonic())
+        alive = [True]
+
+        async def read() -> bool:
+            return alive[0]
+
+        beat = Heartbeat(counters, read, clock, interval_seconds=30, failure_threshold=3)
+        await beat.tick()  # a recent transaction wins: source is TRANSACTION
+        first = (beat.liveness_source, beat.consecutive_failures)
+        alive[0] = False
+        counters.last_success_monotonic = None  # no recent transaction or periodic either
+        clock.advance(31)
+        await beat.tick()  # every path fails: the stale source must be cleared
+        return (*first, beat.liveness_source, beat.consecutive_failures)
+
+    source, failures, after_source, after_failures = asyncio.run(scenario())
+    assert (source, failures) == (LivenessSource.TRANSACTION, 0)
+    assert (after_source, after_failures) == (None, 1)
+
+
+async def test_cancelled_read_cancels_the_endpoint_call() -> None:
+    started, cancelled = asyncio.Event(), asyncio.Event()
+
+    class Endpoint:
+        async def execute(self, request, response_timeout):
+            started.set()
+            try:
+                await asyncio.sleep(3600)
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+
+    class Clock:
+        def monotonic(self) -> float:
+            return 0.0
+
+        async def sleep(self, seconds: float) -> None:
+            await asyncio.sleep(3600)
+
+    request = SimpleNamespace(read_total_timeout_seconds=None, abandoned=False)
+    runner = asyncio.ensure_future(execute_read(Endpoint(), request, RetryConfig(), Clock()))
+    await started.wait()
+    runner.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await runner
+    assert cancelled.is_set()

@@ -41,6 +41,7 @@ class TransactionRequest:
     is_action: bool = False  # action variables are never retried automatically
     abandoned: bool = False
     charge: "BudgetHandle | None" = None  # released by the serializer unless the transaction starts
+    read_total_timeout_seconds: float | None = None  # overrides RetryConfig for this read (bounded readbacks)
 
 
 @dataclass(frozen=True, slots=True)

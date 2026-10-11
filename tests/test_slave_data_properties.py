@@ -44,7 +44,7 @@ def slave_data(draw: st.DrawFn) -> SlaveData:
     )
 
 
-# Feature: rct-rest-api, Property 17: value round-trip (slave structure share)
+# Feature: rct-manager, Property 17: value round-trip (slave structure share)
 @settings(max_examples=200, deadline=None)
 @given(slave_data())
 def test_slave_data_round_trip(value: SlaveData) -> None:

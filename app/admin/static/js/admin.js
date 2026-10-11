@@ -20,49 +20,154 @@
     return node;
   }
 
+  // Auto-dismiss delays: a warning or error is something the operator must be able to read and act on.
+  const TOAST_TIMEOUT_MS = { success: 3500, info: 3500, warning: 12000, danger: 30000 };
+  const NETWORK_ERROR_TEXT = 'The server did not respond. Check the connection and try again.';
+
   function toast(message, kind = 'success') {
     const region = $('toast-region');
     // An identical message already showing (or still sliding out) is suppressed instead of
     // stacking a visual duplicate, e.g. two call sites reporting the same failed request.
     const duplicate = [...region.children].some((node) => node.dataset.message === message && node.dataset.kind === kind);
     if (duplicate) return;
-    const box = element('div', `alert alert-${kind}`, message);
+    const box = element('div', `alert alert-${kind} d-flex align-items-start gap-2`);
     box.dataset.message = message;
     box.dataset.kind = kind;
+    const close = element('button', 'btn-close');
+    close.type = 'button';
+    close.setAttribute('aria-label', 'Dismiss notification');
+    box.append(element('span', 'flex-grow-1', message), close);
     region.append(box);
     requestAnimationFrame(() => box.classList.add('is-visible'));
     const remove = () => box.remove();
+    let timer = null;
+    let started = 0;
+    let remaining = TOAST_TIMEOUT_MS[kind] ?? TOAST_TIMEOUT_MS.success;
     const leave = () => {
+      clearTimeout(timer);
+      if (box.classList.contains('is-leaving')) return;
       box.classList.remove('is-visible');
       box.classList.add('is-leaving');
-      box.addEventListener('transitionend', remove, { once: true });
-      setTimeout(remove, 400); // fallback if the transition does not fire (e.g. display: none ancestor)
+      box.addEventListener('transitionend', (event) => { if (event.target === box && event.propertyName === 'transform') remove(); });
+      setTimeout(remove, 400); // fallback if the transition does not fire (reduced motion, hidden ancestor)
     };
-    setTimeout(leave, kind === 'danger' ? 8500 : 3500);
+    const arm = () => { started = Date.now(); timer = setTimeout(leave, remaining); };
+    // Hover or keyboard focus pauses the countdown so a message can be read without racing it.
+    const pause = () => {
+      if (timer === null) return;
+      clearTimeout(timer);
+      timer = null;
+      remaining = Math.max(2000, remaining - (Date.now() - started));
+    };
+    const resume = () => { if (timer === null && !box.matches(':hover, :focus-within')) arm(); };
+    box.addEventListener('mouseenter', pause);
+    box.addEventListener('focusin', pause);
+    box.addEventListener('mouseleave', resume);
+    box.addEventListener('focusout', resume);
+    close.addEventListener('click', leave);
+    arm();
   }
 
   function messageFrom(error) {
+    // fetch() rejects with a bare TypeError ("Failed to fetch" / "Load failed" / "NetworkError ...").
+    if (error instanceof TypeError) return NETWORK_ERROR_TEXT;
     return error instanceof Error ? error.message : 'An unknown error occurred.';
+  }
+
+  // Themed replacement for window.confirm(): resolves true only through the explicit accept button;
+  // focus starts on the safe (cancel) button.
+  let confirmOpen = false;
+  function confirmAction({ title, message, confirmLabel, danger = false }) {
+    if (confirmOpen) return Promise.resolve(false);
+    confirmOpen = true;
+    const modalElement = $('confirm-modal');
+    const modal = window.bootstrap.Modal.getOrCreateInstance(modalElement);
+    const accept = $('confirm-accept');
+    $('confirm-title').textContent = title;
+    $('confirm-message').textContent = message;
+    accept.textContent = confirmLabel;
+    accept.className = `btn ${danger ? 'btn-danger' : 'btn-primary'}`;
+    return new Promise((resolve) => {
+      let accepted = false;
+      const onAccept = () => { accepted = true; modal.hide(); };
+      accept.addEventListener('click', onAccept, { once: true });
+      modalElement.addEventListener('shown.bs.modal', () => $('confirm-cancel').focus(), { once: true });
+      modalElement.addEventListener('hidden.bs.modal', () => {
+        accept.removeEventListener('click', onAccept);
+        confirmOpen = false;
+        // Hiding this modal clears Bootstrap's body lock even when another modal (e.g. the inverter dialog) is still open.
+        if (document.querySelector('.modal.show')) document.body.classList.add('modal-open');
+        resolve(accepted);
+      }, { once: true });
+      modal.show();
+    });
+  }
+
+  // navigator.clipboard requires a secure context (HTTPS or localhost) and is undefined on a
+  // plain-HTTP LAN deployment, so fall back to the classic textarea + execCommand('copy') trick.
+  async function copyToClipboard(text) {
+    if (navigator.clipboard) {
+      try {
+        await navigator.clipboard.writeText(text);
+        return true;
+      } catch { /* fall through to the legacy fallback below */ }
+    }
+    const textarea = element('textarea');
+    textarea.value = text;
+    textarea.setAttribute('readonly', '');
+    textarea.style.position = 'fixed';
+    textarea.style.top = '0';
+    textarea.style.left = '0';
+    textarea.style.opacity = '0';
+    document.body.append(textarea);
+    textarea.select();
+    textarea.setSelectionRange(0, text.length);
+    let copied = false;
+    try { copied = document.execCommand('copy'); } catch { copied = false; }
+    textarea.remove();
+    return copied;
   }
 
   async function api(path, options = {}) {
     const method = options.method || 'GET';
-    const response = await fetch(`/admin/api/${path}`, {
-      credentials: 'same-origin',
-      ...options,
-      headers: {
-        ...(method !== 'GET' ? { 'X-CSRF-Token': csrfToken } : {}),
-        ...(options.body ? { 'Content-Type': 'application/json' } : {}),
-        ...options.headers,
-      },
-    });
+    let response;
+    try {
+      response = await fetch(`/admin/api/${path}`, {
+        credentials: 'same-origin',
+        ...options,
+        headers: {
+          ...(method !== 'GET' ? { 'X-CSRF-Token': csrfToken } : {}),
+          ...(options.body ? { 'Content-Type': 'application/json' } : {}),
+          ...options.headers,
+        },
+      });
+    } catch (error) {
+      // A genuine network failure opens the connection-lost modal at once; a caller-initiated
+      // abort (supersede or timeout) says nothing about the link.
+      const callerAbort = options.signal?.aborted || error?.name === 'AbortError' || error?.name === 'TimeoutError';
+      if (!callerAbort) window.RCTReconnect?.start();
+      throw error;
+    }
+    if (response.ok && window.RCTReconnect?.isActive()) window.RCTReconnect.stop();
     const data = await response.json().catch(() => ({}));
     if (!response.ok) {
       if (response.status === 401 && !['login', 'change-password'].includes(page)) {
         location.assign('/login');
       }
       const detail = data.detail;
-      throw new Error(typeof detail === 'string' ? detail : `Request failed (${response.status}).`);
+      // dispatch_capability_conflict (409) carries a structured detail {detail, operation_id, mode}
+      // instead of a plain string; naming the blocking operation is what makes the refusal useful.
+      // FastAPI's 422 detail is an array of {msg, ...}; only the documented conflict shape is formatted
+      // as operation/mode.
+      let message = `Request failed (${response.status}).`;
+      if (typeof detail === 'string') message = detail;
+      else if (Array.isArray(detail) && typeof detail[0]?.msg === 'string') message = detail[0].msg;
+      else if (detail && typeof detail === 'object' && 'operation_id' in detail && 'mode' in detail) {
+        message = `${detail.detail || 'Conflict.'} (operation ${detail.operation_id}, mode ${detail.mode})`;
+      }
+      const error = new Error(message);
+      error.status = response.status; // callers (e.g. the Energy poll) branch on 503 vs transient
+      throw error;
     }
     return data;
   }
@@ -89,11 +194,26 @@
     form.querySelector('button[type="submit"]').disabled = busy;
   }
 
-  function formError(message) {
+  const AUTH_FIELD_IDS = ['username', 'password', 'current-password', 'new-password', 'confirm-password'];
+
+  function clearFormError() {
+    $('form-error').hidden = true;
+    for (const id of AUTH_FIELD_IDS) { $(id)?.removeAttribute('aria-invalid'); $(id)?.removeAttribute('aria-describedby'); }
+  }
+
+  // Focus goes to the offending field (the alert itself is announced by role="alert"); without one
+  // the alert box takes focus.
+  function formError(message, fieldId) {
+    clearFormError();
     const box = $('form-error');
     box.textContent = message;
     box.hidden = false;
-    box.focus();
+    const field = fieldId ? $(fieldId) : null;
+    if (field) {
+      field.setAttribute('aria-invalid', 'true');
+      field.setAttribute('aria-describedby', 'form-error');
+      field.focus();
+    } else box.focus();
   }
 
   // The status line of both auth pages. Only JS writes into it, and only to report a problem.
@@ -127,25 +247,49 @@
     const next = document.documentElement.getAttribute('data-bs-theme') === 'dark' ? 'light' : 'dark';
     document.documentElement.setAttribute('data-bs-theme', next);
     localStorage.setItem('rct-admin-theme', next);
+    syncThemeToggle();
+  }
+
+  // Reflect the active theme on #theme-toggle: aria-pressed reports the state to assistive tech,
+  // and the glyph plus the label name the action the button performs next (A11Y-05). Initialised
+  // from the data-bs-theme attribute theme.js already applied before paint.
+  function syncThemeToggle() {
+    const button = $('theme-toggle');
+    if (!button) return;
+    const dark = document.documentElement.getAttribute('data-bs-theme') === 'dark';
+    button.setAttribute('aria-pressed', String(dark));
+    const label = dark ? 'Switch to light mode' : 'Switch to dark mode';
+    button.setAttribute('aria-label', label);
+    button.title = label;
+    const icon = button.querySelector('.material-icons');
+    if (icon) icon.textContent = dark ? 'light_mode' : 'dark_mode';
   }
 
   function initShell() {
     $('theme-toggle')?.addEventListener('click', toggleTheme);
+    syncThemeToggle();
     const toggle = $('nav-toggle');
-    toggle?.addEventListener('click', () => {
+    const setNav = (open) => {
       const nav = $('mobile-nav');
-      nav.hidden = !nav.hidden;
-      toggle.setAttribute('aria-expanded', String(!nav.hidden));
-      toggle.setAttribute('aria-label', nav.hidden ? 'Open menu' : 'Close menu');
+      nav.hidden = !open;
+      toggle.setAttribute('aria-expanded', String(open));
+      toggle.setAttribute('aria-label', open ? 'Close menu' : 'Open menu');
+    };
+    toggle?.addEventListener('click', () => setNav($('mobile-nav').hidden));
+    document.addEventListener('keydown', (event) => {
+      if (event.key !== 'Escape' || !toggle || $('mobile-nav').hidden) return;
+      setNav(false);
+      toggle.focus();
+    });
+    document.addEventListener('click', (event) => {
+      if (!toggle || $('mobile-nav').hidden || event.target.closest('#mobile-nav, #nav-toggle')) return;
+      setNav(false);
     });
     $('logout-button')?.addEventListener('click', async () => {
       try {
         await api('logout', { method: 'POST' });
         location.assign('/login');
       } catch (error) { toast(messageFrom(error), 'danger'); }
-    });
-    window.addEventListener('beforeunload', (event) => {
-      if (outstandingWork()) { event.preventDefault(); event.returnValue = ''; }
     });
   }
 
@@ -168,23 +312,27 @@
   }
 
   async function submitLogin(form) {
-    $('form-error').hidden = true;
+    clearFormError();
     submitState(form, true);
     try {
       const result = await api('login', { method: 'POST', body: JSON.stringify({ username: $('username').value.trim(), password: $('password').value }) });
       location.assign(result.must_change_password ? '/change-password' : '/ui/dashboard');
-    } catch (error) { formError(messageFrom(error)); submitState(form, false); }
+    } catch (error) { formError(messageFrom(error), 'password'); submitState(form, false); }
   }
 
   async function submitPasswordChange(form) {
-    $('form-error').hidden = true;
+    clearFormError();
     const next = $('new-password').value;
-    if (next !== $('confirm-password').value) { formError('The new passwords do not match.'); return; }
+    if (next !== $('confirm-password').value) { formError('The new passwords do not match.', 'confirm-password'); return; }
     submitState(form, true);
     try {
       await api('change-password', { method: 'POST', body: JSON.stringify({ current_password: $('current-password').value, new_password: next }) });
       location.assign('/ui/dashboard');
-    } catch (error) { formError(messageFrom(error)); submitState(form, false); }
+    } catch (error) {
+      const message = messageFrom(error);
+      formError(message, /current/i.test(message) ? 'current-password' : 'new-password');
+      submitState(form, false);
+    }
   }
 
   function displayStatus(status) {
@@ -197,9 +345,12 @@
     return [String(status || 'Unknown'), ''];
   }
 
+  // The one text for a metric without a value, whatever the reason; a reason belongs in a tooltip.
+  const NOT_AVAILABLE = 'n/a';
+
   // Splits a reading into number and unit so the card can render the unit smaller than the number.
   function metricParts(value, unit) {
-    if (!Number.isFinite(value)) return ['–', ''];
+    if (!Number.isFinite(value)) return [NOT_AVAILABLE, ''];
     if (unit === 'ratio') { value *= 100; unit = '%'; }
     // `|| 0` turns a rounded negative zero into 0 so the card never shows "-0 W".
     return [new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 }).format(Math.round(value) || 0), unit ? ` ${unit}` : ''];
@@ -226,7 +377,7 @@
   }
 
   function formatMetric(value, unit) {
-    return metricParts(value, unit).join('');
+    return Number.isFinite(value) ? metricParts(value, unit).join('') : 'n/a';
   }
 
   function showHeroMetrics(devices) {
@@ -251,17 +402,159 @@
     }
     $('house-power').textContent = formatMetric(house, all.find((item) => item.name === 'household_load_power')?.unit || 'W');
     $('battery-soc').textContent = formatMetric(soc, all.find((item) => item.name === 'battery_soc')?.unit || 'ratio');
+    // Whole days until the next battery calibration. power_mng_bat_next_calib_date is a UNIX
+    // timestamp in SECONDS that belongs to the power manager, not a tower, so it is only mapped for
+    // the first/primary tower - take it from the first device that actually reports it. Same
+    // availability guard as the battery card's "Next calibration" cell: finite and > 0, and the
+    // resulting Date must parse. Rounding: ceil, so a date later today still reads "1 day" rather
+    // than "0 days" and only a date already in the past (clamped to 0) shows "0".
+    const calibItem = all.find((item) => item.name === 'power_mng_bat_next_calib_date' &&
+      Number.isFinite(Number(item.value)) && Number(item.value) > 0);
+    const calibDate = calibItem ? new Date(Number(calibItem.value) * 1000) : null;
+    const calibValid = Boolean(calibDate && !Number.isNaN(calibDate.getTime()));
+    const daysToCalibration = calibValid
+      ? Math.max(0, Math.ceil((calibDate.getTime() - Date.now()) / 86400000))
+      : null;
+    if (calibValid) setReading($('days-to-calibration'), String(daysToCalibration), daysToCalibration === 1 ? 'day' : 'days');
+    else setReading($('days-to-calibration'), 'n/a');
   }
 
-  const INVERTER_METRICS = [['solar_a_power', 'PV A'], ['solar_b_power', 'PV B'], ['grid_power', 'Grid'], ['ac_power', 'AC power']];
-  const BATTERY_METRICS = [['battery_soc', 'Charge level']];
-  const INVERTER_FACTS = [['heat_sink_temperature', 'Heat sink']];
-  const BATTERY_FACTS = [
-    ['battery_temperature', 'Battery temperature'],
-    ['battery_cycles', 'Charge cycles'],
-    ['battery_soc_target', 'SOC target'],
-    ['power_mng_bat_next_calib_date', 'Next calibration'],
+  // { name, label, icon, kind } per cell of the power card's grid, in reading order. The inverter
+  // state is deliberately not a cell: the card header chip already shows it. 'label'
+  // takes the server-decoded enum text instead of a number; the icon is decorative (aria-hidden).
+  const POWER_CELLS = [
+    { name: 'solar_a_power', label: 'PV A', icon: 'wb_sunny' },
+    { name: 'solar_b_power', label: 'PV B', icon: 'wb_sunny' },
+    { name: 'grid_power', label: 'Grid power', icon: 'factory' },
+    { name: 'ac_power', label: 'AC power', icon: 'bolt' },
+    { name: 'heat_sink_temperature', label: 'Heat sink', icon: 'device_thermostat', optional: true },
   ];
+  // The battery card's fact grid below the charge level and its bar. Cells name a *role*, not a
+  // metric: the server maps each role to the catalog name that belongs to this particular tower
+  // (app/admin/api.py, _battery_metric_names), so two towers no longer render the same numbers. A
+  // role the server reports no name for is dropped from that tower's grid - 'cycles', 'soc_target'
+  // and 'next_calibration' have no per-tower register, so they are only mapped for the first tower
+  // and the second tower simply does not show them.
+  const BATTERY_CELLS = [
+    { role: 'temperature', label: 'Temperature', icon: 'device_thermostat', optional: true },
+    { role: 'cycles', label: 'Charge cycles', icon: 'loop', optional: true },
+    { role: 'soc_target', label: 'SOC target', icon: 'flag', optional: true },
+    { role: 'next_calibration', label: 'Next calibration', icon: 'event_repeat', optional: true },
+  ];
+
+  // Metric names that prove a battery system is attached; without any of them no battery card is
+  // rendered at all rather than an empty one. Fallback only — used when the server's `batteries`
+  // list (below) is empty, e.g. a registry without the module_sn_0..6 slots.
+  const BATTERY_PRESENCE = ['battery_soc', 'battery_temperature', 'battery_cycles', 'battery_status2',
+    'battery_placeholder_0_status2'];
+
+  // One descriptor per physical tower from /admin/api/devices (`batteries`). module_count is per tower and
+  // null when untrustworthy (module_count_status: ok / pending / anomaly, see _battery_module_report).
+  // Without module_sn slots there are no `batteries` entries; BATTERY_PRESENCE falls back to one card.
+  function batteryTowers(metrics, batteries) {
+    if (Array.isArray(batteries) && batteries.length) {
+      return batteries.map((battery, index) => ({
+        id: battery.id,
+        title: battery.title || `Battery ${index + 1}`,
+        metrics: battery.metrics && typeof battery.metrics === 'object' ? battery.metrics : {},
+        moduleCount: typeof battery.module_count === 'number' ? battery.module_count : null,
+        moduleCountStatus: battery.module_count_status || (battery.module_count === null ? 'anomaly' : 'ok'),
+        populatedModuleSlots: Array.isArray(battery.populated_module_slots) ? battery.populated_module_slots : [],
+      }));
+    }
+    if (!BATTERY_PRESENCE.some((name) => metrics.has(name))) return [];
+    return [{
+      id: 'battery',
+      title: 'Battery 1',
+      metrics: {
+        soc: 'battery_soc', temperature: 'battery_temperature', status: 'battery_status2',
+        cycles: 'battery_cycles', soc_target: 'battery_soc_target',
+        next_calibration: 'power_mng_bat_next_calib_date',
+      },
+      moduleCount: null, moduleCountStatus: 'pending', populatedModuleSlots: [],
+    }];
+  }
+
+  // The three battery slices (app/admin/static/img/battery_{top,middle,bottom}.svg) share a 220-wide
+  // viewBox and are drawn flush to their own top/bottom edges with no transparent margin, so
+  // stacking top + middle*N + bottom at one common rendered width with no gap reproduces one
+  // continuous case. Height per slice follows from its own viewBox aspect ratio at that width, so
+  // slices never need matching/hardcoded heights. These viewBox heights must stay in sync with the
+  // SVGs.
+  const BATTERY_SLICE_VIEWBOX_WIDTH = 220;
+  const BATTERY_SLICES = {
+    top: { file: 'battery_top.svg', viewBoxHeight: 70 },
+    middle: { file: 'battery_middle.svg', viewBoxHeight: 109 },
+    bottom: { file: 'battery_bottom.svg', viewBoxHeight: 132 },
+  };
+  // Upper bound for the rendered tower, sized so a full 5-module tower is flush with the readings
+  // column (charge bar plus two metric rows) beside it. In viewBox units an assembled tower is
+  // 70 + N*109 + 132, i.e. 420 units at N=2 and 856 at N=6, so a fixed width makes a six-module
+  // tower more than twice as tall as a two-module one and drags the whole card down. The width is
+  // therefore derived from the cap for the given module count: a tall tower gets *narrower*, never
+  // shorter and never fewer modules, so the module count stays visually apparent.
+  const BATTERY_TOWER_MAX_HEIGHT = 207;
+  // Width a short tower is allowed to reach; also the battery card's image column (5rem in admin.css).
+  const BATTERY_SLICE_MAX_WIDTH = 80;
+
+  function batteryTowerViewBoxHeight(moduleCount) {
+    return BATTERY_SLICES.top.viewBoxHeight + moduleCount * BATTERY_SLICES.middle.viewBoxHeight
+      + BATTERY_SLICES.bottom.viewBoxHeight;
+  }
+
+  // Shared slice width that keeps the assembled tower inside BATTERY_TOWER_MAX_HEIGHT.
+  function batterySliceWidth(moduleCount) {
+    const units = batteryTowerViewBoxHeight(moduleCount);
+    const fitted = (BATTERY_TOWER_MAX_HEIGHT * BATTERY_SLICE_VIEWBOX_WIDTH) / units;
+    return Math.max(1, Math.min(BATTERY_SLICE_MAX_WIDTH, Math.floor(fitted)));
+  }
+
+  function batterySliceImage(kind, width) {
+    const { file, viewBoxHeight } = BATTERY_SLICES[kind];
+    const image = element('img', 'device-battery-slice');
+    image.src = `/admin/static/img/${file}`;
+    image.alt = '';
+    image.width = width;
+    image.height = Math.round((width * viewBoxHeight) / BATTERY_SLICE_VIEWBOX_WIDTH);
+    return image;
+  }
+
+  // Top once, N middles, bottom once — DOM order top-to-bottom, matching the visual stack order.
+  function buildBatteryStack(moduleCount) {
+    const width = batterySliceWidth(moduleCount);
+    const nodes = [batterySliceImage('top', width)];
+    for (let i = 0; i < moduleCount; i += 1) nodes.push(batterySliceImage('middle', width));
+    nodes.push(batterySliceImage('bottom', width));
+    return nodes;
+  }
+
+  // Hardware limit (server-side validation concept, used only for the diagnostic note text below):
+  // the catalog's seven serial slots are the size of a data structure, the documented hardware
+  // takes at most six modules per tower.
+  const BATTERY_MAX_MODULES_PER_TOWER = 6;
+
+  // GRAPHIC ceiling — a different concept from the hardware limit above. The drawn tower contract
+  // is exactly 1 top cap + 1..5 battery segments + 1 bottom cap, so this is the hard cap on what
+  // buildBatteryStack() is ever asked to draw, independent of how many modules the server trusts.
+  const BATTERY_TOWER_MAX_SEGMENTS = 5;
+
+  // Maps a trusted backend module count onto a drawn segment count: 1..5 modules map 1:1, the
+  // hardware maximum of 6 is drawn with the 5 segments of the graphic ceiling (the note keeps the
+  // true count); anything beyond the hardware maximum is not drawn.
+  function renderableSegmentCount(moduleCount) {
+    if (typeof moduleCount !== 'number' || moduleCount < 1) return null;
+    if (moduleCount > BATTERY_MAX_MODULES_PER_TOWER) return null;
+    // 1..5 modules map 1:1; the documented 6th module shares the 5th segment (graphic ceiling).
+    return Math.min(moduleCount, BATTERY_TOWER_MAX_SEGMENTS);
+  }
+
+  // null -> nothing renderable (patchBatteryCard shows a neutral note instead of a tower). No
+  // module tower is fabricated for "pending" (no complete serial scan yet) — see patchBatteryCard
+  // for the "detecting modules…" placeholder text that covers that case instead of a drawn tower.
+  function renderableModuleCount(tower) {
+    if (tower.moduleCountStatus === 'pending') return null;
+    return renderableSegmentCount(tower.moduleCount);
+  }
 
   // Reconciles a parent's children with the wanted nodes in order; untouched nodes are not re-inserted.
   function syncChildren(parent, nodes) {
@@ -296,127 +589,362 @@
     [/balancing active/i, 'The battery is balancing its cells right now; this finishes on its own.'],
   ];
 
-  function createDeviceHalf(className, title, imageName, badgeMetric, badgeLabel, metricDefs, factDefs) {
-    const half = element('section', `device-half ${className}`);
-    half.append(element('h4', 'device-half-title', title));
-    const cell = (label) => {
-      const node = element('div', 'device-metric');
-      const dd = element('dd', 'mb-0 fw-semibold');
-      node.append(element('dt', 'fw-normal text-secondary', label), dd);
-      return { node, dd };
-    };
-    const list = element('dl', 'device-metrics mb-0');
-    const facts = element('dl', 'device-facts mb-0');
-    const rows = [];
-    for (const [name, label] of metricDefs) {
-      const { node, dd } = cell(label);
-      const row = { name, dd, cell: node, optional: false, bar: null };
-      if (name === 'battery_soc') {
-        // Decorative: the percentage is already printed above the bar.
-        row.bar = element('div', 'device-soc-bar');
-        row.bar.setAttribute('aria-hidden', 'true');
-        row.bar.append(element('div', 'device-soc-fill'));
-        node.append(row.bar);
-      }
-      list.append(node);
-      rows.push(row);
+  // One cell of a card's key-value grid: decorative icon, then a <dl> holding only the label/value
+  // pair. The icon is a sibling of the <dl>, never inside the dt/dd group — a <dl> div-wrapper may
+  // contain only dt and dd, so the grid container is a plain <div> and each pair gets its own <dl>
+  // (A11Y-02).
+  function createMetricCell({ label, icon }) {
+    const node = element('div', 'device-metric-card');
+    if (icon) {
+      const iconNode = element('span', 'material-icons device-metric-card-icon', icon);
+      iconNode.setAttribute('aria-hidden', 'true');
+      node.append(iconNode);
     }
-    const { node: badgeNode, dd: badgeDd } = cell(badgeLabel);
-    badgeDd.classList.add('device-fact-badge');
-    badgeNode.classList.add('device-status-metric');
-    const note = element('p', 'device-notice-text mb-0');
-    note.hidden = true;
-    badgeNode.append(note);
-    const badgeCell = { badgeMetric, dd: badgeDd, cell: badgeNode, note };
-    for (const [name, label] of factDefs) {
-      const { node, dd } = cell(label);
-      rows.push({ name, dd, cell: node, optional: true, bar: null });
-    }
-    const readings = element('div', 'device-readings');
-    readings.append(list, facts);
-    const image = element('img', 'device-half-image');
+    const list = element('dl', 'device-metric-pair mb-0');
+    const dd = element('dd', 'mb-0');
+    list.append(element('dt', 'fw-normal', label), dd);
+    node.append(list);
+    return { node, dd };
+  }
+
+  // Header shared by the power card and every battery card: icon + title left, status chip right.
+  // Both start on the same baseline, which is what keeps the cards reading as equal columns.
+  function createCardHead(title, icon) {
+    const head = element('div', 'device-subcard-head');
+    const titleNode = element('h4', 'device-subcard-title mb-0');
+    const iconNode = element('span', 'material-icons', icon);
+    iconNode.setAttribute('aria-hidden', 'true');
+    const titleText = element('span', null, title);
+    titleNode.append(iconNode, titleText);
+    const chip = element('span', 'status-badge status-badge-neutral');
+    const text = element('span');
+    chip.append(text);
+    chip.hidden = true;
+    head.append(titleNode, chip);
+    // titleText is exposed separately so a renamed tower ("Battery 1" -> "Battery 2") can be patched
+    // without touching the decorative icon beside it.
+    return { node: head, chip, chipText: text, titleText };
+  }
+
+  function cardImage(imageName, width, height) {
+    const image = element('img', 'device-subcard-image');
     image.src = `/admin/static/img/${imageName}`;
     image.alt = '';
-    image.width = 152;
-    image.height = 200;
-    const content = element('div', 'device-half-content');
-    content.append(image, readings);
-    half.append(content);
-    return { node: half, rows, badgeCell, facts };
+    image.width = width;
+    image.height = height;
+    return image;
   }
 
+  // Power card: header, inverter image on the left, a fixed 2-column key-value grid on the right.
+  function createPowerCard() {
+    const card = element('section', 'device-subcard device-subcard-power');
+    const head = createCardHead('Inverter / Power', 'bolt');
+    // Plain <div>, not <dl>: each cell carries its own <dl> so the per-cell icon never sits inside
+    // a dt/dd group (A11Y-02).
+    const grid = element('div', 'device-metric-grid mb-0');
+    const cells = POWER_CELLS.map((spec) => {
+      const { node, dd } = createMetricCell(spec);
+      grid.append(node);
+      return { ...spec, dd, node };
+    });
+    const body = element('div', 'device-subcard-body');
+    body.append(cardImage('rct-inverter.svg', 120, 127), grid);
+    card.append(head.node, body);
+    return { node: card, head, grid, cells, statusMetric: 'inverter_state' };
+  }
+
+  // Battery card: header, tower image on the left, and on the right the charge level with its bar
+  // directly beneath the value, then a 2x2 fact grid. Same outer shape as the power card.
+  // Identity of a tower descriptor for reuse purposes: same tower and same metric mapping means the
+  // existing card can be patched; a different mapping needs a fresh grid, so the card is rebuilt.
+  function batteryTowerKey(tower) {
+    return `${tower.id}\u0000${BATTERY_CELLS.map((cell) => tower.metrics[cell.role] || '').join('\u0001')}`;
+  }
+
+  function createBatteryCard(tower) {
+    const card = element('section', 'device-subcard device-subcard-battery');
+    const head = createCardHead(tower.title, 'battery_charging_full');
+    const charge = element('div', 'device-charge');
+    // The dt/dd charge pair gets its own <dl> so it has a valid list ancestor; the decorative SoC
+    // bar stays a sibling of that <dl>, not a member of the dt/dd group (A11Y-02).
+    const chargeList = element('dl', 'device-charge-pair mb-0');
+    const chargeValue = element('dd', 'mb-0 device-charge-value');
+    chargeList.append(element('dt', 'fw-normal', 'Charge level'), chargeValue);
+    charge.append(chargeList);
+    const bar = element('div', 'device-soc-bar');
+    bar.setAttribute('aria-hidden', 'true');  // the percentage is printed right above it
+    bar.append(element('div', 'device-soc-fill'));
+    charge.append(bar);
+    const grid = element('div', 'device-metric-grid mb-0');
+    // Only the roles this tower actually has a metric name for; a role the device reports per
+    // device rather than per tower is absent from the second tower's map and gets no cell here.
+    const cells = BATTERY_CELLS.filter((spec) => tower.metrics[spec.role]).map((spec) => {
+      const { node, dd } = createMetricCell(spec);
+      grid.append(node);
+      return { ...spec, name: tower.metrics[spec.role], dd, node };
+    });
+    const readings = element('div', 'device-subcard-readings');
+    readings.append(charge, grid);
+    const stack = element('div', 'device-battery-stack');
+    // Shown instead of the tower when no module count can be trusted; see patchBatteryCard.
+    const note = element('p', 'device-battery-note mb-0');
+    note.hidden = true;
+    const column = element('div', 'device-battery-column');
+    column.append(stack, note);
+    const body = element('div', 'device-subcard-body');
+    body.append(column, readings);
+    card.append(head.node, body);
+    return {
+      node: card, head, grid, cells, chargeValue, bar, stack, note, renderedModules: -1,
+      towerKey: batteryTowerKey(tower), socMetric: tower.metrics.soc, statusMetric: tower.metrics.status,
+    };
+  }
+
+  // Main area of a device card: the flow graphic panel and the detail panel (power card plus a
+  // grid of battery cards). Both panels are created once; polls only patch their contents.
   function createDeviceVisual() {
-    const wrap = element('div', 'device-visual');
-    const inverterHalf = createDeviceHalf(
-      'device-half-inverter', 'Power', 'rct-inverter.svg', 'inverter_state', 'Inverter status', INVERTER_METRICS, INVERTER_FACTS,
-    );
-    const batteryHalf = createDeviceHalf(
-      'device-half-battery', 'Battery', 'rct-batterystack.svg', 'battery_status2', 'Battery status', BATTERY_METRICS, BATTERY_FACTS,
-    );
-    const divider = element('div', 'device-divider');
-    divider.setAttribute('aria-hidden', 'true');
-    wrap.append(inverterHalf.node, divider, batteryHalf.node);
-    return { node: wrap, inverterHalf, batteryHalf };
+    const wrap = element('div', 'device-visual device-item-main');
+    const flow = energyFlowGraphic();
+    const flowBox = element('div', 'device-flow-graphic device-flow-panel');
+    flowBox.hidden = true;
+    flowBox.append(flow.svg, flow.badges);
+    const cards = element('div', 'device-visual-cards device-detail-panel');
+    const inverterCard = createPowerCard();
+    const batteryGrid = element('div', 'device-battery-grid');
+    cards.append(inverterCard.node, batteryGrid);
+    wrap.append(flowBox, cards);
+    // batteries grows to match batteryTowers() on the first patch; see patchDeviceVisual.
+    return { node: wrap, flow, flowBox, cards, batteryGrid, inverterCard, batteries: [] };
   }
 
-  // Patches one half's rows and badge cell in place, same reconciliation pattern for both halves.
-  function patchDeviceHalf(half, metrics) {
-    const factNodes = [];
-    const { badgeMetric, dd: badgeDd, cell: badgeCell, note } = half.badgeCell || {};
-    // Falls back to the second battery stack's status when the first is not present.
-    const badgeReading = badgeMetric ? metrics.get(badgeMetric) || (badgeMetric === 'battery_status2' ? metrics.get('battery_placeholder_0_status2') : undefined) : undefined;
-    if (badgeReading?.label) {
-      const badgeText = badgeReading.label;
-      setText(badgeDd, badgeText);
-      if (badgeDd.title !== badgeText) badgeDd.title = badgeText;
-      const notice = BATTERY_NOTICES.find(([pattern]) => pattern.test(badgeText));
-      setClass(badgeCell, 'is-notice', Boolean(notice));
-      setText(note, notice ? notice[1] : '');
-      note.hidden = !notice;
-      factNodes.push(badgeCell);
+  // Shows the server-decoded status text as a compact chip. A status that needs an explanation
+  // carries it in the title tooltip only, so no long prose sits permanently in the card.
+  // No cross-tower fallback: a tower shows its own status or none. Falling back from
+  // battery_status2 to battery_placeholder_0_status2 made a second tower's status appear on the
+  // first tower's chip, which is exactly the kind of shared-value bug this card had.
+  function patchCardStatus(head, metrics, statusMetric) {
+    const reading = statusMetric ? metrics.get(statusMetric) : undefined;
+    if (!reading?.label) { head.chip.hidden = true; return; }
+    const text = reading.label;
+    setText(head.chipText, text);
+    const notice = BATTERY_NOTICES.find(([pattern]) => pattern.test(text));
+    const title = notice ? `${text} — ${notice[1]}` : text;
+    if (head.chip.title !== title) head.chip.title = title;
+    setClass(head.chip, 'status-badge-warning', Boolean(notice));
+    setClass(head.chip, 'status-badge-neutral', !notice);
+    head.chip.hidden = false;
+  }
+
+  // Fills one key-value cell. Returns false when the device reports no reading for it, so an
+  // optional cell can be dropped from the grid instead of showing a permanent placeholder.
+  function patchMetricCell(cell, metrics) {
+    const metric = metrics.get(cell.name);
+    if (!metric && cell.optional) return false;
+    if (cell.kind === 'label') {
+      const available = Boolean(metric?.label);
+      setReading(cell.dd, available ? metric.label : 'n/a');
+      setClass(cell.dd, 'text-secondary', !available);
+      return available;
     }
-    for (const { name, dd, cell, optional, bar } of half.rows) {
-      const metric = metrics.get(name);
-      if (optional) {
-        if (!metric) continue;  // no reading for this device: leave the fact out
-        factNodes.push(cell);
-      }
-      const value = metric && metric.value !== null && metric.value !== undefined ? Number(metric.value) : NaN;
-      const calibrationDate = name === 'power_mng_bat_next_calib_date' && Number.isFinite(value) && value > 0 ? new Date(value * 1000) : null;
-      const available = name === 'power_mng_bat_next_calib_date' ? Boolean(calibrationDate && !Number.isNaN(calibrationDate.getTime())) : Number.isFinite(value);
-      const isGrid = name === 'grid_power';
-      const [number, unit] = calibrationDate ? [formatDate(calibrationDate, { time: true }), ''] : metricParts(isGrid ? Math.abs(value) : value, metric?.unit);
-      if (available) setReading(dd, number, unit, isGrid ? gridFlow(value) : null); else setReading(dd, 'n/a');
-      setClass(dd, 'text-secondary', !available);
-      if (bar) {
-        const percent = available ? Math.min(100, Math.max(0, metric.unit === 'ratio' ? value * 100 : value)) : 0;
-        const width = `${percent}%`;
-        if (bar.firstElementChild.style.width !== width) bar.firstElementChild.style.width = width;
+    const value = metric && metric.value !== null && metric.value !== undefined ? Number(metric.value) : NaN;
+    const calibrationDate = cell.name === 'power_mng_bat_next_calib_date' && Number.isFinite(value) && value > 0 ? new Date(value * 1000) : null;
+    const available = cell.name === 'power_mng_bat_next_calib_date'
+      ? Boolean(calibrationDate && !Number.isNaN(calibrationDate.getTime()))
+      : Number.isFinite(value);
+    const isGrid = cell.name === 'grid_power';
+    const [number, unit] = calibrationDate
+      ? [formatDate(calibrationDate, { time: true }), '']
+      : metricParts(isGrid ? Math.abs(value) : value, metric?.unit);
+    if (available) setReading(cell.dd, number, unit, isGrid ? gridFlow(value) : null); else setReading(cell.dd, 'n/a');
+    setClass(cell.dd, 'text-secondary', !available);
+    return available;
+  }
+
+  function patchCardGrid(card, metrics) {
+    const nodes = [];
+    for (const cell of card.cells) {
+      const available = patchMetricCell(cell, metrics);
+      // An optional cell whose reading only ran out stays, as n/a, so the card keeps its shape.
+      if (!cell.optional || available || metrics.get(cell.name)?.expired) nodes.push(cell.node);
+    }
+    syncChildren(card.grid, nodes);
+  }
+
+  function patchBatteryCard(card, metrics, tower) {
+    const wanted = renderableModuleCount(tower);
+    // Rebuilds the slice stack only when the module count actually changed, not on every poll —
+    // same no-churn pattern as syncChildren/patchDeviceVisual elsewhere in this file.
+    if (card.renderedModules !== wanted) {
+      card.renderedModules = wanted;
+      if (wanted === null) {
+        // Either "pending" (no complete serial scan yet - a neutral, temporary state, not a
+        // fabricated tower) or "anomaly" (a complete scan whose populated slots do not describe a
+        // documented tower). Both show no tower; the note text below tells them apart.
+        card.stack.replaceChildren();
+        card.note.hidden = false;
+      } else {
+        card.stack.replaceChildren(...buildBatteryStack(wanted));
+        // The stack's CSS width is a fixed 5rem; the height cap needs the narrower per-count width.
+        card.stack.style.width = `${batterySliceWidth(wanted)}px`;
       }
     }
-    syncChildren(half.facts, factNodes);
+    if (wanted !== null) {
+      // The graphic caps at BATTERY_TOWER_MAX_SEGMENTS; the true module count stays readable as text.
+      const capped = tower.moduleCount > wanted;
+      card.note.hidden = !capped;
+      if (capped) {
+        setText(card.note, `${tower.moduleCount} modules`);
+        const detail = `This tower has ${tower.moduleCount} modules; the graphic draws at most `
+          + `${BATTERY_TOWER_MAX_SEGMENTS} battery segments.`;
+        if (card.note.title !== detail) card.note.title = detail;
+      }
+    }
+    if (wanted === null) {
+      if (tower.moduleCountStatus === 'pending') {
+        setText(card.note, 'Detecting modules…');
+        const detail = 'The battery has not finished reporting its module serials yet; the module tower will '
+          + 'appear once the scan completes.';
+        if (card.note.title !== detail) card.note.title = detail;
+      } else if (tower.moduleCountStatus === 'ok') {
+        // A trusted count above the graphic's drawn ceiling (BATTERY_TOWER_MAX_SEGMENTS) — real
+        // hardware the tower graphic contract (1 top + 1..5 segments + 1 bottom) does not cover,
+        // not a data anomaly, so it gets its own message rather than "layout unclear".
+        setText(card.note, `${tower.moduleCount} modules`);
+        const detail = `This tower has ${tower.moduleCount} modules; the tower graphic currently shows at most `
+          + `${BATTERY_TOWER_MAX_SEGMENTS}.`;
+        if (card.note.title !== detail) card.note.title = detail;
+      } else {
+        const slots = tower.populatedModuleSlots || [];
+        setText(card.note, 'Module layout unclear');
+        const detail = slots.length
+          ? `The battery reports module serials in slots ${slots.join(', ')}, which does not describe a documented tower (at most ${BATTERY_MAX_MODULES_PER_TOWER} modules, numbered without gaps). No module tower is drawn for it.`
+          : 'No usable module serials were reported, so no module tower is drawn.';
+        if (card.note.title !== detail) card.note.title = detail;
+      }
+    }
+    patchCardStatus(card.head, metrics, card.statusMetric);
+    const metric = card.socMetric ? metrics.get(card.socMetric) : undefined;
+    const value = metric && metric.value !== null && metric.value !== undefined ? Number(metric.value) : NaN;
+    const available = Number.isFinite(value);
+    // The catalog documents the unit "ratio" only on battery_soc; battery_placeholder_0_soc carries
+    // an empty unit for the same 0..1 quantity, so the charge reading falls back to ratio instead of
+    // printing a bare 0.42 for the second tower.
+    const socUnit = metric?.unit || 'ratio';
+    const [number, unit] = metricParts(value, socUnit);
+    if (available) setReading(card.chargeValue, number, unit); else setReading(card.chargeValue, 'n/a');
+    setClass(card.chargeValue, 'text-secondary', !available);
+    const percent = available ? Math.min(100, Math.max(0, socUnit === 'ratio' ? value * 100 : value)) : 0;
+    const width = `${percent}%`;
+    if (card.bar.firstElementChild.style.width !== width) card.bar.firstElementChild.style.width = width;
+    patchCardGrid(card, metrics);
   }
 
   function patchDeviceVisual(visual, device) {
     const metrics = new Map((device.metrics || []).map((item) => [item.name, item]));
-    patchDeviceHalf(visual.inverterHalf, metrics);
-    patchDeviceHalf(visual.batteryHalf, metrics);
+    patchCardStatus(visual.inverterCard.head, metrics, visual.inverterCard.statusMetric);
+    patchCardGrid(visual.inverterCard, metrics);
+    const towers = batteryTowers(metrics, device.batteries);
+    // Battery cards are created and dropped as the reported towers change; the surviving cards
+    // keep their nodes, so a poll does not rebuild the whole card.
+    while (visual.batteries.length > towers.length) visual.batteries.pop();
+    towers.forEach((tower, index) => {
+      // A card is reused only while it still describes the same tower with the same metric mapping;
+      // the fact cells are built from that mapping, so a changed one needs a new card.
+      const existing = visual.batteries[index];
+      if (!existing || existing.towerKey !== batteryTowerKey(tower)) {
+        visual.batteries[index] = createBatteryCard(tower);
+      }
+      setText(visual.batteries[index].head.titleText, tower.title);
+      patchBatteryCard(visual.batteries[index], metrics, tower);
+    });
+    setClass(visual.node, 'has-many-batteries', towers.length > 1);
+    syncChildren(visual.batteryGrid, visual.batteries.map((card) => card.node));
+    patchDeviceFlow(visual, device);
+    syncChildren(visual.node, [visual.flowBox, visual.cards]);
   }
 
-  function createDeviceCard() {
+  // Feeds the shared flow graphic from device.energy_flow on the /admin/api/devices response
+  // (business-signed, server-normalized, dispatch-independent) — never from device.metrics, which
+  // is device-signed and has no battery_power. Hidden when the device has no energy_flow or every
+  // reading in it is absent, so a device without energy data shows no graphic.
+  function patchDeviceFlow(visual, device) {
+    const readings = device.energy_flow;
+    const hasReading = readings && Object.values(readings).some((reading) => reading && reading.value != null);
+    const shown = Boolean(hasReading || device.flow_known);
+    visual.flowBox.hidden = !shown;
+    setClass(visual.node, 'has-flow', shown);
+    if (shown) visual.flow.update(readings);
+  }
+
+  // Collapsed device ids live in localStorage (survives logins); read once, then kept in memory
+  // so blocked storage or malformed JSON only costs persistence, never the dashboard.
+  const COLLAPSED_KEY = 'rct-admin.collapsedDevices';
+  const EXPANDED_KEY = 'rct-admin.expandedDevices';
+  const collapseChoices = { [COLLAPSED_KEY]: null, [EXPANDED_KEY]: null };
+  let deviceCardCount = 0;
+
+  function choiceSet(storageKey) {
+    if (collapseChoices[storageKey]) return collapseChoices[storageKey];
+    const ids = new Set();
+    collapseChoices[storageKey] = ids;
+    try {
+      const stored = JSON.parse(localStorage.getItem(storageKey));
+      if (Array.isArray(stored)) stored.forEach((id) => { if (typeof id === 'string') ids.add(id); });
+    } catch { /* storage blocked or JSON malformed: fall back to the default */ }
+    return ids;
+  }
+
+  // An explicit user choice wins; without one a single inverter starts open, several start closed.
+  function isCollapsed(key, deviceCount) {
+    if (choiceSet(COLLAPSED_KEY).has(key)) return true;
+    if (choiceSet(EXPANDED_KEY).has(key)) return false;
+    return deviceCount > 1;
+  }
+
+  function rememberCollapsed(key, collapsed) {
+    choiceSet(collapsed ? COLLAPSED_KEY : EXPANDED_KEY).add(key);
+    choiceSet(collapsed ? EXPANDED_KEY : COLLAPSED_KEY).delete(key);
+    for (const storageKey of [COLLAPSED_KEY, EXPANDED_KEY]) {
+      try { localStorage.setItem(storageKey, JSON.stringify([...choiceSet(storageKey)])); } catch { /* keep in-memory state */ }
+    }
+  }
+
+  function setCardCollapsed(ref, collapsed) {
+    ref.visual.node.hidden = collapsed;
+    setClass(ref.card, 'is-collapsed', collapsed);
+    ref.toggle.setAttribute('aria-expanded', String(!collapsed));
+  }
+
+  function createDeviceCard(key, deviceCount) {
+    const toggle = element('button', 'device-toggle');
+    toggle.type = 'button';
+    const icon = element('span', 'material-icons', 'expand_more');
+    icon.setAttribute('aria-hidden', 'true');
+    toggle.append(icon);
     const ref = {
+      toggle,
       card: element('article', 'device-item'),
       head: element('div', 'device-head'),
-      statusBadge: element('span', 'device-status-badge device-status-badge-online'),
+      statusBadge: element('span', 'status-badge status-badge-success'),
       top: element('div', 'device-head-main'),
       meta: element('div', 'device-head-meta'),
       dot: element('span', 'status-dot'),
       title: element('h3', 'mb-0 me-auto'),
       statusText: element('div', 'fw-medium small'),
       address: element('small', 'text-secondary'),
+      serial: element('small', 'text-secondary device-serial'),
       last: element('small', 'text-secondary'),
       visual: createDeviceVisual(),
     };
+    ref.visual.node.id = `device-body-${++deviceCardCount}`;
+    toggle.setAttribute('aria-controls', ref.visual.node.id);
+    let collapsedNow = isCollapsed(key, deviceCount);
+    setCardCollapsed(ref, collapsedNow);
+    toggle.addEventListener('click', () => {
+      collapsedNow = !collapsedNow;
+      rememberCollapsed(key, collapsedNow);
+      setCardCollapsed(ref, collapsedNow);
+    });
     return ref;
   }
 
@@ -427,12 +955,15 @@
     setText(ref.statusBadge, status);
     ref.dot.className = `status-dot ${statusClass}`;
     setText(ref.title, device.name || device.id || 'Inverter');
+    ref.toggle.setAttribute('aria-label', `Show or hide details of ${ref.title.textContent}`);
     setText(ref.statusText, status);
     // Name, address, last connection and the connection state share two compact header lines.
-    syncChildren(ref.top, connected ? [ref.title, ref.statusBadge] : [ref.dot, ref.title, ref.statusText]);
-    setText(ref.address, `${device.host || '–'}${device.port ? `:${device.port}` : ''}`);
+    syncChildren(ref.top, connected ? [ref.toggle, ref.title, ref.statusBadge] : [ref.toggle, ref.dot, ref.title, ref.statusText]);
+    setText(ref.address, `${device.host || NOT_AVAILABLE}${device.port ? `:${device.port}` : ''}`);
     if (device.last_success_at) setText(ref.last, `Last connection: ${formatDate(device.last_success_at, { time: true })}`);
-    syncChildren(ref.meta, device.last_success_at ? [ref.address, ref.last] : [ref.address]);
+    const serial = typeof device.serial_number === 'string' ? device.serial_number.trim() : '';
+    if (serial) setText(ref.serial, `S/N: ${serial}`);
+    syncChildren(ref.meta, [ref.address, ...(serial ? [ref.serial] : []), ...(device.last_success_at ? [ref.last] : [])]);
     syncChildren(ref.head, [ref.top, ref.meta]);
     patchDeviceVisual(ref.visual, device);
     syncChildren(ref.card, [ref.head, ref.visual.node]);
@@ -449,7 +980,167 @@
   let dashboardTimer = null;
   let dashboardController = null;
   let dashboardGeneration = 0;
-  let dashboardLastSuccess = null;
+  // Last known state per device and for the TSDB tile. A poll only refreshes what it actually
+  // delivered; everything else keeps its last value until it is older than VALUE_MAX_AGE_MS (the
+  // next expected poll plus a tolerance) and then shows n/a. Structure (towers, flow graphic)
+  // outlives values, so a failed, empty or "connecting" answer never rebuilds the layout.
+  const SNAPSHOT_KEY = 'rct.dashboard.snapshot';
+  const SNAPSHOT_VERSION = 2;
+  const SNAPSHOT_MAX_AGE_MS = 60 * 60 * 1000;
+  const VALUE_MAX_AGE_MS = DASHBOARD_INTERVAL_MS + DASHBOARD_TIMEOUT_MS + 2000;
+  const FLOW_FIELDS = ['pv_power_w', 'grid_power_w', 'house_load_w', 'battery_power_w', 'battery_soc_percent'];
+  let dashboardView = new Map(); // key -> { device, metrics: Map(name -> { metric, at }), flow: Map(field -> { reading, at }), batteries }
+  let dashboardTsdb = { raw: null, good: null, goodAt: 0 };
+  let dashboardSnapshot = null; // { at } of the last successful poll (or of the restored snapshot)
+  let dashboardStaleTimer = null;
+  let dashboardBanner = null;
+
+  function deviceKeys(devices) {
+    const seen = new Set();
+    return devices.map((device, index) => {
+      let key = String(device.id ?? `index-${index}`);
+      while (seen.has(key)) key += '+';
+      seen.add(key);
+      return key;
+    });
+  }
+
+  // Whether a card cell shows this reading as a value (not n/a); only such a cell can run out.
+  function metricShown(metric) {
+    const value = metric.value !== null && metric.value !== undefined ? Number(metric.value) : NaN;
+    return Number.isFinite(value) && (metric.name !== 'power_mng_bat_next_calib_date' || value > 0);
+  }
+
+  // A TSDB status is "settled" when it is not configured or exports healthily; a restart reports an
+  // unsettled one for a moment, which must not replace the last settled status before it expires.
+  const tsdbSettled = (tsdb) => Boolean(tsdb) && (!tsdb.configured || (tsdb.export_enabled && tsdb.healthy));
+
+  function absorbDashboard(devices, tsdb, now) {
+    const keys = deviceKeys(devices);
+    const next = new Map();
+    devices.forEach((incoming, index) => {
+      const prev = dashboardView.get(keys[index]);
+      const entry = prev || { metrics: new Map(), flow: new Map(), batteries: [] };
+      for (const metric of Array.isArray(incoming.metrics) ? incoming.metrics : []) entry.metrics.set(metric.name, { metric, at: now });
+      for (const field of FLOW_FIELDS) {
+        const reading = incoming.energy_flow?.[field];
+        if (reading && reading.value !== null && reading.value !== undefined) entry.flow.set(field, { reading, at: now });
+      }
+      // Towers merge by id: one that is missing from an answer (module scan after a restart) stays and
+      // runs out by its values; a tower still detecting its modules keeps its last module count.
+      const reported = new Map((Array.isArray(incoming.batteries) ? incoming.batteries : []).map((tower) => [tower.id, tower]));
+      const merged = [];
+      for (const known of entry.batteries) {
+        const tower = reported.get(known.id);
+        reported.delete(known.id);
+        if (!tower) { if (now - known.seen_at <= SNAPSHOT_MAX_AGE_MS) merged.push(known); continue; }
+        merged.push(tower.module_count_status !== 'ok' && known.module_count_status === 'ok'
+          ? { ...tower, module_count: known.module_count, module_count_status: 'ok', populated_module_slots: known.populated_module_slots, seen_at: now }
+          : { ...tower, seen_at: now });
+      }
+      for (const tower of reported.values()) merged.push({ ...tower, seen_at: now });
+      entry.batteries = merged;
+      const { metrics, batteries, energy_flow: flow, ...info } = incoming; // the parts above are kept per value
+      entry.device = { ...info, last_success_at: info.last_success_at || prev?.device.last_success_at || null };
+      next.set(keys[index], entry);
+    });
+    dashboardView = next;
+    dashboardTsdb.raw = tsdb;
+    if (tsdbSettled(tsdb)) { dashboardTsdb.good = tsdb; dashboardTsdb.goodAt = now; }
+  }
+
+  // The devices as shown at `now`: expired values become null (n/a), expired structure is dropped.
+  function viewDevices(now) {
+    return [...dashboardView.values()].map((entry) => {
+      const flow = {};
+      for (const field of FLOW_FIELDS) {
+        const known = entry.flow.get(field);
+        flow[field] = known && now - known.at <= VALUE_MAX_AGE_MS
+          ? known.reading : { value: null, stale: true, age_seconds: null, expired: Boolean(known) };
+      }
+      return {
+        ...entry.device,
+        metrics: [...entry.metrics.values()].map(({ metric, at }) => (now - at <= VALUE_MAX_AGE_MS ? metric : { ...metric, value: null, label: undefined, expired: metricShown(metric) })),
+        batteries: entry.batteries.filter((tower) => now - tower.seen_at <= SNAPSHOT_MAX_AGE_MS),
+        energy_flow: flow,
+        flow_known: [...entry.flow.values()].some((known) => now - known.at <= SNAPSHOT_MAX_AGE_MS),
+      };
+    });
+  }
+
+  function viewTsdb(now) {
+    const { raw, good, goodAt } = dashboardTsdb;
+    return !tsdbSettled(raw) && good && now - goodAt <= VALUE_MAX_AGE_MS ? good : raw;
+  }
+
+  // Re-renders from the last known state and arms a timer for the next value that runs out.
+  function refreshDashboard() {
+    clearTimeout(dashboardStaleTimer);
+    dashboardStaleTimer = null;
+    const now = Date.now();
+    renderDashboard(viewDevices(now), viewTsdb(now));
+    const ages = [dashboardTsdb.goodAt];
+    for (const entry of dashboardView.values()) {
+      for (const { at } of entry.metrics.values()) ages.push(at);
+      for (const { at } of entry.flow.values()) ages.push(at);
+    }
+    const live = ages.filter((at) => at && now - at < VALUE_MAX_AGE_MS);
+    if (live.length) dashboardStaleTimer = setTimeout(refreshDashboard, Math.min(...live) + VALUE_MAX_AGE_MS - now + 50);
+  }
+
+  function saveSnapshot() {
+    const snapshot = {
+      v: SNAPSHOT_VERSION, at: dashboardSnapshot.at, tsdb: dashboardTsdb,
+      devices: [...dashboardView].map(([key, entry]) => ({
+        key, device: entry.device, metrics: [...entry.metrics.values()], flow: [...entry.flow], batteries: entry.batteries,
+      })),
+    };
+    try { localStorage.setItem(SNAPSHOT_KEY, JSON.stringify(snapshot)); } catch { /* storage full or blocked */ }
+  }
+
+  // After a reload (the connection-lost modal reloads once the server is back) the page starts from
+  // the stored state instead of from an empty one; values still expire by their own age.
+  function restoreSnapshot() {
+    try {
+      const stored = JSON.parse(localStorage.getItem(SNAPSHOT_KEY) || 'null');
+      if (!stored || stored.v !== SNAPSHOT_VERSION || !Array.isArray(stored.devices) || !Number.isFinite(stored.at) || Date.now() - stored.at >= SNAPSHOT_MAX_AGE_MS) return false;
+      const view = new Map();
+      for (const item of stored.devices) {
+        view.set(item.key, {
+          device: item.device, metrics: new Map(item.metrics.map((known) => [known.metric.name, known])),
+          flow: new Map(item.flow), batteries: item.batteries,
+        });
+      }
+      dashboardTsdb = { raw: stored.tsdb.raw, good: stored.tsdb.good, goodAt: stored.tsdb.goodAt };
+      dashboardView = view;
+      dashboardSnapshot = { at: stored.at };
+      return true;
+    } catch { return false; /* corrupt or foreign entry: start empty */ }
+  }
+
+  // The note takes the place of the page subtitle, so showing it never moves the grid.
+  function setDashboardStale(error) {
+    const grid = $('dashboard-grid') || $('devices-list');
+    const subtitle = document.querySelector('.page-heading p.text-secondary');
+    if (!dashboardBanner) {
+      dashboardBanner = element('p', 'dashboard-offline-banner fw-medium text-warning-emphasis mb-0');
+      dashboardBanner.setAttribute('role', 'status');
+      if (subtitle) subtitle.after(dashboardBanner); else grid.before(dashboardBanner);
+    }
+    const reason = error?.status >= 500 ? `Server error (${error.status})` : 'Connection to server lost';
+    const text = `${reason} – data from ${hhmm(new Date(dashboardSnapshot.at))}`;
+    if (dashboardBanner.textContent !== text) dashboardBanner.textContent = text;
+    dashboardBanner.hidden = false;
+    if (subtitle) subtitle.hidden = true;
+    grid.classList.add('is-offline');
+  }
+
+  function clearDashboardStale() {
+    if (dashboardBanner) dashboardBanner.hidden = true;
+    const subtitle = document.querySelector('.page-heading p.text-secondary');
+    if (subtitle) subtitle.hidden = false;
+    ($('dashboard-grid') || $('devices-list')).classList.remove('is-offline');
+  }
 
   function dashboardDelay() {
     const base = Math.min(DASHBOARD_INTERVAL_MS * 2 ** dashboardFailures, DASHBOARD_MAX_INTERVAL_MS);
@@ -471,18 +1162,49 @@
     } catch { /* the count is informational; keep the last value */ }
   }
 
-  function renderDashboard(devices) {
+  function renderTsdbTile(tsdb) {
+    const icon = $('tsdb-status-icon');
+    const label = $('tsdb-status-label');
+    const time = $('tsdb-status-time');
+    icon.classList.remove('text-success', 'text-danger', 'text-secondary');
+    if (!tsdb || !tsdb.configured) {
+      icon.textContent = 'cloud_off';
+      icon.classList.add('text-secondary');
+      label.textContent = NOT_AVAILABLE;
+      label.title = 'Not configured'; // the reason stays secondary; the value reads n/a
+      time.textContent = '';
+      return;
+    }
+    label.title = '';
+    if (!tsdb.export_enabled) {
+      icon.textContent = 'pause_circle';
+      icon.classList.add('text-secondary');
+      label.textContent = NOT_AVAILABLE;
+      label.title = 'Export disabled';
+    } else if (tsdb.healthy) {
+      icon.textContent = 'cloud_done';
+      icon.classList.add('text-success');
+      label.textContent = 'Sending';
+    } else {
+      icon.textContent = 'sync_problem';
+      icon.classList.add('text-danger');
+      label.textContent = 'Failing';
+    }
+    time.textContent = tsdb.last_success_at ? `Last sent ${hhmm(new Date(tsdb.last_success_at))}` : '';
+  }
+
+  function renderDashboard(devices, tsdb) {
     const list = $('devices-list');
     showHeroMetrics(devices);
+    renderTsdbTile(tsdb);
     $('device-count').textContent = String(devices.length);
     $('connected-count').textContent = String(devices.filter((item) => displayStatus(item.status)[1] === 'online').length);
-    const seen = new Set();
+    const keys = deviceKeys(devices);
+    const seen = new Set(keys);
     const nodes = devices.map((device, index) => {
-      let key = String(device.id ?? `index-${index}`);
-      while (seen.has(key)) key += '+';
-      seen.add(key);
+      const key = keys[index];
       let ref = dashboardCards.get(key);
-      if (!ref) { ref = createDeviceCard(); dashboardCards.set(key, ref); }
+      if (!ref) { ref = createDeviceCard(key, devices.length); dashboardCards.set(key, ref); }
       patchDeviceCard(ref, device);
       return ref.card;
     });
@@ -501,19 +1223,25 @@
     dashboardController = controller;
     const timer = setTimeout(() => controller.abort(Object.assign(new Error('The dashboard request timed out.'), { name: 'TimeoutError' })), DASHBOARD_TIMEOUT_MS);
     try {
+      // One network leg: the flow graphic is fed from device.energy_flow on this same response, a
+      // dispatch-independent projection, not from a second energy/devices fetch.
       const data = await api('devices', { signal: controller.signal });
       if (generation !== dashboardGeneration) return 'skipped';
       dashboardPollFailing = false;
       dashboardFailures = 0;
-      renderDashboard(Array.isArray(data.devices) ? data.devices : []);
-      dashboardLastSuccess = new Date();
-      const updated = $('dashboard-updated');
-      if (updated) updated.textContent = `Updated ${hhmm(dashboardLastSuccess)}`;
+      const now = Date.now();
+      absorbDashboard(Array.isArray(data.devices) ? data.devices : [], data.tsdb || null, now);
+      dashboardSnapshot = { at: now };
+      refreshDashboard();
+      saveSnapshot();
+      clearDashboardStale();
       return 'ok';
     } catch (error) {
       if (generation !== dashboardGeneration) return 'skipped';
       dashboardFailures += 1;
-      syncChildren($('devices-list'), [dashboardNotices.error]);
+      // Server unreachable or failing: the last known state stays on screen and expires value by value.
+      if (dashboardSnapshot) setDashboardStale(error);
+      else syncChildren($('devices-list'), [dashboardNotices.error]);
       // Automatic background polls toast only on the first failure after a success streak, so a
       // sustained outage does not spam one alert per poll; a non-automatic load always toasts.
       if (!automatic || !dashboardPollFailing) toast(messageFrom(error), 'danger');
@@ -526,6 +1254,7 @@
   }
 
   function initDashboardPolling() {
+    if (restoreSnapshot()) refreshDashboard();
     // Refresh at once when the tab becomes visible instead of waiting for the next tick.
     document.addEventListener('visibilitychange', () => {
       if (document.hidden) { clearTimeout(dashboardTimer); dashboardTimer = null; return; }
@@ -539,28 +1268,63 @@
     const date = new Date(value);
     if (Number.isNaN(date.getTime())) return String(value);
     // Locale comes from the browser (undefined), never a hardcoded region.
-    return new Intl.DateTimeFormat(undefined, time ? { dateStyle: 'medium', timeStyle: 'short' } : { dateStyle: 'medium' }).format(date);
+    return new Intl.DateTimeFormat(undefined, time ? { dateStyle: 'medium', timeStyle: 'medium' } : { dateStyle: 'medium' }).format(date);
   }
+
+  function tokenEmptyRow() {
+    const row = element('tr');
+    const cell = element('td', 'text-secondary', 'No API tokens created yet.');
+    cell.colSpan = 6;
+    row.append(cell);
+    return row;
+  }
+
+  function tokenRoleCell(role) {
+    const write = role !== 'read';
+    const cell = element('td');
+    cell.append(element('span', `status-badge ${write ? 'status-badge-warning' : 'status-badge-success'}`, write ? 'Read and write' : 'Read'));
+    return cell;
+  }
+
+  let tokensRequest = 0;
 
   async function loadTokens() {
     const host = $('tokens-list');
+    const request = ++tokensRequest;
     const data = await api('tokens');
+    if (request !== tokensRequest) return; // a newer load owns the table
     host.replaceChildren();
-    if (!data.tokens?.length) { host.append(element('p', 'text-secondary mb-0', 'No tokens created yet.')); return; }
+    if (!data.tokens?.length) { host.append(tokenEmptyRow()); return; }
     for (const token of data.tokens) {
-      const row = element('div', 'token-row');
-      const details = element('div');
-      details.append(element('strong', 'd-block', token.name), element('small', 'd-block text-secondary', `${token.role === 'read' ? 'Read' : 'Read and write'} · Created: ${formatDate(token.created_at)} · Last used: ${formatDate(token.last_used_at, { time: true, empty: 'Never' })} · Expires: ${formatDate(token.expires_at)}`));
-      const revoke = element('button', 'btn btn-outline-danger btn-sm', 'Revoke');
+      const row = element('tr');
+      const nowrap = (text, extra = '') => element('td', `token-nowrap${extra}`, text);
+      const actions = element('td', 'text-end token-nowrap');
+      const revoke = element('button', 'btn btn-outline-danger btn-sm d-inline-flex align-items-center gap-1');
+      const icon = element('span', 'material-icons', 'delete');
+      icon.setAttribute('aria-hidden', 'true');
+      revoke.append(icon, 'Revoke');
       revoke.type = 'button';
       revoke.setAttribute('aria-label', `Revoke token ${token.name}`);
       revoke.addEventListener('click', async () => {
-        if (!confirm(`Really revoke token "${token.name}"?`)) return;
+        if (!await confirmAction({
+          title: 'Revoke token?',
+          message: `Applications using "${token.name}" lose access immediately. This cannot be undone.`,
+          confirmLabel: 'Revoke token',
+          danger: true,
+        })) return;
         revoke.disabled = true;
-        try { await api(`tokens/${encodeURIComponent(token.id)}`, { method: 'DELETE' }); row.remove(); toast('Token revoked.'); if (!host.childElementCount) host.append(element('p', 'text-secondary mb-0', 'No tokens created yet.')); }
+        try { await api(`tokens/${encodeURIComponent(token.id)}`, { method: 'DELETE' }); row.remove(); toast('Token revoked.'); if (!host.childElementCount) host.append(tokenEmptyRow()); }
         catch (error) { revoke.disabled = false; toast(messageFrom(error), 'danger'); }
       });
-      row.append(details, revoke);
+      actions.append(revoke);
+      row.append(
+        element('td', '', token.name),
+        tokenRoleCell(token.role),
+        nowrap(formatDate(token.created_at, { time: true })),
+        nowrap(formatDate(token.last_used_at, { time: true, empty: 'Never' })),
+        nowrap(formatDate(token.expires_at, { time: true })),
+        actions,
+      );
       host.append(row);
     }
   }
@@ -580,32 +1344,1534 @@
 
   function initTokens() {
     loadTokens().catch((error) => toast(messageFrom(error), 'danger'));
-    $('token-form').addEventListener('submit', async (event) => {
+    const modal = $('add-token-modal');
+    const form = $('token-form');
+    const showResult = (shown) => {
+      $('token-form-state').hidden = shown;
+      $('new-token-result').hidden = !shown;
+      // The dialog is named by whichever title is visible.
+      modal.setAttribute('aria-labelledby', shown ? 'token-created-title' : 'add-token-title');
+    };
+    modal.addEventListener('shown.bs.modal', () => { if (!$('token-form-state').hidden) $('token-name').focus(); });
+    // The token is shown once: a stray backdrop click or Escape must not discard it. Only the
+    // Done and close buttons (explicit actions) dismiss the result step.
+    let explicitClose = false;
+    // Done and the close button stay disabled until a copy succeeded, so the token cannot be lost unseen.
+    let copied = false;
+    const setCopied = (value) => {
+      copied = value;
+      $('token-done').disabled = !value;
+      $('token-close').disabled = !value;
+    };
+    // These two buttons close through our own handler, so the flag is set before Bootstrap's hide() runs.
+    for (const button of modal.querySelectorAll('#new-token-result [data-bs-dismiss="modal"]')) {
+      button.removeAttribute('data-bs-dismiss');
+      button.addEventListener('click', () => {
+        if (!copied) return;
+        explicitClose = true;
+        window.bootstrap.Modal.getInstance(modal)?.hide();
+      });
+    }
+    modal.addEventListener('hide.bs.modal', (event) => {
+      if ($('new-token-result').hidden || explicitClose) return;
       event.preventDefault();
-      const form = event.currentTarget;
-      submitState(form, true);
-      $('new-token-box').hidden = true;
+      toast('Copy the token first, then choose Done. It will not be shown again.', 'warning');
+    });
+    // Closing by any path wipes the plaintext secret from the DOM and restores the form state.
+    modal.addEventListener('hidden.bs.modal', () => {
+      explicitClose = false;
+      setCopied(false);
       $('new-token-value').textContent = '';
+      showResult(false);
+      form.reset();
+      $('token-expires').value = EXPIRY_DEFAULT;
+    });
+    form.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      submitState(form, true);
       const expiry = expiryFromPreset($('token-expires').value);
       const body = { name: $('token-name').value.trim(), role: $('token-role').value };
       if (expiry) body.expires_at = expiry;
       try {
         const result = await api('tokens', { method: 'POST', body: JSON.stringify(body) });
         $('new-token-value').textContent = result.token || '';
-        $('new-token-box').hidden = false;
-        form.reset();
-        // reset() restores the markup default, which is the 90-day option; set it explicitly so a
-        // later markup reorder cannot silently default new tokens to "Never expires".
-        $('token-expires').value = EXPIRY_DEFAULT;
+        setCopied(false);
+        showResult(true);
+        $('copy-token').focus();
         await loadTokens();
         toast('Token created. Please copy it now.');
       } catch (error) { toast(messageFrom(error), 'danger'); }
       finally { submitState(form, false); }
     });
     $('copy-token').addEventListener('click', async () => {
-      try { await navigator.clipboard.writeText($('new-token-value').textContent); toast('Token copied.'); }
-      catch { toast('Copying is not available here. Please select and copy the token.', 'warning'); }
+      if (await copyToClipboard($('new-token-value').textContent)) {
+        setCopied(true);
+        toast('Token copied.');
+      } else toast('Copying is not available here. Please select and copy the token.', 'warning');
     });
+  }
+
+  // Business labels for the Energy Manager's own enums (app/energy/models.py); the admin API never
+  // sends a register name or a raw dispatch mode, except in the Diagnostics section. These are
+  // presentation-only — the REST action names (charge/discharge/hold/auto) are unchanged on the wire.
+  const ENERGY_ACTION_LABELS = {
+    charge: 'Charge battery', discharge: 'Discharge battery', hold: 'Keep battery idle',
+    auto: 'Return to automatic',
+  };
+  const ENERGY_STATE_LABELS = {
+    automatic: 'Automatic', starting: 'Starting', charging: 'Charging', discharging: 'Discharging',
+    holding: 'Holding', stopping: 'Stopping', fault: 'Fault',
+  };
+  const ENERGY_REASON_LABELS = {
+    mode_off: 'the inverter is switched off', external: 'controlled by an external app',
+    write_not_permitted: 'write access was revoked',
+    limits_missing: 'power limits are not configured', hardware_not_verified: 'hardware is not verified',
+    restore_required: 'the inverter must be handed back first',
+  };
+  // The operating mode per inverter (app/energy/models.py EnergyMode): who may command it.
+  const ENERGY_MODES = [
+    ['off', 'Off', 'power_settings_new', 'the inverter runs on its own'],
+    ['manual', 'Manual', 'touch_app', 'you operate it from this page'],
+    ['external', 'External', 'api', 'an external app controls it through the API'],
+  ];
+  const ENERGY_MODE_TOASTS = {
+    off: 'Switched off; the inverter is back in automatic operation.',
+    manual: 'Manual mode: you can operate this inverter from this page.',
+    external: 'External mode: an app can now control this inverter through the API.',
+  };
+  const ENERGY_MODE_TOAST_MANUAL_LOCKED = 'Manual mode is selected, but control stays locked until the setup steps below are complete.';
+  // The Setup checklist's "Write access enabled" row is required_write_names (served by the
+  // backend, RctDispatchGateway.REQUIRED_WRITES) ⊆ approved_write_names.
+  const missingRequiredWrites = (device) => {
+    const approved = new Set(device.approved_write_names || []);
+    return (device.required_write_names || []).filter((name) => !approved.has(name));
+  };
+  // The three capabilities that must all be verified before manual control is released.
+  const ENERGY_REQUIRED_CAPABILITIES = ['write_path_convention', 'battery_power_sign_convention', 'grid_power_sign_convention'];
+  const ENERGY_POLICY_MODES = [['business_target', 'Business target'], ['below_current_soc', 'Below current SoC']];
+  const ENERGY_POLL_MS = 3000;
+  const ENERGY_POLL_TIMEOUT_MS = 8000;
+  const ENERGY_IDLE_WATTS = 20; // below this a flow counts as standing still
+  const SVG_NS = 'http://www.w3.org/2000/svg';
+  const energyPanels = new Map();
+  let energyPolling = false;
+  // Logical clock ordering poll requests against finished panel actions, so a poll requested before
+  // an action completed never overwrites its result.
+  let energyClock = 0;
+  let energyNote = null;
+  let energyExpertMode = false; // page-wide display switch; never persisted, resets on every load
+
+  function svgEl(tag, attrs = {}, text) {
+    const node = document.createElementNS(SVG_NS, tag);
+    for (const [key, value] of Object.entries(attrs)) node.setAttribute(key, String(value));
+    if (text !== undefined) node.textContent = String(text);
+    return node;
+  }
+
+  function readingValue(reading) {
+    return reading && reading.value !== null && reading.value !== undefined && Number.isFinite(Number(reading.value))
+      ? Number(reading.value) : null;
+  }
+
+  // A stale or absent figure is treated as unknown (used by the Energy Manager panel).
+  function liveValue(reading) {
+    return reading && !reading.stale ? readingValue(reading) : null;
+  }
+
+  function formatPower(watts) {
+    if (!Number.isFinite(watts)) return NOT_AVAILABLE;
+    const abs = Math.abs(watts);
+    return abs >= 1000 ? `${(abs / 1000).toFixed(2)} kW` : `${Math.round(abs)} W`;
+  }
+
+  // Operate and Setup show power in kW; the backend keeps transmitting/storing watts. Rounding
+  // boundary is pinned (design §11): < 10000 W -> two decimals (e.g. "0.90 kW"), >= 10000 W -> one.
+  function formatPowerKw(watts) {
+    if (!Number.isFinite(watts)) return NOT_AVAILABLE;
+    const abs = Math.abs(watts);
+    return `${(abs / 1000).toFixed(abs < 10000 ? 2 : 1)} kW`;
+  }
+
+  function formatPercent(value) {
+    return Number.isFinite(value) ? `${Math.round(value)} %` : NOT_AVAILABLE;
+  }
+
+  function energyFlowGraphic({ lite = false } = {}) {
+    const svg = svgEl('svg', { viewBox: lite ? '0 145 420 125' : '0 0 420 270', class: 'energy-flow-svg', role: 'img' });
+    const lines = {};
+    // Each path runs in the direction of the "positive" flow; a negative value reverses the animation.
+    const lineDefs = [
+      ['pv', 'M210 114 V154', 210, 134, 90],
+      ['grid', 'M94 190 H172', 133, 190, 0],
+      ['battery', 'M326 190 H248', 287, 190, 180],
+    ];
+    for (const [key, d, mx, my, angle] of lineDefs.filter(([key]) => !lite || key !== 'pv')) {
+      const group = svgEl('g', { class: 'flow-line is-idle' });
+      const track = svgEl('path', { class: 'flow-track', d });
+      const dots = svgEl('path', { class: 'flow-dots', d });
+      const arrow = svgEl('polygon', { class: 'flow-arrow', points: '-7,-6 7,0 -7,6' });
+      group.append(track, dots, arrow);
+      svg.append(group);
+      lines[key] = { group, dots, arrow, mx, my, angle };
+    }
+    const nodes = {};
+    const nodeDefs = [
+      ['pv', 210, 78, 'wb_sunny', 'PV', 'top'],
+      ['grid', 56, 190, 'factory', 'Grid', 'bottom'],
+      ['house', 210, 190, 'home', 'House', 'bottom'],
+      ['battery', 364, 190, 'battery_charging_full', 'Battery', 'bottom'],
+    ];
+    for (const [key, cx, cy, icon, label, place] of nodeDefs.filter(([key]) => !lite || key !== 'pv')) {
+      const group = svgEl('g', { class: 'flow-node' });
+      group.append(svgEl('circle', { class: 'flow-node-ring', cx, cy, r: 34 }));
+      group.append(svgEl('text', { class: 'flow-node-icon', x: cx, y: cy, 'aria-hidden': 'true' }, icon));
+      const top = place === 'top';
+      group.append(svgEl('text', { class: 'flow-node-label', x: cx, y: top ? 16 : cy + 50 }, label));
+      const value = svgEl('text', { class: 'flow-node-value', x: cx, y: top ? 34 : cy + 68 }, NOT_AVAILABLE);
+      group.append(value);
+      svg.append(group);
+      nodes[key] = { group, label: group.querySelector('.flow-node-label'), baseLabel: label, value };
+    }
+
+    // Four state badges under the graphic; derived in update() from the same readings and idle threshold.
+    const badges = element('div', 'flow-badges');
+    badges.setAttribute('role', 'group');
+    badges.setAttribute('aria-label', 'Energy status');
+    const badgeNodes = {};
+    for (const [key, icon, caption] of [
+      ['generation', 'wb_sunny', 'Generation'], ['consumption', 'home', 'Consumption'],
+      ['grid', 'factory', 'Grid'], ['battery', 'battery_charging_full', 'Battery'],
+    ]) {
+      const node = element('div', 'flow-badge');
+      node.hidden = true;
+      const iconNode = element('span', 'material-icons flow-badge-icon', icon);
+      iconNode.setAttribute('aria-hidden', 'true');
+      const state = element('span', 'flow-badge-state status-badge status-badge-neutral');
+      node.append(iconNode, element('span', 'flow-badge-caption', caption), state);
+      badges.append(node);
+      badgeNodes[key] = { node, state, caption };
+    }
+
+    // state is [text, favourable] or null when the reading is unknown (badge hidden, no invented state).
+    // Tone: favourable -> success, everything else -> neutral; flow states are never faults.
+    //   Generation:  Generating success | No generation neutral
+    //   Consumption: Independent success | Grid supplied neutral
+    //   Grid:        Feed-in success | Idle neutral | Import neutral
+    //   Battery:     Charging success | Discharging neutral | Idle neutral
+    //   Any badge:   n/a (reading expired) neutral
+    // `expired`: the reading ran out, so the badge reads n/a instead of vanishing (the row keeps its height).
+    function setBadge(key, state, stale, expired = false) {
+      const badge = badgeNodes[key];
+      const shown = Boolean(state) || expired;
+      if (badge.node.hidden !== !shown) badge.node.hidden = !shown;
+      if (!shown) return;
+      const [text, favourable] = state || ['n/a', false];
+      setText(badge.state, text);
+      setClass(badge.state, 'status-badge-success', favourable === true);
+      setClass(badge.state, 'status-badge-neutral', favourable !== true);
+      const label = `${badge.caption}: ${text}`;
+      if (badge.node.getAttribute('aria-label') !== label) badge.node.setAttribute('aria-label', label);
+    }
+
+    // Dot speed is the same constant on every line (the energy-flow-dash animation in admin.css); only direction and colour follow the power.
+    function setLine(key, watts, positiveKind, negativeKind) {
+      const line = lines[key];
+      const active = Number.isFinite(watts) && Math.abs(watts) >= ENERGY_IDLE_WATTS;
+      setClass(line.group, 'is-idle', !active);
+      if (!active) return;
+      const reverse = watts < 0;
+      setClass(line.group, 'is-reverse', reverse);
+      for (const kind of new Set([positiveKind, negativeKind])) setClass(line.group, kind, kind === (reverse ? negativeKind : positiveKind));
+      line.arrow.setAttribute('transform', `translate(${line.mx} ${line.my}) rotate(${line.angle + (reverse ? 180 : 0)})`);
+    }
+
+    function setNode(key, text, stale, labelSuffix = '') {
+      const node = nodes[key];
+      node.value.textContent = text;
+      node.label.textContent = labelSuffix ? `${node.baseLabel} · ${labelSuffix}` : node.baseLabel;
+      setClass(node.group, 'is-stale', stale);
+    }
+
+    function update(readings) {
+      const r = readings;
+      const pv = readingValue(r.pv_power_w);
+      const grid = readingValue(r.grid_power_w);
+      const battery = readingValue(r.battery_power_w);
+      const house = readingValue(r.house_load_w);
+      const soc = readingValue(r.battery_soc_percent);
+
+      // Same value and threshold as the node labels below; a stale reading is only dimmed, never
+      // dropped, so the animation cannot disagree with a "Charging" or "Import" label.
+      if (!lite) setLine('pv', pv, 'flow-pv', 'flow-pv');
+      setLine('grid', grid, 'flow-import', 'flow-export');
+      setLine('battery', battery, 'flow-discharge', 'flow-charge');
+
+      const gridWord = grid === null ? '' : Math.abs(grid) < ENERGY_IDLE_WATTS ? 'Idle' : grid > 0 ? 'Import' : 'Export';
+      const batteryWord = battery === null ? '' : Math.abs(battery) < ENERGY_IDLE_WATTS ? 'Idle' : battery > 0 ? 'Discharging' : 'Charging';
+      if (!lite) setNode('pv', formatPower(pv), !!r.pv_power_w.stale);
+      setNode('grid', formatPower(grid), !!r.grid_power_w.stale);
+      setNode('house', formatPower(house), !!r.house_load_w.stale);
+      setNode('battery', formatPower(battery), !!r.battery_power_w.stale,
+        soc === null ? '' : formatPercent(soc));
+      const idle = ENERGY_IDLE_WATTS;
+      if (!lite) {
+        setBadge('generation', pv === null ? null : pv >= idle ? ['Generating', true] : ['No generation', false], !!r.pv_power_w.stale, !!r.pv_power_w.expired);
+        setBadge('consumption', grid === null ? null : grid < idle ? ['Independent', true] : ['Grid supplied', false], !!r.grid_power_w.stale, !!r.grid_power_w.expired);
+        setBadge('grid', grid === null ? null : grid <= -idle ? ['Feed-in', true] : grid < idle ? ['Idle', true] : ['Import', false], !!r.grid_power_w.stale, !!r.grid_power_w.expired);
+        setBadge('battery', battery === null ? null : battery <= -idle ? ['Charging', true] : battery >= idle ? ['Discharging', false] : ['Idle', false], !!r.battery_power_w.stale, !!r.battery_power_w.expired);
+      }
+      svg.setAttribute('aria-label', [
+        ...(!lite ? [`PV ${formatPower(pv)}`] : []),
+        `grid ${grid === null ? NOT_AVAILABLE : `${formatPower(grid)} ${gridWord.toLowerCase()}`}`,
+        `battery ${battery === null ? NOT_AVAILABLE : `${formatPower(battery)} ${batteryWord.toLowerCase()}`}`,
+        `house ${formatPower(house)}`,
+      ].join(', '));
+    }
+
+    return { svg, badges, update };
+  }
+
+  function energyAvailability(device, action) {
+    return (device.actions || []).find((item) => item.action === action) || { available: false, reason: null };
+  }
+
+  // The state-independent readiness checklist (design §12). Every row is derived from a field that
+  // is authoritative in every mode, so a device that is switched off still reports it correctly
+  // (unlike device.actions[].reason, which collapses to mode_off while it is off). Shared by the
+  // Operate "needs setup" banner (§9) and the Setup block renderer (§12).
+  function energyChecklist(device) {
+    const writeAccess = device.write_support_enabled !== false && missingRequiredWrites(device).length === 0;
+    const verified = ENERGY_REQUIRED_CAPABILITIES.every((name) => {
+      const cap = (device.capabilities || []).find((item) => item.name === name);
+      return cap && cap.status === 'verified';
+    });
+    return {
+      connected: Boolean(device.connected),
+      limits: device.limits !== null && device.limits !== undefined,
+      writeAccess,
+      hardwareVerified: verified,
+    };
+  }
+
+  // The first unmet checklist item in the fixed order the Setup CTA targets (design §12).
+  function energyFirstUnmet(checklist) {
+    if (!checklist.connected) return 'connection';
+    if (!checklist.writeAccess) return 'write_access';
+    if (!checklist.limits) return 'limits';
+    if (!checklist.hardwareVerified) return 'hardware';
+    return null;
+  }
+
+  // "Needs setup" is any unmet item among write-access / power-limits / hardware-verified (connection
+  // is handled by its own branch). Used to place the §9 banner above the mode branches.
+  function energyNeedsSetup(checklist) {
+    return !checklist.limits || !checklist.writeAccess || !checklist.hardwareVerified;
+  }
+
+  // The one human-readable Operate status (design §9). No raw register/capability text or
+  // reject_detail — those live only in Diagnostics. `poll503` renders the config empty-state.
+  function energyControlState(device, poll503) {
+    if (poll503) {
+      return { ready: false, kind: 'config', text: 'Manual battery control requires write support to be enabled.', detail: '' };
+    }
+    if (!device.connected) {
+      return { ready: false, kind: 'blocked', text: 'Not connected.', detail: '' };
+    }
+    if (device.state === 'fault') {
+      return { ready: false, kind: 'blocked', text: 'The inverter reports a fault.', detail: '' };
+    }
+    const checklist = energyChecklist(device);
+    if (energyNeedsSetup(checklist)) {
+      return { ready: false, kind: 'setup', text: 'Manual control needs setup.', detail: '', firstUnmet: energyFirstUnmet(checklist) };
+    }
+    if (device.mode === 'off') {
+      return { ready: false, kind: 'disabled', text: 'Manual control is off for this inverter. Choose Manual to operate it here.', detail: '' };
+    }
+    if (device.mode === 'external') {
+      return { ready: false, kind: 'external', text: 'This inverter is controlled by an external app through the API (PAT required).', detail: '' };
+    }
+    return { ready: true, kind: 'ready', text: '', detail: '' };
+  }
+
+  // Current mode line + one plain sentence (design §10). While running, a non-stale battery reading
+  // adds the measured rate in kW; a stale reading omits the rate rather than show a stale number.
+  function energyModeSentence(device) {
+    const target = device.target_soc_percent;
+    const hasTarget = target !== null && target !== undefined;
+    const reading = device.readings.battery_power_w;
+    const live = liveValue(reading); // null when absent or stale
+    const rate = live !== null && Math.abs(live) >= ENERGY_IDLE_WATTS ? ` ${formatPowerKw(live)}` : '';
+    switch (device.state) {
+      case 'automatic':
+        return { mode: 'Automatic', sentence: 'Automatic — the inverter decides.' };
+      case 'charging':
+        return {
+          mode: hasTarget ? `Charging to ${Math.round(target)} %` : 'Charging',
+          sentence: `Charging${hasTarget ? ` to ${Math.round(target)} %` : ''}.${rate ? ` Charging at${rate}.` : ''}`
+        };
+      case 'discharging':
+        return {
+          mode: hasTarget ? `Discharging to ${Math.round(target)} %` : 'Discharging',
+          sentence: `Discharging${hasTarget ? ` to ${Math.round(target)} %` : ''}.${rate ? ` Discharging at${rate}.` : ''}`
+        };
+      case 'holding':
+        return { mode: 'Keeping battery idle', sentence: 'Keeping battery idle.' };
+      case 'starting':
+        return { mode: 'Starting', sentence: 'Starting…' };
+      case 'stopping':
+        return { mode: 'Stopping', sentence: 'Stopping…' };
+      default:
+        return { mode: ENERGY_STATE_LABELS[device.state] || device.state, sentence: '' };
+    }
+  }
+
+  // A failed live poll is actionable; the normal cache age is intentionally not shown here.
+  const energyFreshnessNote = (pollFailed) => pollFailed ? 'Live data unavailable.' : '';
+
+  function energyTargetRange(device, action) {
+    // A stale SoC must not narrow the slider; only the server window applies then.
+    const soc = liveValue(device.readings.battery_soc_percent);
+    const window = device.target_soc_window;
+    let lo = Math.ceil(window.min);
+    let hi = Math.floor(window.max);
+    if (soc !== null && action === 'charge') lo = Math.max(lo, Math.floor(soc) + 1);
+    if (soc !== null && action === 'discharge') hi = Math.min(hi, Math.ceil(soc) - 1);
+    return { lo, hi, valid: lo <= hi };
+  }
+
+  function createEnergyPanel(first, deviceCount) {
+    const id = first.device_id;
+    const path = `energy/devices/${encodeURIComponent(id)}`;
+    let device = first;
+    let selected = null; // 'charge' | 'discharge' while its target slider is open
+    let busy = false;
+    let pendingMode = null;    // the user's mode choice while its PUT is in flight
+    let actionFinishedAt = 0;  // energyClock tick of the last finished action
+    let lastPoll503 = false;   // the Operate poll returned 503 (write support disabled) — §9.2
+    let lastPollFailed = false; // a non-503 transient poll failure — §13 freshness note
+    const touched = { charge: false, discharge: false };
+
+    const card = element('section', 'card energy-panel');
+    const body = element('div', 'card-body');
+    card.append(body);
+
+    // Header: name, connection, master switch.
+    const head = element('div', 'energy-head mb-3');
+    const title = element('div', 'energy-head-title');
+    const nameNode = element('h2', 'h5 mb-0');
+    const dot = element('span', 'status-dot');
+    const connection = element('span', 'small text-secondary');
+    const collapseKey = `energy:${id}`; // own namespace: collapsing here must not collapse the dashboard card
+    const collapseToggle = element('button', 'device-toggle');
+    collapseToggle.type = 'button';
+    const collapseIcon = element('span', 'material-icons', 'expand_more');
+    collapseIcon.setAttribute('aria-hidden', 'true');
+    collapseToggle.append(collapseIcon);
+    title.append(collapseToggle, nameNode, dot, connection);
+    // Three-state radio group; arrow keys only move the focus, Space/Enter/click selects, so
+    // passing over a mode never switches the inverter.
+    const modeGroup = element('div', 'energy-mode-switch');
+    modeGroup.setAttribute('role', 'radiogroup');
+    const modeButtons = {};
+    for (const [value, label, icon, hint] of ENERGY_MODES) {
+      const button = element('button', 'energy-mode-option');
+      button.type = 'button';
+      button.setAttribute('role', 'radio');
+      button.setAttribute('aria-label', `${label}: ${hint}`);
+      button.title = hint;
+      const glyph = element('span', 'material-icons', icon);
+      glyph.setAttribute('aria-hidden', 'true');
+      button.append(glyph, element('span', null, label));
+      modeButtons[value] = button;
+      modeGroup.append(button);
+    }
+    head.append(title, modeGroup);
+    body.append(head);
+
+    const layout = element('div', 'energy-body');
+    const control = element('div', 'energy-control');
+    const liteFlow = energyFlowGraphic({ lite: true });
+    const liteBox = element('div', 'energy-flow-lite');
+    liteBox.append(liteFlow.svg);
+    layout.append(control);
+    const content = element('div', 'energy-content'); // everything below the header folds away
+    content.id = `energy-content-${++deviceCardCount}`;
+    content.append(layout);
+    body.append(content);
+    collapseToggle.setAttribute('aria-controls', content.id);
+    function setCollapsed(collapsed) {
+      content.hidden = collapsed;
+      setClass(card, 'is-collapsed', collapsed);
+      collapseToggle.setAttribute('aria-expanded', String(!collapsed));
+    }
+    let collapsedNow = isCollapsed(collapseKey, deviceCount);
+    setCollapsed(collapsedNow);
+    collapseToggle.addEventListener('click', () => {
+      collapsedNow = !collapsedNow;
+      rememberCollapsed(collapseKey, collapsedNow);
+      setCollapsed(collapsedNow);
+    });
+
+    // The state-independent Setup checklist (design §12), shown only when a prerequisite is unmet.
+    const modeNote = element('p', 'small text-secondary energy-mode-note');
+    const modeLink = element('a', null, 'Inverters page');
+    modeLink.href = '/ui/inverters';
+    modeNote.append('Write access is switched off, so Manual and External cannot be selected yet. Turn it on on the ', modeLink, '.');
+    modeNote.hidden = true;
+    control.append(modeNote);
+
+    const setupBox = element('div', 'energy-setup');
+    setupBox.hidden = true;
+    const setupHeading = element('h3', 'h6 mb-2', 'Manual battery control setup');
+    const setupList = element('ul', 'energy-setup-list');
+    const setupStep = element('div', 'energy-setup-step');
+    setupStep.setAttribute('aria-live', 'polite');
+    // States that the selected mode is not in effect yet, so the switch is not read as active.
+    const setupLead = element('p', 'small fw-semibold energy-setup-lead mb-2');
+    setupLead.setAttribute('role', 'status');
+    setupLead.hidden = true;
+    setupBox.append(setupHeading, setupLead, setupList, setupStep);
+    control.append(setupBox);
+
+    const statusBox = element('div', 'energy-status');
+    const statusIcon = element('span', 'material-icons');
+    statusIcon.setAttribute('aria-hidden', 'true');
+    const statusText = element('div');
+    const statusMain = element('div', 'fw-semibold');
+    const statusDetail = element('div', 'small text-secondary');
+    statusText.append(statusMain, statusDetail);
+    statusBox.append(statusIcon, statusText);
+
+    // One plain-language block: current mode + a single human sentence (design §10).
+    const modeBox = element('div', 'energy-mode');
+    const modeLine = element('div', 'small text-secondary');
+    const modeSentence = element('div', 'fw-semibold');
+    const socLine = element('div', 'small text-secondary energy-soc');
+    const freshness = element('p', 'small text-secondary energy-freshness mb-0');
+    freshness.hidden = true;
+    modeBox.append(modeLine, modeSentence, socLine, freshness);
+
+    const actions = element('div', 'energy-actions');
+    const buttons = {};
+    for (const action of ['charge', 'hold', 'discharge', 'auto']) {
+      const button = element('button', 'btn btn-primary', ENERGY_ACTION_LABELS[action]);
+      button.type = 'button';
+      if (action === 'auto') button.classList.add('energy-action-auto');
+      buttons[action] = button;
+      actions.append(button);
+    }
+
+    const target = element('div', 'energy-target');
+    target.hidden = true;
+    const targetLabel = element('label', 'form-label d-flex justify-content-between mb-1');
+    const targetName = element('span', null, 'Target SoC');
+    const targetOutput = element('output', 'fw-semibold');
+    targetLabel.append(targetName, targetOutput);
+    const range = element('input', 'form-range');
+    range.type = 'range';
+    range.step = '1';
+    range.id = `energy-target-${id}`;
+    targetLabel.htmlFor = range.id;
+    const scale = element('div', 'energy-target-scale');
+    const scaleLo = element('span');
+    const scaleHi = element('span');
+    scale.append(scaleLo, scaleHi);
+    const targetNote = element('p', 'small text-secondary mb-0');
+    targetNote.hidden = true;
+    const confirm = element('button', 'btn btn-primary mt-2 w-100');
+    confirm.type = 'button';
+    target.append(targetLabel, range, scale, targetNote, confirm);
+
+    const operate = element('div', 'energy-operate');
+    const operateMain = element('div', 'energy-operate-main');
+    operateMain.append(modeBox, actions);
+    operate.append(operateMain, liteBox);
+    control.append(statusBox, operate, target);
+
+    const advanced = energyAdvanced(id, () => device, (next) => panel.update(next));
+    let expertOn = energyExpertMode;
+
+    function setBusy(value) {
+      busy = value;
+      if (!value) actionFinishedAt = ++energyClock;
+      render();
+    }
+
+    // 202 {status_available: false}: the action ran but the status projection failed, so the body
+    // carries no panel state. Poll the status instead of rendering it.
+    async function applyActionResult(result) {
+      if (result && result.status_available === false) {
+        try {
+          const list = await api('energy/devices');
+          const fresh = list.find((item) => item.device_id === id);
+          if (fresh) panel.update(fresh);
+        } catch (error) { /* the regular poll refreshes the panel */ }
+        return;
+      }
+      panel.update(result);
+    }
+
+    async function send(payload) {
+      setBusy(true);
+      try {
+        const result = await api(`${path}/command`, { method: 'POST', body: JSON.stringify(payload) });
+        toast('Command sent.');
+        selected = null;
+        touched.charge = false;
+        touched.discharge = false;
+        await applyActionResult(result);
+      } catch (error) { toast(messageFrom(error), 'danger'); }
+      finally { setBusy(false); }
+    }
+
+    async function chooseMode(wanted) {
+      // aria-disabled instead of disabled keeps the keyboard focus on the group while a PUT runs.
+      if (busy || lastPoll503 || wanted === (pendingMode ?? device.mode)) return;
+      pendingMode = wanted;
+      setBusy(true);
+      try {
+        const result = await api(`${path}/mode`, { method: 'PUT', body: JSON.stringify({ mode: wanted }) });
+        pendingMode = null;
+        // Manual with an unfinished setup stays locked; the toast must not promise otherwise.
+        const locked = wanted === 'manual' && energyNeedsSetup(energyChecklist(device));
+        toast(locked ? ENERGY_MODE_TOAST_MANUAL_LOCKED : ENERGY_MODE_TOASTS[wanted]);
+        selected = null;
+        await applyActionResult(result);
+      } catch (error) { toast(messageFrom(error), 'danger'); }
+      finally { pendingMode = null; setBusy(false); }
+    }
+    const modeValues = ENERGY_MODES.map(([value]) => value);
+    for (const value of modeValues) {
+      modeButtons[value].addEventListener('click', () => chooseMode(value));
+      modeButtons[value].addEventListener('keydown', (event) => {
+        const step = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 }[event.key];
+        let next = null;
+        if (step !== undefined) next = modeValues[(modeValues.indexOf(value) + step + modeValues.length) % modeValues.length];
+        else if (event.key === 'Home') next = modeValues[0];
+        else if (event.key === 'End') next = modeValues[modeValues.length - 1];
+        if (next === null) return;
+        event.preventDefault();
+        modeButtons[next].focus();
+      });
+    }
+
+    buttons.hold.addEventListener('click', () => send({ action: 'hold' }));
+    buttons.auto.addEventListener('click', () => send({ action: 'auto' }));
+    for (const action of ['charge', 'discharge']) {
+      buttons[action].addEventListener('click', () => { selected = selected === action ? null : action; render(); });
+    }
+    range.addEventListener('input', () => { if (selected) touched[selected] = true; renderTarget(); });
+    confirm.addEventListener('click', () => {
+      if (!selected) return;
+      send({ action: selected, target_soc_percent: Number(range.value) });
+    });
+
+    function renderTarget() {
+      target.hidden = selected === null;
+      if (selected === null) return;
+      const limits = energyTargetRange(device, selected);
+      const soc = readingValue(device.readings.battery_soc_percent);
+      range.hidden = scale.hidden = !limits.valid;
+      targetNote.hidden = limits.valid;
+      confirm.hidden = !limits.valid;
+      targetName.textContent = selected === 'charge' ? 'Charge up to' : 'Discharge down to';
+      if (!limits.valid) {
+        targetOutput.textContent = '';
+        targetNote.textContent = selected === 'charge'
+          ? `The battery (${formatPercent(soc)}) is already at the highest allowed target.`
+          : `The battery (${formatPercent(soc)}) is already at the lowest allowed target.`;
+        return;
+      }
+      range.min = String(limits.lo);
+      range.max = String(limits.hi);
+      const current = Number(range.value);
+      if (!touched[selected] || !(current >= limits.lo && current <= limits.hi)) {
+        const wanted = selected === 'charge' ? 80 : 20;
+        range.value = String(Math.min(Math.max(wanted, limits.lo), limits.hi));
+      }
+      scaleLo.textContent = `${limits.lo} %`;
+      scaleHi.textContent = `${limits.hi} %`;
+      targetOutput.textContent = `${range.value} %`;
+      confirm.textContent = `${ENERGY_ACTION_LABELS[selected]} to ${range.value} %`;
+      confirm.disabled = busy;
+    }
+
+    // Which Setup rows the checklist renders, in display order.
+    const SETUP_ROWS = [
+      ['connected', 'Inverter connected'],
+      ['writeAccess', 'Write access'],
+      ['limits', 'Power limits'],
+      ['hardwareVerified', 'Hardware verification'],
+    ];
+
+    // Shows only the editor of the first unmet step; the rest of the checklist stays a status list.
+    function renderSetup(checklist) {
+      const unmet = SETUP_ROWS.some(([key]) => !checklist[key]);
+      setupBox.hidden = !unmet;
+      if (!unmet) { if (!advanced.busy()) advanced.layout(null); return; }
+      setupList.replaceChildren();
+      for (const [key, label] of SETUP_ROWS) {
+        const met = checklist[key];
+        const row = element('li', `energy-setup-item ${met ? 'is-met' : 'is-unmet'}`);
+        const icon = element('span', 'material-icons', met ? 'check_circle' : 'radio_button_unchecked');
+        icon.setAttribute('aria-hidden', 'true');
+        row.append(icon, element('span', null, label));
+        setupList.append(row);
+      }
+      if (advanced.busy()) return; // a save is running; the step moves on once it finished
+      const first = energyFirstUnmet(checklist);
+      advanced.layout(first);
+      const node = advanced.step(first);
+      if (setupStep.firstChild !== node) {
+        const moved = setupStep.firstChild !== null;
+        setupStep.replaceChildren(...(node ? [node] : []));
+        // Keyboard and screen-reader users land on the new step instead of a vanished form.
+        const heading = moved && node && node.querySelector('h4');
+        if (heading) { heading.tabIndex = -1; heading.focus(); }
+      }
+    }
+
+    function render() {
+      const readyState = energyControlState(device, lastPoll503);
+      nameNode.textContent = device.device_name;
+      collapseToggle.setAttribute('aria-label', `Show or hide details of ${device.device_name}`);
+      dot.className = `status-dot ${device.connected ? 'online' : 'offline'}`;
+      connection.textContent = `${device.connected ? 'Connected' : 'Not connected'} · ${device.host}`;
+      const shownMode = pendingMode ?? device.mode ?? 'off';
+      modeGroup.setAttribute('aria-label', `Operating mode of ${device.device_name}`);
+      for (const value of modeValues) {
+        const button = modeButtons[value];
+        const checked = value === shownMode;
+        button.setAttribute('aria-checked', String(checked));
+        button.setAttribute('aria-disabled', String(busy || lastPoll503));
+        button.tabIndex = checked ? 0 : -1;
+        setClass(button, 'is-selected', checked);
+      }
+      modeNote.hidden = !(device.write_support_enabled === false && shownMode === 'off');
+
+      renderSetup(energyChecklist(device));
+      // Selected but blocked by an unfinished setup: show it as pending, not as effective.
+      const pendingSetup = shownMode !== 'off' && device.connected && !lastPoll503 && energyNeedsSetup(energyChecklist(device));
+      for (const value of modeValues) setClass(modeButtons[value], 'is-pending', pendingSetup && value === shownMode);
+      setupLead.hidden = !pendingSetup;
+      if (pendingSetup) {
+        const modeLabel = ENERGY_MODES.find(([value]) => value === shownMode)[1];
+        setupLead.textContent = `${modeLabel} is selected but not active yet. Battery control stays locked until every step below is done.`;
+      }
+
+      statusBox.className = `energy-status ${readyState.ready ? 'is-ready' : 'is-blocked'}`;
+      // Nothing when healthy; the Setup block replaces the "needs setup" line.
+      statusBox.hidden = readyState.ready || readyState.kind === 'setup';
+      statusIcon.textContent = 'info';
+      statusMain.textContent = readyState.text;
+      statusDetail.textContent = readyState.detail || '';
+      statusDetail.hidden = !readyState.detail;
+
+      // Mode + one plain sentence; the whole block is hidden until manual control is ready.
+      // In External the controls stay visible but disabled, so the state is readable.
+      const operable = readyState.ready;
+      const external = readyState.kind === 'external';
+      modeBox.hidden = !(operable || external);
+      if (operable || external) {
+        const mode = energyModeSentence(device);
+        modeLine.textContent = `Current mode: ${mode.mode}`;
+        modeSentence.textContent = mode.sentence;
+        const soc = readingValue(device.readings.battery_soc_percent);
+        socLine.textContent = soc === null ? '' : `Battery ${formatPercent(soc)}`;
+        socLine.hidden = soc === null;
+        const note = energyFreshnessNote(lastPollFailed);
+        freshness.textContent = note;
+        freshness.hidden = !note;
+      }
+
+      // Actions + target are usable only once ready.
+      actions.hidden = !(operable || external || readyState.kind === 'disabled');
+      operate.hidden = actions.hidden;
+      liteBox.hidden = actions.hidden;
+      if (!liteBox.hidden) liteFlow.update(device.readings);
+      for (const action of ['charge', 'hold', 'discharge', 'auto']) {
+        const item = energyAvailability(device, action);
+        const enabled = operable && item.available && !busy && device.connected;
+        buttons[action].disabled = !enabled;
+        const reason = external ? 'external' : item.reason;
+        buttons[action].title = enabled ? '' : (ENERGY_REASON_LABELS[reason] || '');
+        setClass(buttons[action], 'is-selected', selected === action);
+        buttons[action].setAttribute('aria-pressed', action === 'charge' || action === 'discharge' ? String(selected === action) : 'false');
+      }
+      if (!operable && selected) selected = null;
+      if (selected && buttons[selected].disabled) selected = null;
+      renderTarget();
+      advanced.update(device, expertOn, lastPoll503);
+      if (expertOn !== (advanced.expert.parentNode === content)) {
+        if (expertOn) content.append(advanced.expert); else advanced.expert.remove();
+      }
+    }
+
+    const panel = {
+      root: card,
+      update(next, flags) {
+        device = next;
+        if (flags) { lastPoll503 = Boolean(flags.poll503); lastPollFailed = Boolean(flags.pollFailed); }
+        render();
+      },
+      // Lets pollEnergy signal a 503/transient failure without a fresh device payload.
+      setPollState(flags) { lastPoll503 = Boolean(flags.poll503); lastPollFailed = Boolean(flags.pollFailed); render(); },
+      setTimestamp(text) { advanced.setTimestamp(text); },
+      // False while an action runs or when the poll was requested before the last action finished.
+      acceptsPoll(requestedAt) { return !busy && requestedAt > actionFinishedAt; },
+      // Display only: no request, no stored value.
+      setExpert(on) { expertOn = Boolean(on); render(); },
+    };
+    render();
+    return panel;
+  }
+
+  // Starting verification consents to the bounded hold and automatic save. The inverter's
+  // readings establish each direction whenever possible; only unclear readings need an answer.
+  function openVerificationAssistant({ id, deviceName, onDone, opener }) {
+    const base = `energy/devices/${encodeURIComponent(id)}/verification-assistant`;
+    const post = (action, body) => api(`${base}/${action}`, { method: 'POST', body: JSON.stringify(body || {}) });
+    const uid = `energy-assistant-${++deviceCardCount}`;
+    let state = null;
+    let running = false;
+    let problem = null;
+    let finished = false;
+    let testAttempted = false;
+    let saveAttempted = false;
+    const POLL_MS = 3000;
+    let pollTimer = null;
+    let epoch = 0;
+    let renderedStage = -1;
+    let liveNode = null;
+    let renderedKey = '';
+    const assistantError = (error) => error?.status === 404
+      ? 'The verification service is unavailable. Reload this page and start the check again. The inverter may still be online.'
+      : messageFrom(error);
+    const power = (value) => (Number.isFinite(value) ? `${Math.round(Math.abs(value)).toLocaleString('en-GB')} W` : 'unknown');
+
+    const modalEl = element('div', 'modal fade energy-assistant');
+    modalEl.tabIndex = -1;
+    modalEl.setAttribute('aria-labelledby', `${uid}-title`);
+    modalEl.dataset.bsBackdrop = 'static';
+    modalEl.dataset.bsKeyboard = 'false';
+    const content = element('div', 'modal-content');
+    modalEl.append(element('div', 'modal-dialog modal-dialog-centered modal-dialog-scrollable'));
+    modalEl.firstChild.append(content);
+    const header = element('div', 'modal-header');
+    const title = element('h2', 'modal-title h5', `Verify hardware: ${deviceName}`);
+    title.id = `${uid}-title`;
+    header.append(title);
+    const body = element('div', 'modal-body');
+    body.setAttribute('aria-live', 'polite');
+    const footer = element('div', 'modal-footer');
+    content.append(header, body, footer);
+    document.body.append(modalEl);
+    const modal = window.bootstrap.Modal.getOrCreateInstance(modalEl);
+
+    const stageOf = () => {
+      if (!state || !state.started || state.blockers.length) return 0;
+      const [battery, grid, test] = state.steps;
+      if (battery.status !== 'done') return 1;
+      if (test.status !== 'done') return 3;
+      if (grid.status !== 'done') return 2;
+      return 4;
+    };
+    const button = (label, className, onClick) => {
+      const node = element('button', `btn ${className}`, label);
+      node.type = 'button';
+      node.addEventListener('click', onClick);
+      return node;
+    };
+    const guarded = (task) => async () => {
+      problem = null;
+      running = true;
+      epoch += 1;
+      render();
+      try { await task(); } catch (error) { problem = assistantError(error); } finally { running = false; render(); }
+    };
+    const note = (text, kind) => { const n = element('div', `alert alert-${kind} small`, text); n.setAttribute('role', kind === 'danger' ? 'alert' : 'status'); return n; };
+    // 'wait' while the quantity is (almost) zero or unreadable, 'ask' when it moves but the balance
+    // could not prove the direction. Nothing is stored while waiting.
+    const KINDS = [
+      { kind: 'battery', subject: 'battery', field: 'battery_power_w' },
+      { kind: 'grid', subject: 'grid', field: 'grid_power_w' },
+    ];
+    const directionMode = (index) => {
+      const value = state && state.readings ? state.readings[KINDS[index].field] : null;
+      return Number.isFinite(value) && Math.abs(value) >= state.min_direction_w ? 'ask' : 'wait';
+    };
+    const liveText = (index) => {
+      const value = state && state.readings ? state.readings[KINDS[index].field] : null;
+      return Number.isFinite(value) ? `Checking automatically · about ${power(value)}.` : 'Checking automatically · waiting for a reading.';
+    };
+    const choice = (index) => {
+      const kind = KINDS[index].kind;
+      const options = index === 0
+        ? [['discharging', 'The battery is discharging (supplying the house)'], ['charging', 'The battery is charging (taking power in)'], ['idle', 'The battery is idle (neither charging nor discharging)']]
+        : [['importing', 'The house is taking power from the grid (import)'], ['exporting', 'The house is feeding power into the grid (export)'], ['idle', 'No power flows to or from the grid (idle)']];
+      const wrap = element('div', 'd-grid gap-2');
+      wrap.append(element('p', 'mb-1', index === 0 ? 'Right now, the battery is:' : 'Right now, the house is:'));
+      for (const [answer, label] of options) wrap.append(button(label, 'btn-primary', guarded(async () => { state = await post('direction', { kind, answer }); })));
+      return wrap;
+    };
+    const waiting = (index) => {
+      const box = element('div', 'alert alert-info small energy-assistant-waiting');
+      box.setAttribute('role', 'status');
+      const spin = element('span', 'spinner-border spinner-border-sm me-2'); spin.setAttribute('aria-hidden', 'true');
+      liveNode = element('span', null, liveText(index));
+      const line = element('p', 'mb-0'); line.append(spin, liveNode);
+      box.append(line);
+      return box;
+    };
+    const viewKey = () => {
+      if (!state) return '';
+      const parts = state.steps.map((step) => `${step.status}|${step.method}|${step.message}`);
+      const stage = stageOf();
+      return [stage, ...(stage === 1 || stage === 2 ? [directionMode(stage - 1)] : []), ...parts].join('#');
+    };
+    const save = guarded(async () => {
+      const status = await post('commit', { confirm: true });
+      finished = true;
+      running = false; // hide.bs.modal refuses to close while a step runs
+      onDone(status);
+      modal.hide();
+      toast('Hardware verified. Manual battery control is available.');
+    });
+    const runTest = guarded(async () => { state = await post('control-test', { confirm: true }); });
+    const schedulePoll = () => {
+      clearTimeout(pollTimer);
+      pollTimer = null;
+      const stage = stageOf();
+      if (running || finished || problem) return;
+      if (stage === 4 && !saveAttempted) {
+        saveAttempted = true;
+        pollTimer = setTimeout(save, 0);
+      } else if (stage === 3 && !testAttempted && Number.isFinite(state.readings?.battery_power_w)
+        && Math.abs(state.readings.battery_power_w) >= state.min_baseline_w) {
+        testAttempted = true;
+        pollTimer = setTimeout(runTest, 0);
+      } else if (stage === 1 || stage === 2 || (stage === 3 && !testAttempted)) {
+        pollTimer = setTimeout(poll, POLL_MS);
+      }
+    };
+    async function poll() {
+      pollTimer = null;
+      if (running || finished || !modalEl.isConnected) return;
+      const mine = epoch;
+      try {
+        const next = await post('auto-check');
+        if (mine !== epoch || running || !modalEl.isConnected) return;
+        state = next;
+        if (viewKey() !== renderedKey) render();
+        else { if (liveNode) liveNode.textContent = liveText(stageOf() === 3 ? 0 : stageOf() - 1); schedulePoll(); }
+      } catch (error) {
+        if (mine !== epoch || !modalEl.isConnected) return;
+        if (error?.status === 409) {
+          state = null;
+          testAttempted = false;
+          saveAttempted = false;
+          problem = 'The check timed out. Start verification again when power is flowing.';
+          render();
+          return;
+        }
+        problem = assistantError(error);
+        render();
+      }
+    }
+
+    function render() {
+      const stage = stageOf();
+      liveNode = null;
+      const main = element('div');
+      const heading = (text) => { const h = element('h3', 'h6', text); h.tabIndex = -1; return h; };
+      const stepMessage = (index) => (state && state.steps[index].message ? note(state.steps[index].message, 'warning') : null);
+      const footerButtons = [];
+      const cancel = button(finished ? 'Close' : 'Cancel', 'btn-outline-secondary', () => modal.hide());
+      cancel.disabled = running;
+      if (state && state.blockers.length) {
+        main.append(heading('Verification cannot start'), element('p', 'small', 'Resolve these items, then retry:'));
+        const list = element('ul', 'small');
+        for (const text of state.blockers) list.append(element('li', null, text));
+        main.append(list);
+        footerButtons.push(button('Retry', 'btn-primary', guarded(async () => {
+          state = await post('start');
+          if (state.started && !state.blockers.length) state = await post('auto-check');
+        })));
+      } else if (stage === 0 && !(state && state.started)) {
+        main.append(heading('Automatic verification'),
+          element('p', 'small', 'Reads live values, briefly holds the battery at 0 W for up to 30 seconds, restores it and saves the result. The house may briefly draw power from the grid. Watch the first charge or discharge: this test only checks 0 W.'));
+        footerButtons.push(button('Start verification', 'btn-primary', guarded(async () => {
+          state = await post('start');
+          if (state.started && !state.blockers.length) state = await post('auto-check');
+        })));
+      } else if (stage === 1 || stage === 2) {
+        const index = stage - 1;
+        const asking = directionMode(index) === 'ask';
+        const titles = [['Battery direction?', 'Waiting for battery power'], ['Grid direction?', 'Waiting for grid power']];
+        main.append(heading(titles[index][asking ? 0 : 1]), stepMessage(index) || '');
+        if (asking) {
+          main.append(element('p', 'small', 'The readings are unclear. Check the inverter display or app:'), choice(index));
+        } else {
+          if (stage === 2) main.append(element('p', 'small mb-2', 'Battery test passed. Waiting for measurable grid power.'));
+          main.append(waiting(index));
+        }
+      } else if (stage === 3) {
+        const ready = Number.isFinite(state.readings?.battery_power_w)
+          && Math.abs(state.readings.battery_power_w) >= state.min_baseline_w;
+        main.append(heading(testAttempted || ready ? 'Testing battery control' : 'Waiting for battery power'), stepMessage(2) || '');
+        if (!testAttempted) main.append(waiting(0));
+        if (testAttempted && state.steps[2].status === 'failed') footerButtons.push(button('Retry test', 'btn-primary', runTest));
+      } else {
+        main.append(heading('Saving verification'));
+        if (problem) footerButtons.push(button('Retry save', 'btn-primary', () => { problem = null; save(); }));
+      }
+      if (running) {
+        const progress = element('p', 'small text-secondary d-flex align-items-center gap-2 mb-0 energy-assistant-progress');
+        const spinner = element('span', 'spinner-border spinner-border-sm');
+        spinner.setAttribute('aria-hidden', 'true');
+        progress.append(spinner, 'Checking…');
+        main.append(progress);
+      }
+      if (problem) main.append(note(problem, 'danger'));
+      if (problem && stage === 3 && testAttempted && !footerButtons.length)
+        footerButtons.push(button('Retry test', 'btn-primary', () => { problem = null; runTest(); }));
+      if (problem && (stage === 1 || stage === 2 || (stage === 3 && !testAttempted)) && !footerButtons.length)
+        footerButtons.push(button('Retry', 'btn-primary', guarded(async () => { state = await post('auto-check'); })));
+      for (const node of footerButtons) node.disabled = node.disabled || running;
+      body.replaceChildren(main);
+      footer.replaceChildren(cancel, ...footerButtons);
+      renderedKey = viewKey();
+      if (stage !== renderedStage) { renderedStage = stage; main.querySelector('h3')?.focus(); }
+      schedulePoll();
+    }
+
+    modalEl.addEventListener('hide.bs.modal', (event) => { if (running) event.preventDefault(); });
+    modalEl.addEventListener('keydown', (event) => { if (event.key === 'Escape' && !running) modal.hide(); });
+    modalEl.addEventListener('shown.bs.modal', () => body.querySelector('h3')?.focus());
+    modalEl.addEventListener('hidden.bs.modal', () => {
+      clearTimeout(pollTimer);
+      epoch += 1;
+      if (!finished) api(base, { method: 'DELETE' }).catch(() => { });
+      modal.dispose();
+      modalEl.remove();
+      opener?.focus();
+    });
+    render();
+    modal.show();
+  }
+
+  // Expert mode is a page-wide display switch, never persisted and never a backend setting. The
+  // required setup steps (write access, power limits, hardware verification) live in the guided
+  // Setup block; this function builds their editors plus the Expert-only section. The Expert section
+  // is attached to the page only while Expert mode is on; it holds the full hardware verification,
+  // engineering mode, the SoC-target policy and Diagnostics (the ONLY place raw reject_detail,
+  // capability names and write approvals appear). Raw register names are fine on this admin surface.
+  function energyAdvanced(id, getDevice, onChange) {
+    const path = `energy/devices/${encodeURIComponent(id)}`;
+
+    const expert = element('section', 'energy-expert mt-3');
+    expert.append(element('h3', 'h5 mb-1', 'Expert settings'));
+    expert.append(element('p', 'small text-warning-emphasis energy-expert-warning',
+      'Advanced hardware settings. Incorrect values can prevent battery control from working correctly.'));
+    const expertInner = element('div', 'energy-advanced-inner');
+    expert.append(expertInner);
+
+    const diagnostics = element('details', 'energy-diagnostics energy-advanced-section');
+    diagnostics.append(element('summary', 'small', 'Diagnostics…'));
+    const diagInner = element('div', 'energy-advanced-inner');
+    diagnostics.append(diagInner);
+
+    const field = (labelText, input, extra) => {
+      const col = element('div', extra || 'col-auto');
+      const label = element('label', 'form-label small mb-1', labelText);
+      input.id = `energy-${id}-${labelText.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`;
+      label.htmlFor = input.id;
+      col.append(label, input);
+      return col;
+    };
+    const numberInput = (min, max, step) => {
+      const input = element('input', 'form-control form-control-sm');
+      input.type = 'number';
+      input.min = String(min);
+      input.max = String(max);
+      input.step = String(step);
+      return input;
+    };
+    const textInput = (maxLength) => {
+      const input = element('input', 'form-control form-control-sm');
+      input.type = 'text';
+      input.maxLength = maxLength;
+      return input;
+    };
+    const checkbox = (labelText) => {
+      const wrap = element('div', 'form-check');
+      const input = element('input', 'form-check-input');
+      input.type = 'checkbox';
+      input.id = `energy-${id}-${labelText.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`;
+      const label = element('label', 'form-check-label small', labelText);
+      label.htmlFor = input.id;
+      wrap.append(input, label);
+      return { wrap, input };
+    };
+    const section = (parent, heading, hint) => {
+      const node = element('div', 'energy-advanced-section');
+      node.append(element('h3', 'h6', heading));
+      if (hint) node.append(element('p', 'small text-secondary', hint));
+      parent.append(node);
+      return node;
+    };
+    // While a save runs, the panel must not move forms or swap the Setup step under it.
+    let saving = 0;
+    const dirty = { verify: false, limits: false, engineering: false, policy: false };
+    const guarded = (button, task, formKey) => async (event) => {
+      event.preventDefault();
+      button.disabled = true;
+      saving += 1;
+      try {
+        await task();
+        if (formKey) dirty[formKey] = false;
+      } catch (error) {
+        toast(messageFrom(error), 'danger');
+        return;
+      } finally { saving -= 1; button.disabled = false; }
+      // The save succeeded; a failed refresh is not an error, the next poll catches up.
+      try { await onChange(await api('energy/devices').then((list) => list.find((item) => item.device_id === id) || getDevice())); }
+      catch { /* next poll refreshes */ }
+    };
+    const markInvalid = (input, message) => {
+      const col = input.parentNode;
+      let note = col.querySelector('.invalid-feedback');
+      if (!note) {
+        note = element('div', 'invalid-feedback');
+        note.id = `${input.id}-error`;
+        col.append(note);
+      }
+      note.textContent = message;
+      input.classList.add('is-invalid');
+      input.setAttribute('aria-invalid', 'true');
+      const previousDescribedBy = input.getAttribute('aria-describedby');
+      input.setAttribute('aria-describedby', note.id);
+      input.focus();
+      input.addEventListener('change', () => {
+        input.classList.remove('is-invalid');
+        input.removeAttribute('aria-invalid');
+        note.textContent = '';
+        if (previousDescribedBy && previousDescribedBy !== note.id) input.setAttribute('aria-describedby', previousDescribedBy);
+        else input.removeAttribute('aria-describedby');
+      }, { once: true });
+      throw new Error(message);
+    };
+
+    // 1. Gate detail (Diagnostics)
+    const gateSection = section(diagInner, 'Gate detail', 'Raw decision per action; unverified capability names are listed as the dispatch layer reports them.');
+    const gateHost = element('div', 'table-responsive');
+    gateHost.tabIndex = 0;
+    // role gives the aria-label a name to attach to on a focusable scroll container (A11Y-04).
+    gateHost.setAttribute('role', 'region');
+    gateHost.setAttribute('aria-label', 'Gate detail');
+    gateSection.append(gateHost);
+
+    // 2. Capabilities and sign conventions (Diagnostics)
+    const capSection = section(diagInner, 'Hardware capabilities and sign conventions',
+      'Charge, hold and discharge need all three capabilities verified; otherwise only the time-limited engineering mode releases them.');
+    const capHost = element('div', 'table-responsive');
+    capHost.tabIndex = 0;
+    capHost.setAttribute('role', 'region');
+    capHost.setAttribute('aria-label', 'Hardware capabilities');
+    capSection.append(capHost);
+
+    // 2b. Write approvals and freshness (Diagnostics)
+    const writeSection = section(diagInner, 'Write approvals',
+      'The live approved register set and what mode changes contributed.');
+    const writeApproved = element('p', 'small mb-1');
+    const writeAdded = element('p', 'small mb-0 text-secondary');
+    writeSection.append(writeApproved, writeAdded);
+
+    const freshSection = section(diagInner, 'Freshness', 'Per-reading age and staleness, and the last poll time.');
+    const freshHost = element('div', 'table-responsive');
+    freshHost.tabIndex = 0;
+    freshHost.setAttribute('role', 'region');
+    freshHost.setAttribute('aria-label', 'Reading freshness');
+    const pollStamp = element('p', 'small text-secondary mb-0', 'Updated –');
+    freshSection.append(freshHost, pollStamp);
+
+    // 3. Hardware verification: one form that lives in the Expert section only. The Setup step of a
+    // Basic user just points to it (strategy code and byte widths are protocol detail), and never
+    // switches Expert mode on by itself. Never prefilled with guessed hardware values.
+    const verifySection = section(expertInner, 'Hardware verification',
+      'Enter what you measured on this inverter. The server stamps who verified it and when; a verification applies to this device only.');
+    const verifyExpertSlot = element('div');
+    const verifyForm = element('form', 'row g-2 align-items-end');
+    const model = textInput(128);
+    const firmware = textInput(64);
+    const code = numberInput(0, 255, 1);
+    const enumWidth = numberInput(1, 4, 1);
+    const boolWidth = numberInput(1, 4, 1);
+    const batterySign = element('select', 'form-select form-select-sm');
+    for (const [value, text] of [['', 'Select…'], ['true', 'Positive value discharges the battery'], ['false', 'Positive value charges the battery']]) {
+      const option = element('option', null, text);
+      option.value = value;
+      batterySign.append(option);
+    }
+    const gridSign = element('select', 'form-select form-select-sm');
+    for (const [value, text] of [['', 'Select…'], ['true', 'Positive value is grid import'], ['false', 'Positive value is grid export']]) {
+      const option = element('option', null, text);
+      option.value = value;
+      gridSign.append(option);
+    }
+    const note = textInput(200);
+    const frame = checkbox('Write frame layout verified');
+    const sequence = checkbox('Apply sequence verified');
+    const attest = checkbox('I verified these values on the hardware');
+    const verifyButton = element('button', 'btn btn-sm btn-primary', 'Mark hardware as verified');
+    verifyButton.type = 'submit';
+    const revokeButton = element('button', 'btn btn-sm btn-outline-secondary', 'Revoke verification');
+    revokeButton.type = 'button';
+    const checks = element('div', 'col-12');
+    checks.append(frame.wrap, sequence.wrap, attest.wrap);
+    const buttonRow = element('div', 'col-12 d-flex gap-2');
+    buttonRow.append(verifyButton);
+    verifyForm.append(
+      field('Device model', model, 'col-sm-6 col-lg-3'), field('Firmware', firmware, 'col-sm-6 col-lg-3'),
+      field('Strategy code', code), field('Enum byte width', enumWidth), field('Bool byte width', boolWidth),
+      field('Battery power sign', batterySign, 'col-sm-6'), field('Grid power sign', gridSign, 'col-sm-6'),
+      field('Evidence note', note, 'col-12'), checks, buttonRow,
+    );
+    verifyExpertSlot.append(verifyForm);
+    verifySection.append(verifyExpertSlot, revokeButton);
+
+    verifyForm.addEventListener('submit', guarded(verifyButton, async () => {
+      if (!attest.input.checked) throw new Error('Confirm that the values were verified on the hardware.');
+      if (!model.value.trim() || !firmware.value.trim()) throw new Error('Device model and firmware are required.');
+      if (!note.value.trim()) throw new Error('An evidence note is required.');
+      if (!frame.input.checked || !sequence.input.checked) throw new Error('Confirm the write frame layout and the apply sequence.');
+      if (batterySign.value === '') markInvalid(batterySign, 'Select the battery power sign.');
+      if (gridSign.value === '') markInvalid(gridSign, 'Select the grid power sign.');
+      const numbers = [code, enumWidth, boolWidth];
+      if (numbers.some((input) => input.value === '' || !input.checkValidity())) {
+        throw new Error('Strategy code (0-255) and both byte widths (1-4) are required.');
+      }
+      await api(`${path}/hardware-verification`, {
+        method: 'PUT',
+        body: JSON.stringify({
+          verified_device_model: model.value.trim(), verified_firmware: firmware.value.trim(), note: note.value.trim(),
+          soc_strategy_external_code: Number(code.value), enum_byte_width: Number(enumWidth.value),
+          bool_byte_width: Number(boolWidth.value), write_frame_layout_verified: frame.input.checked,
+          apply_sequence_verified: sequence.input.checked, battery_discharge_positive: batterySign.value === 'true',
+          grid_import_positive: gridSign.value === 'true',
+        }),
+      });
+      attest.input.checked = false;
+      toast('Hardware verification saved.');
+    }, 'verify'));
+    revokeButton.addEventListener('click', guarded(revokeButton, async () => {
+      // Server side: status only, the recorded evidence stays.
+      await api(`${path}/hardware-verification`, { method: 'DELETE' });
+      toast('Verification revoked.');
+    }));
+
+    // 4. Power limits (Setup step or Expert section). Entered in kW, converted to watts on submit.
+    // The saved request always carries the existing engineering_mode so Basic Setup never changes it.
+    const limitSection = section(expertInner, 'Power limits');
+    const limitExpertSlot = element('div');
+    limitSection.append(limitExpertSlot);
+    const limitForm = element('form', 'row g-2 align-items-end');
+    // Step 0.001 from min 0.001, so whole-watt values like 3.00 kW validate (a 0.01 step rejected them).
+    const maxCharge = numberInput(0.001, 100, 0.001);
+    const maxDischarge = numberInput(0.001, 100, 0.001);
+    const limitButton = element('button', 'btn btn-primary', 'Save and continue');
+    limitButton.type = 'submit';
+    const limitButtonCol = element('div', 'col-auto');
+    limitButtonCol.append(limitButton);
+    limitForm.append(field('Maximum charging power (kW)', maxCharge), field('Maximum discharging power (kW)', maxDischarge), limitButtonCol);
+    const putLimits = (chargeW, dischargeW, engineeringMode) => api(`dispatch/devices/${encodeURIComponent(id)}`, {
+      method: 'PUT',
+      body: JSON.stringify({ max_charge_power_w: chargeW, max_discharge_power_w: dischargeW, engineering_mode: engineeringMode }),
+    });
+    limitForm.addEventListener('submit', guarded(limitButton, async () => {
+      if ([maxCharge, maxDischarge].some((input) => input.value === '' || !input.checkValidity())) {
+        throw new Error('Enter both maximum powers in kW.');
+      }
+      const current = getDevice().limits;
+      await putLimits(Math.round(Number(maxCharge.value) * 1000), Math.round(Number(maxDischarge.value) * 1000),
+        Boolean(current && current.engineering_mode));
+      toast('Limits saved.');
+    }, 'limits'));
+
+    // 4b. Engineering mode (Expert only); keeps the saved power limits untouched.
+    const engineeringSection = section(expertInner, 'Engineering mode',
+      'Engineering mode releases unverified hardware for short, time-capped commands. It is not needed once the hardware is verified.');
+    const engineeringForm = element('form', 'row g-2 align-items-end');
+    const engineering = checkbox('Engineering mode');
+    const engineeringButton = element('button', 'btn btn-sm btn-outline-primary', 'Save engineering mode');
+    engineeringButton.type = 'submit';
+    const engineeringCol = element('div', 'col-auto');
+    engineeringCol.append(engineering.wrap);
+    const engineeringButtonCol = element('div', 'col-auto');
+    engineeringButtonCol.append(engineeringButton);
+    engineeringForm.append(engineeringCol, engineeringButtonCol);
+    engineeringSection.append(engineeringForm);
+    engineeringForm.addEventListener('submit', guarded(engineeringButton, async () => {
+      const current = getDevice().limits;
+      if (!current) throw new Error('Set the power limits first.');
+      await putLimits(current.max_charge_power_w, current.max_discharge_power_w, engineering.input.checked);
+      toast('Engineering mode saved.');
+    }, 'engineering'));
+
+    // 5. SoC target policy (Expert)
+    const policySection = section(expertInner, 'SoC target policy',
+      'How the business target is translated into the inverter\'s own SoC target. "Below current SoC" is an unverified hypothesis.');
+    const policyForm = element('form', 'row g-2 align-items-end');
+    const policyMode = element('select', 'form-select form-select-sm');
+    for (const [value, text] of ENERGY_POLICY_MODES) {
+      const option = element('option', null, text);
+      option.value = value;
+      policyMode.append(option);
+    }
+    const policyMargin = numberInput(0, 50, 0.1);
+    const policyButton = element('button', 'btn btn-sm btn-outline-primary', 'Save policy');
+    policyButton.type = 'submit';
+    const policyButtonCol = element('div', 'col-auto');
+    policyButtonCol.append(policyButton);
+    policyForm.append(field('Policy', policyMode), field('Margin %', policyMargin), policyButtonCol);
+    policySection.append(policyForm);
+    policyForm.addEventListener('submit', guarded(policyButton, async () => {
+      const policy = getDevice().soc_target_policy;
+      await api(`${path}/soc-target-policy`, {
+        method: 'PUT',
+        body: JSON.stringify({ mode: policyMode.value, below_margin_percent: Number(policyMargin.value), note: policy.note || null }),
+      });
+      toast('SoC target policy saved.');
+    }, 'policy'));
+
+    expertInner.append(diagnostics);
+
+    const simpleTable = (headers, rows) => {
+      const table = element('table', 'table table-sm table-borderless mb-0');
+      const headRow = element('tr');
+      for (const label of headers) headRow.append(element('th', 'text-secondary small fw-normal', label));
+      const thead = element('thead');
+      thead.append(headRow);
+      table.append(thead);
+      const bodyEl = element('tbody');
+      for (const cells of rows) {
+        const row = element('tr');
+        for (const [text, className] of cells) row.append(element('td', `small ${className || ''}`, text));
+        bodyEl.append(row);
+      }
+      table.append(bodyEl);
+      return table;
+    };
+
+    // Guided Setup steps. No register names here; the forms above are moved into their step.
+    const inverterLink = (text, href) => {
+      const link = element('a', 'btn btn-primary energy-step-link', text);
+      link.href = href;
+      return link;
+    };
+    const stepNode = (heading, text, ...rest) => {
+      const node = element('div', 'energy-setup-step-body');
+      node.append(element('h4', 'h6 mb-1', heading), element('p', 'small text-secondary', text), ...rest);
+      return node;
+    };
+    const limitSetupSlot = element('div');
+    const steps = {
+      connection: stepNode('Inverter connection', 'The inverter is not connected. Check its connection settings.', inverterLink('Manage inverters', '/ui/dashboard?manage=inverters')),
+      write_access: stepNode('Write access', '', inverterLink('Open Inverters page', '/ui/inverters')),
+      limits: stepNode('Power limits', 'The most power the battery may be charged and discharged with, in kW.', limitSetupSlot),
+      hardware: stepNode('Hardware verification', ''),
+    };
+    // Names what is missing; the global write switch is not part of the device payload, so it is
+    // only reported when the poll answered 503 (write support disabled).
+    const writeAccessText = steps.write_access.querySelector('p');
+    // The values come from a real hardware and firmware verification, so the form is Expert-only; the
+    // Basic step says so and never guesses or pre-fills them.
+    const hardwareText = steps.hardware.querySelector('p');
+    // Opens the guided check on an explicit click only; nothing is written by the setup step itself.
+    const openVerifyButton = element('button', 'btn btn-primary energy-step-link', 'Verify hardware');
+    openVerifyButton.type = 'button';
+    hardwareText.after(openVerifyButton);
+    openVerifyButton.addEventListener('click', () => {
+      openVerificationAssistant({ id, deviceName: getDevice().device_name, onDone: onChange, opener: openVerifyButton });
+    });
+    const renderHardwareText = (expertOn) => {
+      hardwareText.textContent = expertOn
+        ? 'Verify this inverter to unlock manual control. Use the guided check or enter measured values below.'
+        : 'Verify this inverter to unlock manual control. The check runs automatically and asks only when a measurement is unclear.';
+      openVerifyButton.hidden = false;
+    };
+    // Plain wording first; the raw register names stay one click away for people who need them.
+    const technicalNames = element('details', 'small mb-2');
+    technicalNames.append(element('summary', null, 'Show technical names'), element('code', 'd-block text-break'));
+    writeAccessText.after(technicalNames);
+    function renderWriteAccessText(device, writeSupportOff) {
+      const missing = missingRequiredWrites(device);
+      const parts = [];
+      if (writeSupportOff || device.write_support_enabled === false) parts.push('Write access is switched off. Turn on "Write access" on the Inverters page.');
+      if (missing.length) {
+        parts.push('Manual battery control needs the battery power control registers approved on the Inverters page (under "Writable parameters").');
+      } else if (!writeSupportOff && device.write_support_enabled !== false) {
+        parts.push('Write access is required for manual battery control.');
+      }
+      writeAccessText.textContent = parts.join(' ');
+      technicalNames.hidden = !missing.length;
+      technicalNames.querySelector('code').textContent = missing.join(', ');
+    }
+    const place = (node, slot) => { if (node.parentNode !== slot) slot.append(node); };
+    function layout(firstUnmet) {
+      place(limitForm, firstUnmet === 'limits' ? limitSetupSlot : limitExpertSlot);
+      limitButton.textContent = firstUnmet === 'limits' ? 'Save and continue' : 'Save limits';
+    }
+
+    // A form is refilled from the server only while the user has not edited it, so a poll never
+    // overwrites typing. Evidence checkboxes and the attestation are never prefilled.
+    for (const [key, form] of Object.entries({ verify: verifyForm, limits: limitForm, engineering: engineeringForm, policy: policyForm })) {
+      const mark = () => { dirty[key] = true; };
+      form.addEventListener('input', mark);
+      form.addEventListener('change', mark);
+    }
+    function refill(device) {
+      if (!dirty.verify) {
+        const caps = Object.fromEntries(device.capabilities.map((item) => [item.name, item]));
+        const isVerified = (name) => caps[name] && caps[name].status === 'verified';
+        const write = isVerified('write_path_convention') ? caps.write_path_convention : null;
+        model.value = (write && write.verified_device_model) || '';
+        firmware.value = (write && write.verified_firmware) || '';
+        code.value = write ? (write.soc_strategy_external_code ?? '') : '';
+        enumWidth.value = write ? (write.enum_byte_width ?? '') : '';
+        boolWidth.value = write ? (write.bool_byte_width ?? '') : '';
+        note.value = (write && write.note) || '';
+        batterySign.value = isVerified('battery_power_sign_convention') ? String(caps.battery_power_sign_convention.battery_discharge_positive) : '';
+        gridSign.value = isVerified('grid_power_sign_convention') ? String(caps.grid_power_sign_convention.grid_import_positive) : '';
+      }
+      if (!dirty.limits) {
+        maxCharge.value = device.limits ? (device.limits.max_charge_power_w / 1000).toFixed(device.limits.max_charge_power_w % 10 === 0 ? 2 : 3) : '';
+        maxDischarge.value = device.limits ? (device.limits.max_discharge_power_w / 1000).toFixed(device.limits.max_discharge_power_w % 10 === 0 ? 2 : 3) : '';
+      }
+      if (!dirty.engineering) engineering.input.checked = Boolean(device.limits && device.limits.engineering_mode);
+      if (!dirty.policy) {
+        policyMode.value = device.soc_target_policy.mode;
+        policyMargin.value = device.soc_target_policy.below_margin_percent;
+      }
+    }
+
+    function update(device, expertOn, writeSupportOff = false) {
+      revokeButton.hidden = !energyChecklist(device).hardwareVerified;
+      renderWriteAccessText(device, writeSupportOff);
+      renderHardwareText(expertOn);
+      refill(device);
+      if (!expertOn) return; // the Expert section is not on the page; build its tables when it is
+      gateHost.replaceChildren(simpleTable(
+        ['Action', 'Allowed', 'Engineering mode', 'Unverified', 'Reject detail'],
+        device.gates.map((gate) => [
+          [ENERGY_ACTION_LABELS[gate.action] || gate.action], [gate.allowed ? 'Yes' : 'No', gate.allowed ? 'text-success' : 'text-danger'],
+          [gate.engineering_mode ? 'Yes' : 'No'], [gate.unverified.join(', ') || '–'], [gate.reject_detail || '–'],
+        ]),
+      ));
+      capHost.replaceChildren(simpleTable(
+        ['Capability', 'Status', 'Model / firmware', 'Sign convention'],
+        device.capabilities.map((item) => [
+          [item.name], [item.status, item.status === 'verified' ? 'text-success' : 'text-danger'],
+          [item.verified_device_model ? `${item.verified_device_model} / ${item.verified_firmware || '–'}` : '–'],
+          [item.name === 'battery_power_sign_convention' ? (item.battery_discharge_positive ? 'positive = discharging' : 'positive = charging')
+            : item.name === 'grid_power_sign_convention' ? (item.grid_import_positive ? 'positive = import' : 'positive = export') : '–'],
+        ]),
+      ));
+      writeApproved.textContent = `Approved writes: ${(device.approved_write_names || []).join(', ') || '–'}`;
+      writeAdded.textContent = `Added by mode changes: ${(device.added_write_names || []).join(', ') || '–'}`;
+      freshHost.replaceChildren(simpleTable(
+        ['Reading', 'Age (s)', 'Stale'],
+        Object.entries(device.readings || {}).map(([name, reading]) => [
+          [name], [Number.isFinite(reading && reading.age_seconds) ? Math.round(reading.age_seconds) : NOT_AVAILABLE],
+          [reading && reading.stale ? 'Yes' : 'No', reading && reading.stale ? 'text-danger' : ''],
+        ]),
+      ));
+    }
+
+    // Relocated poll timestamp (design §13): fed from pollEnergy, shown only in Diagnostics.
+    function setTimestamp(text) { pollStamp.textContent = text; }
+
+    return { expert, update, setTimestamp, layout, busy: () => saving > 0, step: (name) => steps[name] || null };
+  }
+
+  // Shows one status paragraph in the list while there are no panels; null removes it.
+  // `action` adds a link button to the banner; `kind` is the Bootstrap alert colour.
+  function setEnergyNote(host, text, { kind = 'secondary', action = null } = {}) {
+    if (!text) { energyNote?.remove(); energyNote = null; return; }
+    if (!energyNote) energyNote = element('div', 'alert mb-0 d-flex flex-wrap align-items-center justify-content-between gap-2');
+    energyNote.className = `alert alert-${kind} mb-0 d-flex flex-wrap align-items-center justify-content-between gap-2`;
+    energyNote.setAttribute('role', 'status');
+    const label = element('span', null, text);
+    if (action) {
+      const link = element('a', 'btn btn-primary energy-step-link', action.label);
+      link.href = action.href;
+      energyNote.replaceChildren(label, link);
+    } else energyNote.replaceChildren(label);
+    if (energyNote.parentNode !== host) host.append(energyNote);
+  }
+
+  async function pollEnergy() {
+    if (energyPolling) return;
+    energyPolling = true;
+    const host = $('energy-list');
+    const requestedAt = ++energyClock;
+    // A hung fetch must not stop the polling for good; the abort lands in the failure branch.
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(Object.assign(new Error('The energy request timed out.'), { name: 'TimeoutError' })), ENERGY_POLL_TIMEOUT_MS);
+    try {
+      const devices = await api('energy/devices', { signal: controller.signal });
+      const ids = devices.map((item) => item.device_id);
+      // Keep panels of devices that still exist (their unsaved input survives); add or drop the rest.
+      for (const [id, panel] of [...energyPanels]) {
+        if (!ids.includes(id)) { panel.root.remove(); energyPanels.delete(id); }
+      }
+      for (const device of devices) {
+        const panel = energyPanels.get(device.device_id);
+        if (!panel) {
+          const created = createEnergyPanel(device, devices.length);
+          energyPanels.set(device.device_id, created);
+          host.append(created.root);
+        } else if (panel.acceptsPoll(requestedAt)) {
+          panel.update(device, { poll503: false, pollFailed: false });
+        }
+      }
+      if ([...energyPanels.keys()].join('\n') !== ids.join('\n')) {
+        const ordered = new Map(ids.map((id) => [id, energyPanels.get(id)]));
+        energyPanels.clear();
+        for (const [id, panel] of ordered) { energyPanels.set(id, panel); host.append(panel.root); }
+      }
+      setEnergyNote(host, devices.length ? null : 'No inverters configured yet.');
+      // The absolute timestamp lives in Diagnostics now (design §13), not a top-of-page line.
+      const stamp = `Updated ${new Date().toLocaleTimeString('en-GB')}`;
+      for (const device of devices) {
+        const ages = Object.values(device.readings || {}).map((item) => item && item.age_seconds).filter(Number.isFinite);
+        const oldest = ages.length ? ` · oldest measurement ${Math.round(Math.max(...ages))} s` : '';
+        energyPanels.get(device.device_id).setTimestamp(`${stamp}${oldest}`);
+      }
+    } catch (error) {
+      // 503 means write support/dispatch is disabled (design §9.2): render the config empty-state on
+      // every panel; it clears on the next 200. Any other failure (including a timeout) is a
+      // transient note (§13).
+      const poll503 = error && error.status === 503;
+      for (const panel of energyPanels.values()) panel.setPollState({ poll503, pollFailed: !poll503 });
+      if (poll503 && !energyPanels.size) setEnergyNote(host, 'Manual battery control requires write support to be enabled.', { kind: 'warning', action: { label: 'Open Inverters page', href: '/ui/inverters' } });
+    } finally { clearTimeout(timer); energyPolling = false; }
+  }
+
+  // Reads the cache only (server side), so the poll rate does not load the inverter.
+  function initEnergy() {
+    const expertSwitch = $('energy-expert-mode');
+    if (expertSwitch) {
+      expertSwitch.checked = energyExpertMode;
+      expertSwitch.addEventListener('change', () => {
+        energyExpertMode = expertSwitch.checked;
+        $('energy-expert-state').textContent = energyExpertMode ? 'On' : 'Off';
+        for (const panel of energyPanels.values()) panel.setExpert(energyExpertMode);
+      });
+    }
+    pollEnergy();
+    setInterval(() => { if (!document.hidden) pollEnergy(); }, ENERGY_POLL_MS);
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) pollEnergy(); });
   }
 
   const settingFields = [
@@ -625,10 +2891,63 @@
     { key: 'forwarded_header', label: 'Forwarded header', help: 'HTTP header carrying the original client address.', group: 'Network', type: 'text' },
   ];
 
+  // The service switches its listener in the background. The connection monitor shows a calm
+  // status and reloads once the service answers, on the new port if the port changed.
+  function followListenerChange(saved) {
+    const port = Number(saved.bind_port);
+    const current = Number(location.port || (location.protocol === 'https:' ? 443 : 80));
+    const moved = !saved.behind_reverse_proxy && Number.isInteger(port) && port !== current;
+    window.RCTReconnect?.applying(moved ? `${location.protocol}//${location.hostname}:${port}` : null);
+  }
+
+  // Inside a container the listener port is internal; see CONTAINER_PORT_NOTE.
+  let runningInContainer = false;
+  const CONTAINER_PORT_NOTE = 'This service runs in a container: changing the internal port changes neither the published Docker port mapping nor the BIND_PORT used by the container health check.';
+  const CONTAINER_PORT_CONSEQUENCE = ' The container reports unhealthy, and the published port no longer reaches the service, until BIND_PORT in the environment or compose file matches and the port mapping is updated.';
+
+  // Changes that can lock the operator out of this UI or widen trust: confirmed before they autosave.
+  // Returns the confirmation text, or null when the field is harmless or the value did not change.
+  function riskyChange(key, next) {
+    if (JSON.stringify(next) === JSON.stringify(settingsDraft[key])) return null;
+    const target = () => `${key === 'bind_address' ? next : settingsDraft.bind_address}:${key === 'bind_port' ? next : settingsDraft.bind_port}`;
+    if (key === 'bind_address' || key === 'bind_port') {
+      return {
+        title: 'Change listen address?',
+        message: `The service switches to ${target()} in the background. If that address is not reachable from your network, you can no longer open this admin interface.`
+          + (runningInContainer && key === 'bind_port' ? ` ${CONTAINER_PORT_NOTE}${CONTAINER_PORT_CONSEQUENCE}` : ''),
+        confirmLabel: 'Switch listen address',
+      };
+    }
+    if (key === 'behind_reverse_proxy' || key === 'trusted_proxies') {
+      return {
+        title: 'Change proxy trust?',
+        message: 'Client addresses are taken from the forwarded header of trusted proxies. A wrong value can lock you out or let clients spoof their address.',
+        confirmLabel: 'Save proxy setting',
+      };
+    }
+    if (key.endsWith('_allow_plaintext_credentials') && next === true) {
+      return {
+        title: 'Allow plaintext credentials?',
+        message: 'The export credentials are sent over unencrypted HTTP to a remote host, where anyone on the network path can read them.',
+        confirmLabel: 'Allow plaintext',
+        danger: true,
+      };
+    }
+    return null;
+  }
+
+  // Puts a control back to the draft value after a declined confirmation (no change event fires).
+  function restoreControl(control, value) {
+    if (control.type === 'checkbox') control.checked = Boolean(value);
+    else control.value = Array.isArray(value) ? value.join(', ') : String(value ?? '');
+  }
+
   let settingsCommitted = {};
   let settingsDraft = {};
-  const pendingKeys = new Set();          // scalar + devices keys
+  let tsdbRuntimeStatus = null;
+  const pendingKeys = new Set();          // scalar keys
   let pendingExportGroup = false;         // the export fields are queued as a group, never per key
+  let exportEnabledSaving = false;        // the master switch persists independently of the group
   const secretRevision = new Map();       // secret key -> monotonically increasing edit counter
   const sendRevisions = new Map();        // secret key -> revision snapshot of the in-flight request
   let settingsTimer = null;
@@ -640,54 +2959,48 @@
   // drops it from the payload when off and blanks the checkbox when on.
   const SECRET_KEYS = new Set(['influxdb_token', 'questdb_password']);
   function isSecretKey(key) { return SECRET_KEYS.has(key); }
+  const SECRET_PLACEHOLDER = '•••••••• (stored)';
 
   const SAVE_STATES = { idle: 0, saved: 1, incomplete: 2, unsaved: 3, saving: 4, failed: 5 };
   const SAVE_STATE_TEXT = {
     failed: ['Save failed', 'text-danger'],
     saving: ['Saving …', 'text-secondary'],
-    unsaved: ['Unsaved changes', 'text-warning'],
-    incomplete: ['Incomplete — not saved yet', 'text-warning'],
-    saved: ['Saved', 'text-success'],
+    unsaved: ['Unsaved changes', 'text-warning-emphasis'],
+    incomplete: ['Incomplete — not saved yet', 'text-warning-emphasis'],
+    saved: ['', 'text-secondary'], // success is announced by the toast, not by a second label
     idle: ['', 'text-secondary'],
   };
-  const SAVE_STATE_CLASSES = ['text-danger', 'text-secondary', 'text-warning', 'text-success'];
-  const saveSections = new Map();         // id -> { state, message, lastSavedAt }
+  const SAVE_STATE_CLASSES = ['text-danger', 'text-secondary', 'text-warning-emphasis', 'text-success'];
+  const lastIncompleteToast = new Map();  // id -> last incomplete message already toasted (no repeats)
+  const saveSections = new Map();         // id -> { state, message, failure }
   const anySection = (states) => [...saveSections.values()].some((entry) => states.includes(entry.state));
 
-  const DEVICES_INCOMPLETE_MSG = 'Fix the marked inverter rows — nothing was saved yet.';
   const FAILURE_MESSAGES = {
     general: (reason) => `Not saved (${reason}). The value was restored — enter it again.`,
-    devices: (reason) => `The inverters were not saved (${reason}). Retry, or discard the changes.`,
     export: (reason) => `The export settings were not saved (${reason}).`,
     parameters: (reason) => `Not saved (${reason}). The list was reloaded from the server — apply your change again.`,
   };
   function failureMessage(id, reason) { return (FAILURE_MESSAGES[id] || FAILURE_MESSAGES.general)(reason); }
 
   function sectionOf(key) {
-    if (key === 'devices') return 'devices';
     return exportFields.some((field) => field.key === key) ? 'export' : 'general';
   }
 
   // Every anchor is block level, and null when the section has no surface on this page.
   // #exposed-list is a <tbody>, so the parameters anchor on prometheus is its table wrapper.
   function anchorFor(id) {
-    if (id === 'devices') return document.getElementById('device-editor');
-    if (id === 'export') return document.querySelector('.export-layout');
-    if (id === 'parameters') return document.querySelector(page === 'prometheus' ? '.prometheus-table-wrap' : '#writable-list');
+    if (id === 'parameters') return document.querySelector('.param-table-wrap');
     return document.getElementById('settings-sections');
   }
 
   // A section notice is a sibling *before* its anchor: aria-live="off" plus that placement avoids
-  // the double announcement a node inside the aria-live="polite" #settings-sections would cause, and
-  // keeps the export notice outside .export-layout, which the e2e "no Save button" checks count in.
+  // the double announcement a node inside the aria-live="polite" #settings-sections would cause.
   // `kind` is 'error' (a rejected save) or 'hint' (an incomplete group that is being withheld).
   const NOTICE_IDS = { error: 'save-error', hint: 'save-hint' };
 
   function sectionNotice(id, kind) {
     const anchor = anchorFor(id);
     if (!anchor) return null;
-    const modal = anchor.closest('#inverters-modal');
-    if (modal && !modal.classList.contains('show')) return null; // toast-only while the dialog is hidden
     const host = anchor.closest('details') || anchor; // never insert into a folded disclosure
     if (host.tagName === 'DETAILS' && kind === 'error') host.open = true; // the error must be on screen
     const nodeId = `${NOTICE_IDS[kind]}-${id}`;
@@ -710,8 +3023,7 @@
   // nothing left to resend; `parameters` reloaded the server's list, so a retry would re-PUT the
   // server's own state and could overwrite a concurrent change from another session.
   const RETRY_ACTIONS = {
-    export: () => { queueExportSettings(); flushSettings({ sections: ['export'] }).catch(() => { }); },
-    devices: () => { queueSettings('devices'); flushSettings({ sections: ['devices'] }).catch(() => { }); },
+    export: () => { applyExport().catch(() => { }); },
   };
 
   function renderSectionAlert(id, message) {
@@ -726,12 +3038,6 @@
       retry.addEventListener('click', RETRY_ACTIONS[id]);
       actions.append(retry);
     }
-    if (id === 'devices') {
-      const discard = element('button', 'btn btn-outline-secondary btn-sm', 'Discard changes');
-      discard.type = 'button';
-      discard.addEventListener('click', discardDeviceChanges);
-      actions.append(discard);
-    }
     if (actions.childElementCount) node.append(actions);
   }
 
@@ -745,7 +3051,6 @@
     const failure = state === 'failed' ? message : (resolved ? '' : previous?.failure || '');
     saveSections.set(id, {
       state, message, failure,
-      lastSavedAt: state === 'saved' ? new Date() : previous?.lastSavedAt || null,
     });
     renderSaveState();
   }
@@ -756,26 +3061,24 @@
     for (const [id, entry] of saveSections) {
       if (entry.failure) renderSectionAlert(id, entry.failure);
       else document.getElementById(`save-error-${id}`)?.remove();
+      // An incomplete group is reported once per distinct message, as a warning toast; the fields
+      // themselves carry aria-invalid and their "Required." help text.
+      if (entry.state === 'incomplete' && entry.message) {
+        if (lastIncompleteToast.get(id) !== entry.message) { lastIncompleteToast.set(id, entry.message); toast(entry.message, 'warning'); }
+      } else lastIncompleteToast.delete(id);
     }
+    refreshExportBar();
     const label = $('save-state');
     if (!label) return; // absent on tokens/about/login/change-password; the alerts above are independent
     let top = 'idle';
-    let savedAt = null;
     for (const entry of saveSections.values()) {
       if (SAVE_STATES[entry.state] > SAVE_STATES[top]) top = entry.state;
-      if (entry.lastSavedAt && (!savedAt || entry.lastSavedAt > savedAt)) savedAt = entry.lastSavedAt;
     }
     const [text, className] = SAVE_STATE_TEXT[top];
-    label.textContent = top === 'saved' && savedAt ? `Saved ${hhmm(savedAt)}` : text;
+    label.textContent = text;
+    label.dataset.state = top;
     label.classList.remove(...SAVE_STATE_CLASSES);
     label.classList.add(className);
-  }
-
-  // Derived on demand instead of a cached counter four writers had to keep correct. `failed` is
-  // deliberately absent: `general` rolled its value back, and `devices`/`export` failures keep
-  // their keys queued, so genuine leftover work is already covered by hasPending(null).
-  function outstandingWork() {
-    return hasPending(null) || parameterDirty || parameterSending || anySection(['saving', 'incomplete']);
   }
 
   function reportSaveFailure(section, message) {
@@ -784,12 +3087,13 @@
     return sectionAlert(section);
   }
 
-  function restartDebounce() { clearTimeout(settingsTimer); settingsTimer = setTimeout(() => { flushSettings().catch(() => { }); }, 450); }
+  // Only the autosaving 'general' settings use the debounce; the export group is sent by its Apply button.
+  function scheduleSettingsFlush() { clearTimeout(settingsTimer); settingsTimer = setTimeout(() => { flushSettings({ sections: ['general'] }).catch(() => { }); }, 450); }
 
   function queueSettings(key) {
     pendingKeys.add(key);
     setSectionState(sectionOf(key), 'unsaved');
-    restartDebounce();
+    scheduleSettingsFlush();
   }
 
   function incompleteSections() {
@@ -853,11 +3157,6 @@
       pendingExportGroup = false;
       setSectionState('export', 'incomplete', missingExportHint(type));
     }
-    // The symmetric devices re-check: the draft can be mutated without a render (syncDeviceInputs).
-    if (pendingKeys.has('devices') && !devicesValid()) {
-      pendingKeys.delete('devices');
-      setSectionState('devices', 'incomplete', DEVICES_INCOMPLETE_MSG);
-    }
     const keys = keysFor(sections);
     if (!keys.length) {
       renderSaveState();
@@ -883,8 +3182,7 @@
 
   async function sendSettingsInner(keys) {
     const sentSections = new Set(keys.map(sectionOf));
-    const sentDevices = keys.includes('devices') ? settingsDraft.devices.filter((device) => !isBlankNewRow(device)) : [];
-    const payload = Object.fromEntries(keys.map((key) => [key, key === 'devices' ? devicesPayload() : structuredClone(settingsDraft[key])]));
+    const payload = Object.fromEntries(keys.map((key) => [key, structuredClone(settingsDraft[key])]));
     for (const key of keys) if (isSecretKey(key)) sendRevisions.set(key, secretRevision.get(key) || 0);
     try {
       const result = await api('settings', { method: 'PUT', body: JSON.stringify(payload) });
@@ -897,34 +3195,31 @@
         if (secretRevision.get(key) !== sendRevisions.get(key)) continue; // a newer value was typed meanwhile
         settingsDraft[key] = '';
         const control = $(`setting-${key}`);
-        if (control) { control.value = ''; control.placeholder = 'set'; }
+        if (control) { control.value = ''; control.placeholder = SECRET_PLACEHOLDER; }
       }
-      // Only the server-assigned id is adopted; copying back the whole entry would overwrite
-      // edits the operator made while this request was still in flight. Matched by the same
-      // (host, port, network_id) tuple deviceProblem() uses, not by array index, since the server
-      // is not guaranteed to echo devices back in exactly the order they were sent.
-      sentDevices.forEach((device) => {
-        const assigned = (result.settings?.devices || []).find((candidate) =>
-          String(candidate.host || '').trim().toLowerCase() === String(device.host || '').trim().toLowerCase()
-          && Number(candidate.port) === Number(device.port)
-          && networkId(candidate.network_id) === networkId(device.network_id));
-        if (assigned && !device.device_id && assigned.device_id) device.device_id = assigned.device_id;
-      });
-      showRestartNotice(result.restart_required);
+      // Switching write access on makes the server approve the registers manual control needs.
+      if (keys.includes('enable_write_support') && payload.enable_write_support) refreshWriteApprovals();
       if (page === 'prometheus') markPrometheusSaved();
-      if (page === 'dashboard' && keys.includes('devices')) { loadDashboard().catch((error) => toast(messageFrom(error), 'danger')); loadMetricCount(); }
       for (const id of sentSections) setSectionState(id, 'saved');
-      if (keys.some((key) => result.restart_required?.includes(key))) toast('Saved. A restart is required for this setting.', 'warning');
+      if (page === 'tsdb' && sentSections.has('export')) {
+        refreshTsdbRuntimeStatus().catch((error) => console.warn('Could not refresh TSDB status:', messageFrom(error)));
+      }
+      if (result.applying) followListenerChange(result.settings || settingsCommitted);
       else toast('Settings saved and active.');
       return true;
     } catch (error) {
       // A full renderSettings() would tear down and rebuild every section's DOM, including one the
       // operator was mid-edit on but that was never part of this save — losing focus and any input
       // in that unrelated section. Only the controls for the keys that actually failed are refreshed.
+      // A failed save can still have stored part of the request, so the server state is the baseline.
+      try {
+        const fresh = await api('settings');
+        if (fresh.settings) settingsCommitted = structuredClone(fresh.settings);
+      } catch { /* keep the last known state */ }
       for (const key of keys) {
         if (pendingKeys.has(key)) continue;  // re-queued during the request: that value wins
-        if (key === 'devices') continue;     // the draft is kept; a rollback would orphan the row objects
         if (isSecretKey(key)) continue;      // the committed view holds no raw secret, only _configured
+        if (sectionOf(key) === 'export') continue; // the Apply form keeps what was typed so it can be corrected
         settingsDraft[key] = structuredClone(settingsCommitted[key]);
         const control = $(`setting-${key}`);
         if (!control) continue;
@@ -939,7 +3234,7 @@
       settingsInFlight = null;
       sendRevisions.clear();               // the map's lifetime is exactly this request
       renderSaveState();
-      if (hasPending(null)) restartDebounce(); // re-arm the 450 ms timer, no recursion
+      if (hasPending(['general'])) scheduleSettingsFlush(); // re-arm the 450 ms timer, no recursion
     }
   }
 
@@ -970,12 +3265,12 @@
       if (field.type === 'toggle') control.checked = Boolean(value);
       else if (field.type === 'list') control.value = Array.isArray(value) ? value.join(', ') : '';
       else if (field.type !== 'secret') control.value = String(value ?? '');
-      if (field.type === 'secret') { control.autocomplete = 'new-password'; control.placeholder = settingsDraft[`${field.key}_configured`] ? 'set' : ''; }
+      if (field.type === 'secret') { control.autocomplete = 'new-password'; control.placeholder = settingsDraft[`${field.key}_configured`] ? SECRET_PLACEHOLDER : ''; }
       // The bounds come from the field definition so the browser signals what the server accepts.
       if (field.type === 'number') { control.min = String(field.min); control.max = String(field.max); control.inputMode = 'numeric'; }
     }
     control.id = id;
-    const help = element('div', 'form-text', field.help);
+    const help = element('div', 'form-text', runningInContainer && field.key === 'bind_port' ? `${field.help} ${CONTAINER_PORT_NOTE}` : field.help);
     help.id = `${id}-help`;
     control.setAttribute('aria-describedby', help.id);
     if (field.type === 'toggle') {
@@ -988,20 +3283,29 @@
 
   function settingControl(field) {
     const { wrap, control } = buildFieldControl(field, settingsDraft[field.key]);
-    const onChange = () => {
+    const onChange = async () => {
+      let next;
       if (field.type === 'number') {
         const invalid = numberFieldInvalid(control, field);
         if (invalid) { reportInvalid(control, invalid); return; }
         clearInvalid(control);
-        settingsDraft[field.key] = control.value === '' ? null : Number(control.value);
-      } else if (field.type === 'toggle') settingsDraft[field.key] = control.checked;
-      else if (field.type === 'list') settingsDraft[field.key] = control.value.split(',').map((item) => item.trim()).filter(Boolean);
-      else settingsDraft[field.key] = control.value;
+        next = control.value === '' ? null : Number(control.value);
+      } else if (field.type === 'toggle') next = control.checked;
+      else if (field.type === 'list') next = control.value.split(',').map((item) => item.trim()).filter(Boolean);
+      else next = control.value;
+      const risk = riskyChange(field.key, next);
+      if (risk && !(await confirmAction(risk))) { restoreControl(control, settingsDraft[field.key]); return; }
+      settingsDraft[field.key] = next;
       queueSettings(field.key);
       if (page === 'prometheus') renderPrometheusSummary();
-      // A master toggle decides which dependent fields exist, so only its own group is rebuilt
-      // live — and the toggle keeps the focus it had when it was operated.
-      if (gatesOtherFields(field.key)) preserveFocus(() => rerenderGroup(field.group));
+      // A master toggle decides which dependent fields exist, so only the dependents are rebuilt
+      // live — the toggle keeps the focus it had when it was operated. On the Prometheus page the
+      // master lives in the top card and its dependents in #settings-sections, so only that host is
+      // rebuilt; elsewhere the master and its dependents share one group card.
+      if (gatesOtherFields(field.key)) {
+        if (page === 'prometheus') preserveFocus(rerenderPrometheusDependents);
+        else preserveFocus(() => rerenderGroup(field.group));
+      }
     };
     control.addEventListener('change', onChange);
     return wrap;
@@ -1054,7 +3358,7 @@
   }
 
   const exportFields = [
-    { key: 'db_type', label: 'Database type', help: 'Target of the metrics export. The Prometheus endpoint (/metrics) is independent of it.', type: 'select', options: [['', 'Disabled'], ['influxdb_v2', 'InfluxDB 2'], ['questdb', 'QuestDB (Open Source)']] },
+    { key: 'db_type', label: 'Database type', help: 'Target of the metrics export. The Prometheus endpoint (/metrics) is independent of it.', type: 'select', options: [['', 'Select ...'], ['influxdb_v2', 'InfluxDB 2'], ['questdb', 'QuestDB (Open Source)']] },
     { key: 'metrics_export_enabled', label: 'Enable export', help: 'Pause pushing without losing the connection settings below.', type: 'toggle' },
     { key: 'metrics_export_interval_seconds', label: 'Export interval (seconds)', help: '5 to 3600.', type: 'number', min: 5, max: 3600, any: true },
     { key: 'influxdb_hostname', label: 'Hostname or URL', help: 'Host or http(s) URL without a path.', type: 'text', backend: 'influxdb_v2' },
@@ -1079,11 +3383,32 @@
     { key: 'questdb_retention_days', label: 'Total retention (days)', help: '0 keeps all data. An existing TTL in QuestDB is not overwritten.', type: 'number', min: 0, max: 36500, backend: 'questdb' },
   ];
 
+  async function saveExportEnabled(next, onChange) {
+    exportEnabledSaving = true;
+    settingsDraft.metrics_export_enabled = next;
+    onChange(); // rebuild dependants and replace the switch with its disabled in-flight state
+    syncTsdbStatusSurfaces();
+    pendingExportGroup = false;
+    pendingKeys.add('metrics_export_enabled');
+    setSectionState('export', 'unsaved');
+    try {
+      const saved = await flushSettings({ sections: ['export'] });
+      if (!saved) settingsDraft.metrics_export_enabled = Boolean(settingsCommitted.metrics_export_enabled);
+    } finally {
+      exportEnabledSaving = false;
+      onChange();
+      syncTsdbStatusSurfaces();
+      queueExportSettings(); // any other edited export fields still belong to Apply changes
+    }
+  }
+
   function exportControl(field, onChange) {
+    // The shared setting-row (label, control, .form-text) is used as built, like on every other page.
     const { wrap, control } = buildFieldControl(field, settingsDraft[field.key]);
     // A secret left empty keeps its current value server-side (the PUT handler drops ""), so an
     // empty box must not overwrite settingsDraft and must not autosave on every blur.
-    control.addEventListener('change', () => {
+    if (field.key === 'metrics_export_enabled') control.disabled = exportEnabledSaving;
+    control.addEventListener('change', async () => {
       if (field.type === 'secret') {
         if (control.value === '') return;          // an empty box keeps the stored secret; no queueing
         settingsDraft[field.key] = control.value;
@@ -1093,9 +3418,18 @@
         if (invalid) { reportInvalid(control, invalid); return; }
         clearInvalid(control);
         settingsDraft[field.key] = control.value === '' ? null : Number(control.value);
-      } else if (field.type === 'toggle') settingsDraft[field.key] = control.checked;
-      else settingsDraft[field.key] = control.value;
-      if (field.key === 'db_type' || field.key === 'questdb_downsampling') onChange();
+      } else if (field.type === 'toggle') {
+        const risk = riskyChange(field.key, control.checked);
+        if (risk && !(await confirmAction(risk))) { restoreControl(control, settingsDraft[field.key]); return; }
+        if (field.key === 'metrics_export_enabled') {
+          saveExportEnabled(control.checked, onChange).catch((error) => toast(messageFrom(error), 'danger'));
+          return;
+        }
+        settingsDraft[field.key] = control.checked;
+      } else settingsDraft[field.key] = control.value;
+      if (['db_type', 'metrics_export_enabled', 'questdb_downsampling'].includes(field.key)) onChange();
+      syncTsdbStatusSurfaces();
+      control.dataset.touched = '1';
       queueExportSettings();
     });
     return wrap;
@@ -1108,16 +3442,12 @@
       || (field.type === 'secret' && Object.hasOwn(settingsDraft, `${field.key}_configured`));
   }
 
-  // The export fields depend on each other (required per backend), so they are saved together.
-  // Order matches the 2-column grid's row-major placement: Export/Target share the top row,
-  // Connection/Retention the bottom row (see .export-grid in admin.css).
-  const EXPORT_GROUPS = ['Export', 'Target', 'Connection', 'Retention'];
-
   function exportGroup(key) {
-    if (key === 'db_type' || key === 'metrics_export_enabled' || key === 'metrics_export_interval_seconds') return 'Export';
+    if (key === 'metrics_export_enabled') return 'Control';
+    if (key === 'db_type') return 'Selector';
+    if (key === 'metrics_export_interval_seconds' || /_(downsampling|raw_retention_days|retention_days)$/.test(key)) return 'Export';
     if (/_(hostname|port|tls_enabled|verify_tls|allow_plaintext_credentials)$/.test(key)) return 'Connection';
-    if (/_(downsampling|raw_retention_days|retention_days)$/.test(key)) return 'Retention';
-    return 'Target';
+    return 'Database';
   }
 
   // Mirrors Settings._check_export: these fields must exist together before the backend will
@@ -1181,56 +3511,169 @@
     return 'Not saved yet.';
   }
 
-  // Export fields autosave as one coherent group: until the active backend's required fields are
-  // all filled, nothing is sent, so the server never has to reject a half-entered combination.
-  // Becoming incomplete again retracts the whole group *and* stops the debounce timer a complete
-  // state had started, so a configuration that regressed inside the window is never sent.
-  function queueExportSettings() {
+  // The export group is applied explicitly, as one coherent group: nothing is sent while typing.
+  // Apply stays disabled until the active backend's required fields are filled, and the group is
+  // re-validated again at send time (sendSettings), so the server never sees a half-entered combination.
+  function exportChangedKeys() {
     const type = settingsDraft.db_type || '';
-    if (!exportReady(type)) {
-      pendingExportGroup = false;
-      setSectionState('export', 'incomplete', missingExportHint(type));
-      if (!hasPending(null)) clearTimeout(settingsTimer);
-      return;
-    }
-    pendingExportGroup = true;
-    setSectionState('export', 'unsaved');
-    restartDebounce();
+    return exportPayloadKeys(type).filter((key) => (isSecretKey(key)
+      ? Boolean(settingsDraft[key])
+      : JSON.stringify(blankToNull(settingsDraft[key])) !== JSON.stringify(blankToNull(settingsCommitted[key]))));
   }
 
-  // Export fields autosave through the shared queueSettings/flushSettings path, same as every
-  // other settings page; db_type changes still re-render because the field set depends on it.
+  const blankToNull = (value) => (value === '' || value === undefined ? null : value); // an emptied field equals an unset one
+
+  function exportDirty() { return page === 'tsdb' && exportChangedKeys().length > 0; }
+
+  // A required field that was edited and is still empty is flagged on the field itself.
+  function markMissingExportFields() {
+    const type = settingsDraft.db_type || '';
+    const missing = new Set(settingsDraft.metrics_export_enabled ? exportRequiredKeys(type).filter((key) => !exportFieldFilled(key)) : []);
+    for (const key of exportRequiredKeys(type)) {
+      const control = $(`setting-${key}`);
+      if (!control) continue;
+      const flagged = missing.has(key) && control.dataset.touched === '1';
+      control.classList.toggle('is-invalid', flagged);
+      if (flagged) control.setAttribute('aria-invalid', 'true'); else control.removeAttribute('aria-invalid');
+    }
+  }
+
+  // Marks the draft state; never starts a timer and never sends.
+  function queueExportSettings() {
+    const type = settingsDraft.db_type || '';
+    if (!exportDirty()) setSectionState('export', 'idle');
+    else if (settingsDraft.metrics_export_enabled && !exportReady(type)) setSectionState('export', 'incomplete', missingExportHint(type));
+    else setSectionState('export', 'unsaved');
+    markMissingExportFields();
+    refreshExportBar();
+  }
+
+  // The button is the only visible element of the form's action bar; its native disabled state
+  // tells assistive technology that there is nothing (valid) to apply.
+  function refreshExportBar() {
+    const apply = $('export-apply');
+    if (!apply) return;
+    const incomplete = Boolean(settingsDraft.metrics_export_enabled) && !exportReady(settingsDraft.db_type || '');
+    apply.disabled = settingsSending || !exportDirty() || incomplete;
+    apply.setAttribute('aria-busy', String(settingsSending));
+  }
+
+  async function applyExport() {
+    if (settingsSending) return;
+    const type = settingsDraft.db_type || '';
+    if (settingsDraft.metrics_export_enabled) {
+      if (!exportReady(type)) { queueExportSettings(); return; }
+      pendingExportGroup = true;
+    } else {
+      pendingExportGroup = false;
+      pendingKeys.add('metrics_export_enabled'); // a disabled export sends only the switch
+    }
+    setSectionState('export', 'unsaved');
+    await flushSettings({ sections: ['export'] });
+    refreshExportBar();
+  }
+
+  function tsdbStatusView() {
+    const type = settingsDraft.db_type || '';
+    const lastSuccess = tsdbRuntimeStatus?.last_success_at ? hhmm(new Date(tsdbRuntimeStatus.last_success_at)) : '';
+    if (!settingsDraft.metrics_export_enabled) return { label: 'Export paused', detail: 'Database settings retained', tone: 'muted' };
+    if (!type) return { label: 'Configuration incomplete', detail: 'Choose a target database', tone: 'warning' };
+    if (!exportReady(type)) return { label: 'Configuration incomplete', detail: 'Complete the required fields', tone: 'warning' };
+    if (!tsdbRuntimeStatus?.export_enabled) return { label: 'Exporter not running', detail: 'Waiting for the exporter service', tone: 'danger' };
+    if (!tsdbRuntimeStatus.healthy) {
+      return { label: 'Waiting for successful export', detail: lastSuccess ? `Last export ${lastSuccess}` : 'No successful export yet', tone: 'warning' };
+    }
+    return { label: 'Export running', detail: lastSuccess ? `Last export ${lastSuccess}` : 'Exporter active', tone: 'success' };
+  }
+
+  function tsdbConsoleLines() {
+    const type = settingsDraft.db_type || '';
+    const now = hhmm(new Date());
+    const status = tsdbStatusView();
+    const lines = [[now, type ? `Target: ${backendLabel(type)}` : 'No target database selected'], [now, status.label]];
+    if (status.detail) lines.push([now, status.detail]);
+    if (tsdbRuntimeStatus?.last_success_at) {
+      lines.push([hhmm(new Date(tsdbRuntimeStatus.last_success_at)), 'Last successful export']);
+    }
+    return lines;
+  }
+
+  function fillTsdbConsole(consoleNode) {
+    consoleNode.replaceChildren();
+    for (const [time, message] of tsdbConsoleLines()) {
+      const line = element('div', 'tsdb-console-line');
+      const timestamp = element('time', 'tsdb-console-time', time);
+      line.append(timestamp, element('span', '', message));
+      consoleNode.append(line);
+    }
+  }
+
+  function syncTsdbStatusSurfaces() {
+    const consoleNode = $('tsdb-mini-console');
+    if (consoleNode) fillTsdbConsole(consoleNode);
+  }
+
+  async function refreshTsdbRuntimeStatus() {
+    const data = await api('devices');
+    tsdbRuntimeStatus = data.tsdb || null;
+    syncTsdbStatusSurfaces();
+  }
+
+  // Export fields autosave through the shared queueSettings/flushSettings path. The cards are plain
+  // settings cards (h2.h5 + setting rows) placed straight into the shared .settings-grid.
   function renderExportSettings(host) {
-    const layout = element('div', 'export-layout');
-    host.append(layout);
-    // The Export group never becomes a <section>, so it is not routed through rerenderGroup();
-    // this internal render already replaces only .export-layout's children.
     const rerender = () => preserveFocus(render);
-    const render = () => {
-      const grid = element('div', 'export-grid');
-      const type = settingsDraft.db_type || '';
-      for (const group of EXPORT_GROUPS) {
-        const body = element('div', 'card-body');
-        body.append(element('h2', 'h5 mb-3', group === 'Export' ? 'Metrics export' : group));
-        for (const field of exportFields) {
-          if (exportGroup(field.key) !== group || !exportFieldKnown(field)) continue;
-          if ((field.backend && field.backend !== type) || (field.any && !type)) continue;
-          if (field.key === 'questdb_raw_retention_days' && settingsDraft.questdb_downsampling === 'off') continue;
-          if (field.key === 'questdb_retention_days' && settingsDraft.questdb_downsampling === 'manual') continue;
-          body.append(exportControl(field, rerender));
-        }
-        if (body.children.length < 2) continue;
-        const section = element('section', 'card');
-        section.append(body);
-        grid.append(section);
-      }
-      layout.replaceChildren(grid);
+    const knownField = (key) => exportFields.find((field) => field.key === key && exportFieldKnown(field));
+    const fieldVisible = (field, type) => {
+      if ((field.backend && field.backend !== type) || (field.any && !type)) return false;
+      if (field.key === 'questdb_raw_retention_days' && settingsDraft.questdb_downsampling !== 'manual') return false;
+      if (field.key === 'questdb_retention_days' && settingsDraft.questdb_downsampling === 'manual') return false;
+      return true;
     };
+    const card = (name, title, nodes, extraClass = '') => {
+      const section = element('section', `card export-card export-card-${name} ${extraClass}`.trim());
+      const body = element('div', 'card-body');
+      body.append(element('h2', 'h5 mb-2', title), ...nodes);
+      section.append(body);
+      return section;
+    };
+    const groupCard = (group, title, type) => card(group.toLowerCase(), title,
+      exportFields.filter((field) => exportGroup(field.key) === group && exportFieldKnown(field) && fieldVisible(field, type))
+        .map((field) => exportControl(field, rerender)));
+    const render = () => {
+      const type = settingsDraft.db_type || '';
+      const enabled = Boolean(settingsDraft.metrics_export_enabled);
+      const cards = [card('control', 'Export to time-series database',
+        [knownField('metrics_export_enabled'), enabled ? knownField('db_type') : null]
+          .filter(Boolean).map((field) => exportControl(field, rerender)))];
+      if (enabled && type) {
+        const consoleNode = element('div', 'tsdb-console');
+        consoleNode.id = 'tsdb-mini-console';
+        consoleNode.setAttribute('role', 'log');
+        consoleNode.setAttribute('aria-live', 'polite');
+        fillTsdbConsole(consoleNode);
+        cards.push(
+          groupCard('Database', 'Target database settings', type),
+          groupCard('Connection', 'Connection', type),
+          groupCard('Export', 'Export settings', type),
+          card('console', 'Status & Log', [consoleNode], 'card-span-all'),
+        );
+      }
+      host.replaceChildren(...cards);
+      syncTsdbStatusSurfaces();
+      refreshExportBar();
+    };
+    $('export-actions')?.replaceChildren(buildApplyBar('export', {
+      onApply: () => { applyExport().catch((error) => toast(messageFrom(error), 'danger')); },
+    }));
     render();
   }
 
+  // Mirrors the server-side host plausibility check `_HOST` in app/admin/api.py; keep the two in
+  // step. This is the client-side pre-check only — the server validates again on save (JS-02).
   const HOST_PATTERN = /^(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,62})(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,62}))*|\[[0-9A-Fa-f:.]+\]|[0-9A-Fa-f:.]+)$/;
 
+  // Mirrors the server network-id upper bound in app/admin/api.py (`_network_id`, 2**32 - 1).
   const MAX_NETWORK_ID = 2 ** 32 - 1;
 
   // Empty means "directly attached", exactly as the server reads a missing network id.
@@ -1245,6 +3688,8 @@
     if (!host) return { field: 'host', message: 'Enter an IP address or host name.' };
     if (!HOST_PATTERN.test(host)) return { field: 'host', message: 'Enter a plain IP address or host name, without scheme or path.' };
     const port = Number(device.port);
+    // Port and network-id bounds mirror app/admin/api.py (`_normalize_devices`: 1..65535, and
+    // `_network_id`: 0..MAX_NETWORK_ID); keep the two in step (JS-02).
     if (!Number.isInteger(port) || port < 1 || port > 65535) return { field: 'port', message: 'The port must be between 1 and 65535.' };
     const network = networkId(device.network_id);
     if (network !== null && (!Number.isInteger(network) || network < 0 || network > MAX_NETWORK_ID)) {
@@ -1258,21 +3703,21 @@
     return twin ? { field: 'host', message: 'This inverter address is already listed with the same network ID.' } : { field: '', message: '' };
   }
 
-  // A fresh, still empty row is ignored; every other row must be valid before anything is saved.
-  function isBlankNewRow(device) { return !device.device_id && !String(device.host || '').trim(); }
-
-  // Client-only stable identity. Handlers and the row DOM reference a device object, not an array
-  // index: an index does not survive a splice or a re-render, and replacing the array on a failed
-  // save would orphan every object the live handlers still hold.
+  // Client-only stable identity. Row DOM and handlers reference a device by uid, never by array
+  // index, because the list is replaced by the server's answer after every add and delete.
   let deviceUid = 0;
   function withUid(device) { if (!device._uid) device._uid = `d${++deviceUid}`; return device; }
-  function adoptDevices(list) { settingsDraft.devices = (list || []).map(withUid); return settingsDraft.devices; }
+  // The list always mirrors the server state: there is no draft, each add or delete is saved at once.
+  function adoptDevices(list) {
+    settingsDraft.devices = (list || []).map(withUid);
+    return settingsDraft.devices;
+  }
   function deviceByUid(uid) { return (settingsDraft.devices || []).find((device) => device._uid === uid) || null; }
 
   // Explicit fields instead of a spread, so the payload stays self-documenting and independent of
   // the server dropping unknown per-device keys (_normalize_devices rebuilds from a whitelist).
-  function devicesPayload() {
-    return settingsDraft.devices.filter((device) => !isBlankNewRow(device)).map((device) => ({
+  function devicesPayload(list) {
+    return list.map((device) => ({
       host: String(device.host).trim(),
       port: Number(device.port),
       network_id: networkId(device.network_id),
@@ -1281,228 +3726,250 @@
     }));
   }
 
-  // Pure predicate, no DOM: the send-time re-check in sendSettings() needs it for a draft that was
-  // mutated straight from the inputs (syncDeviceInputs) without a render in between.
-  function devicesValid() {
-    return (settingsDraft.devices || []).every((device) => isBlankNewRow(device) || !deviceProblem(device).field);
+  const deviceUi = { busy: false };
+  const deviceLabel = (entry) => `${String(entry.host).trim()}:${entry.port}`;
+  const RESET_NOTE = 'its verification evidence, Engineering Mode and operating mode are reset and its connection is closed';
+
+  // The one place that sends the device list: a full-list PUT that reconfigures the live
+  // connections without a restart. Throws the api() error; the caller reports it inline.
+  async function commitDevices(next) {
+    const payload = { devices: devicesPayload(next) };
+    const result = await api('settings', { method: 'PUT', body: JSON.stringify(payload) });
+    settingsCommitted = result.settings || { ...settingsCommitted, ...payload };
+    adoptDevices(structuredClone(settingsCommitted.devices || payload.devices));
+    if (page === 'dashboard') { loadDashboard().catch((error) => toast(messageFrom(error), 'danger')); loadMetricCount(); }
   }
 
-  // The only owner of the `devices` section state and of whether the `devices` key may stay queued.
-  function refreshDeviceState(card) {
-    let invalid = false;
-    for (const row of card.querySelectorAll('.device-settings-item')) {
-      const device = deviceByUid(row.dataset.uid);
-      if (!device) continue; // the row belongs to a draft generation that is already gone
-      const { field, message } = isBlankNewRow(device) ? { field: '', message: '' } : deviceProblem(device);
-      const feedback = row.querySelector('.invalid-feedback');
-      feedback.textContent = message;
-      // The feedback sits at row level, so it needs d-block instead of Bootstrap's sibling rule.
-      feedback.classList.toggle('d-block', Boolean(message));
-      for (const input of row.querySelectorAll('input[data-field]')) {
-        const offending = Boolean(message) && input.dataset.field === field;
-        input.classList.toggle('is-invalid', offending);
-        // Rewritten on every render, so no stale reference survives a splice or a re-render.
-        if (offending) input.setAttribute('aria-invalid', 'true');
-        else input.removeAttribute('aria-invalid');
-        const described = [input.dataset.help || '', offending ? feedback.id : ''].filter(Boolean).join(' ');
-        if (described) input.setAttribute('aria-describedby', described);
-        else input.removeAttribute('aria-describedby');
-      }
-      if (message) invalid = true;
-    }
-    if (invalid) {
-      pendingKeys.delete('devices');                 // an invalid row is never sent …
-      setSectionState('devices', 'incomplete', DEVICES_INCOMPLETE_MSG);
-    } else if (saveSections.get('devices')?.state === 'incomplete') {
-      // … and leaving the invalid state must not claim success. 'failed' and 'saving' are left
-      // alone — they are not this function's to clear.
-      setSectionState('devices', pendingKeys.has('devices') ? 'unsaved' : 'idle');
-    } else {
-      renderSaveState();
-    }
-    return !invalid;
+  function deviceFailureMessage(error, action) {
+    const reason = messageFrom(error);
+    if (error?.status === 409) return `The change was rejected and rolled back (${reason}). The previous configuration is still active.`;
+    if (error?.status === 504) return `${action} timed out (${reason}). Check the dashboard before retrying.`;
+    return `${action} failed (${reason}).`;
   }
 
-  // Rebuilds exactly the device card, so every change handler is re-bound to the current draft
-  // objects. Used after a successful add, after Discard changes, and after a removal.
-  function rebuildDeviceSection() {
-    const host = document.getElementById('device-editor') || $('settings-sections')?.querySelector('.device-settings');
-    const body = host?.parentElement;
-    if (!body) return; // not on this page, or the editor was never rendered
-    preserveFocus(() => {
-      body.replaceChildren(element('h2', 'h5 mb-3', 'Inverters'));
-      renderDevicesSettings(body);
+  // Outcome texts live in two persistent nodes (never rebuilt, so screen readers announce them):
+  // #device-status for results, #device-error (role=alert) for problems.
+  function setDeviceMessage(kind, text) {
+    const error = document.getElementById('device-error');
+    const status = document.getElementById('device-status');
+    if (error) { error.textContent = kind === 'error' ? text : ''; error.hidden = kind !== 'error' || !text; }
+    if (status) status.textContent = kind === 'status' ? text : '';
+  }
+
+  function setDeviceBusy(busy) {
+    deviceUi.busy = busy;
+    const editor = document.getElementById('device-editor');
+    if (!editor) return;
+    for (const control of editor.querySelectorAll('input, button')) control.disabled = busy;
+    editor.querySelector('#device-add')?.setAttribute('aria-busy', String(busy));
+  }
+
+  function markDeviceField(field) {
+    const form = document.getElementById('device-add-form');
+    for (const input of form?.querySelectorAll('input[data-field]') || []) {
+      const offending = input.dataset.field === field;
+      input.classList.toggle('is-invalid', offending);
+      if (offending) input.setAttribute('aria-invalid', 'true');
+      else input.removeAttribute('aria-invalid');
+      const described = offending ? 'device-error' : (input.dataset.help || '');
+      if (described) input.setAttribute('aria-describedby', described);
+      else input.removeAttribute('aria-describedby');
+    }
+  }
+
+  // `scope` is the editor itself while it is still detached (first render), else the document.
+  function renderDeviceList(scope = document) {
+    const list = scope.querySelector('#device-list');
+    if (!list) return;
+    const devices = settingsDraft.devices || [];
+    list.replaceChildren(...devices.map((device) => deviceItem(device)));
+    list.hidden = devices.length === 0; // an empty <ul> would still take a grid gap
+    scope.querySelector('#device-empty').hidden = devices.length > 0;
+  }
+
+  // A saved inverter is shown, not edited: re-addressing would be a fourth function of the dialog.
+  function deviceItem(device) {
+    const row = element('li', 'device-settings-item');
+    row.dataset.uid = device._uid;
+    const grid = element('div', 'row g-2 align-items-center');
+    const hostCol = element('div', 'col-12 col-sm');
+    hostCol.append(element('span', 'device-saved-host text-break', String(device.host)));
+    const portCol = element('div', 'col-6 col-sm-3', `Port ${device.port}`);
+    const network = networkId(device.network_id);
+    const networkCol = element('div', 'col-6 col-sm-3', network === null ? 'Direct connection' : `Network ID ${network}`);
+    const removeCol = element('div', 'col-auto ms-auto');
+    const remove = element('button', 'btn btn-outline-danger');
+    remove.type = 'button';
+    remove.title = 'Remove inverter';
+    remove.setAttribute('aria-label', `Remove inverter ${deviceLabel(device)}`);
+    const icon = element('span', 'material-icons', 'delete_outline');
+    icon.setAttribute('aria-hidden', 'true');
+    remove.append(icon);
+    remove.addEventListener('click', () => { removeDevice(device._uid, remove).catch((error) => toast(messageFrom(error), 'danger')); });
+    removeCol.append(remove);
+    grid.append(hostCol, portCol, networkCol, removeCol);
+    row.append(grid);
+    return row;
+  }
+
+  // Deleting reconfigures the live connections and resets the inverter's evidence and modes, so it
+  // asks first (the shared confirm dialog) and then saves at once.
+  async function removeDevice(uid, button) {
+    if (deviceUi.busy) return;
+    const device = deviceByUid(uid);
+    if (!device) return;
+    const label = deviceLabel(device);
+    const accepted = await confirmAction({
+      title: 'Remove inverter?',
+      message: `${label}: ${RESET_NOTE}.`,
+      confirmLabel: 'Remove inverter',
+      danger: true,
     });
+    if (!accepted) { if (button.isConnected) button.focus(); return; }
+    setDeviceMessage('status', '');
+    setDeviceBusy(true);
+    let failed = false;
+    try {
+      await commitDevices(settingsDraft.devices.filter((other) => other !== device));
+      renderDeviceList();
+      setDeviceMessage('status', `Inverter ${label} removed.`);
+    } catch (error) {
+      failed = true;
+      setDeviceMessage('error', deviceFailureMessage(error, 'Removing the inverter'));
+    } finally {
+      setDeviceBusy(false);
+    }
+    const editor = document.getElementById('device-editor');
+    if (!editor) return;
+    const target = failed && button.isConnected ? button : editor.querySelector('.device-settings-item button') || editor.querySelector('#device-new-host');
+    target?.focus();
   }
 
-  // The "rebuild consistently" branch: only ever on the operator's explicit request.
-  function discardDeviceChanges() {
-    adoptDevices(structuredClone(settingsCommitted.devices || []));
-    pendingKeys.delete('devices');
-    setSectionState('devices', 'idle');
-    rebuildDeviceSection();
+  // Validates the new row and saves the extended list at once. The input stays on any failure.
+  async function addDevice(card) {
+    if (deviceUi.busy) return;
+    const form = card.querySelector('#device-add-form');
+    const input = (field) => form.querySelector(`input[data-field="${field}"]`);
+    const candidate = withUid({
+      host: input('host').value.trim(),
+      port: input('port').value === '' ? null : Number(input('port').value),
+      network_id: networkId(input('network_id').value),
+    });
+    const problem = deviceProblem(candidate);
+    markDeviceField(problem.field);
+    if (problem.message) {
+      setDeviceMessage('error', problem.message);
+      input(problem.field).focus();
+      return;
+    }
+    setDeviceMessage('error', '');
+    setDeviceMessage('status', '');
+    setDeviceBusy(true);
+    let failed = false;
+    try {
+      await commitDevices([...settingsDraft.devices, candidate]);
+      renderDeviceList();
+      input('host').value = '';
+      input('port').value = '8899';
+      input('network_id').value = '';
+      setDeviceMessage('status', `Inverter ${deviceLabel(candidate)} added.`);
+    } catch (error) {
+      failed = true;
+      setDeviceMessage('error', deviceFailureMessage(error, 'Adding the inverter'));
+    } finally {
+      setDeviceBusy(false);
+    }
+    (failed ? card.querySelector('#device-add') : input('host'))?.focus();
   }
 
   function renderDevicesSettings(card) {
     const host = element('div', 'device-settings');
     host.id = 'device-editor'; // the anchor the persistent devices alert is inserted before
-    const devices = settingsDraft.devices || (settingsDraft.devices = []);
-    // One empty row is always offered, because "Add inverter" now confirms a row instead of
-    // creating one; without it the dialog would open with nowhere to type.
-    if (!devices.some(isBlankNewRow)) devices.push(withUid({ host: '', port: 8899, network_id: null }));
-    for (const [index, device] of devices.entries()) {
-      const row = element('div', 'device-settings-item');
-      row.dataset.uid = device._uid;  // identity
-      row.dataset.index = String(index); // rendering position only, never an identity
-      const grid = element('div', 'row g-2 align-items-start');
-      const hostCol = element('div', 'col-12 col-sm');
-      const hostInput = element('input', 'form-control');
-      hostInput.id = `device-${index}-host`;
-      hostInput.dataset.field = 'host';
-      hostInput.setAttribute('aria-label', 'IP address or host name');
-      hostInput.placeholder = 'IP address or host name';
-      hostInput.autocomplete = 'off';
-      hostInput.value = String(device.host ?? '');
-      hostCol.append(hostInput);
-      const portCol = element('div', 'col-6 col-sm-3');
-      const portInput = element('input', 'form-control');
-      portInput.id = `device-${index}-port`;
-      portInput.dataset.field = 'port';
-      portInput.type = 'number';
-      portInput.min = '1'; portInput.max = '65535'; portInput.inputMode = 'numeric';
-      portInput.setAttribute('aria-label', 'Port');
-      portInput.value = String(device.port ?? '');
-      portCol.append(portInput);
-      const networkCol = element('div', 'col-6 col-sm-3');
-      // Visually hidden keeps the row aligned with the unlabelled host and port inputs.
-      const networkLabel = element('label', 'visually-hidden', 'Network ID (optional, empty means directly attached)');
-      networkLabel.htmlFor = `device-${index}-network-id`;
-      const networkInput = element('input', 'form-control');
-      networkInput.id = `device-${index}-network-id`;
-      networkInput.dataset.field = 'network_id';
-      networkInput.type = 'number';
-      networkInput.min = '0'; networkInput.max = String(MAX_NETWORK_ID); networkInput.inputMode = 'numeric';
-      networkInput.placeholder = 'Network ID (optional)';
-      // refreshDeviceState() composes aria-describedby from this plus the row's error node.
-      networkInput.dataset.help = 'device-network-help';
-      networkInput.setAttribute('aria-describedby', 'device-network-help');
-      networkInput.value = device.network_id === null || device.network_id === undefined ? '' : String(device.network_id);
-      networkCol.append(networkLabel, networkInput);
-      const removeCol = element('div', 'col-6 col-sm-auto');
-      const remove = element('button', 'btn btn-outline-danger');
-      remove.type = 'button';
-      remove.title = 'Remove inverter';
-      remove.setAttribute('aria-label', `Remove inverter ${device.host || index + 1}`);
-      const removeIcon = element('span', 'material-icons', 'delete_outline');
-      removeIcon.setAttribute('aria-hidden', 'true');
-      remove.append(removeIcon);
-      // The trailing empty row has nothing to remove; it is re-created on every render anyway.
-      if (!isBlankNewRow(device)) removeCol.append(remove);
-      grid.append(hostCol, portCol, networkCol, removeCol);
-      const feedback = element('div', 'invalid-feedback');
-      feedback.id = `device-${index}-feedback`;
-      row.append(grid, feedback);
-      host.append(row);
-      const onChange = () => {
-        device.host = hostInput.value;
-        device.port = portInput.value === '' ? null : Number(portInput.value);
-        device.network_id = networkId(networkInput.value);
-        if (refreshDeviceState(card) && !isBlankNewRow(device)) queueSettings('devices');
-      };
-      hostInput.addEventListener('change', onChange);
-      portInput.addEventListener('change', onChange);
-      networkInput.addEventListener('change', onChange);
-      remove.addEventListener('click', () => {
-        const restoreFocus = document.activeElement === remove;
-        const wasSaved = !isBlankNewRow(device);
-        const label = device.host || '';
-        // confirm() is the established pattern here (token revocation uses it); an unsaved row is
-        // removed silently, as before, because there is nothing to lose.
-        if (wasSaved && !confirm(`Really remove inverter "${label}"?`)) return;
-        const at = devices.indexOf(device);
-        if (at < 0) return; // a stale closure must not delete a different row
-        devices.splice(at, 1);
-        rebuildDeviceSection();  // rebinds every handler to the current draft objects
-        const editor = document.getElementById('device-editor');
-        // Not delegated to preserveFocus(): the remove buttons carry no id, so it cannot restore them.
-        if (restoreFocus) {
-          const rows = editor?.querySelectorAll('.device-settings-item');
-          (rows?.[Math.min(at, rows.length - 1)]?.querySelector('button')
-            || editor?.parentElement?.querySelector('.device-settings ~ button'))?.focus();
-        }
-        if (editor?.parentElement && refreshDeviceState(editor.parentElement) && wasSaved) queueSettings('devices');
-      });
-    }
+    const list = element('ul', 'list-unstyled device-list mb-0');
+    list.id = 'device-list';
+    list.setAttribute('aria-label', 'Configured inverters');
+    const empty = element('p', 'text-secondary small mb-0', 'No inverters configured yet.');
+    empty.id = 'device-empty';
+    const form = element('form', 'device-add');
+    form.id = 'device-add-form';
+    form.noValidate = true; // deviceProblem() reports the problem inline, not as a browser bubble
+    const row = element('div', 'device-settings-item');
+    const grid = element('div', 'row g-2 align-items-start');
+    const hostCol = element('div', 'col-12 col-sm');
+    const hostInput = element('input', 'form-control');
+    hostInput.id = 'device-new-host';
+    hostInput.dataset.field = 'host';
+    hostInput.setAttribute('aria-label', 'IP address or host name');
+    hostInput.placeholder = 'IP address or host name';
+    hostInput.autocomplete = 'off';
+    hostCol.append(hostInput);
+    const portCol = element('div', 'col-6 col-sm-3');
+    const portInput = element('input', 'form-control');
+    portInput.id = 'device-new-port';
+    portInput.dataset.field = 'port';
+    portInput.type = 'number';
+    portInput.min = '1'; portInput.max = '65535'; portInput.inputMode = 'numeric';
+    portInput.setAttribute('aria-label', 'Port');
+    portInput.value = '8899';
+    portCol.append(portInput);
+    const networkCol = element('div', 'col-6 col-sm-3');
+    // Visually hidden keeps the row aligned with the unlabelled host and port inputs.
+    const networkLabel = element('label', 'visually-hidden', 'Network ID (optional, empty means directly attached)');
+    networkLabel.htmlFor = 'device-new-network-id';
+    const networkInput = element('input', 'form-control');
+    networkInput.id = 'device-new-network-id';
+    networkInput.dataset.field = 'network_id';
+    networkInput.type = 'number';
+    networkInput.min = '0'; networkInput.max = String(MAX_NETWORK_ID); networkInput.inputMode = 'numeric';
+    networkInput.placeholder = 'Network ID (optional)';
+    networkInput.dataset.help = 'device-network-help';
+    networkInput.setAttribute('aria-describedby', 'device-network-help');
+    networkCol.append(networkLabel, networkInput);
+    grid.append(hostCol, portCol, networkCol);
+    const error = element('div', 'invalid-feedback d-block');
+    error.id = 'device-error';
+    error.setAttribute('role', 'alert');
+    error.hidden = true;
+    row.append(grid, error);
     const networkHelp = element('p', 'text-secondary small mt-2 mb-0', 'Network ID: leave empty for a direct connection. Only set it for an inverter reached through the master in the plant network.');
     networkHelp.id = 'device-network-help';
-    host.append(networkHelp);
-    if (devices.every(isBlankNewRow)) host.append(element('p', 'text-secondary small', 'No inverters configured yet.'));
-    const add = element('button', 'btn btn-outline-primary mt-3', 'Add inverter');
-    add.type = 'button';
-    add.addEventListener('click', () => { addInverter(card, add); });
-    card.append(host, add);
-    refreshDeviceState(card);
-  }
-
-  // The click can land while the cursor still sits in a field, where no change event has fired yet,
-  // so the live input values are read straight from the DOM. Returns true if the draft moved.
-  function syncDeviceInputs(card) {
-    let changed = false;
-    for (const row of card.querySelectorAll('.device-settings-item')) {
-      const device = deviceByUid(row.dataset.uid);
-      if (!device) continue;
-      const host = row.querySelector('input[data-field="host"]').value;
-      const portValue = row.querySelector('input[data-field="port"]').value;
-      const port = portValue === '' ? null : Number(portValue);
-      const network = networkId(row.querySelector('input[data-field="network_id"]').value);
-      if (device.host !== host || device.port !== port || device.network_id !== network) changed = true;
-      device.host = host;
-      device.port = port;
-      device.network_id = network;
+    const add = element('button', 'btn btn-primary mt-3', 'Add inverter');
+    add.type = 'submit';
+    add.id = 'device-add';
+    const status = element('p', 'text-secondary small mt-2 mb-0');
+    status.id = 'device-status';
+    status.setAttribute('role', 'status');
+    form.append(row, networkHelp, add, status);
+    for (const input of [hostInput, portInput, networkInput]) {
+      input.addEventListener('input', () => { markDeviceField(''); setDeviceMessage('error', ''); });
     }
-    return changed;
+    form.addEventListener('submit', (event) => {
+      event.preventDefault();
+      addDevice(card).catch((failure) => toast(messageFrom(failure), 'danger'));
+    });
+    host.append(list, empty, form);
+    card.append(host);
+    renderDeviceList(host);
   }
 
-  // Bootstrap's JS bundle is loaded in base.html; the dismiss button is the fallback if it is not.
-  function closeInvertersModal() {
-    const modal = $('inverters-modal');
-    if (!modal) return;
-    const instance = window.bootstrap?.Modal?.getOrCreateInstance(modal);
-    if (instance) instance.hide();
-    else modal.querySelector('[data-bs-dismiss="modal"]')?.click();
+  // The shared action bar of every explicit-apply form: the Apply button alone. Its native disabled
+  // state tells assistive technology that there is nothing (valid) to apply; `prefix` namespaces the id.
+  function buildApplyBar(prefix, { onApply, applyLabel = 'Apply changes' }) {
+    const bar = element('div', 'apply-bar');
+    const apply = element('button', 'btn btn-primary', applyLabel);
+    apply.type = 'button';
+    apply.id = `${prefix}-apply`;
+    apply.addEventListener('click', onApply);
+    bar.append(apply);
+    return bar;
   }
 
-  // "Add inverter" confirms the row the operator just typed: save, then close. An invalid row keeps
-  // the dialog open with the existing validation markers; a rejected save does too.
-  async function addInverter(card, button) {
-    const dirty = syncDeviceInputs(card);
-    if (!refreshDeviceState(card)) {
-      // Best effort: the marked field is where the operator has to go. Moving the focus there does
-      // not take effect in headless Chromium, so the marker and the message carry the information.
-      const invalid = $('settings-sections')?.querySelector('.device-settings-item input.is-invalid');
-      invalid?.focus();
-      return;
-    }
-    if (dirty && settingsDraft.devices.some((device) => !isBlankNewRow(device))) queueSettings('devices');
-    button.disabled = true;
-    clearTimeout(settingsTimer); // the click supersedes the pending debounce
-    try {
-      // Scoped to the devices section: a foreign key's rejection must not decide this dialog, and
-      // a rejected devices save must keep it open (the alert and the toast say why).
-      if (!(await flushSettings({ sections: ['devices'] }))) return;
-    } finally {
-      button.disabled = false;
-    }
-    // A fresh empty row for the next inverter, and the saved row now carries its server-side id.
-    rebuildDeviceSection();
-    closeInvertersModal();
-  }
-
-  // One builder for both renderSettings() and rerenderGroup(), so the heading suppression and the
-  // Account relabel cannot drift and a group re-render cannot emit a second <h2>.
+  // One builder for both renderSettings() and rerenderGroup(), so the Account relabel cannot drift
+  // and a group re-render cannot emit a second <h2>. The Prometheus page does not use this builder;
+  // it renders its master toggle and dependents through renderPrometheusSettings().
   function buildGroupBody(group) {
     const body = element('div', 'card-body');
-    if (!(page === 'prometheus' && group === 'Prometheus')) body.append(element('h2', 'h5 mb-3', { Account: 'Administrator account' }[group] || group));
+    body.append(element('h2', 'h5 mb-3', { Account: 'Administrator account' }[group] || group));
     if (group === 'Account') renderAccount(body);
     else if (group === 'Inverters') renderDevicesSettings(body);
     else for (const field of settingFields.filter((item) => item.group === group && Object.hasOwn(settingsDraft, item.key) && settingVisible(item))) body.append(settingControl(field));
@@ -1518,14 +3985,43 @@
     section.replaceChildren(buildGroupBody(group));
   }
 
+  // The Prometheus page splits the group: the master toggle lives at the top of the status card
+  // (#prometheus-toggle), while its dependent fields render straight into #settings-sections. The
+  // master's live gating goes through rerenderPrometheusDependents(), not the shared section card.
+  function renderPrometheusSettings() {
+    const toggleHost = $('prometheus-toggle');
+    if (toggleHost) toggleHost.replaceChildren(settingControl(prometheusMasterField()));
+    rerenderPrometheusDependents();
+  }
+
+  function prometheusMasterField() {
+    return settingFields.find((field) => field.key === 'enable_metrics_endpoint');
+  }
+
+  function rerenderPrometheusDependents() {
+    const host = $('settings-sections');
+    if (!host) return;
+    const fields = settingFields.filter((item) => item.group === 'Prometheus'
+      && item.key !== 'enable_metrics_endpoint' && Object.hasOwn(settingsDraft, item.key) && settingVisible(item));
+    // No dependent fields are visible while the endpoint is off, so the card is dropped entirely
+    // rather than left as an empty shell.
+    if (!fields.length) { host.replaceChildren(); return; }
+    const section = element('section', 'card');
+    const body = element('div', 'card-body');
+    body.append(element('h2', 'h5 mb-3', 'Scrape settings'));
+    for (const field of fields) body.append(settingControl(field));
+    section.append(body);
+    host.replaceChildren(section);
+  }
+
   function renderSettings() {
+    if (page === 'prometheus') { renderPrometheusSettings(); return; }
     const host = $('settings-sections');
     host.replaceChildren();
     const groups = {
       settings: ['Access', 'Server', 'Network', 'Account'],
       dashboard: ['Inverters'],
       inverters: ['Write access'],
-      prometheus: ['Prometheus'],
       tsdb: ['Export'],
     }[page] || [];
     for (const group of groups) {
@@ -1543,27 +4039,33 @@
     body.append(change);
   }
 
-  function showRestartNotice(keys) {
-    let notice = $('restart-notice');
-    if (!notice) {
-      notice = element('div', 'alert alert-warning mt-3 mb-0');
-      notice.id = 'restart-notice';
-      notice.setAttribute('role', 'status');
-      $('settings-sections').before(notice);
-    }
-    notice.hidden = !keys?.length;
-    notice.textContent = keys?.length ? `Saved, but active only after a restart: ${keys.join(', ')}` : '';
-  }
-
   async function initSettings() {
-    const result = await api('settings');
+    const [result, devices] = await Promise.all([
+      api('settings'),
+      page === 'tsdb' ? api('devices') : Promise.resolve(null),
+    ]);
     settingsCommitted = structuredClone(result.settings || {});
     settingsDraft = structuredClone(settingsCommitted);
+    runningInContainer = result.in_container === true;
+    if (devices) tsdbRuntimeStatus = devices.tsdb || null;
     // The one place that mints a device identity, besides the blank trailing row.
     if (Object.hasOwn(settingsDraft, 'devices')) adoptDevices(settingsDraft.devices);
     renderSettings();
-    showRestartNotice(result.restart_required);
     renderPrometheusSummary();
+  }
+
+  // Dashboard only: defer the sensitive settings read until the operator first opens the inverters
+  // modal, so a plain dashboard view never fetches it (SEC-06). Loads once; a failure is reported
+  // and leaves the "Loading settings …" placeholder so a later open can retry.
+  function initInvertersModalLazy() {
+    const modal = $('inverters-modal');
+    if (!modal) return;
+    let loaded = false;
+    modal.addEventListener('show.bs.modal', () => {
+      if (loaded) return;
+      loaded = true;
+      initSettings().catch((error) => { loaded = false; toast(messageFrom(error), 'danger'); });
+    });
   }
 
   let parameterData = { available: [], exposed_names: [], write_names: [] };
@@ -1571,7 +4073,9 @@
   let parameterSending = false;
   let parameterTimer = null;
   let exposedPage = 0;
+  let writablePage = 0;
   const addMetricSelection = new Set();
+  const writableSelection = new Set();
   const EXPOSED_PAGE_SIZE = 15;
 
   function renderPrometheusSummary() {
@@ -1593,6 +4097,14 @@
     parameterTimer = setTimeout(flushParameters, 400);
   }
 
+  // Reloads the Writable parameters list and the Energy checklist after the server changed them.
+  async function refreshWriteApprovals() {
+    try {
+      if ($('writable-list') && !parameterDirty && !parameterSending) { parameterData = await api('parameters'); renderParameters(); }
+      if ($('energy-list')) pollEnergy();
+    } catch (error) { toast(messageFrom(error), 'danger'); }
+  }
+
   async function flushParameters() {
     if (parameterSending || !parameterDirty) return;
     const payload = { exposed_names: [...parameterData.exposed_names], write_names: [...parameterData.write_names] };
@@ -1603,7 +4115,7 @@
       const result = await api('parameters', { method: 'PUT', body: JSON.stringify(payload) });
       markPrometheusSaved();
       setSectionState('parameters', 'saved');
-      toast(result.restart_required?.length ? 'Parameters saved. A restart is required.' : 'Parameters saved.', result.restart_required?.length ? 'warning' : 'success');
+      toast('Parameters saved.', 'success');
     } catch (error) {
       // The reload re-establishes server truth, and it is exactly why this section gets no Retry:
       // by then parameterData holds the server's list, so a retry would re-PUT the server's own
@@ -1620,24 +4132,86 @@
     }
   }
 
+  // Shared by the Prometheus and Inverters parameter tables: the row "..." menu, the 15-row pager
+  // and the checkbox row of the add modals.
+  function parameterActionMenu(name, actions, describedBy) {
+    const cell = element('td', 'col-actions text-end');
+    const menu = element('div', 'dropdown');
+    const toggle = element('button', 'btn btn-outline-secondary btn-sm metric-menu-toggle');
+    toggle.type = 'button'; toggle.dataset.bsToggle = 'dropdown'; toggle.setAttribute('aria-expanded', 'false');
+    toggle.setAttribute('aria-label', `Actions for ${name}`);
+    if (describedBy) toggle.setAttribute('aria-describedby', describedBy);
+    toggle.append(element('span', 'material-icons', 'more_horiz'));
+    const options = element('ul', 'dropdown-menu dropdown-menu-end');
+    for (const { key, label, run, disabled = false } of actions) {
+      const item = element('li');
+      const button = element('button', 'dropdown-item', label);
+      button.type = 'button'; button.disabled = disabled; button.dataset.action = key;
+      button.setAttribute('aria-label', `${label}: ${name}`);
+      button.addEventListener('click', run);
+      item.append(button); options.append(item);
+    }
+    menu.append(toggle, options); cell.append(menu);
+    return cell;
+  }
+
+  // Fills <prefix>-list with one page of `entries`, and drives <prefix>-range/-prev/-next. Returns the page.
+  function renderParameterTable(prefix, entries, page, buildRow, emptyText, columns, noun) {
+    const body = $(`${prefix}-list`);
+    const pages = Math.max(1, Math.ceil(entries.length / EXPOSED_PAGE_SIZE));
+    const current = Math.min(page, pages - 1);
+    entries.slice(current * EXPOSED_PAGE_SIZE, (current + 1) * EXPOSED_PAGE_SIZE).forEach((entry) => body.append(buildRow(entry)));
+    if (!entries.length) {
+      const empty = element('tr');
+      const cell = element('td', 'text-secondary py-4', emptyText);
+      cell.colSpan = columns; empty.append(cell); body.append(empty);
+    }
+    $(`${prefix}-range`).textContent = entries.length ? `${current * EXPOSED_PAGE_SIZE + 1}–${Math.min((current + 1) * EXPOSED_PAGE_SIZE, entries.length)} of ${entries.length}` : `0 ${noun}`;
+    $(`${prefix}-prev`).disabled = current === 0;
+    $(`${prefix}-next`).disabled = current >= pages - 1;
+    return current;
+  }
+
+  // Parameter names have no spaces; <wbr> after each underscore gives them clean break points.
+  function appendBreakableName(cell, name) {
+    const parts = name.split('_');
+    parts.forEach((part, index) => {
+      cell.append(document.createTextNode(index < parts.length - 1 ? `${part}_` : part));
+      if (index < parts.length - 1) cell.append(document.createElement('wbr'));
+    });
+  }
+
+  function parameterCheckRow(parameter, selection, ariaPrefix, onChange) {
+    const label = element('label', 'parameter-item');
+    const box = element('input', 'form-check-input');
+    box.type = 'checkbox'; box.value = parameter.name; box.checked = selection.has(parameter.name);
+    box.setAttribute('aria-label', `${ariaPrefix} ${parameter.name}`);
+    box.addEventListener('change', () => {
+      if (box.checked) selection.add(parameter.name);
+      else selection.delete(parameter.name);
+      onChange();
+    });
+    const main = element('span', 'parameter-main');
+    main.append(element('strong', '', parameter.name));
+    if (parameter.description) main.append(element('small', 'text-secondary', parameter.description));
+    label.append(box, main);
+    return label;
+  }
+
   function exposedMetricRow(parameter, index) {
     const row = element('tr', 'metric-row');
     row.dataset.name = parameter.name;
-    const dragCell = element('td');
+    const dragCell = element('td', 'col-handle');
     const handle = element('span', 'material-icons metric-drag-handle', 'drag_indicator');
     handle.draggable = true;
     handle.title = `Drag to reorder ${parameter.name}`;
     handle.setAttribute('aria-hidden', 'true');
     handle.addEventListener('dragstart', (event) => { event.dataTransfer.setData('text/plain', parameter.name); event.dataTransfer.effectAllowed = 'move'; });
     dragCell.append(handle);
-    const nameCell = element('th', 'metric-name');
+    const nameCell = element('th', 'col-name metric-name');
     nameCell.scope = 'row';
     nameCell.title = parameter.name;
-    const nameParts = parameter.name.split('_');
-    nameParts.forEach((part, partIndex) => {
-      nameCell.append(document.createTextNode(partIndex < nameParts.length - 1 ? `${part}_` : part));
-      if (partIndex < nameParts.length - 1) nameCell.append(document.createElement('wbr'));
-    });
+    appendBreakableName(nameCell, parameter.name);
     // Below 768px the description column is hidden, so the description moves into an expandable
     // native <details> inside the name cell instead of being unavailable there.
     if (parameter.description) {
@@ -1645,32 +4219,20 @@
       mobile.append(element('summary', '', 'Description'), element('span', '', parameter.description));
       nameCell.append(mobile);
     }
-    const descriptionCell = element('td', 'text-secondary');
+    const descriptionCell = element('td', 'col-description text-secondary');
     descriptionCell.append(element('span', 'metric-description', parameter.description || '—'));
     if (parameter.description) descriptionCell.title = parameter.description;
-    const actionCell = element('td', 'text-end');
-    const menu = element('div', 'dropdown');
-    const toggle = element('button', 'btn btn-outline-secondary btn-sm metric-menu-toggle');
-    toggle.type = 'button'; toggle.dataset.bsToggle = 'dropdown'; toggle.setAttribute('aria-expanded', 'false');
-    toggle.setAttribute('aria-label', `Actions for ${parameter.name}`);
-    toggle.append(element('span', 'material-icons', 'more_horiz'));
-    const options = element('ul', 'dropdown-menu dropdown-menu-end');
-    const action = (label, callback, disabled, key) => {
-      const item = element('li');
-      const button = element('button', 'dropdown-item', label);
-      button.type = 'button'; button.disabled = disabled; button.dataset.action = key;
-      button.setAttribute('aria-label', `${label}: ${parameter.name}`);
-      button.addEventListener('click', callback);
-      item.append(button); options.append(item);
-    };
-    action('Move up', () => moveParameter(parameter.name, -1), index === 0, 'up');
-    action('Move down', () => moveParameter(parameter.name, 1), index === parameterData.exposed_names.length - 1, 'down');
-    action('Remove', () => {
-      parameterData.exposed_names = parameterData.exposed_names.filter((name) => name !== parameter.name);
-      queueParameters(); renderParameters();
-      $('exposed-search').focus();
-    }, false, 'remove');
-    menu.append(toggle, options); actionCell.append(menu);
+    const actionCell = parameterActionMenu(parameter.name, [
+      { key: 'up', label: 'Move up', disabled: index === 0, run: () => moveParameter(parameter.name, -1) },
+      { key: 'down', label: 'Move down', disabled: index === parameterData.exposed_names.length - 1, run: () => moveParameter(parameter.name, 1) },
+      {
+        key: 'remove', label: 'Remove', run: () => {
+          parameterData.exposed_names = parameterData.exposed_names.filter((name) => name !== parameter.name);
+          queueParameters(); renderParameters();
+          $('exposed-search').focus();
+        }
+      },
+    ]);
     row.append(dragCell, nameCell, descriptionCell, actionCell);
     row.addEventListener('dragover', (event) => { event.preventDefault(); row.classList.add('drag-over'); });
     row.addEventListener('dragleave', () => row.classList.remove('drag-over'));
@@ -1679,20 +4241,53 @@
   }
 
   function availableMetricRow(parameter) {
-    const label = element('label', 'parameter-item');
-    const box = element('input', 'form-check-input');
-    box.type = 'checkbox'; box.value = parameter.name; box.checked = addMetricSelection.has(parameter.name);
-    box.setAttribute('aria-label', `Add ${parameter.name}`);
-    box.addEventListener('change', () => {
-      if (box.checked) addMetricSelection.add(parameter.name);
-      else addMetricSelection.delete(parameter.name);
-      updateAddMetricsCount();
-    });
-    const main = element('span', 'parameter-main');
-    main.append(element('strong', '', parameter.name));
-    if (parameter.description) main.append(element('small', 'text-secondary', parameter.description));
-    label.append(box, main);
-    return label;
+    return parameterCheckRow(parameter, addMetricSelection, 'Add', updateAddMetricsCount);
+  }
+
+  function writableParameterRow(parameter) {
+    const row = element('tr', 'metric-row');
+    row.dataset.name = parameter.name;
+    const nameCell = element('th', 'col-name metric-name');
+    nameCell.scope = 'row';
+    nameCell.title = parameter.name;
+    appendBreakableName(nameCell, parameter.name);
+    const mobileText = [parameter.description, parameter.help_text].filter(Boolean);
+    // Below 768px the description column is hidden; same disclosure as the Prometheus table.
+    if (mobileText.length) {
+      const mobile = element('details', 'metric-description-mobile');
+      mobile.append(element('summary', '', 'Description'), element('span', '', mobileText.join(' ')));
+      nameCell.append(mobile);
+    }
+    const descriptionCell = element('td', 'col-description text-secondary');
+    descriptionCell.append(element('span', 'metric-description', parameter.description || '—'));
+    let helpId = '';
+    if (parameter.help_text) {
+      // Visible text rather than a tooltip, and tied to the row menu so a screen reader reads it
+      // with the control. Parameter names match [a-z][a-z0-9_]{0,63}, so the id stays unique.
+      const help = element('small', 'parameter-help d-block mt-1', parameter.help_text);
+      help.id = `write-help-${parameter.name}`;
+      helpId = help.id;
+      descriptionCell.append(help);
+    }
+    const actionCell = parameterActionMenu(parameter.name, [
+      {
+        key: 'revoke', label: 'Remove write access', run: () => {
+          parameterData.write_names = parameterData.write_names.filter((name) => name !== parameter.name);
+          queueParameters(); renderParameters();
+          $('writable-search').focus();
+        }
+      },
+    ], helpId);
+    row.append(nameCell, descriptionCell, actionCell);
+    return row;
+  }
+
+  function updateAddWritableCount() {
+    if (page !== 'inverters') return;
+    const count = writableSelection.size;
+    $('add-writable-count').textContent = `${count} selected`;
+    $('confirm-add-writable').textContent = count ? `Add ${count} parameters` : 'Add parameters';
+    $('confirm-add-writable').disabled = !count;
   }
 
   function updateAddMetricsCount() {
@@ -1728,66 +4323,47 @@
 
   function renderParameters() {
     const names = new Map(parameterData.available.map((item) => [item.name, item]));
-    const exposedSearch = ($('exposed-search')?.value || '').trim().toLocaleLowerCase();
-    const availableSearch = ($('parameter-search')?.value || '').trim().toLocaleLowerCase();
-    const writeSearch = ($('write-search')?.value || '').trim().toLocaleLowerCase('en-GB');
+    const normalise = (id) => ($(id)?.value || '').trim().toLocaleLowerCase('en-GB');
     const matches = (item, term) => `${item.name} ${item.description || ''} ${item.help_text || ''}`.toLocaleLowerCase('en-GB').includes(term);
-    const exposed = $('exposed-list') || element('tbody');
+    const exposedSearch = normalise('exposed-search');
+    const availableSearch = normalise('parameter-search');
+    const writeSearch = normalise('writable-search');
+    const writeAvailableSearch = normalise('writable-available-search');
     const available = $('available-list') || element('div');
-    const writable = $('writable-list') || element('div');
-    exposed.replaceChildren(); available.replaceChildren(); writable.replaceChildren();
+    const writableAvailable = $('writable-available-list') || element('div');
+    $('exposed-list')?.replaceChildren(); $('writable-list')?.replaceChildren();
+    available.replaceChildren(); writableAvailable.replaceChildren();
     if ($('exposed-list')) {
       const filtered = parameterData.exposed_names
         .map((name, index) => ({ item: names.get(name), index }))
         .filter(({ item }) => item?.exportable !== false && item && matches(item, exposedSearch));
-      const pages = Math.max(1, Math.ceil(filtered.length / EXPOSED_PAGE_SIZE));
-      exposedPage = Math.min(exposedPage, pages - 1);
-      for (const { item, index } of filtered.slice(exposedPage * EXPOSED_PAGE_SIZE, (exposedPage + 1) * EXPOSED_PAGE_SIZE)) exposed.append(exposedMetricRow(item, index));
-      if (!filtered.length) {
-        const empty = element('tr');
-        const cell = element('td', 'text-secondary py-4', exposedSearch ? 'No matching metrics.' : 'No metrics selected.');
-        cell.colSpan = 4; empty.append(cell); exposed.append(empty);
-      }
-      $('exposed-range').textContent = filtered.length ? `${exposedPage * EXPOSED_PAGE_SIZE + 1}–${Math.min((exposedPage + 1) * EXPOSED_PAGE_SIZE, filtered.length)} of ${filtered.length}` : '0 metrics';
-      $('exposed-prev').disabled = exposedPage === 0;
-      $('exposed-next').disabled = exposedPage >= pages - 1;
+      exposedPage = renderParameterTable('exposed', filtered, exposedPage, ({ item, index }) => exposedMetricRow(item, index),
+        exposedSearch ? 'No matching metrics.' : 'No metrics selected.', 4, 'metrics');
       renderPrometheusSummary();
     }
+    if ($('writable-list')) {
+      const granted = parameterData.write_names.map((name) => names.get(name)).filter((item) => item?.writable && matches(item, writeSearch));
+      writablePage = renderParameterTable('writable', granted, writablePage, writableParameterRow,
+        writeSearch ? 'No matching parameters.' : 'No writable parameters selected.', 3, 'parameters');
+    }
     let availableMatches = 0;
+    let writableMatches = 0;
     for (const item of parameterData.available) {
       if (page === 'prometheus' && item.exportable !== false && !parameterData.exposed_names.includes(item.name) && matches(item, availableSearch)) {
         availableMatches += 1;
         if (availableMatches <= 100) available.append(availableMetricRow(item));
       }
-      if (page !== 'inverters') continue;
-      if (!item.writable || !matches(item, writeSearch)) continue;
-      const row = element('label', 'parameter-item');
-      const box = element('input', 'form-check-input');
-      box.type = 'checkbox';
-      box.checked = parameterData.write_names.includes(item.name);
-      box.setAttribute('aria-label', `Write access for ${item.name}`);
-      box.addEventListener('change', () => {
-        parameterData.write_names = box.checked ? [...parameterData.write_names, item.name] : parameterData.write_names.filter((name) => name !== item.name);
-        queueParameters();
-      });
-      const description = element('span', 'parameter-main');
-      description.append(element('strong', '', item.name));
-      if (item.description) description.append(element('small', 'text-secondary', item.description));
-      if (item.help_text) {
-        // Visible text rather than a tooltip, and tied to the checkbox so a screen reader reads it
-        // with the control. Parameter names match [a-z][a-z0-9_]{0,63}, so the id stays unique.
-        const help = element('small', 'parameter-help', item.help_text);
-        help.id = `write-help-${item.name}`;
-        box.setAttribute('aria-describedby', help.id);
-        description.append(help);
+      if (page === 'inverters' && item.writable && !parameterData.write_names.includes(item.name) && matches(item, writeAvailableSearch)) {
+        writableMatches += 1;
+        if (writableMatches <= 100) writableAvailable.append(parameterCheckRow(item, writableSelection, 'Allow writing', updateAddWritableCount));
       }
-      row.append(box, description);
-      writable.append(row);
     }
     if (availableMatches > 100) available.append(element('p', 'text-secondary small', `${availableMatches - 100} more metrics. Refine the search to select them.`));
+    if (writableMatches > 100) writableAvailable.append(element('p', 'text-secondary small', `${writableMatches - 100} more parameters. Refine the search to select them.`));
     if (page === 'prometheus' && !available.childElementCount) available.append(element('p', 'text-secondary small', availableSearch ? 'No matching metrics.' : 'All metrics are exposed.'));
-    if (page === 'inverters' && !writable.childElementCount) writable.append(element('p', 'text-secondary small', writeSearch ? 'No matching parameters.' : 'No writable parameters available.'));
+    if (page === 'inverters' && !writableAvailable.childElementCount) writableAvailable.append(element('p', 'text-secondary small', writeAvailableSearch ? 'No matching parameters.' : 'All writable parameters are selected.'));
     updateAddMetricsCount();
+    updateAddWritableCount();
   }
 
   async function initParameters() {
@@ -1795,13 +4371,26 @@
     renderParameters();
     $('parameter-search')?.addEventListener('input', renderParameters);
     $('copy-metrics-endpoint')?.addEventListener('click', async () => {
-      try { await navigator.clipboard.writeText(`${location.origin}/metrics`); toast('Metrics endpoint copied.'); }
-      catch { toast('Could not copy the metrics endpoint.', 'danger'); }
+      if (await copyToClipboard(`${location.origin}/metrics`)) toast('Metrics endpoint copied.');
+      else toast('Could not copy the metrics endpoint.', 'danger');
     });
     $('exposed-search')?.addEventListener('input', () => { exposedPage = 0; renderParameters(); });
     $('exposed-prev')?.addEventListener('click', () => { exposedPage -= 1; renderParameters(); });
     $('exposed-next')?.addEventListener('click', () => { exposedPage += 1; renderParameters(); });
-    $('write-search')?.addEventListener('input', renderParameters);
+    $('writable-search')?.addEventListener('input', () => { writablePage = 0; renderParameters(); });
+    $('writable-prev')?.addEventListener('click', () => { writablePage -= 1; renderParameters(); });
+    $('writable-next')?.addEventListener('click', () => { writablePage += 1; renderParameters(); });
+    $('writable-available-search')?.addEventListener('input', renderParameters);
+    $('confirm-add-writable')?.addEventListener('click', () => {
+      const additions = parameterData.available.filter((item) => writableSelection.has(item.name) && item.writable && !parameterData.write_names.includes(item.name)).map((item) => item.name);
+      if (!additions.length) return;
+      parameterData.write_names.push(...additions);
+      writableSelection.clear();
+      queueParameters(); renderParameters();
+      window.bootstrap.Modal.getInstance($('add-writable-modal'))?.hide();
+    });
+    $('add-writable-modal')?.addEventListener('shown.bs.modal', () => $('writable-available-search').focus());
+    $('add-writable-modal')?.addEventListener('hidden.bs.modal', () => { writableSelection.clear(); $('writable-available-search').value = ''; renderParameters(); });
     $('confirm-add-metrics')?.addEventListener('click', () => {
       const additions = parameterData.available.filter((item) => addMetricSelection.has(item.name) && item.exportable !== false && !parameterData.exposed_names.includes(item.name)).map((item) => item.name);
       if (!additions.length) return;
@@ -1811,10 +4400,6 @@
       queueParameters(); renderParameters();
       window.bootstrap.Modal.getInstance($('add-metrics-modal'))?.hide();
     });
-    // sectionNotice() refuses to build the devices alert while the dialog is hidden (the failure is
-    // a toast then), so nothing holds the alert for a save that failed with the dialog closed.
-    // Re-running the single writer on show rebuilds it for a section whose failure is still open.
-    $('inverters-modal')?.addEventListener('shown.bs.modal', renderSaveState);
     $('add-metrics-modal')?.addEventListener('shown.bs.modal', () => $('parameter-search').focus());
     $('add-metrics-modal')?.addEventListener('hidden.bs.modal', () => { addMetricSelection.clear(); $('parameter-search').value = ''; renderParameters(); });
     $('exposed-list')?.addEventListener('dragover', (event) => event.preventDefault());
@@ -1823,6 +4408,23 @@
       event.preventDefault();
       reorderParameter(event.dataTransfer.getData('text/plain'), '');
     });
+  }
+
+  // dashboard.js is a separate deferred script; wait for its ready event instead of assuming it ran.
+  function startDashboardLayout() {
+    if (window.RCTDashboard) return window.RCTDashboard.initLayout();
+    return new Promise((resolve, reject) => {
+      document.addEventListener('rct:dashboard-ready', () => {
+        window.RCTDashboard.initLayout().then(resolve, reject);
+      }, { once: true });
+    });
+  }
+
+  // Lets dashboard.js hold the grid back until the first tile contents exist, so nothing resizes
+  // after the first paint. Set as a flag too: the layout may finish before or after this runs.
+  function markDashboardDataReady() {
+    document.body.dataset.dashboardData = 'ready';
+    document.dispatchEvent(new CustomEvent('rct:dashboard-data-ready'));
   }
 
   async function bootstrap() {
@@ -1834,14 +4436,29 @@
     }
     try {
       await session();
-      if (page === 'dashboard') { initDashboardPolling(); await Promise.all([loadDashboard(), loadMetricCount(), initSettings()]); }
+      if (page === 'dashboard') {
+        initDashboardPolling();
+        // dashboard.js owns the GridStack layout; it is independent of the polling above and of
+        // data loading, so it is started without awaiting it.
+        startDashboardLayout().catch((error) => toast(messageFrom(error), 'danger'));
+        // The settings read (GET /admin/api/settings) is sensitive and only feeds the inverters
+        // modal, which may never open. Load it lazily on first open instead of on every dashboard
+        // load (SEC-06).
+        initInvertersModalLazy();
+        await Promise.all([loadDashboard().finally(markDashboardDataReady), loadMetricCount()]);
+      }
       else if (page === 'tokens') initTokens();
+      else if (page === 'energy') initEnergy();
       else if (['settings', 'inverters', 'prometheus', 'tsdb'].includes(page)) {
         await initSettings();
         if (page === 'inverters' || page === 'prometheus') await initParameters();
       }
     } catch (error) { toast(messageFrom(error), 'danger'); }
   }
+
+  // dashboard.js loads after this file and needs the shared request/toast helpers; admin.js stays
+  // the single owner of the CSRF token and the fetch wrapper (abort/401/toast handling included).
+  window.RCTAdmin = Object.freeze({ api, toast, messageFrom, element, confirmAction });
 
   function start() {
     initShell();

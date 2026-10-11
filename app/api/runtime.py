@@ -18,10 +18,13 @@ from app.catalog.base import MetricCatalog
 from app.clock import Clock
 from app.config import DeviceEntry, Settings
 from app.dispatch.base import BatteryDispatchPort
+from app.energy.base import EnergyManagerPort
+from app.energy.readings import EnergyReadingsPort
 from app.errors import DeviceApiError, UnknownDevice, UnknownMetric
 from app.gateway.base import DeviceGateway, DeviceState
 from app.gateway.vendor import VendorDiagnostics
 from app.observability.exporter import MetricsExporter
+from app.observability.stats import ServiceCounters
 from app.scheduling.shutdown import ShutdownCoordinator
 
 # A device is ready when it answers; a degraded device still delivers values.
@@ -35,14 +38,29 @@ class Runtime:
     clock: Clock
     catalog: MetricCatalog
     gateway: DeviceGateway
+    # Replaced as a whole on reconfiguration and never mutated in place, so a reader on another
+    # thread that took a reference iterates a stable snapshot.
     devices: dict[str, DeviceEntry]
     roles: dict[str, str]
     shutdown: ShutdownCoordinator | None = None
     exporter: MetricsExporter | None = None
+    stats: ServiceCounters | None = None
     vendor: VendorDiagnostics | None = None
     tasks: list = field(default_factory=list)
     dispatch: BatteryDispatchPort | None = None
+    # Typed against the narrow protocol in app/energy/base.py, not the concrete manager, so this
+    # module keeps its ports-only rule and a router can be tested against a stub.
+    energy: EnergyManagerPort | None = None
+    # Cache-only sign-normalized readings, independent of dispatch/Energy-Manager state, so the
+    # dashboard's energy_flow projection works even with write support disabled (design §4.2).
+    energy_readings: EnergyReadingsPort | None = None
+    # Register names through which battery dispatch commands the device; injected by the composition
+    # root so routers need not import the vendor adapter that defines them.
+    dispatch_control_registers: frozenset[str] = frozenset()
     export_task: asyncio.Task | None = None  # the running push-exporter task; an explicit handle (not list position)
+    # Set when a device reconfiguration failed after the old graph was torn down: the live graph is
+    # then partial, so readiness must not report the service as healthy.
+    graph_failed: bool = False
 
     def shutting_down(self) -> bool:
         return self.shutdown is not None and self.shutdown.plan is not None

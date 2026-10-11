@@ -21,6 +21,21 @@ first or pass it in the environment); devices are configured in the GUI.
 Tests live in `tests/`; `pytest` runs with `asyncio_mode = "auto"`. Property
 tests use `hypothesis`.
 
+## Browser E2E (manual)
+
+`tests/e2e/admin_flow.mjs` drives the administration GUI with Playwright against an isolated
+database and a simulated inverter (`tests/e2e/run_server.py`, `tests/e2e/fake_inverter.py`); it is
+not part of `pytest` or CI. Playwright must be installed outside the repository:
+
+```sh
+PLAYWRIGHT_DIR=<dir with node_modules/playwright> PYTHON=.venv/bin/python \
+  node tests/e2e/admin_flow.mjs <artifact-dir>
+```
+
+The driver reads the one-time admin password from the `Password file:` line of the first-start
+banner of its own test server. `BROWSER` (`chromium`, `webkit`, `firefox`), `VIEWPORT_WIDTH` and
+`COLOR_SCHEME` (`light`, `dark`) select the matrix cell.
+
 ## Run locally
 
 ```sh
@@ -43,7 +58,7 @@ mkdocs build -f docs/mkdocs.yml --strict -d /tmp/rct-site
 | --- | --- |
 | `.github/workflows/ci.yml` | ruff, pytest, actionlint, `docker build --check`, manifest checks |
 | `.github/workflows/docs-build.yml` | strict docs build, link check, Trivy scan, deploy to GitHub Pages from `main` |
-| `.github/workflows/release.yml` | tag-driven: validates the tag against `pyproject.toml`, builds native `linux/amd64` + `linux/arm64` images, smoke-tests and scans each, publishes a multi-arch manifest to Docker Hub (`giiibates/rct-rest-api`) with an SBOM and provenance attestation, and creates the GitHub Release |
+| `.github/workflows/release.yml` | tag-driven: validates the tag against `pyproject.toml`, builds native `linux/amd64` + `linux/arm64` images, smoke-tests and scans each, publishes a multi-arch manifest to Docker Hub (`giiibates/rct-manager`) with an SBOM and provenance attestation, and creates the GitHub Release |
 
 Push a tag `v<version>` matching `[project].version` in `pyproject.toml` to trigger a release;
 `docker/build.sh` stays the separate manual path for a local build or a push to a private

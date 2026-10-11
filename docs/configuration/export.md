@@ -9,7 +9,8 @@ The service can push its metrics to a time-series database. Supported targets:
 | QuestDB OSS 10.x | Writes to `/write` (ILP over HTTP); HTTP Basic Auth only |
 
 Configure the target on the GUI **TSDB** page (secrets are write-only). Without a database type
-nothing is exported. A change requires a restart. The variables `DB_TYPE=influxdb_v2` or
+nothing is exported. A saved change restarts the export at once; no server restart is needed. The
+fields of one backend are saved together, and only once its required fields are filled. The variables `DB_TYPE=influxdb_v2` or
 `DB_TYPE=questdb` and the `INFLUXDB_*` / `QUESTDB_*` names listed in
 [Environment Variables](environment.md) only seed the very first start.
 
@@ -25,7 +26,9 @@ Histogram buckets are not exported. Export health is part of `/metrics`
 
 An unreachable or rejecting database never affects the REST API or device polling. A failed
 push is dropped (the next one carries current values), the delay doubles up to 300 s, and the
-log shows the first failure and then each power of two, plus the recovery.
+log shows the first failure and then each power of two, plus the recovery. QuestDB provisioning
+(retention and rollup DDL) runs only when the set of metric columns changed and retries with its
+own backoff; its failures do not mark the export as failed.
 
 ## QuestDB retention and downsampling
 

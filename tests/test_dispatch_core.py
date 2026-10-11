@@ -6,6 +6,7 @@
 
 """Battery dispatch strategies, persistence and state-machine safety invariants."""
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -22,6 +23,7 @@ from app.dispatch.controller import (
     DispatchRejected,
     ReconfigurationRejected,
 )
+from app.dispatch.gating import should_write
 from app.dispatch.models import (
     ControlTelemetry,
     DeviceControlSnapshot,
@@ -36,10 +38,12 @@ from app.dispatch.models import (
     PowerSetpoint,
     StopReason,
 )
+from app.dispatch.soc_policy import SocTargetPolicyRegistry
 from app.dispatch.store import DispatchStore
 from app.dispatch.strategy import calculate_setpoint
 from app.errors import DeviceApiError
 from app.gateway.base import WriteOutcome
+from app.gateway.conventions import RctSocTargetConvention
 from tests.conftest import ManualClock
 
 
@@ -70,6 +74,24 @@ def test_discharge_strategy_tracks_grid_import_without_export() -> None:
         last=PowerSetpoint(),
     )
     assert setpoint == PowerSetpoint(PowerDirection.DISCHARGE, 1100)
+    within_deadband = calculate_setpoint(
+        DispatchMode.DISCHARGE_TO_LOAD,
+        telemetry(grid=150),
+        target_soc_percent=20,
+        max_power_w=5000,
+        config=config,
+        last=setpoint,
+    )
+    assert within_deadband == setpoint
+    at_zero_import = calculate_setpoint(
+        DispatchMode.DISCHARGE_TO_LOAD,
+        telemetry(grid=0),
+        target_soc_percent=20,
+        max_power_w=5000,
+        config=config,
+        last=setpoint,
+    )
+    assert at_zero_import == PowerSetpoint(PowerDirection.DISCHARGE, 1000)
     no_export = calculate_setpoint(
         DispatchMode.DISCHARGE_TO_LOAD,
         telemetry(grid=-50),
@@ -218,7 +240,9 @@ def test_dispatch_store_upgrade_adds_only_the_new_tables_and_keeps_the_old_row(t
     store = version_1_database(tmp_path / "dispatch.db", "s" * 48, _V1_ROW)
     store.initialize()
     with store.connect() as db:
-        assert int(db.execute("PRAGMA user_version").fetchone()[0]) == 2
+        # A version 1 file now lands on the current schema version in one go (see
+        # tests/test_energy_store.py for the 2 -> 3 step on its own).
+        assert int(db.execute("PRAGMA user_version").fetchone()[0]) == 4
         tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         assert {"dispatch_operations", "dispatch_capabilities", "dispatch_device_config"} <= tables
         assert db.execute("PRAGMA synchronous").fetchone()[0] == 2
@@ -266,23 +290,43 @@ def test_dispatch_store_status_and_engineering_mode_stay_readable_without_the_se
     store = DispatchStore(path, "s" * 48)
     store.initialize()
     store.put_capability(
-        CapabilityRecord("main", CapabilityName.WRITE_PATH, status=CapabilityStatus.VERIFIED)
+        CapabilityRecord(
+            "main",
+            CapabilityName.WRITE_PATH,
+            status=CapabilityStatus.VERIFIED,
+            soc_strategy_external_code=1,
+            enum_byte_width=1,
+            bool_byte_width=1,
+            write_frame_layout_verified=True,
+            apply_sequence_verified=True,
+        )
     )
     store.put_device_config("main", DeviceLimits(3000, 5000, engineering_mode=True))
     other = DispatchStore(path, "r" * 48)
     with other.connect() as db:
         assert db.execute("SELECT status FROM dispatch_capabilities").fetchone()[0] == "verified"
         assert db.execute("SELECT engineering_mode FROM dispatch_device_config").fetchone()[0] == 1
-    with pytest.raises(ValueError, match="cannot be decrypted"):
-        other.get_capabilities()
+    # An undecryptable row is skipped (reads as unverified), never released.
+    assert other.get_capabilities() == []
 
 
-def test_dispatch_store_detects_a_capability_blob_moved_to_another_row(tmp_path: Path) -> None:
+def test_dispatch_store_detects_a_capability_blob_moved_to_another_row(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
     """The payload is bound to device_id/name, so a copied blob cannot release a second device."""
     store = DispatchStore(tmp_path / "dispatch.db", "s" * 48)
     store.initialize()
     store.put_capability(
-        CapabilityRecord("main", CapabilityName.WRITE_PATH, status=CapabilityStatus.VERIFIED)
+        CapabilityRecord(
+            "main",
+            CapabilityName.WRITE_PATH,
+            status=CapabilityStatus.VERIFIED,
+            soc_strategy_external_code=1,
+            enum_byte_width=1,
+            bool_byte_width=1,
+            write_frame_layout_verified=True,
+            apply_sequence_verified=True,
+        )
     )
     with store.connect() as db:
         blob = db.execute("SELECT encrypted FROM dispatch_capabilities").fetchone()[0]
@@ -290,15 +334,32 @@ def test_dispatch_store_detects_a_capability_blob_moved_to_another_row(tmp_path:
             "INSERT INTO dispatch_capabilities(device_id,name,status,encrypted) VALUES(?,?,?,?)",
             ("slave1", CapabilityName.WRITE_PATH.value, "verified", blob),
         )
-    with pytest.raises(ValueError, match="integrity check failed"):
-        store.get_capabilities()
+    # The copied blob fails its integrity check: the second device is not released and the
+    # row is reported, while the genuine row stays readable.
+    with caplog.at_level("ERROR", logger="app.dispatch.store"):
+        records = store.get_capabilities()
+    assert [r.device_id for r in records] == ["main"]
+    assert "of device slave1 is unreadable" in caplog.text
+
+
+class _NoBarrier:
+    async def __aenter__(self) -> None:
+        return None
+
+    async def __aexit__(self, *exc) -> None:
+        return None
 
 
 class FakeDispatchGateway:
-    def __init__(self, clock: ManualClock) -> None:
+    def restore_barrier(self, device_id: str):
+        return _NoBarrier()
+
+    def __init__(self, clock: ManualClock, *, soc_target_policies: SocTargetPolicyRegistry | None = None) -> None:
         self.clock = clock
         self.calls: list[tuple] = []
         self.fail_restore = False
+        # The same registry instance the controller writes to, exactly as in production.
+        self.soc_target_policies = soc_target_policies or SocTargetPolicyRegistry()
 
     def outcome(self, name: str, value=0) -> WriteOutcome:
         return WriteOutcome(name, value, value, True, False, self.clock.now())
@@ -319,9 +380,22 @@ class FakeDispatchGateway:
         self.calls.append(("setpoint", setpoint.direction, setpoint.watts))
         return self.outcome("power", setpoint.watts)
 
-    async def apply_soc_target(self, device_id: str, percent: float) -> WriteOutcome:
-        self.calls.append(("soc_target", percent))
-        return self.outcome("soc", percent)
+    async def apply_soc_target(
+        self,
+        device_id: str,
+        *,
+        dispatch_mode: DispatchMode,
+        stop_target_percent: float,
+        soc_percent: float,
+    ) -> WriteOutcome:
+        # The fake stands in for the RCT adapter, so it records what the adapter would write: the
+        # derived register ratio, never the business stop goal it was handed.
+        policy = self.soc_target_policies.policy(device_id)
+        ratio = RctSocTargetConvention(policy.mode, policy.below_margin_percent).register_ratio(
+            dispatch_mode, stop_target_percent=stop_target_percent, soc_percent=soc_percent
+        )
+        self.calls.append(("soc_target", ratio))
+        return self.outcome("soc", ratio)
 
     async def apply_control_mode(self, device_id: str, *, external: bool) -> WriteOutcome:
         self.calls.append(("control", external))
@@ -384,6 +458,7 @@ def controller_with_store(
         config or DispatchConfig(),
         limits if limits is not None else {"main": DeviceLimits(3000, 5000)},
         capabilities=capabilities if capabilities is not None else verified_registry("main"),
+        soc_target_policies=gateway.soc_target_policies,
     )
 
 
@@ -431,7 +506,7 @@ async def test_charge_apply_and_cancel_restores_snapshot(tmp_path: Path) -> None
         ("read_soc", "main"),
         ("snapshot", "main"),
         ("control", True),
-        ("soc_target", 80),
+        ("soc_target", 0.8),
         ("grid_charge", True),
         ("telemetry", "main"),
     ]
@@ -746,3 +821,268 @@ async def test_submit_rejects_a_new_dispatch_when_the_fresh_snapshot_read_is_sta
     status = await dispatch.status("main")
     assert status.state is DispatchState.IDLE
     assert status.restore_required is False
+
+
+async def test_submit_restores_after_a_non_device_error_during_apply(tmp_path: Path) -> None:
+    """Any failure after the first write (not only DeviceApiError) must roll the hardware back."""
+    clock = ManualClock()
+    gateway = FakeDispatchGateway(clock)
+    dispatch = controller(tmp_path, clock, gateway)
+
+    async def broken_grid_charge(device_id: str, *, enabled: bool):
+        raise ValueError("boom")
+
+    gateway.apply_grid_charge = broken_grid_charge  # type: ignore[method-assign]
+    with pytest.raises(ValueError, match="boom"):
+        await dispatch.submit(
+            "main",
+            DispatchCommand(DispatchMode.CHARGE_FROM_GRID, 80, 2000, clock.now() + timedelta(hours=1)),
+        )
+    assert [call for call in gateway.calls if call[0] == "restore"] == [("restore", step) for step in range(4)]
+    assert (await dispatch.status("main")).state is DispatchState.IDLE
+
+
+# --- recover()/shutdown_restore() must survive stale reads and unreadable rows ------------------
+
+
+async def test_recover_rereads_the_record_under_the_lock_after_a_concurrent_tick(tmp_path: Path) -> None:
+    """A tick landing between store.all() and the device lock must not turn into a stale-CAS abort."""
+    clock = ManualClock()
+    gateway = FakeDispatchGateway(clock)
+    dispatch = controller(tmp_path, clock, gateway)
+    await dispatch.submit(
+        "main",
+        DispatchCommand(DispatchMode.CHARGE_FROM_GRID, 80, 2000, clock.now() + timedelta(hours=1)),
+    )
+    real_all = dispatch._store.all
+
+    def all_then_concurrent_write():
+        records = real_all()
+        newer = dispatch._store.get("main")
+        assert newer is not None
+        dispatch._store.put(newer)  # bumps record_version behind the stale copy
+        return records
+
+    dispatch._store.all = all_then_concurrent_write
+    await dispatch.recover()
+    assert (await dispatch.status("main")).state is DispatchState.IDLE
+
+
+async def test_recover_continues_with_the_next_device_when_one_restore_raises(tmp_path: Path) -> None:
+    clock = ManualClock()
+    gateway = FakeDispatchGateway(clock)
+    dispatch = controller(
+        tmp_path, clock, gateway, limits={d: DeviceLimits(3000, 5000) for d in ("a", "b")},
+        capabilities=verified_registry("a", "b"),
+    )
+    for device_id in ("a", "b"):
+        await dispatch.submit(
+            device_id,
+            DispatchCommand(DispatchMode.CHARGE_FROM_GRID, 80, 2000, clock.now() + timedelta(hours=1)),
+        )
+    real_get = dispatch._get
+
+    async def get_failing_for_a(device_id: str):
+        if device_id == "a":
+            raise RuntimeError("boom")
+        return await real_get(device_id)
+
+    dispatch._get = get_failing_for_a
+    await dispatch.recover()
+    dispatch._get = real_get
+    assert (await dispatch.status("b")).state is DispatchState.IDLE
+
+
+def test_dispatch_store_all_skips_a_row_that_cannot_be_decrypted(tmp_path: Path) -> None:
+    store = DispatchStore(tmp_path / "dispatch.db", "s" * 48)
+    store.initialize()
+    store.put(DispatchRecord("good", state=DispatchState.PRECHECK))
+    store.put(DispatchRecord("bad", state=DispatchState.PRECHECK))
+    with store.connect() as db:
+        db.execute("UPDATE dispatch_operations SET encrypted=? WHERE device_id='bad'", (b"not-a-fernet-token",))
+    assert [record.device_id for record in store.all()] == ["good"]
+
+
+async def test_failed_restore_backs_off_exponentially_with_a_cap(tmp_path: Path) -> None:
+    clock = ManualClock()
+    gateway = FakeDispatchGateway(clock)
+    dispatch = controller(tmp_path, clock, gateway)
+    await dispatch.submit(
+        "main",
+        DispatchCommand(DispatchMode.CHARGE_FROM_GRID, 80, 2000, clock.now() + timedelta(hours=1)),
+    )
+    gateway.fail_restore = True
+    await dispatch.cancel("main")
+    delays = []
+    for _ in range(12):
+        record = await dispatch._get("main")
+        assert record.next_restore_at is not None
+        delays.append((record.next_restore_at - clock.now()).total_seconds())
+        clock.advance(delays[-1])
+        await dispatch.tick("main")
+    assert delays[:4] == [1, 2, 4, 8]
+    assert max(delays) == 30
+    record = await dispatch._get("main")
+    assert record.restore_attempts == 13
+
+
+async def test_restore_retry_info_exposes_attempts_and_next_retry(tmp_path: Path) -> None:
+    clock = ManualClock()
+    gateway = FakeDispatchGateway(clock)
+    dispatch = controller(tmp_path, clock, gateway)
+    await dispatch.submit(
+        "main",
+        DispatchCommand(DispatchMode.CHARGE_FROM_GRID, 80, 2000, clock.now() + timedelta(hours=1)),
+    )
+    assert await dispatch.restore_retry_info("main") == (0, None)
+    gateway.fail_restore = True
+    await dispatch.cancel("main")
+    attempts, next_at = await dispatch.restore_retry_info("main")
+    assert attempts == 1 and next_at == clock.now() + timedelta(seconds=1)
+
+
+def test_a_negative_stored_restore_attempts_counter_is_clamped() -> None:
+    record = DispatchRecord("main")
+    data = record.to_dict()
+    data["restore_attempts"] = -5
+    assert DispatchRecord.from_dict(data).restore_attempts == 0
+    del data["restore_attempts"]  # records written before the counter existed
+    assert DispatchRecord.from_dict(data).restore_attempts == 0
+
+
+async def test_recover_reports_an_unreadable_record_as_critical(tmp_path: Path, caplog) -> None:
+    clock = ManualClock()
+    gateway = FakeDispatchGateway(clock)
+    dispatch = controller(tmp_path, clock, gateway)
+    dispatch._store.put(DispatchRecord("ghost", state=DispatchState.PRECHECK))
+    with dispatch._store.connect() as db:
+        db.execute("UPDATE dispatch_operations SET encrypted=? WHERE device_id='ghost'", (b"garbage",))
+    with caplog.at_level("CRITICAL"):
+        await dispatch.recover()
+    assert dispatch.unreadable_devices == ("ghost",)
+    assert any(r.levelname == "CRITICAL" and "ghost" in r.getMessage() for r in caplog.records)
+
+
+async def test_recovery_ready_unlatches_after_an_automatic_restore_heals(tmp_path: Path) -> None:
+    """C2 self-heal: a failed restore at the startup sweep keeps readiness red, but an automatic
+    tick() retry that reaches IDLE must flip recovery_ready() back to green without a restart —
+    the regression the former latched snapshot caused.
+    """
+    clock = ManualClock()
+    gateway = FakeDispatchGateway(clock)
+    dispatch = controller(tmp_path, clock, gateway)
+    await dispatch.submit(
+        "main",
+        DispatchCommand(DispatchMode.CHARGE_FROM_GRID, 80, 2000, clock.now() + timedelta(hours=1)),
+    )
+    # The startup sweep finds the active record and tries to restore it, but the device is
+    # unreachable, so the restore lands in FAULT_RESTORE_PENDING and readiness must stay red.
+    gateway.fail_restore = True
+    await dispatch.recover()
+    assert dispatch.restore_pending_devices == ("main",)
+    assert dispatch.recovery_ready() is False
+
+    # The inverter comes back; the automatic retry in tick() heals it.
+    gateway.fail_restore = False
+    clock.advance(1)
+    status = await dispatch.tick("main")
+    assert status.state is DispatchState.IDLE
+    assert dispatch.restore_pending_devices == ()
+    assert dispatch.recovery_ready() is True
+
+
+async def test_recovery_ready_is_false_until_the_sweep_runs(tmp_path: Path) -> None:
+    """A green readiness must never precede the startup recovery sweep, even with nothing pending."""
+    clock = ManualClock()
+    gateway = FakeDispatchGateway(clock)
+    dispatch = controller(tmp_path, clock, gateway)
+    assert dispatch.recovery_ready() is False
+    await dispatch.recover()
+    assert dispatch.recovery_ready() is True
+
+
+def test_export_cut_bypasses_deadband_and_interval_for_a_reduction() -> None:
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    config = DispatchConfig()
+    current = PowerSetpoint(PowerDirection.DISCHARGE, 1000)
+    desired = PowerSetpoint(PowerDirection.DISCHARGE, 850)
+    kwargs = {"now": now, "last_write_at": now, "config": config}
+    assert not should_write(desired, current, **kwargs)
+    assert should_write(desired, current, export_cut=True, **kwargs)
+    # Only a reduction is urgent; an increase still honours the deadband.
+    assert not should_write(PowerSetpoint(PowerDirection.DISCHARGE, 1150), current, export_cut=True, **kwargs)
+
+
+async def test_a_successful_restore_clears_the_fault_code(tmp_path: Path) -> None:
+    clock = ManualClock()
+    gateway = FakeDispatchGateway(clock)
+    dispatch = controller(tmp_path, clock, gateway)
+    await dispatch.submit(
+        "main",
+        DispatchCommand(DispatchMode.CHARGE_FROM_GRID, 80, 2000, clock.now() + timedelta(hours=1)),
+    )
+    gateway.fail_restore = True
+    stuck = await dispatch.cancel("main")
+    assert stuck.fault_code == "device_unreachable"
+    gateway.fail_restore = False
+    clock.advance(1)
+    status = await dispatch.tick("main")
+    assert status.state is DispatchState.IDLE
+    assert status.fault_code is None
+
+
+async def test_run_lets_an_in_flight_tick_finish_before_a_cancellation_takes_effect(
+    tmp_path: Path,
+) -> None:
+    """C1 regression: a device reconfiguration cancelling ``run()`` must not interrupt a ``tick()``
+    that is already mid hardware-write. Without the ``asyncio.shield`` in ``run()``, cancelling the
+    outer task while ``apply_setpoint`` is in flight would propagate ``CancelledError`` out of
+    ``tick()`` and leave the plan step persisted as "sent" forever, with ``last_commanded`` never
+    updated — the record would look CHARGING but the server would no longer know the real setpoint.
+    """
+    clock = ManualClock()
+    gateway = FakeDispatchGateway(clock)
+    dispatch = controller(tmp_path, clock, gateway)
+    await dispatch.submit(
+        "main",
+        DispatchCommand(DispatchMode.DISCHARGE_TO_LOAD, 20, 2000, clock.now() + timedelta(hours=1)),
+    )
+    gateway.calls.clear()
+
+    # tick()'s next telemetry read reports a different grid import than submit() saw, so
+    # calculate_setpoint() derives a new desired setpoint and should_write() takes the write branch.
+    async def _changed_telemetry(device_id: str) -> ControlTelemetry:
+        return telemetry(grid=5000)
+
+    gateway.read_control_telemetry = _changed_telemetry
+
+    # Make the next apply_setpoint() hang until the test releases it, so the cancellation below
+    # lands while tick() is provably inside the hardware write.
+    entered_write = asyncio.Event()
+    release_write = asyncio.Event()
+    original_apply_setpoint = gateway.apply_setpoint
+
+    async def _blocking_apply_setpoint(device_id: str, setpoint):
+        entered_write.set()
+        await release_write.wait()
+        return await original_apply_setpoint(device_id, setpoint)
+
+    gateway.apply_setpoint = _blocking_apply_setpoint
+
+    run_task = asyncio.create_task(dispatch.run("main"))
+    await asyncio.sleep(0)  # let run() reach its first clock.sleep() and register as a sleeper
+    clock.advance(dispatch._config.cycle_interval_seconds)  # wake run()'s sleep, it starts tick()
+    await asyncio.wait_for(entered_write.wait(), timeout=5)
+
+    run_task.cancel()
+    await asyncio.sleep(0)  # let the cancellation reach the shield
+    assert not run_task.done()  # shielded: the in-flight tick must still be running
+
+    release_write.set()
+    with pytest.raises(asyncio.CancelledError):
+        await run_task
+
+    status = await dispatch.status("main")
+    # The write completed and was persisted ("confirmed"), not left stuck at "sent"/half-written.
+    assert status.state is DispatchState.DISCHARGING
+    assert any(call[0] == "setpoint" for call in gateway.calls)

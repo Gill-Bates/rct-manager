@@ -11,6 +11,7 @@ import pytest
 
 from app.api.app_factory import create_app
 from app.config import Settings
+from tests.api_helpers import admin_session_headers
 
 
 @pytest.mark.asyncio
@@ -18,15 +19,18 @@ async def test_prometheus_settings_apply_live_and_persist(tmp_path):
     settings = Settings(_env_file=None, hmac_secret="s" * 48, admin_db_path=tmp_path / "rct.db")
     app = create_app(settings)
     assert app.state.admin_store.change_password(app.state.first_start_password, "a much stronger password")
-    token = app.state.admin_store.create_token("settings", "read/write", None)[1]
-    headers = {"Authorization": f"Bearer {token}"}
     updates = {
         "metrics_require_token": False,
         "metrics_trusted_sources": ["192.0.2.10", "2001:db8::/32"],
         "metrics_rate_limit_requests": 300,
         "metrics_rate_limit_window_seconds": 120,
     }
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver") as client:
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver", headers={"Origin": "http://testserver"}) as client:
+        # Trust and authentication settings need the cookie session, a PAT is refused for them.
+        csrf = (await client.get("/admin/api/session")).json()["csrf_token"]
+        login = await client.post("/admin/api/login", headers={"X-CSRF-Token": csrf},
+                                  json={"username": "admin", "password": "a much stronger password"})
+        headers = {"X-CSRF-Token": login.json()["csrf_token"]}
         response = await client.put("/admin/api/settings", headers=headers, json=updates)
         assert response.status_code == 200
         result = response.json()
@@ -35,7 +39,7 @@ async def test_prometheus_settings_apply_live_and_persist(tmp_path):
         assert result["settings"]["metrics_rate_limit_requests"] == 300
         assert result["settings"]["metrics_rate_limit_window_seconds"] == 120
         # Applied to the running server immediately, no restart needed.
-        assert result["restart_required"] == []
+        assert "restart_required" not in result
         assert set(updates).issubset(result["live"])
         assert app.state.runtime.settings.metrics_require_token is False
         assert [str(n) for n in app.state.runtime.settings.metrics_trusted_sources] == [
@@ -52,7 +56,7 @@ async def test_prometheus_settings_apply_live_and_persist(tmp_path):
         # immediately, which could only happen if the running counter picked up the new value.
         tight = await client.put("/admin/api/settings", headers=headers,
                                  json={"metrics_rate_limit_requests": 1, "metrics_rate_limit_window_seconds": 60})
-        assert tight.json()["restart_required"] == []
+        assert "restart_required" not in tight.json()
         assert (await client.get("/metrics")).status_code == 429
 
         for invalid in (
@@ -72,7 +76,7 @@ async def test_prometheus_settings_apply_live_and_persist(tmp_path):
         # Re-enabling the token requirement is live too: the next unauthenticated scrape is
         # rejected for missing auth (checked before the already-spent scrape limit).
         reenabled = await client.put("/admin/api/settings", headers=headers, json={"metrics_require_token": True})
-        assert reenabled.json()["restart_required"] == []
+        assert "restart_required" not in reenabled.json()
         assert (await client.get("/metrics")).status_code == 401
 
     restarted = create_app(settings)
@@ -94,7 +98,7 @@ async def test_device_heading_prefers_display_name_then_reported_name_then_id(tm
     app.state.admin_store.change_password(app.state.first_start_password, "a much stronger password")
     token = app.state.admin_store.create_token("devices", "read/write", None)[1]
     headers = {"Authorization": f"Bearer {token}"}
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver") as client:
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver", headers={"Origin": "http://testserver"}) as client:
         # Never connected, no admin-set name: falls back to the device_id.
         before = (await client.get("/admin/api/devices", headers=headers)).json()["devices"]
         assert before[0]["name"] == "main"
@@ -104,6 +108,11 @@ async def test_device_heading_prefers_display_name_then_reported_name_then_id(tm
         app.state.runtime.gateway.set_reported_name("main", "Garage Inverter")
         reported = (await client.get("/admin/api/devices", headers=headers)).json()["devices"]
         assert reported[0]["name"] == "Garage Inverter"
+        assert reported[0]["serial_number"] is None  # not read yet: the card omits it
+
+        app.state.runtime.gateway.set_reported_serial("main", "12345678")
+        with_serial = (await client.get("/admin/api/devices", headers=headers)).json()["devices"]
+        assert with_serial[0]["serial_number"] == "12345678"
 
     # An admin-set display_name wins over the device-reported name (checked at startup,
     # since "devices" is not a live setting: a saved display_name needs a restart to apply).
@@ -113,7 +122,7 @@ async def test_device_heading_prefers_display_name_then_reported_name_then_id(tm
     named_app = create_app(named_settings)
     named_app.state.admin_store.change_password(named_app.state.first_start_password, "a much stronger password")
     named_token = named_app.state.admin_store.create_token("devices", "read/write", None)[1]
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=named_app), base_url="http://testserver") as client:
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=named_app), base_url="http://testserver", headers={"Origin": "http://testserver"}) as client:
         named_app.state.runtime.gateway.set_reported_name("main", "Garage Inverter")
         named = (await client.get("/admin/api/devices",
                                    headers={"Authorization": f"Bearer {named_token}"})).json()["devices"]
@@ -129,9 +138,8 @@ async def test_stored_address_display_name_is_repaired_once_and_a_chosen_name_su
                                              display_name="10.40.0.188:8899")])
     app = create_app(settings)
     app.state.admin_store.change_password(app.state.first_start_password, "a much stronger password")
-    token = app.state.admin_store.create_token("devices", "read/write", None)[1]
-    headers = {"Authorization": f"Bearer {token}"}
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver") as client:
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver", headers={"Origin": "http://testserver"}) as client:
+        headers = await admin_session_headers(client, "a much stronger password")  # devices are session-only
         app.state.runtime.gateway.set_reported_name("main", "Garage Inverter")
         listed = (await client.get("/admin/api/devices", headers=headers)).json()["devices"]
         assert listed[0]["name"] == "Garage Inverter"  # the address-shaped name no longer wins

@@ -12,20 +12,24 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 # One-second buckets bound a window counter's memory to roughly window_seconds entries,
-# regardless of how many events land in it (Finding P2-2): a flood of well-formed foreign
+# regardless of how many events land in it: a flood of well-formed foreign
 # RESPONSE frames, exempt from the flood-reconnect limit, could otherwise grow its deque by one
 # float per frame for as long as the peer kept sending.
 _BUCKET_SECONDS = 1.0
+# Pruning uses the largest configurable window (UNEXPECTED_FRAME_WINDOW_SECONDS le=3600), so a
+# reader with a short window never deletes buckets that a reader with a longer window still needs.
+_RETENTION_SECONDS = 3600.0
 
 
 @dataclass(slots=True)
 class EndpointCounters:
     last_frame_at: datetime | None = None
     last_success_at: datetime | None = None
-    last_send_at: datetime | None = None
     last_success_monotonic: float | None = None
     last_periodic_monotonic: float | None = None
     discarded_bytes: int = 0
+    crc_errors: int = 0  # frames dropped for a CRC mismatch; never reach the cache
+    framing_errors: int = 0
     unexpected_frames: int = 0
     unexpected_frames_window: deque[list[float]] = field(default_factory=deque)  # [bucket_start, count]
     # flood_frames_window below holds the subset that are not well-formed responses to another
@@ -57,10 +61,11 @@ def _bucket_append(window: deque[list[float]], now: float) -> None:
 
 
 def _in_window(window: deque[list[float]], now: float, window_seconds: float) -> int:
-    horizon = now - window_seconds
-    while window and window[0][0] <= horizon:
+    retention_horizon = now - max(window_seconds, _RETENTION_SECONDS)
+    while window and window[0][0] <= retention_horizon:
         window.popleft()
-    return sum(count for _, count in window)
+    horizon = now - window_seconds
+    return sum(count for start, count in window if start > horizon)
 
 
 @dataclass(slots=True)

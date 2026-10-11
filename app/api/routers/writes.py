@@ -4,7 +4,7 @@
 # Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
 #
 
-"""Write and action endpoints; registered only when write support is enabled (Requirement 19).
+"""Write and action endpoints; always registered, refused per request while write support is off (Requirement 19).
 
 Allowlist and value range are checked inside the gateway before the access serializer is touched,
 so every 403, 404, 409 and 422 leaves the device without a transaction.
@@ -18,7 +18,9 @@ from pydantic import BaseModel, ConfigDict
 
 from app.api.models import ActionResult, WriteResult
 from app.api.problems import ErrorCode, problem_responses
-from app.api.runtime import RuntimeDep
+from app.api.runtime import Runtime, RuntimeDep
+from app.dispatch.models import DispatchState
+from app.energy.models import EnergyMode
 from app.errors import DeviceApiError
 from app.protocol.values import ScalarValue
 from app.security.dependencies import require_write
@@ -26,6 +28,24 @@ from app.security.tokens import Principal
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/devices/{device_id}", tags=["writes"])
+
+
+async def _dispatch_owns_register(runtime: Runtime, device_id: str, metric_name: str) -> bool:
+    """True when the metric is a dispatch-control register and this device is not switched off/idle.
+
+    Fail-closed ownership check for the generic write path: an energy mode other than OFF, or any
+    dispatch state that is not a clean IDLE (including a pending restore), means the dispatch layer
+    owns these registers and a parallel raw write must be refused. The register set is the one the
+    energy allowlist and the admin revoke guard use (Runtime.dispatch_control_registers).
+    """
+    if metric_name not in runtime.dispatch_control_registers:
+        return False
+    if runtime.energy is not None and runtime.energy.mode(device_id) is not EnergyMode.OFF:
+        return True
+    if runtime.dispatch is None:
+        return False
+    status = await runtime.dispatch.status(device_id)
+    return status.state is not DispatchState.IDLE or status.restore_required or status.operation_id is not None
 
 ACTION_NOTE = (
     "The command was sent to the device. The device reports no execution result; check the effect on the device."
@@ -63,8 +83,9 @@ class ValueBody(BaseModel):
 @router.put(
     "/metrics/{metric_name}",
     summary="Write one metric",
-    response_model=WriteResult,
-    responses=problem_responses(*_COMMON, ErrorCode.METRIC_IS_ACTION, ErrorCode.WRITE_OUTCOME_UNKNOWN),
+    responses=problem_responses(
+        *_COMMON, ErrorCode.METRIC_IS_ACTION, ErrorCode.DISPATCH_REGISTER_LOCKED, ErrorCode.WRITE_OUTCOME_UNKNOWN
+    ),
 )
 async def put_metric(
     device_id: str,
@@ -76,6 +97,14 @@ async def put_metric(
     runtime.device(device_id)
     runtime.metric(metric_name)
     runtime.ensure_accepting()
+    if await _dispatch_owns_register(runtime, device_id, metric_name):
+        log.warning(
+            "Write refused: dispatch owns register token=%s device=%s metric=%s",
+            principal.token_id,
+            device_id,
+            metric_name,
+        )
+        raise DeviceApiError("dispatch_register_locked", device_id=device_id, name=metric_name)
     log.info("Write request: token=%s device=%s metric=%s", principal.token_id, device_id, metric_name)
     try:
         outcome = await runtime.gateway.write_metric(device_id, metric_name, body.value)
@@ -105,7 +134,6 @@ async def put_metric(
 @router.post(
     "/actions/{action_name}",
     summary="Trigger an action",
-    response_model=ActionResult,
     responses=problem_responses(*_COMMON, ErrorCode.ACTION_OUTCOME_UNKNOWN),
 )
 async def post_action(

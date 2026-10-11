@@ -24,14 +24,14 @@ def _unescaped_body(raw: bytes) -> bytes:
     return unescape_body(raw[1:])
 
 
-# Feature: rct-rest-api, Property 1: frame round-trip
+# Feature: rct-manager, Property 1: frame round-trip
 @PROP
 @given(frames())
 def test_frame_round_trip(frame: Frame) -> None:
     assert decode_frame(_unescaped_body(encode_frame(frame))) == frame
 
 
-# Feature: rct-rest-api, Property 2: escaping round-trip and absence of frame bytes
+# Feature: rct-manager, Property 2: escaping round-trip and absence of frame bytes
 @PROP
 @given(st.binary(max_size=300))
 def test_escaping_round_trip_and_frame_freedom(data: bytes) -> None:
@@ -47,7 +47,7 @@ def test_escaping_round_trip_and_frame_freedom(data: bytes) -> None:
             i += 1
 
 
-# Feature: rct-rest-api, Property 3: CRC detects every single-byte corruption
+# Feature: rct-manager, Property 3: CRC detects every single-byte corruption
 @PROP
 @given(frames(), st.data())
 def test_crc_detects_single_byte_corruption(frame: Frame, data: st.DataObject) -> None:

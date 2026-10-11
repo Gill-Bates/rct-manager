@@ -23,7 +23,8 @@ Copy `settings.env.example` to `settings.env`:
 cp settings.env.example settings.env
 ```
 
-The file only holds start parameters (`HMAC_SECRET`, `BIND_ADDRESS`, `BIND_PORT`).
+The file only holds start parameters (`HMAC_SECRET`, `BIND_ADDRESS`, `BIND_PORT`,
+`ALLOW_NON_LOOPBACK_BIND` and optionally `ADMIN_DB_PATH`).
 Devices, authentication, API tokens, logging and export are configured in the
 administration GUI.
 For Docker, supply a stable random `HMAC_SECRET` (`openssl rand -base64 32`)
@@ -35,7 +36,7 @@ See [Environment Variables](../configuration/environment.md) for all settings.
 
 ## Administration and tokens
 
-Open `http://127.0.0.1:8080/` after starting the server. The first start prints a boxed
+Open `http://127.0.0.1:8000/` after starting the server. The first start prints a boxed
 `FIRST START - admin login` block with the one-time `admin` password (8 characters, one special
 character) in clear text, so it can be copy-pasted straight from the console. It is also saved to
 `initial-admin-password` next to the admin database as a fallback for runs without a visible
@@ -70,18 +71,19 @@ python -m app              # start the server (serve is the default mode)
 Check the service:
 
 ```sh
-curl http://127.0.0.1:8080/health
-curl -H "Authorization: Bearer <token>" http://127.0.0.1:8080/api/v1/devices
+curl http://127.0.0.1:8000/health
+curl -H "Authorization: Bearer <token>" http://127.0.0.1:8000/api/v1/devices
 ```
 
 ## Administration menu
 
 | Page | Purpose |
 | --- | --- |
-| Overview | Live values (solar, house consumption, grid, battery) and one card per inverter with its online state, operating state, battery status and next calibration date; add, edit and remove inverters from the Inverters modal. Values are shown as whole numbers, with the decimal and thousands separators of the browser locale |
+| Overview | Configurable widgets with live values (solar, house consumption, grid, battery, TSDB export) and one card per inverter with its energy-flow graphic, online and operating state, and one card per battery tower; add, edit and remove inverters from the Inverters dialog. Values are shown as whole numbers, with the decimal and thousands separators of the browser locale. A value that is missing for any reason (not configured, inverter unreachable, no reading yet, export off) reads `n/a` |
 | Inverters | Write access and the writable parameters |
+| Energy Manager | Manual battery control (charge, keep idle, discharge, return to automatic) per inverter, with a compact grid, house and battery energy-flow view beside the controls when space allows; see [Energy Manager](../energy-manager.md) |
 | TSDB | InfluxDB 2 / QuestDB export |
 | Prometheus | Metrics endpoint and the exposed metrics |
 | API tokens | Create and revoke personal access tokens |
 | Settings | Documentation, authentication, server, network and the admin password |
-| About | Version, runtime, project and dependency information |
+| About | Version, runtime, project and dependency information. The footer of every page shows the version and the build hash `(abc1234)` (`dev` outside an image) |

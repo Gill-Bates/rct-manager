@@ -13,6 +13,7 @@ from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
+from app.config import DeviceKey
 from app.errors import BudgetExhausted, DeviceApiError, QueueFullError, QueueTimeout
 from app.scheduling.budget import BudgetHandle, WorkBudget
 from app.transport.endpoint import TransportEndpoint
@@ -23,9 +24,14 @@ from app.transport.types import (
     TransactionResult,
 )
 
-__all__ = ["AccessSerializer", "TransactionOrigin", "TransactionRequest"]
+__all__ = ["AccessSerializer"]
 
 log = logging.getLogger(__name__)
+
+# Restore and dispatch writes jump the FIFO and ignore its capacity; they wait only for the running
+# transaction, so this bound just keeps a wedged worker from blocking a caller forever.
+_PRIORITY_MAX_WAIT_SECONDS = 60.0
+_PRIORITY_ORIGINS = frozenset({TransactionOrigin.SYSTEM_WRITE, TransactionOrigin.SHUTDOWN})
 
 type Handler = Callable[[TransactionRequest], Awaitable[TransactionResult]]
 
@@ -42,6 +48,10 @@ class _Item:
     result: asyncio.Future[TransactionResult] = field(
         default_factory=lambda: asyncio.get_running_loop().create_future()
     )
+
+    @property
+    def priority(self) -> bool:
+        return self.request.origin in _PRIORITY_ORIGINS
 
 
 class _BoundedDeque:
@@ -70,9 +80,19 @@ class _BoundedDeque:
 
     async def put(self, item: _Item) -> None:
         async with self._condition:
-            if len(self._items) >= self._capacity:
-                raise asyncio.QueueFull
-            self._items.append(item)
+            if item.priority:
+                # Overtakes queued reads only: behind every queued write (caller writes included),
+                # so writes to a device keep their order and a restore is never overwritten by an
+                # older caller write that was queued first.
+                position = max(
+                    (i + 1 for i, queued in enumerate(self._items) if queued.priority or queued.request.kind == "write"),
+                    default=0,
+                )
+                self._items.insert(position, item)
+            else:
+                if len(self._items) >= self._capacity:
+                    raise asyncio.QueueFull
+                self._items.append(item)
             self._unfinished += 1
             self._condition.notify_all()
 
@@ -95,6 +115,22 @@ class _BoundedDeque:
 
     def get_nowait(self) -> _Item:
         return self._items.popleft()
+
+    async def remove_where(self, predicate: Callable[[_Item], bool]) -> list[_Item]:
+        """Take every queued (not yet started) item matching ``predicate`` out of the queue."""
+        async with self._condition:
+            taken = [item for item in self._items if predicate(item)]
+            for item in taken:
+                self._items.remove(item)
+                self._unfinished -= 1
+            self._condition.notify_all()
+            return taken
+
+    async def reset(self) -> None:
+        """Forget unfinished work whose items were taken out by stop() without a task_done()."""
+        async with self._condition:
+            self._unfinished = len(self._items)
+            self._condition.notify_all()
 
     async def task_done(self) -> None:
         async with self._condition:
@@ -131,6 +167,7 @@ class AccessSerializer:
         self._worker: asyncio.Task[None] | None = None
         self._current: _Item | None = None
         self._accepting = True
+        self._barriers: dict[DeviceKey, int] = {}
 
     def start(self) -> None:
         if self._worker is None:
@@ -160,11 +197,11 @@ class AccessSerializer:
             item.request.charge.release()
 
     @classmethod
-    def _abort(cls, item: _Item) -> None:
+    def _abort(cls, item: _Item, code: str = "shutdown") -> None:
         cls._release(item)
         for future in (item.started, item.result):
             if not future.done():
-                future.set_exception(DeviceApiError("shutdown"))
+                future.set_exception(DeviceApiError(code))
                 future.add_done_callback(_consume)
 
     async def drain(self) -> None:
@@ -173,6 +210,7 @@ class AccessSerializer:
 
     async def stop(self) -> int:
         """Cancel the worker (shutdown only); returns the number of aborted transactions."""
+        self._accepting = False  # a submit() racing the teardown must not queue behind a dead worker
         worker, self._worker = self._worker, None
         running = self._current  # the worker clears it while being cancelled
         if worker is not None:
@@ -183,12 +221,40 @@ class AccessSerializer:
             items.append(self._queue.get_nowait())
         for item in items:
             self._abort(item)  # a running transaction was committed, so its release is a no-op
+        await self._queue.reset()  # otherwise a later drain()/join() waits for items that never finish
         self._current = None
         return len(items)
+
+    @staticmethod
+    def _is_caller_mutation(request: TransactionRequest) -> bool:
+        return request.origin is TransactionOrigin.CALLER and request.kind == "write"
+
+    async def raise_barrier(self, device_key: DeviceKey) -> None:
+        """Restore barrier: no caller write for this device may run after the restore starts.
+
+        Queued caller writes are rejected (safer than running them first, they would be about to
+        overwrite the restored state), later ones are refused until ``lower_barrier()``. Reads pass.
+        """
+        self._barriers[device_key] = self._barriers.get(device_key, 0) + 1
+        queued = await self._queue.remove_where(
+            lambda item: item.request.device_key == device_key and self._is_caller_mutation(item.request)
+        )
+        for item in queued:
+            item.request.abandoned = True
+            self._abort(item, "restore_in_progress")
+
+    def lower_barrier(self, device_key: DeviceKey) -> None:
+        count = self._barriers.get(device_key, 0) - 1
+        if count > 0:
+            self._barriers[device_key] = count
+        else:
+            self._barriers.pop(device_key, None)
 
     async def submit(self, request: TransactionRequest) -> TransactionResult:
         if not self._accepting:
             raise DeviceApiError("not_ready")
+        if request.device_key in self._barriers and self._is_caller_mutation(request):
+            raise DeviceApiError("restore_in_progress")
         item = _Item(request)
         item.result.add_done_callback(_consume)
         try:
@@ -197,13 +263,14 @@ class AccessSerializer:
             self._release(item)
             raise QueueFullError(retry_after=math.ceil(self._queue.qsize() * self._per_tx)) from None
         try:
-            await asyncio.wait_for(asyncio.shield(item.started), self._max_wait)
+            wait = _PRIORITY_MAX_WAIT_SECONDS if item.priority else self._max_wait
+            await asyncio.wait_for(asyncio.shield(item.started), wait)
         except TimeoutError:
             if not item.started.done():
                 request.abandoned = True
                 self._release(item)
                 # Remove the item right away: a timed-out caller must not keep binding a queue
-                # slot until the worker's FIFO turn reaches and skips it (Finding P3-2).
+                # slot until the worker's FIFO turn reaches and skips it.
                 await self._queue.discard(item)
                 raise QueueTimeout() from None
         except asyncio.CancelledError:

@@ -32,4 +32,4 @@ discovery) lives only under `/api/v1/vendor/rct/`.
 | Metric value | `name`, `value`, `unit`, `timestamp` (UTC), `age_seconds`, `stale`, `source` (`device`, `cache`); optional `stale_reason`, `freshness`, `enum_value`, `enum_label` |
 | Write result | `device_id`, `name`, `written_value`, `readback_value`, `confirmed`, `send_unconfirmed`, `timestamp` |
 | Action result | `device_id`, `name`, `requested_value`, `readback_value`, `action_confirmed` (always `false`), `action_note`, `timestamp` |
-| Readiness | `device_id`, `state`, `last_success_at`, `last_heartbeat_at`, `consecutive_failures`, `queue_length`, `foreign_access_suspected`, `liveness_source`, `transactions`, `failures`, `cache_hits`, `cache_misses` |
+| Readiness | `device_id`, `state`, `last_success_at`, `last_heartbeat_at`, `consecutive_failures`, `queue_length`, `foreign_access_suspected`, `liveness_source`, `transactions`, `failures`, `cache_hits`, `cache_misses`, `periodic_available` (`null`: periodic reads not configured), `periodic_setup_failures` |

@@ -122,6 +122,8 @@ class DeviceReadiness(BaseModel):
     failures: int
     cache_hits: int
     cache_misses: int
+    periodic_available: bool | None = None
+    periodic_setup_failures: int = 0
 
 
 class ReadinessResponse(BaseModel):

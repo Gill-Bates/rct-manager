@@ -17,7 +17,12 @@ UNKNOWN_ADDRESS = "unknown"
 
 def _parse(text: str) -> str | None:
     try:
-        return str(ip_address(text.strip().strip("[]")))
+        text = text.strip()
+        if text.startswith("[") and text.endswith("]"):
+            text = text[1:-1]
+        if "[" in text or "]" in text:
+            return None
+        return str(ip_address(text))
     except ValueError:
         return None
 
@@ -31,6 +36,10 @@ class ClientIpResolver:
     def __init__(self, trusted_proxies: Sequence[Network] = (), forwarded_header: str = "") -> None:
         self._trusted = tuple(trusted_proxies)
         self._header = forwarded_header.lower()
+
+    def is_trusted_peer(self, peer: str | None) -> bool:
+        address = _parse(peer) if peer else None
+        return address is not None and _trusted(address, self._trusted)
 
     def _header_value(self, headers: Mapping[str, str]) -> str:
         """All lines of the header in order, comma-joined, so a repeated header cannot hide earlier hops."""

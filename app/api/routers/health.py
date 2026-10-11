@@ -32,14 +32,18 @@ async def health(runtime: RuntimeDep) -> dict[str, str]:
 @business.get(
     "/readiness",
     summary="Device readiness",
-    response_model=ReadinessResponse,
     responses=problem_responses(
         ErrorCode.MISSING_TOKEN, ErrorCode.INVALID_TOKEN, ErrorCode.RATE_LIMITED, ErrorCode.NOT_READY
     ),
 )
 async def readiness(runtime: RuntimeDep, _: Annotated[Principal, Depends(require_read)]) -> ReadinessResponse:
     devices = runtime.readiness()
-    ready = not runtime.shutting_down() and all(d.state in READY_STATES for d in devices)
+    ready = (
+        not runtime.shutting_down()
+        and not runtime.graph_failed
+        and (runtime.dispatch is None or runtime.dispatch.recovery_ready())
+        and all(d.state in READY_STATES for d in devices)
+    )
     if not ready:
         raise ProblemError(ErrorCode.NOT_READY, devices=devices)  # devices extension member (Requirement 25.19)
     return ReadinessResponse(ready=True, devices=devices)

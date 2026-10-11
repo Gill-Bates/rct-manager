@@ -6,22 +6,24 @@
 
 """Server-rendered administration pages."""
 
+import re
 import sys
 from datetime import UTC, datetime
 from importlib.metadata import PackageNotFoundError, version
+from ipaddress import ip_address
 from pathlib import Path
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from app import __version__
+from app import __build__, __version__
 from app.admin.api import admin_session
 
 _ROOT = Path(__file__).resolve().parent
 _TEMPLATES = Jinja2Templates(directory=str(_ROOT / "templates"))
-_PAGES = {"dashboard", "inverters", "tsdb", "prometheus", "tokens", "settings", "about"}
+_PAGES = {"dashboard", "inverters", "tsdb", "prometheus", "tokens", "settings", "energy", "about"}
 _CHANGELOG = _ROOT.parent.parent / "CHANGELOG.md"
 _DEPENDENCIES = ("argon2-cffi", "cryptography", "fastapi", "jinja2", "pydantic", "pydantic-settings", "starlette", "uvicorn")
 _HEADERS = {
@@ -35,8 +37,34 @@ _HEADERS = {
 }
 
 
+_HOST = re.compile(r"[A-Za-z0-9.-]{1,253}")
+
+
+def _page_headers(request: Request) -> dict[str, str]:
+    """Pages may probe their own host on any port, so a listener port change can be followed.
+
+    The reconnect monitor checks /health on the new port; 'self' alone would block that request.
+    """
+    host = request.url.hostname or ""
+    if ":" in host:
+        try:
+            ip_address(host)
+        except ValueError:
+            return _HEADERS
+        host = f"[{host}]"
+    elif not _HOST.fullmatch(host):
+        return _HEADERS
+    policy = _HEADERS["Content-Security-Policy"].replace(
+        "connect-src 'self';", f"connect-src 'self' {request.url.scheme}://{host}:*;"
+    )
+    return {**_HEADERS, "Content-Security-Policy": policy}
+
+
 class _AdminStaticFiles(StaticFiles):
     async def get_response(self, path, scope):
+        # Dotfiles (e.g. local tool state such as .omc/) are never public.
+        if any(part.startswith(".") for part in path.replace("\\", "/").split("/")):
+            raise HTTPException(404)
         response = await super().get_response(path, scope)
         response.headers.update(_HEADERS)
         return response
@@ -47,9 +75,14 @@ def _redirect(path: str) -> RedirectResponse:
 
 
 def _render(request: Request, template: str, context: dict):
-    context = {"app_version": __version__, "copyright_year": datetime.now(UTC).year, **context}
+    context = {
+        "app_version": __version__,
+        "build_hash": __build__,
+        "copyright_year": datetime.now(UTC).year,
+        **context,
+    }
     return _TEMPLATES.TemplateResponse(
-        request, template, context, headers={**_HEADERS, "Cache-Control": "no-store"}
+        request, template, context, headers={**_page_headers(request), "Cache-Control": "no-store"}
     )
 
 

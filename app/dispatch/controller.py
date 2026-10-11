@@ -7,15 +7,16 @@
 """Battery dispatch state machine and recovery loop (REQ-100..REQ-125)."""
 
 import asyncio
-import contextlib
 import logging
 import math
 import uuid
-from datetime import timedelta
+from collections.abc import Iterable
+from datetime import datetime, timedelta
 
 from app.clock import Clock
 from app.dispatch.base import BatteryDispatchGateway
 from app.dispatch.capabilities import (
+    CapabilityName,
     CapabilityRecord,
     CapabilityRegistry,
     evaluate_gate,
@@ -36,15 +37,33 @@ from app.dispatch.models import (
     StopReason,
     phase_for,
 )
+from app.dispatch.soc_policy import SocTargetPolicy, SocTargetPolicyRegistry
 from app.dispatch.store import DispatchStore
 from app.dispatch.strategy import calculate_setpoint, target_reached
 from app.errors import DeviceApiError
 
 log = logging.getLogger(__name__)
 
+# Automatic restore retries back off exponentially so a persistently failing device is not hammered.
+_RESTORE_BACKOFF_BASE_SECONDS = 1.0
+_RESTORE_BACKOFF_MAX_SECONDS = 30.0  # the battery stays externally controlled meanwhile
+
+# The state a successfully applied command leaves the device in. A table rather than a conditional
+# so a new mode without a state cannot silently inherit another mode's.
+_STATE_FOR_MODE = {
+    DispatchMode.CHARGE_FROM_GRID: DispatchState.CHARGING,
+    DispatchMode.DISCHARGE_TO_LOAD: DispatchState.DISCHARGING,
+    DispatchMode.HOLD: DispatchState.HOLDING,
+}
+
 
 class DispatchRejected(DeviceApiError):
     pass
+
+
+def _guarded_names(mode: DispatchMode) -> frozenset[CapabilityName]:
+    # limit_export=True is a superset of limit_export=False (it only adds EXPORT_LIMIT).
+    return required_for(mode, limit_export=True)
 
 
 class CapabilityConflict(DeviceApiError):
@@ -87,6 +106,7 @@ class DispatchController:
         limits: dict[str, DeviceLimits],
         *,
         capabilities: CapabilityRegistry,
+        soc_target_policies: SocTargetPolicyRegistry,
     ) -> None:
         self._gateway = gateway
         self._store = store
@@ -96,7 +116,20 @@ class DispatchController:
         # The very same registry instance the adapter reads from: a second instance would be a
         # second truth, and a capability update has to take effect live, without a restart.
         self._capabilities = capabilities
+        # Same single-instance rule as the capabilities: the adapter reads the policy this
+        # controller writes, so an operator change takes effect on the next apply without a restart.
+        self._soc_target_policies = soc_target_policies
         self._locks: dict[str, asyncio.Lock] = {}
+        self.unreadable_devices: tuple[str, ...] = ()
+        # Live set of devices whose restore is outstanding (ended in FAULT_RESTORE_PENDING). Kept
+        # current by _restore_guarded on every success/failure, so an automatic tick() retry that
+        # heals a device clears it here too; readiness derives from this instead of a latched
+        # startup snapshot (so a post-startup self-heal is not stuck red until restart).
+        self._restore_pending: set[str] = set()
+        # The startup recovery sweep has to run before readiness may turn green (C2): until then a
+        # possibly half-written hardware state has not been reconciled, even though no device sits
+        # in _restore_pending yet.
+        self._recovery_complete = False
 
     def _lock(self, device_id: str) -> asyncio.Lock:
         return self._locks.setdefault(device_id, asyncio.Lock())
@@ -143,19 +176,40 @@ class DispatchController:
     async def status(self, device_id: str) -> DispatchStatus:
         return self._status(await self._get(device_id))
 
-    async def submit(self, device_id: str, command: DispatchCommand) -> DispatchStatus:
+    async def submit_verification_probe(self, device_id: str, command: DispatchCommand) -> DispatchStatus:
+        """Run one short HOLD on unverified hardware for the guided verification.
+
+        Only a HOLD (0 W, no SoC goal) qualifies: it moves no energy on purpose, and it goes through
+        the same snapshot, durable intent, TTL cap and restore path as any dispatch. The gate is
+        passed as if engineering mode were on, without persisting that switch.
+        """
+        if command.mode is not DispatchMode.HOLD:
+            raise DispatchRejected("invalid_request")
+        return await self.submit(device_id, command, _verification_probe=True)
+
+    async def submit(
+        self, device_id: str, command: DispatchCommand, *, _verification_probe: bool = False
+    ) -> DispatchStatus:
         async with self._lock(device_id):
             if command.mode is DispatchMode.EXPORT_TO_GRID:
                 raise DispatchRejected("dispatch_mode_unavailable")
             now = self._clock.now()
             if command.valid_until.tzinfo is None or command.valid_until <= now:
                 raise DispatchRejected("value_out_of_range")
-            if not math.isfinite(command.target_soc_percent) or not math.isfinite(command.max_power_w):
-                raise DispatchRejected("value_not_finite")
-            if not self._config.min_soc <= command.target_soc_percent <= self._config.max_soc:
-                raise DispatchRejected("value_out_of_range")
-            if command.max_power_w <= 0:
-                raise DispatchRejected("value_out_of_range")
+            if command.mode is DispatchMode.HOLD:
+                # A hold has no SoC goal and no power budget; anything else is a programming error
+                # upstream, not an operator value out of range.
+                if command.target_soc_percent is not None or command.max_power_w != 0.0:
+                    raise DispatchRejected("invalid_request")
+            else:
+                if command.target_soc_percent is None:
+                    raise DispatchRejected("invalid_request")
+                if not math.isfinite(command.target_soc_percent) or not math.isfinite(command.max_power_w):
+                    raise DispatchRejected("value_not_finite")
+                if not self._config.min_soc <= command.target_soc_percent <= self._config.max_soc:
+                    raise DispatchRejected("value_out_of_range")
+                if command.max_power_w <= 0:
+                    raise DispatchRejected("value_out_of_range")
             limits = self._limits.get(device_id)
             if limits is None:
                 raise DispatchRejected("dispatch_limits_missing")
@@ -165,7 +219,7 @@ class DispatchController:
                 command.mode,
                 self._capabilities,
                 device_id=device_id,
-                device_engineering_mode=limits.engineering_mode,
+                device_engineering_mode=limits.engineering_mode or _verification_probe,
                 limit_export=self._config.limit_export_during_discharge,
             )
             if not gate.allowed:
@@ -177,6 +231,18 @@ class DispatchController:
                     reason=gate.reject_detail,
                 )
             current = await self._get(device_id)
+            if current.state in (
+                DispatchState.APPLYING,
+                DispatchState.REPLACING,
+                DispatchState.PRECHECK,
+            ):
+                # An interrupted apply/replace left hardware possibly half-written; tick()/recover()
+                # treat exactly these as "restore first". submit() must not accept a new order on top
+                # of that half-written state while recovery has not run yet (its correctness must not
+                # depend on the startup sweep winning the CPU race). Drive the restore under this
+                # lock, then reject so the caller retries against a clean record.
+                await self._restore(current, StopReason.DEVICE_ERROR, "recovery_required")
+                raise DispatchRejected("dispatch_restore_required")
             if current.state in (
                 DispatchState.RESTORING,
                 DispatchState.FAULT,
@@ -194,6 +260,10 @@ class DispatchController:
             ):
                 return self._status(current)
             soc = await self._gateway.read_soc(device_id)
+            if not math.isfinite(soc) or not 0.0 <= soc <= 100.0:
+                # The controller is the last validation boundary for device data (H4): a NaN or
+                # out-of-range SoC must never reach target_reached() or apply_soc_target().
+                raise DeviceApiError("protocol_error", device_id=device_id)
             if target_reached(command.mode, soc, command.target_soc_percent):
                 if current.intent is not None or current.restore_required:
                     await self._restore(current, StopReason.TARGET_REACHED)
@@ -202,12 +272,17 @@ class DispatchController:
                 current.stop_reason = StopReason.TARGET_REACHED
                 await self._put(current)
                 return self._status(current)
-            maximum = (
-                limits.max_charge_power_w
-                if command.mode is DispatchMode.CHARGE_FROM_GRID
-                else limits.max_discharge_power_w
-            )
-            effective_power = min(command.max_power_w, maximum)
+            if command.mode is DispatchMode.HOLD:
+                # DeviceLimits is still required above (the gate and the TTL cap need it); only the
+                # power lookup is skipped, because a hold commands no power at all.
+                effective_power = 0.0
+            else:
+                maximum = (
+                    limits.max_charge_power_w
+                    if command.mode is DispatchMode.CHARGE_FROM_GRID
+                    else limits.max_discharge_power_w
+                )
+                effective_power = min(command.max_power_w, maximum)
             # Engineering mode drives unverified hardware, so an unattended setpoint must expire
             # sooner than in normal operation.
             ttl_cap = (
@@ -236,29 +311,39 @@ class DispatchController:
             )
             await self._put(record)  # durable intent before the first hardware access
             if record.snapshot is None:
-                record.snapshot = await self._gateway.read_snapshot(device_id)
-                if not record.snapshot.all_fresh:
+                snapshot = await self._gateway.read_snapshot(device_id)
+                if not snapshot.all_fresh:
                     # D5: a snapshot that is not fully fresh must not become the basis of a new
                     # dispatch (it may later be restored from). The half-written intent above is
                     # cleaned up the same way a device error during apply is: via _restore().
+                    # The stale snapshot stays local: nothing was written, so there is nothing
+                    # to restore and _restore() takes its no-snapshot reset-to-IDLE path.
                     await self._restore(record, StopReason.SNAPSHOT_STALE)
                     raise DispatchRejected("dispatch_snapshot_stale")
+                record.snapshot = snapshot
             record.state = DispatchState.REPLACING if replacing else DispatchState.APPLYING
             record.restore_required = True
-            steps = ["control_mode", "soc_target", "grid_charge"]
-            steps.append("setpoint")
+            steps = ["control_mode"]
+            if command.mode is not DispatchMode.HOLD:
+                # A hold has no SoC goal, so there is no SoC target to write. _apply() executes
+                # exactly this durable plan by step name, so plan and execution cannot drift.
+                steps.append("soc_target")
+            steps += ["grid_charge", "setpoint"]
             record.plan = [{"name": name, "status": "planned"} for name in steps]
             await self._put(record)  # snapshot and complete plan before writes
             try:
-                await self._apply(record)
-            except DeviceApiError as exc:
-                await self._restore(record, StopReason.DEVICE_ERROR, getattr(exc, "code", "internal_error"))
+                # The SoC submit() already read is handed down: _apply() adds no device read, and
+                # the derivation of the device-level SoC target needs the measured value.
+                await self._apply(record, soc_percent=soc)
+            except Exception as exc:
+                try:
+                    await self._restore(record, StopReason.DEVICE_ERROR, getattr(exc, "code", "internal_error"))
+                except Exception:
+                    # The record stays RESTORING/APPLYING, so tick()/recover() finish the restore;
+                    # the apply error below is the one the caller needs to see.
+                    log.exception("Restore after failed apply of device %s raised", device_id)
                 raise
-            record.state = (
-                DispatchState.CHARGING
-                if command.mode is DispatchMode.CHARGE_FROM_GRID
-                else DispatchState.DISCHARGING
-            )
+            record.state = _STATE_FOR_MODE[command.mode]
             record.restore_required = False
             await self._put(record)
             return self._status(record, replaced=replacing)
@@ -278,6 +363,23 @@ class DispatchController:
             return None
         return record.intent.mode if record.intent is not None else None
 
+    async def _raise_if_active(self, device_id: str, names: Iterable[CapabilityName] | None = None) -> None:
+        """Refuse a gate change while an operation of the device is active; the caller holds the lock.
+
+        ``names`` limits the refusal to capabilities the active mode depends on; ``None`` refuses
+        any change.
+        """
+        current = await self._get(device_id)
+        blocking_mode = self._active_mode_blocking(current)
+        if blocking_mode is None:
+            return
+        if names is not None:
+            guarded = _guarded_names(blocking_mode)
+            if not any(name in guarded for name in names):
+                return
+        assert current.intent is not None
+        raise CapabilityConflict(device_id, current.intent.operation_id, blocking_mode)
+
     async def _step(self, record: DispatchRecord, index: int, write) -> None:
         record.plan[index]["status"] = "sent"
         await self._put(record)
@@ -285,39 +387,71 @@ class DispatchController:
         record.plan[index]["status"] = "confirmed"
         await self._put(record)
 
-    async def _apply(self, record: DispatchRecord) -> None:
-        assert record.intent is not None
-        index = 0
-        await self._step(record, index, lambda: self._gateway.apply_control_mode(record.device_id, external=True))
-        index += 1
-        await self._step(
-            record,
-            index,
-            lambda: self._gateway.apply_soc_target(record.device_id, record.intent.target_soc_percent),
-        )
-        index += 1
-        assert record.snapshot is not None
-        grid_charge_enabled = (
-            True
-            if record.intent.mode is DispatchMode.CHARGE_FROM_GRID
-            else record.snapshot.grid_charge_enabled
-        )
-        await self._step(
-            record,
-            index,
-            lambda: self._gateway.apply_grid_charge(record.device_id, enabled=grid_charge_enabled),
-        )
-        index += 1
-        telemetry = await self._gateway.read_control_telemetry(record.device_id)
-        desired = calculate_setpoint(
-            record.intent.mode,
-            telemetry,
-            target_soc_percent=record.intent.target_soc_percent,
-            max_power_w=record.intent.max_power_w,
-            config=self._config,
-            last=PowerSetpoint(),
-        )
-        await self._step(record, index, lambda: self._gateway.apply_setpoint(record.device_id, desired))
+    def _writer(
+        self,
+        record: DispatchRecord,
+        name: str,
+        *,
+        desired: PowerSetpoint,
+        grid_charge_enabled: bool,
+        soc_percent: float,
+    ):
+        """The write one named plan step performs. An unknown name is a ``KeyError``: that is a
+        programming error, not operator input, and loud is correct.
+        """
+        intent = record.intent
+        assert intent is not None
+        if name == "control_mode":
+            return lambda: self._gateway.apply_control_mode(record.device_id, external=True)
+        if name == "soc_target":
+            # The business stop goal, the mode and the measured SoC go to the adapter; which raw
+            # value the device's SoC-target register wants is the adapter's decision alone.
+            return lambda: self._gateway.apply_soc_target(
+                record.device_id,
+                dispatch_mode=intent.mode,
+                stop_target_percent=intent.target_soc_percent,
+                soc_percent=soc_percent,
+            )
+        if name == "grid_charge":
+            return lambda: self._gateway.apply_grid_charge(record.device_id, enabled=grid_charge_enabled)
+        if name == "setpoint":
+            return lambda: self._gateway.apply_setpoint(record.device_id, desired)
+        raise KeyError(name)
+
+    async def _apply(self, record: DispatchRecord, *, soc_percent: float) -> None:
+        assert record.intent is not None and record.snapshot is not None
+        if record.intent.mode is DispatchMode.CHARGE_FROM_GRID:
+            grid_charge_enabled = True
+        elif record.intent.mode is DispatchMode.HOLD:
+            grid_charge_enabled = False  # holding must not let the grid charge the battery
+        else:
+            grid_charge_enabled = record.snapshot.grid_charge_enabled
+        desired = PowerSetpoint()
+        # Dispatch by step name over the durable plan: an omitted step must not shift the index of
+        # every later step against record.plan's own bookkeeping.
+        for index, step in enumerate(record.plan):
+            if step["name"] == "setpoint":
+                # The telemetry read stays immediately before the setpoint write.
+                telemetry = await self._gateway.read_control_telemetry(record.device_id)
+                desired = calculate_setpoint(
+                    record.intent.mode,
+                    telemetry,
+                    target_soc_percent=record.intent.target_soc_percent,
+                    max_power_w=record.intent.max_power_w,
+                    config=self._config,
+                    last=PowerSetpoint(),
+                )
+            await self._step(
+                record,
+                index,
+                self._writer(
+                    record,
+                    step["name"],
+                    desired=desired,
+                    grid_charge_enabled=grid_charge_enabled,
+                    soc_percent=soc_percent,
+                ),
+            )
         record.last_commanded = desired
         record.last_write_at = self._clock.now()
 
@@ -325,14 +459,21 @@ class DispatchController:
         async with self._lock(device_id):
             record = await self._get(device_id)
             if record.state is DispatchState.FAULT_RESTORE_PENDING:
-                # D1 (minimal slice): retry a stuck restore once its eligibility time has passed.
-                # No backoff curve/attempt counter yet (design.md §6.2 owns the full feature) —
-                # without this, a device that fails one restore attempt stays stuck forever until
-                # an operator intervenes via cancel()/submit() or a process restart's recover().
+                # Retry a stuck restore once its backoff has elapsed; without this a device that
+                # fails one attempt stays stuck until an operator or a restart intervenes.
                 if record.next_restore_at is not None and self._clock.now() >= record.next_restore_at:
                     await self._restore(record, record.stop_reason or StopReason.DEVICE_ERROR, record.fault_code)
                 return self._status(record)
-            if record.state not in (DispatchState.CHARGING, DispatchState.DISCHARGING):
+            if record.state in (DispatchState.APPLYING, DispatchState.REPLACING, DispatchState.RESTORING):
+                # An interrupted apply/restore (failed _put, unexpected error) left hardware
+                # half-written; submit() holds this lock while it runs, so this is never live.
+                await self._restore(record, StopReason.DEVICE_ERROR, "recovery_required")
+                return self._status(record)
+            if record.state not in (
+                DispatchState.CHARGING,
+                DispatchState.DISCHARGING,
+                DispatchState.HOLDING,
+            ):
                 return self._status(record)
             assert record.intent is not None
             if self._clock.now() >= record.intent.valid_until:
@@ -366,6 +507,9 @@ class DispatchController:
                     now=self._clock.now(),
                     last_write_at=record.last_write_at,
                     config=self._config,
+                    export_cut=(
+                        record.intent.mode is DispatchMode.DISCHARGE_TO_LOAD and telemetry.grid_import_w <= 0
+                    ),
                 ):
                     record.plan = [{"name": "setpoint", "status": "sent"}]
                     await self._put(record)
@@ -374,13 +518,19 @@ class DispatchController:
                     record.last_commanded = desired
                     record.last_write_at = self._clock.now()
                     await self._put(record)
-            except asyncio.CancelledError:
-                raise
-            except DeviceApiError as exc:
+            except Exception as exc:  # noqa: BLE001
                 await self._restore(record, StopReason.DEVICE_ERROR, getattr(exc, "code", "internal_error"))
             return self._status(record)
 
     async def _restore(
+        self, record: DispatchRecord, reason: StopReason, fault_code: str | None = None
+    ) -> None:
+        # The barrier spans the whole sequence, failures included, so a caller write queued before
+        # the restore can never run after it and overwrite the restored values.
+        async with self._gateway.restore_barrier(record.device_id):
+            await self._restore_guarded(record, reason, fault_code)
+
+    async def _restore_guarded(
         self, record: DispatchRecord, reason: StopReason, fault_code: str | None = None
     ) -> None:
         if record.snapshot is None:
@@ -388,8 +538,11 @@ class DispatchController:
             record.intent = None
             record.restore_required = False
             record.stop_reason = reason
+            record.fault_code = None
             record.next_restore_at = None
+            record.restore_attempts = 0
             await self._put(record)
+            self._restore_pending.discard(record.device_id)
             return
         record.state = DispatchState.RESTORING
         record.restore_required = True
@@ -410,16 +563,24 @@ class DispatchController:
                     step + 1,
                     lambda step=step: self._gateway.restore(record.device_id, record.snapshot, step),
                 )
-        except asyncio.CancelledError:
-            raise
-        except DeviceApiError as exc:
+        except Exception as exc:  # noqa: BLE001
             record.state = DispatchState.FAULT_RESTORE_PENDING
             record.restore_required = True
             record.fault_code = getattr(exc, "code", fault_code or "internal_error")
-            # D1 (minimal slice): eligible for an automatic retry immediately, no backoff curve
-            # yet. See the comment at tick()'s FAULT_RESTORE_PENDING branch for the full context.
-            record.next_restore_at = self._clock.now()
+            record.restore_attempts += 1
+            delay = min(
+                _RESTORE_BACKOFF_BASE_SECONDS * 2 ** min(record.restore_attempts - 1, 20),
+                _RESTORE_BACKOFF_MAX_SECONDS,
+            )
+            record.next_restore_at = self._clock.now() + timedelta(seconds=delay)
+            log.warning(
+                "Restore of device %s failed (attempt %d), next retry in %.0f s",
+                record.device_id,
+                record.restore_attempts,
+                delay,
+            )
             await self._put(record)
+            self._restore_pending.add(record.device_id)
             return
         record.state = DispatchState.IDLE
         record.intent = None
@@ -427,8 +588,11 @@ class DispatchController:
         record.last_commanded = PowerSetpoint()
         record.restore_required = False
         record.plan = []
+        record.fault_code = None
         record.next_restore_at = None
+        record.restore_attempts = 0
         await self._put(record)
+        self._restore_pending.discard(record.device_id)
 
     async def cancel(self, device_id: str) -> DispatchStatus:
         async with self._lock(device_id):
@@ -453,32 +617,50 @@ class DispatchController:
         if record.device_id != device_id:
             raise ValueError("capability record belongs to another device")
         async with self._lock(device_id):
-            current = await self._get(device_id)
-            blocking_mode = self._active_mode_blocking(current)
-            if blocking_mode is not None and record.name in (
-                required_for(blocking_mode, limit_export=True) | required_for(blocking_mode, limit_export=False)
-            ):
-                # D2 (variant A, immutable during an active operation): unconditional — this also
-                # closes the VERIFIED->VERIFIED bypass, which only ever existed because the old
-                # admin-layer check skipped the VERIFIED branch entirely.
-                assert current.intent is not None
-                raise CapabilityConflict(device_id, current.intent.operation_id, blocking_mode)
+            # D2 (variant A, immutable during an active operation): unconditional — this also
+            # closes the VERIFIED->VERIFIED bypass, which only ever existed because the old
+            # admin-layer check skipped the VERIFIED branch entirely.
+            await self._raise_if_active(device_id, [record.name])
             await asyncio.to_thread(self._store.put_capability, record)
             self._capabilities.replace(record)
+
+    async def set_capabilities(self, device_id: str, records: list[CapabilityRecord]) -> None:
+        """Persist several capabilities of one device in one transaction, then take them all over.
+
+        Same lock and active-operation guard as ``set_capability()``; a failed commit leaves the
+        registry untouched, so a verification can never end up half applied.
+        """
+        if any(record.device_id != device_id for record in records):
+            raise ValueError("capability record belongs to another device")
+        async with self._lock(device_id):
+            await self._raise_if_active(device_id, [record.name for record in records])
+            await asyncio.to_thread(self._store.put_capabilities, records)
+            for record in records:
+                self._capabilities.replace(record)
 
     async def set_device_limits(self, device_id: str, limits: DeviceLimits) -> None:
         """Persist the power limits and the engineering-mode switch of one device, then take over."""
         async with self._lock(device_id):
-            current = await self._get(device_id)
-            blocking_mode = self._active_mode_blocking(current)
-            if blocking_mode is not None:
-                # A limits/engineering-mode change could invalidate the effective_power the
-                # controller already applied for the active operation on this device (same hazard
-                # class as a capability flip) — block it under the same lock, unconditionally.
-                assert current.intent is not None
-                raise CapabilityConflict(device_id, current.intent.operation_id, blocking_mode)
+            # A limits/engineering-mode change could invalidate the effective_power the controller
+            # already applied for the active operation (same hazard class as a capability flip).
+            await self._raise_if_active(device_id)
             await asyncio.to_thread(self._store.put_device_config, device_id, limits)
             self._limits[device_id] = limits
+
+    async def set_soc_target_policy(self, device_id: str, policy: SocTargetPolicy) -> None:
+        """Persist how one device derives its device-level SoC target, then take it over.
+
+        The single writer of the policy table, for the same reasons ``set_capability`` is the single
+        writer of the capability table: the write runs off the event loop under the per-device lock,
+        it is refused while an operation of that device is active (the derivation would change under
+        an applied setpoint), and the registry the adapter reads is updated only after the commit.
+        """
+        if policy.device_id != device_id:
+            raise ValueError("soc target policy belongs to another device")
+        async with self._lock(device_id):
+            await self._raise_if_active(device_id)
+            await asyncio.to_thread(self._store.put_soc_target_policy, policy)
+            self._soc_target_policies.replace(policy)
 
     def capabilities(self, device_id: str) -> tuple[CapabilityRecord, ...]:
         return self._capabilities.all(device_id)
@@ -486,7 +668,12 @@ class DispatchController:
     def device_limits(self, device_id: str) -> DeviceLimits | None:
         return self._limits.get(device_id)
 
-    async def force_restore_or_raise(self, device_id: str) -> None:
+    def soc_target_policy(self, device_id: str) -> SocTargetPolicy:
+        return self._soc_target_policies.policy(device_id)
+
+    async def force_restore_or_raise(
+        self, device_id: str, reason: StopReason = StopReason.DEVICE_RECONFIGURED
+    ) -> None:
         """Synchronously drive ``device_id`` to a clean, restored state before its transport is
         closed by a device-list reconfiguration. A no-op if there is nothing to restore.
 
@@ -499,44 +686,109 @@ class DispatchController:
             record = await self._get(device_id)
             if record.intent is None and not record.restore_required:
                 return
-            await self._restore(record, StopReason.DEVICE_RECONFIGURED)
+            await self._restore(record, reason)
             if record.state is not DispatchState.IDLE:
                 raise ReconfigurationRejected(device_id, record.fault_code)
 
+    async def _read_candidates(self) -> list[DispatchRecord]:
+        records, skipped = await asyncio.to_thread(self._store.all_with_skipped)
+        self.unreadable_devices = tuple(skipped)
+        for device_id in skipped:
+            # No restore is possible for a record that cannot be read; an operator has to look.
+            log.critical(
+                "Dispatch record of device %s is unreadable: its battery settings are NOT restored "
+                "automatically and the device stays blocked for dispatch",
+                device_id,
+            )
+        return records
+
+    async def restore_retry_info(self, device_id: str) -> tuple[int, datetime | None]:
+        """Failed restore attempts and the next automatic retry time (admin/energy status only)."""
+        record = await self._get(device_id)
+        return record.restore_attempts, record.next_restore_at
+
     async def recover(self) -> None:
-        # DispatchStore.all() already skips and logs an individually corrupt row, so one
-        # unreadable device cannot block the restore sweep for every other device.
-        records = await asyncio.to_thread(self._store.all)
-        for record in records:
-            if record.state is DispatchState.IDLE and not record.restore_required:
+        # DispatchStore.all_with_skipped() skips an individually unreadable row. Records read here are
+        # only candidates: each one is re-read under its device lock, because a tick may have
+        # advanced it since, and a stale object would fail the store's CAS check.
+        candidates = await self._read_candidates()
+        for candidate in candidates:
+            if candidate.state is DispatchState.IDLE and not candidate.restore_required:
                 continue
-            async with self._lock(record.device_id):
-                # PRECHECK-with-no-snapshot is the narrow crash window right after the first
-                # durable-intent write in submit(), before read_snapshot() runs: nothing to
-                # restore from yet, so this record is reset to IDLE instead of attempting a
-                # restore that has no snapshot to restore to.
-                if record.state is DispatchState.PRECHECK and record.snapshot is None:
-                    record.state = DispatchState.IDLE
-                    record.intent = None
-                    await self._put(record)
-                else:
-                    # Covers APPLYING/REPLACING-with-snapshot (the normal post-crash case) and,
-                    # defensively, PRECHECK-with-a-snapshot — not currently reachable via
-                    # submit()'s write order (the snapshot is always written strictly after the
-                    # state leaves PRECHECK), kept in case a future code path sets it earlier.
-                    await self._restore(record, StopReason.DEVICE_ERROR, "recovery_required")
+            device_id = candidate.device_id
+            try:
+                async with self._lock(device_id):
+                    record = await self._get(device_id)
+                    if record.state is DispatchState.IDLE and not record.restore_required:
+                        continue
+                    # PRECHECK-with-no-snapshot is the narrow crash window right after the first
+                    # durable-intent write in submit(), before read_snapshot() runs: nothing to
+                    # restore from yet, so the record is reset to IDLE.
+                    if record.state is DispatchState.PRECHECK and record.snapshot is None:
+                        record.state = DispatchState.IDLE
+                        record.intent = None
+                        await self._put(record)
+                        self._restore_pending.discard(device_id)
+                    else:
+                        # Normal post-crash case (APPLYING/REPLACING with snapshot) and, defensively,
+                        # PRECHECK with a snapshot. _restore_guarded() maintains self._restore_pending
+                        # (add on FAULT_RESTORE_PENDING, discard on a clean restore), so a device that
+                        # a later tick() heals clears itself without a restart (readiness unlatched).
+                        await self._restore(record, StopReason.DEVICE_ERROR, "recovery_required")
+            except Exception:
+                # One failing device must not abort the sweep for every other device. A device whose
+                # restore raised outright is treated as still restore-pending until it heals.
+                log.exception("Dispatch recovery failed for device %s", device_id)
+                self._restore_pending.add(device_id)
+        self._recovery_complete = True
+
+    @property
+    def restore_pending_devices(self) -> tuple[str, ...]:
+        """Devices whose battery restore is still outstanding, derived live from the controller
+        rather than a one-off startup snapshot: an automatic tick() retry that heals a device drops
+        it here, so readiness recovers without an application restart (C2 self-heal).
+        """
+        return tuple(sorted(self._restore_pending))
+
+    def recovery_ready(self) -> bool:
+        """True once the startup sweep has run and no device is left unreadable or with an
+        outstanding restore. Read live by /readiness so a post-startup self-heal flips readiness
+        back to green on its own, while a sweep that has not completed yet keeps it red (C2).
+        """
+        return self._recovery_complete and not (self.unreadable_devices or self._restore_pending)
 
     async def shutdown_restore(self) -> None:
         """Best-effort restore while serializers still accept device work."""
-        records = await asyncio.to_thread(self._store.all)
-        for record in records:
-            if record.intent is None and not record.restore_required:
+        candidates = await self._read_candidates()
+        for candidate in candidates:
+            if candidate.intent is None and not candidate.restore_required:
                 continue
-            async with self._lock(record.device_id):
-                await self._restore(record, StopReason.SHUTDOWN)
+            device_id = candidate.device_id
+            try:
+                async with self._lock(device_id):
+                    record = await self._get(device_id)
+                    if record.intent is None and not record.restore_required:
+                        continue
+                    await self._restore(record, StopReason.SHUTDOWN)
+            except Exception:
+                log.exception("Shutdown restore failed for device %s", device_id)
 
     async def run(self, device_id: str) -> None:
         while True:
             await self._clock.sleep(self._config.cycle_interval_seconds)
-            with contextlib.suppress(DeviceApiError):
-                await self.tick(device_id)
+            # Cancellation during the sleep above takes effect immediately; a tick already under
+            # way must not be interrupted mid hardware-write (C1), so it is shielded and, on
+            # cancellation, awaited to completion before the CancelledError propagates.
+            tick_task = asyncio.create_task(self.tick(device_id))
+            try:
+                await asyncio.shield(tick_task)
+            except asyncio.CancelledError:
+                try:
+                    await tick_task
+                except Exception:
+                    # A dead loop would stop TTL/stale/target handling for good; log and keep going.
+                    log.exception("dispatch tick failed while stopping %s", device_id)
+                raise
+            except Exception:
+                # A dead loop would stop TTL/stale/target handling for good; log and keep going.
+                log.exception("dispatch tick failed for %s", device_id)

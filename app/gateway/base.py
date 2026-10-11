@@ -81,6 +81,9 @@ class DeviceStatus:
     failures: int
     cache_hits: int
     cache_misses: int
+    # None: no periodic reads configured. False plus failures > 0: registration is failing.
+    periodic_available: bool | None = None
+    periodic_setup_failures: int = 0
 
 
 class DeviceGateway(Protocol):
@@ -98,7 +101,9 @@ class DeviceGateway(Protocol):
         self, device_id: str, name: str, *, fresh: bool, charge: BudgetHandle | None = None
     ) -> MetricReading: ...
 
-    async def write_metric(self, device_id: str, name: str, value: ScalarValue) -> WriteOutcome: ...
+    async def write_metric(
+        self, device_id: str, name: str, value: ScalarValue, *, system: bool = False
+    ) -> WriteOutcome: ...
 
     async def trigger_action(self, device_id: str, name: str, value: ScalarValue) -> ActionOutcome: ...
 
@@ -106,4 +111,8 @@ class DeviceGateway(Protocol):
 
     def reported_name(self, device_id: str) -> str | None:
         """The device's own name, if read since startup; None otherwise."""
+        ...
+
+    def reported_serial(self, device_id: str) -> str | None:
+        """The device's serial number, if read since startup; None otherwise."""
         ...

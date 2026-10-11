@@ -7,6 +7,10 @@
 """Admin bootstrap, browser session, PAT and encrypted persistence behavior."""
 
 import re
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
+from ipaddress import ip_network
 from unittest.mock import patch
 
 import httpx
@@ -32,7 +36,7 @@ async def test_admin_first_login_change_and_pat(tmp_path):
     settings = Settings(_env_file=None, hmac_secret="s" * 48, admin_db_path=tmp_path / "rct.db")
     app = create_app(settings)
     password = app.state.first_start_password
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver") as client:
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver", headers={"Origin": "http://testserver"}) as client:
         before = await client.get("/admin/api/session")
         assert before.json()["authenticated"] is False
         csrf = before.json()["csrf_token"]
@@ -100,10 +104,61 @@ def test_database_pat_revocation_persists_across_restart(tmp_path):
     _, token = store.create_token("test", "read/write", None)
     entry = store.authenticate_token(token)
     assert entry is not None and entry.role == "read/write"
+    assert entry.id in store._last_touch
     assert store.delete_token(entry.id)
+    assert entry.id not in store._last_touch
     restarted = AdminStore(path, "x" * 48)
     restarted.initialize()
     assert restarted.authenticate_token(token) is None
+
+
+@pytest.mark.parametrize("writer_has_transaction", [False, True])
+def test_pat_revocation_with_pending_last_used_writer(tmp_path, monkeypatch, writer_has_transaction):
+    store = AdminStore(tmp_path / "rct.db", "x" * 48)
+    store.initialize()
+    record, token = store.create_token("test", "read", None)
+    writer_paused = threading.Event()
+    release_writer = threading.Event()
+    delete_started = threading.Event()
+    connect = store.connect
+
+    def pause_writer():
+        writer_paused.set()
+        if not release_writer.wait(5):
+            raise TimeoutError("Test did not release the token writer")
+
+    @contextmanager
+    def controlled_connect():
+        is_writer = threading.current_thread().name.startswith("pat-last-used")
+        with connect() as database:
+            if is_writer and not writer_has_transaction:
+                pause_writer()
+            if not is_writer:
+                database.set_trace_callback(lambda sql: delete_started.set() if sql.startswith("DELETE") else None)
+            yield database
+            if is_writer and writer_has_transaction:
+                pause_writer()
+
+    monkeypatch.setattr(store, "connect", controlled_connect)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        try:
+            assert store.authenticate_token(token) is not None
+            assert writer_paused.wait(5)
+            assert record["id"] in store._last_touch
+            deletion = pool.submit(store.delete_token, record["id"])
+            assert delete_started.wait(5)
+            if writer_has_transaction:
+                assert not deletion.done()
+                release_writer.set()
+            assert deletion.result(timeout=5)
+            assert record["id"] not in store._last_touch
+        finally:
+            release_writer.set()
+            store.close()
+    assert record["id"] not in store._last_touch
+    assert store.authenticate_token(token) is None
+    assert not store.delete_token(record["id"])
+    assert store.list_tokens() == []
 
 
 def test_bootstrap_password_is_eight_chars_with_one_special() -> None:
@@ -120,10 +175,9 @@ async def test_first_start_issues_no_token(tmp_path, capsys):
     settings = Settings(_env_file=None, hmac_secret="s" * 48, admin_db_path=tmp_path / "rct.db")
     app = create_app(settings)
     assert capsys.readouterr().out == ""  # the banner is printed by the server after startup
-    banner = first_start_banner(
-        app.state.runtime.settings, app.state.first_start_password, tmp_path / "initial-admin-password"
-    )
+    banner = first_start_banner(app.state.runtime.settings, tmp_path / "initial-admin-password")
     assert app.state.first_start_password and "token" not in banner.lower()
+    assert app.state.first_start_password not in banner  # the password itself must never reach stdout
     assert app.state.admin_store.list_tokens() == []
 
 
@@ -135,8 +189,8 @@ async def test_admin_writes_need_admin_session_or_read_write_pat(tmp_path, auth_
     app = create_app(settings)
     password = app.state.first_start_password
     store = app.state.admin_store
-    change = {"docs_public": True}
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver") as client:
+    change = {"metrics_rate_limit_requests": 120}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver", headers={"Origin": "http://testserver"}) as client:
         def bearer(token):
             return {"Authorization": "Bearer " + token}
 
@@ -152,13 +206,49 @@ async def test_admin_writes_need_admin_session_or_read_write_pat(tmp_path, auth_
                                   ("POST", "/admin/api/tokens", {"name": "x", "role": "read"})):
             assert (await client.request(method, url, json=body)).status_code == 401
             assert (await client.request(method, url, json=body, headers=bearer(read_pat))).status_code == 403
-            assert (await client.request(method, url, json=body, headers=bearer("pat_" + "A" * 46))).status_code == 401
+            invalid = await client.request(method, url, json=body, headers=bearer("pat_" + "A" * 46))
+            # Session-only endpoints refuse any PAT before looking at it.
+            assert invalid.status_code == (403 if url.endswith("/tokens") else 401)
         assert (await client.get("/admin/api/settings")).status_code == 401
-        assert (await client.get("/admin/api/settings", headers=bearer(read_pat))).status_code == 200
+        # Every administration endpoint needs the read/write role, reads included.
+        assert (await client.get("/admin/api/settings", headers=bearer(read_pat))).status_code == 403
+        assert (await client.get("/admin/api/tokens", headers=bearer(read_pat))).status_code == 403
         done = await client.put("/admin/api/settings", json=change, headers=bearer(write_pat))
-        assert done.status_code == 200 and done.json()["settings"]["docs_public"] is True
+        assert done.status_code == 200 and done.json()["settings"]["metrics_rate_limit_requests"] == 120
+        # Token endpoints and trust/authentication settings (read or write) are session-only; a PAT
+        # may read the other settings but never sees those values.
+        assert (await client.get("/admin/api/tokens", headers=bearer(write_pat))).status_code == 403
+        seen = (await client.get("/admin/api/settings", headers=bearer(write_pat))).json()["settings"]
+        assert "metrics_rate_limit_requests" in seen
+        assert not ({"docs_public", "auth_required", "trusted_proxies", "bind_address", "behind_reverse_proxy",
+                     "forwarded_header", "metrics_require_token", "metrics_trusted_sources"} & set(seen))
+        # Retention stays readable for a PAT; only writing it is session-only.
+        assert "questdb_retention_days" in seen
+        bad_id = await client.put("/admin/api/settings", json={"devices": [{"host": "192.0.2.5", "device_id": ["x"]}]},
+                                  headers=bearer(write_pat))
+        assert bad_id.status_code == 400  # a non-text device id is a client error, not a 500
         made = await client.post("/admin/api/tokens", json={"name": "x", "role": "read"}, headers=bearer(write_pat))
-        assert made.status_code == 201
+        assert made.status_code == 403
+        for key, value in (
+            ("auth_required", not auth_required), ("trusted_proxies", ["10.0.0.0/8"]),
+            ("enable_write_support", True), ("docs_public", True), ("devices", [{"host": "192.0.2.99", "port": 8899}]),
+            ("influxdb_hostname", "attacker.example"), ("questdb_hostname", "attacker.example"),
+            ("influxdb_token", "stolen"), ("questdb_password", "stolen"), ("db_type", "questdb"),
+            ("bind_port", 9999), ("log_level", "DEBUG"),
+            ("questdb_retention_days", 1), ("questdb_raw_retention_days", 1),
+        ):
+            denied = await client.put("/admin/api/settings", json={key: value}, headers=bearer(write_pat))
+            assert denied.status_code == 403, key
+        # Echoing the current value of a protected field is not a change.
+        echo = await client.put("/admin/api/settings", json={"auth_required": auth_required, "docs_public": False},
+                                headers=bearer(write_pat))
+        assert echo.status_code == 200
+        # Widening the write allowlist needs the session too.
+        widened = await client.put(
+            "/admin/api/parameters", headers=bearer(write_pat),
+            json={"exposed_names": [], "write_names": ["power_mng_soc_target_set"]},
+        )
+        assert widened.status_code == 403
 
 
 def test_admin_password_minimum_is_eight_characters():
@@ -169,16 +259,16 @@ def test_admin_password_minimum_is_eight_characters():
         PasswordChange(current_password="x", new_password="1234567")
 
 
-def test_first_start_banner_carries_the_password_and_names_the_fallback_file(tmp_path):
+def test_first_start_banner_names_the_password_file_and_never_the_password(tmp_path):
     from app.api.server import first_start_banner
     from app.config import Settings
 
     password_file = tmp_path / "initial-admin-password"
-    text = first_start_banner(Settings(_env_file=None, bind_port=8123), "XnQ3!4wk", password_file)
-    assert "XnQ3!4wk" in text  # deliberate product choice: copy-pasteable from the console
+    text = first_start_banner(Settings(_env_file=None, bind_port=8123), password_file)
+    assert "XnQ3!4wk" not in text  # the password itself must never be printed to stdout
     assert str(password_file) in text and "http://127.0.0.1:8123/" in text
     assert text.startswith("\n=") and text.endswith("=\n")
-    assert re.search(r"Password:\s+(\S+)", text).group(1) == "XnQ3!4wk"
+    assert re.search(r"Password file:\s+(\S+)", text).group(1) == str(password_file)
 
 
 @pytest.mark.asyncio
@@ -224,7 +314,7 @@ async def test_server_prints_the_banner_after_startup_only_on_first_start(tmp_pa
 async def test_admin_api_errors_keep_their_own_detail(tmp_path):
     settings = Settings(_env_file=None, hmac_secret="s" * 48, admin_db_path=tmp_path / "rct.db")
     app = create_app(settings)
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver") as client:
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver", headers={"Origin": "http://testserver"}) as client:
         csrf = (await client.get("/admin/api/session")).json()["csrf_token"]
         bad = await client.post("/admin/api/login", headers={"X-CSRF-Token": csrf},
                                 json={"username": "admin", "password": "wrong-password"})
@@ -242,7 +332,7 @@ async def test_resaving_an_unchanged_export_field_does_not_restart_the_exporter(
     settings = Settings(_env_file=None, hmac_secret="s" * 48, admin_db_path=tmp_path / "rct.db")
     app = create_app(settings)
     password = app.state.first_start_password
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver") as client:
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver", headers={"Origin": "http://testserver"}) as client:
         csrf = (await client.get("/admin/api/session")).json()["csrf_token"]
         login = await client.post("/admin/api/login", headers={"X-CSRF-Token": csrf},
                                   json={"username": "admin", "password": password})
@@ -273,7 +363,7 @@ async def test_switching_db_type_still_restarts_the_exporter(tmp_path):
     settings = Settings(_env_file=None, hmac_secret="s" * 48, admin_db_path=tmp_path / "rct.db")
     app = create_app(settings)
     password = app.state.first_start_password
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver") as client:
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver", headers={"Origin": "http://testserver"}) as client:
         csrf = (await client.get("/admin/api/session")).json()["csrf_token"]
         login = await client.post("/admin/api/login", headers={"X-CSRF-Token": csrf},
                                   json={"username": "admin", "password": password})
@@ -303,3 +393,216 @@ def test_fresh_install_starts_with_empty_write_selection(tmp_path):
     assert app.state.admin_store.get("write_names") == []
     assert app.state.default_write_entries  # the shipped catalog stays selectable in the GUI
     assert len(app.state.runtime.gateway._allowlist) == 0  # nothing is writable until the operator selects it
+
+
+def test_devices_and_energy_manager_share_one_rct_energy_readings_instance(tmp_path):
+    """The dashboard energy_flow projection (devices()) and the EnergyManager must read through the
+    SAME RctEnergyReadings instance, so a verified sign is reflected in both without a restart and a
+    future refactor cannot silently split them (design §4.2 / §16 item 2). The reach into the
+    manager's private ``_readings`` is intentional: the port exposes no public readings accessor and
+    ``runtime.energy`` is typed ``EnergyManagerPort`` (which has none)."""
+    # Dispatch disabled: a single default RctEnergyReadings, shared with the manager.
+    disabled = Settings(_env_file=None, hmac_secret="s" * 48, admin_db_path=tmp_path / "rct.db")
+    app = create_app(disabled)
+    runtime = app.state.runtime
+    assert runtime.dispatch is None
+    assert runtime.energy is not None
+    assert runtime.energy_readings is runtime.energy._readings
+
+    # Dispatch enabled: still exactly one shared instance, and it uses the LIVE dispatch capability
+    # registry (not a fresh CapabilityRegistry()), so a verification reaches the published sign.
+    from app.dispatch.capabilities import CapabilityRegistry
+
+    enabled = Settings(
+        _env_file=None,
+        hmac_secret="s" * 48,
+        admin_db_path=tmp_path / "rct-enabled.db",
+        dispatch_db_path=tmp_path / "rct-dispatch.db",
+        enable_write_support=True,
+    )
+    app2 = create_app(enabled)
+    runtime2 = app2.state.runtime
+    assert runtime2.dispatch is not None
+    assert runtime2.energy is not None
+    assert runtime2.energy_readings is runtime2.energy._readings
+    # The shared instance's registry is the live dispatch registry, not an empty default.
+    assert isinstance(runtime2.energy_readings._capabilities, CapabilityRegistry)
+    assert runtime2.energy_readings._capabilities is runtime2.dispatch._capabilities
+
+
+def _fake_request(peer: str, forwarded_proto: str | None, scheme: str = "http", behind_proxy: bool = False):
+    from types import SimpleNamespace
+
+    from app.security.client_ip import ClientIpResolver
+
+    resolver = ClientIpResolver([ip_network("127.0.0.0/8"), ip_network("fd00::/8")], "x-forwarded-for")
+    headers = {"x-forwarded-proto": forwarded_proto} if forwarded_proto else {}
+    state = SimpleNamespace(
+        security=SimpleNamespace(client_ip=resolver),
+        runtime=SimpleNamespace(settings=SimpleNamespace(behind_reverse_proxy=behind_proxy)),
+    )
+    return SimpleNamespace(
+        client=SimpleNamespace(host=peer), headers=headers, url=SimpleNamespace(scheme=scheme),
+        app=SimpleNamespace(state=state),
+    )
+
+
+@pytest.mark.parametrize(("peer", "proto", "expected"), [
+    ("127.0.0.1", "https", "https"),     # trusted proxy: the browser scheme counts
+    ("fd00::5", "https, http", "https"),  # IPv6 trusted proxy, first hop wins
+    ("192.0.2.9", "https", "http"),       # untrusted peer cannot claim https
+    ("2001:db8::1", "https", "http"),
+    ("127.0.0.1", "gopher", "http"),      # unknown value ignored
+    ("127.0.0.1", None, "http"),
+])
+def test_public_scheme_trusts_forwarded_proto_only_from_a_trusted_proxy(peer, proto, expected):
+    from app.admin.api import _public_scheme, _secure_cookies
+
+    request = _fake_request(peer, proto)
+    assert _public_scheme(request) == expected
+    assert _secure_cookies(request) is (expected == "https")
+
+
+def test_secure_cookies_follow_behind_reverse_proxy_even_for_an_untrusted_peer():
+    from app.admin.api import _secure_cookies
+
+    assert _secure_cookies(_fake_request("192.0.2.9", None, behind_proxy=True)) is True
+
+
+def test_stored_display_name_that_is_too_long_or_has_control_characters_still_loads():
+    from app.config import DeviceEntry
+
+    entry = DeviceEntry(device_id="main", host="10.0.0.1", display_name="x" * 100)
+    assert entry.display_name == "x" * 64
+    assert DeviceEntry(device_id="main", host="10.0.0.1", display_name="a\x00b\nc").display_name == "a b c"
+
+
+def test_admin_input_for_a_display_name_is_still_rejected_strictly():
+    from fastapi import HTTPException
+
+    from app.admin.api import _display_name
+
+    assert _display_name("") is None and _display_name("Garage") == "Garage"
+    for bad in ("x" * 65, "a\x00b"):
+        with pytest.raises(HTTPException) as excinfo:
+            _display_name(bad)
+        assert excinfo.value.status_code == 400
+
+
+@pytest.mark.parametrize(("behavior", "status", "rollback"), [
+    ("raise", 500, False),    # failure after the teardown began: the live graph is unknown
+    ("hang", 504, False),     # still running: neither success nor rollback can be claimed
+    ("build", 409, True),     # nothing torn down: the old list must be restored
+])
+def test_reconfigure_failures_are_reported_and_only_a_build_failure_rolls_back(behavior, status, rollback):
+    import asyncio
+    import threading
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from fastapi import HTTPException
+
+    from app.admin import api
+    from app.errors import ReconfigurationBuildError
+
+    async def reconfigure():
+        if behavior == "raise":
+            raise RuntimeError("boom")
+        if behavior == "build":
+            raise ReconfigurationBuildError("bad address")
+        await asyncio.sleep(5)
+
+    loop = asyncio.new_event_loop()
+    thread = threading.Thread(target=loop.run_forever, daemon=True)
+    thread.start()
+    state = SimpleNamespace(reconfigure_devices=reconfigure, loop=loop, admin_store=None)
+    request = SimpleNamespace(app=SimpleNamespace(state=state))
+    sentinel = Settings(_env_file=None, hmac_secret="s" * 48)
+    try:
+        with patch.object(api, "_RECONFIGURE_TIMEOUT_SECONDS", 0.05), pytest.raises(HTTPException) as excinfo:
+            api._reconfigure_devices(request, sentinel, sentinel)
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+        thread.join(timeout=2)
+    assert excinfo.value.status_code == status
+    assert excinfo.value.rollback is rollback
+
+
+def test_reconfigure_timeout_defers_rollback_when_the_running_coroutine_fails_rollback_capable():
+    """A reconfiguration that outlives its HTTP wait (504) and then fails in the pre-teardown phase
+    must still revert the saved device list, with no caller left to do it (finding 3)."""
+    import asyncio
+    import threading
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from fastapi import HTTPException
+
+    from app.admin import api
+    from app.errors import ReconfigurationBuildError
+
+    async def reconfigure():
+        # Outlive the 0.05 s HTTP wait, then fail rollback-capable (old graph still live).
+        await asyncio.sleep(0.2)
+        raise ReconfigurationBuildError("bad address")
+
+    reverted: list[tuple] = []
+    done = threading.Event()
+
+    def fake_revert(state, store, updated, previous):
+        reverted.append((updated, previous))
+        done.set()
+
+    loop = asyncio.new_event_loop()
+    thread = threading.Thread(target=loop.run_forever, daemon=True)
+    thread.start()
+    state = SimpleNamespace(reconfigure_devices=reconfigure, loop=loop, admin_store=object())
+    request = SimpleNamespace(app=SimpleNamespace(state=state))
+    updated = Settings(_env_file=None, hmac_secret="s" * 48)
+    previous = Settings(_env_file=None, hmac_secret="s" * 48)
+    try:
+        with (
+            patch.object(api, "_RECONFIGURE_TIMEOUT_SECONDS", 0.05),
+            patch.object(api, "_revert_devices_on_state", fake_revert),
+        ):
+            with pytest.raises(HTTPException) as excinfo:
+                api._reconfigure_devices(request, updated, previous)
+            assert excinfo.value.status_code == 504
+            # Still inside the patch so the deferred executor runs the fake: the coroutine fails
+            # ~0.2 s from now, the done-callback reverts, then this unblocks.
+            assert done.wait(2), "deferred rollback did not run after the timed-out reconfiguration failed"
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+        thread.join(timeout=2)
+    assert reverted == [(updated, previous)]
+
+
+@pytest.mark.parametrize("value", [float("inf"), float("nan"), 50_001.0])
+def test_dispatch_body_rejects_an_unbounded_max_power(value):
+    from datetime import UTC, datetime
+
+    from app.api.routers.dispatch import DispatchBody
+
+    with pytest.raises(ValidationError):
+        DispatchBody(mode="charge_from_grid", target_soc_percent=80, max_power_w=value,
+                     valid_until=datetime(2030, 1, 1, tzinfo=UTC))
+
+
+def test_enabling_the_metrics_endpoint_is_session_only_where_it_would_serve_without_a_token():
+    from types import SimpleNamespace
+
+    from app.admin.api import _changed_session_only
+    from app.config import Settings
+
+    def request(**settings):
+        desired = Settings(_env_file=None, hmac_secret="s" * 48, enable_metrics_endpoint=False, **settings)
+        return SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(admin_desired_settings=desired)))
+
+    on = {"enable_metrics_endpoint": True}
+    assert _changed_session_only(request(), on) == set()  # token still required: not a privilege change
+    assert _changed_session_only(request(metrics_require_token=False), on) == {"enable_metrics_endpoint"}
+    assert _changed_session_only(request(metrics_trusted_sources=["10.0.0.0/8"]), on) == {"enable_metrics_endpoint"}
+    assert _changed_session_only(request(), {**on, "metrics_require_token": False}) >= {
+        "enable_metrics_endpoint", "metrics_require_token",
+    }
+    assert _changed_session_only(request(metrics_require_token=False), {"enable_metrics_endpoint": False}) == set()

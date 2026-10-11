@@ -1,91 +1,210 @@
 {% extends "base.html" %}
 {% block title %}Overview – RCT Administration{% endblock %}
+{% block extra_css %}
+<link rel="stylesheet" href="/admin/static/vendor/gridstack.min.css">
+<link rel="stylesheet" href="/admin/static/css/dashboard.css">
+{% endblock %}
 {% block content %}
 <div class="page-heading">
   <div>
     <h1>Overview</h1>
     <p class="text-secondary mb-0">Connected inverters and server status</p>
   </div>
-</div>
-<p id="dashboard-updated" class="text-secondary small mb-0" role="status" tabindex="-1"></p>
-<div class="kpi-grid my-4" id="dashboard-kpis" aria-live="polite">
-  <div class="card kpi-card">
-    <div class="card-body"><span class="material-icons text-primary" aria-hidden="true">devices</span>
-      <div>
-        <div class="text-secondary small">Inverters</div><strong id="device-count">–</strong>
-      </div>
-    </div>
-  </div>
-  <div class="card kpi-card">
-    <div class="card-body"><span class="material-icons text-success" aria-hidden="true">check_circle</span>
-      <div>
-        <div class="text-secondary small">Connected</div><strong id="connected-count">–</strong>
-      </div>
-    </div>
-  </div>
-  <div class="card kpi-card">
-    <div class="card-body"><span class="material-icons text-primary" aria-hidden="true">monitoring</span>
-      <div>
-        <div class="text-secondary small">Exposed metrics</div><strong id="metric-count">–</strong>
-      </div>
-    </div>
-  </div>
-  <div class="card kpi-card">
-    <div class="card-body"><span class="material-icons text-warning" aria-hidden="true">wb_sunny</span>
-      <div>
-        <div class="text-secondary small">PV power</div><strong id="pv-power">–</strong>
-      </div>
-    </div>
-  </div>
-  <div class="card kpi-card">
-    <div class="card-body"><span class="material-icons text-primary" aria-hidden="true">home</span>
-      <div>
-        <div class="text-secondary small">House consumption</div><strong id="house-power">–</strong>
-      </div>
-    </div>
-  </div>
-  <div class="card kpi-card">
-    <div class="card-body"><span class="material-icons text-primary" aria-hidden="true">electric_meter</span>
-      <div>
-        <div class="text-secondary small">Grid power</div><strong id="grid-power">–</strong>
-      </div>
-    </div>
-  </div>
-  <div class="card kpi-card">
-    <div class="card-body"><span class="material-icons text-success" aria-hidden="true">battery_charging_full</span>
-      <div>
-        <div class="text-secondary small">Battery level</div><strong id="battery-soc">–</strong>
-      </div>
-    </div>
+  <div class="dashboard-toolbar d-flex align-items-center gap-2">
+    {# No aria-pressed: this is not a toggle button that stays in place. Entering edit mode hides it
+    and shows #dashboard-edit-done instead, so the visible button pair carries the state (A11Y-06). #}
+    <button id="dashboard-edit-toggle" class="btn btn-outline-secondary d-inline-flex align-items-center gap-1"
+      type="button"><span class="material-icons" aria-hidden="true">tune</span>Edit
+      dashboard</button>
+    <button id="dashboard-add-widget" class="btn btn-outline-secondary d-inline-flex align-items-center gap-1 d-none"
+      type="button" data-bs-toggle="modal" data-bs-target="#add-widget-modal"><span class="material-icons"
+        aria-hidden="true">edit</span>Edit Widgets</button>
+    <button id="dashboard-reset-layout" class="btn btn-outline-secondary d-inline-flex align-items-center gap-1 d-none"
+      type="button"><span class="material-icons" aria-hidden="true">restart_alt</span>Reset layout</button>
+    <button id="dashboard-edit-done" class="btn btn-primary d-inline-flex align-items-center gap-1 d-none"
+      type="button"><span class="material-icons" aria-hidden="true">check</span>Done</button>
+    <p class="dashboard-edit-hint small text-secondary mb-0">Layout editing is available on larger screens.</p>
   </div>
 </div>
-<section>
-  <div class="d-flex align-items-center justify-content-between mb-3">
-    <h2 class="h5 mb-0">Inverters</h2><button id="add-inverter" class="btn btn-primary d-inline-flex align-items-center gap-1"
-      type="button" data-bs-toggle="modal" data-bs-target="#inverters-modal" title="Manage inverters"><span
-        class="material-icons" aria-hidden="true">add</span>Add inverter</button>
+<div class="grid-stack dashboard-grid dashboard-grid--loading my-4" id="dashboard-grid">
+  <div class="grid-stack-item" gs-id="pv-power" gs-x="0" gs-y="0" gs-w="2" gs-h="2" data-widget-id="pv-power">
+    <div class="grid-stack-item-content">
+      <div class="card kpi-card h-100">
+        <div class="dashboard-widget-header d-none"><span class="dashboard-drag-handle material-icons"
+            aria-hidden="true">drag_indicator</span></div>
+        <div class="card-body"><span class="material-icons text-warning" aria-hidden="true">wb_sunny</span>
+          <div>
+            <div class="text-secondary small">PV power</div><strong id="pv-power">n/a</strong>
+          </div>
+        </div>
+      </div>
+    </div>
   </div>
-  <div id="devices-list" class="device-grid" aria-live="polite">
-    <p class="text-secondary mb-0">Loading inverters …</p>
+  <div class="grid-stack-item" gs-id="grid-power" gs-x="2" gs-y="0" gs-w="2" gs-h="2" data-widget-id="grid-power">
+    <div class="grid-stack-item-content">
+      <div class="card kpi-card h-100">
+        <div class="dashboard-widget-header d-none"><span class="dashboard-drag-handle material-icons"
+            aria-hidden="true">drag_indicator</span></div>
+        <div class="card-body"><span class="material-icons text-primary" aria-hidden="true">factory</span>
+          <div>
+            <div class="text-secondary small">Grid power</div><strong id="grid-power">n/a</strong>
+          </div>
+        </div>
+      </div>
+    </div>
   </div>
-</section>
+  <div class="grid-stack-item" gs-id="house-power" gs-x="4" gs-y="0" gs-w="2" gs-h="2" data-widget-id="house-power">
+    <div class="grid-stack-item-content">
+      <div class="card kpi-card h-100">
+        <div class="dashboard-widget-header d-none"><span class="dashboard-drag-handle material-icons"
+            aria-hidden="true">drag_indicator</span></div>
+        <div class="card-body"><span class="material-icons text-primary" aria-hidden="true">home</span>
+          <div>
+            <div class="text-secondary small">House consumption</div><strong id="house-power">n/a</strong>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="grid-stack-item" gs-id="battery-soc" gs-x="6" gs-y="0" gs-w="2" gs-h="2" data-widget-id="battery-soc">
+    <div class="grid-stack-item-content">
+      <div class="card kpi-card h-100">
+        <div class="dashboard-widget-header d-none"><span class="dashboard-drag-handle material-icons"
+            aria-hidden="true">drag_indicator</span></div>
+        <div class="card-body"><span class="material-icons text-success" aria-hidden="true">battery_charging_full</span>
+          <div>
+            <div class="text-secondary small">Battery level</div><strong id="battery-soc">n/a</strong>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="grid-stack-item" gs-id="tsdb-status" gs-x="8" gs-y="0" gs-w="2" gs-h="2" data-widget-id="tsdb-status">
+    <div class="grid-stack-item-content">
+      <div class="card kpi-card h-100">
+        <div class="dashboard-widget-header d-none"><span class="dashboard-drag-handle material-icons"
+            aria-hidden="true">drag_indicator</span></div>
+        <div class="card-body"><span class="material-icons text-secondary" aria-hidden="true"
+            id="tsdb-status-icon">cloud_off</span>
+          <div>
+            <div class="text-secondary small">TSDB export</div><strong id="tsdb-status-label">n/a</strong>
+            <div class="text-secondary small" id="tsdb-status-time"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="grid-stack-item" gs-id="metric-count" gs-x="10" gs-y="0" gs-w="2" gs-h="2" data-widget-id="metric-count">
+    <div class="grid-stack-item-content">
+      <div class="card kpi-card h-100">
+        <div class="dashboard-widget-header d-none"><span class="dashboard-drag-handle material-icons"
+            aria-hidden="true">drag_indicator</span></div>
+        <div class="card-body"><span class="material-icons text-primary" aria-hidden="true">monitoring</span>
+          <div>
+            <div class="text-secondary small">Exposed metrics</div><strong id="metric-count">n/a</strong>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="grid-stack-item" gs-id="devices" gs-x="0" gs-y="2" gs-w="12" gs-h="8" data-widget-id="devices">
+    <div class="grid-stack-item-content">
+      <section class="dashboard-widget-section">
+        <div class="dashboard-widget-header d-none"><span class="dashboard-drag-handle material-icons"
+            aria-hidden="true">drag_indicator</span></div>
+        <div class="d-flex align-items-center justify-content-between mb-3">
+          <h2 class="h5 mb-0">Inverters</h2><button id="add-inverter"
+            class="btn btn-primary d-inline-flex align-items-center gap-1" type="button" data-bs-toggle="modal"
+            data-bs-target="#inverters-modal" title="Manage inverters"><span class="material-icons"
+              aria-hidden="true">add</span>Add inverter</button>
+        </div>
+        <div id="devices-list" class="device-grid">
+          <p class="text-secondary mb-0">Loading inverters …</p>
+        </div>
+      </section>
+    </div>
+  </div>
+  <div class="grid-stack-item d-none" gs-id="device-count" gs-x="0" gs-y="0" gs-w="2" gs-h="2"
+    data-widget-id="device-count">
+    <div class="grid-stack-item-content">
+      <div class="card kpi-card h-100">
+        <div class="dashboard-widget-header d-none"><span class="dashboard-drag-handle material-icons"
+            aria-hidden="true">drag_indicator</span></div>
+        <div class="card-body"><span class="material-icons text-primary" aria-hidden="true">devices</span>
+          <div>
+            <div class="text-secondary small">Inverters</div><strong id="device-count">n/a</strong>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="grid-stack-item d-none" gs-id="connected-count" gs-x="2" gs-y="0" gs-w="2" gs-h="2"
+    data-widget-id="connected-count">
+    <div class="grid-stack-item-content">
+      <div class="card kpi-card h-100">
+        <div class="dashboard-widget-header d-none"><span class="dashboard-drag-handle material-icons"
+            aria-hidden="true">drag_indicator</span></div>
+        <div class="card-body"><span class="material-icons text-success" aria-hidden="true">check_circle</span>
+          <div>
+            <div class="text-secondary small">Connected</div><strong id="connected-count">n/a</strong>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="grid-stack-item d-none" gs-id="days-to-calibration" gs-x="4" gs-y="0" gs-w="2" gs-h="2"
+    data-widget-id="days-to-calibration">
+    <div class="grid-stack-item-content">
+      <div class="card kpi-card h-100">
+        <div class="dashboard-widget-header d-none"><span class="dashboard-drag-handle material-icons"
+            aria-hidden="true">drag_indicator</span></div>
+        <div class="card-body"><span class="material-icons text-info" aria-hidden="true">event_repeat</span>
+          <div>
+            <div class="text-secondary small">Days to calibration</div><strong id="days-to-calibration">n/a</strong>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+<div id="add-widget-modal" class="modal fade" tabindex="-1" aria-labelledby="add-widget-title" aria-hidden="true">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h2 id="add-widget-title" class="modal-title h5">Add widget</h2>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <ul id="add-widget-list" class="list-group"></ul>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Close</button>
+      </div>
+    </div>
+  </div>
+</div>
 <div id="inverters-modal" class="modal fade" tabindex="-1" aria-labelledby="inverters-modal-title" aria-hidden="true">
   <div class="modal-dialog modal-lg modal-dialog-scrollable">
     <div class="modal-content">
       <div class="modal-header">
         <div>
           <h2 id="inverters-modal-title" class="modal-title h5">Inverters</h2>
-          <p class="text-secondary small mb-0">Changes are saved automatically.</p>
+          <p class="text-secondary small mb-0">Each change takes effect immediately.</p>
         </div><button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
       </div>
       <div class="modal-body">
-        <div id="settings-sections" aria-live="polite">
+        {# No aria-live: renderSettings() rebuilds this subtree wholesale, which would re-announce
+        the whole form. Outcomes are announced via #save-state and the toast region instead, the
+        same fix as the standalone settings pages (A11Y-03). #}
+        <div id="settings-sections">
           <p class="text-secondary">Loading settings …</p>
         </div>
       </div>
-      <div class="modal-footer"><span id="save-state" class="save-state text-secondary small me-auto"
-          aria-live="polite"></span></div>
     </div>
   </div>
 </div>
+{% endblock %}
+{% block extra_js %}
+<script src="/admin/static/vendor/gridstack-all.js" defer></script>
+<script src="/admin/static/js/dashboard.js" defer></script>
 {% endblock %}

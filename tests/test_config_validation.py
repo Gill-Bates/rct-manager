@@ -54,7 +54,7 @@ def test_tuning_variables_are_not_read_from_the_environment(monkeypatch) -> None
 
 def test_valid_defaults_load() -> None:
     settings = load_settings()
-    assert settings.bind_port == 8080
+    assert settings.bind_port == 8000
     assert settings.auth_required is True and settings.devices == [] and settings.enable_write_support is False
     assert settings.behind_reverse_proxy is False
     assert settings.allow_non_loopback_bind is False
@@ -299,7 +299,7 @@ def test_endpoint_id_is_the_direct_device_id_without_address() -> None:
 
 
 def test_structured_device_entry_strips_ipv6_brackets_like_the_text_parser() -> None:
-    """Finding P3-2: a DeviceEntry built directly from structured data must canonicalize the host
+    """A DeviceEntry built directly from structured data must canonicalize the host
     the same way the text parser already does, so the transport never receives bracket syntax."""
     from app.config import DeviceEntry
 

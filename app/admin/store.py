@@ -219,6 +219,11 @@ class AdminStore:
             for key, value in values.items():
                 db.execute(_UPSERT_SETTING, (key, self._encode(key, value)))
 
+    def delete(self, key: str) -> None:
+        """Remove a stored value; a missing key is not an error (idempotent reset-to-default)."""
+        with self.connect() as db:
+            db.execute("DELETE FROM settings WHERE key=?", (key,))
+
     def merge_operator_settings(self, current, changes: dict):
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
@@ -234,11 +239,14 @@ class AdminStore:
             return False
         with self.connect() as db:
             row = db.execute("SELECT encrypted FROM admin_user WHERE username=?", (username,)).fetchone()
-        password_hash = self._decode(username, row["encrypted"])["password_hash"] if row else _DUMMY_PASSWORD_HASH
         try:
+            password_hash = (
+                self._decode(username, row["encrypted"])["password_hash"] if row else _DUMMY_PASSWORD_HASH
+            )
             verified = _PASSWORDS.verify(password_hash, password)
             return bool(row is not None and verified)
-        except _PASSWORD_ERRORS:
+        except (*_PASSWORD_ERRORS, KeyError, TypeError):
+            # An unreadable record is a failed login (counted by the caller), never a 500.
             return False
 
     def change_password(self, current: str, new: str) -> bool:
@@ -321,11 +329,16 @@ class AdminStore:
 
     def create_token(self, name: str, role: str, expires_at: datetime | None) -> tuple[dict, str]:
         with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")  # the 32-token cap is count-then-insert: take the write lock first
             return self._insert_token(db, name, role, expires_at)
 
     def delete_token(self, token_id: str) -> bool:
         with self.connect() as db:
-            return bool(db.execute("DELETE FROM pats WHERE id=?", (token_id,)).rowcount)
+            deleted = bool(db.execute("DELETE FROM pats WHERE id=?", (token_id,)).rowcount)
+        if deleted:
+            with self._touch_lock:
+                self._last_touch.pop(token_id, None)
+        return deleted
 
     def authenticate_token(self, token: str) -> FileToken | None:
         if len(token) > 512 or not pat_well_formed(token):
@@ -335,7 +348,11 @@ class AdminStore:
             row = db.execute("SELECT * FROM pats WHERE digest=?", (self._pat_digest(sha256),)).fetchone()
         if row is None:
             return None
-        record = self._decode(row["id"], row["encrypted"])
+        try:
+            record = self._decode(row["id"], row["encrypted"])
+        except ValueError:
+            log.warning("Rejected an unreadable token record")  # tampered or encrypted under another HMAC_SECRET
+            return None
         if record["expires_at"] and datetime.fromisoformat(record["expires_at"]) <= datetime.now(UTC):
             return None
         self._note_use(record)

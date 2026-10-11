@@ -299,6 +299,55 @@ def test_capability_note_is_bounded_printable_ascii(note: str) -> None:
         CapabilityRecord("main", CapabilityName.WRITE_PATH, note=note)
 
 
+def test_verified_export_limit_requires_its_safety_flag() -> None:
+    """H6 fail-closed: the gate decides on status alone, so a VERIFIED EXPORT_LIMIT whose
+    export_limit_zero_blocks_export is still None must be rejected at the dataclass boundary — it
+    would otherwise pass the safety gate without the fact the status claims.
+    """
+    with pytest.raises(ValueError, match="export_limit_zero_blocks_export"):
+        CapabilityRecord(
+            "main",
+            CapabilityName.EXPORT_LIMIT,
+            status=CapabilityStatus.VERIFIED,
+            export_limit_zero_blocks_export=None,
+        )
+    # The same record with the flag set is accepted.
+    CapabilityRecord(
+        "main",
+        CapabilityName.EXPORT_LIMIT,
+        status=CapabilityStatus.VERIFIED,
+        export_limit_zero_blocks_export=True,
+    )
+
+
+@pytest.mark.parametrize(
+    "field, value",
+    [
+        ("soc_strategy_external_code", 256),
+        ("soc_strategy_external_code", -1),
+        ("enum_byte_width", 0),
+        ("enum_byte_width", 5),
+        ("bool_byte_width", 5),
+        ("refresh_interval_seconds", float("inf")),
+        ("refresh_interval_seconds", -1.0),
+        ("refresh_interval_seconds", 86_401.0),
+    ],
+)
+def test_capability_value_ranges_are_enforced_in_the_domain(field: str, value) -> None:
+    with pytest.raises(ValueError):
+        CapabilityRecord("main", CapabilityName.WRITE_PATH, **{field: value})
+
+
+def test_optional_bool_is_fail_closed_on_deserialization() -> None:
+    """A stored "false" must not deserialize to True: a bool-looking string is corruption, which
+    from_dict reports so the store treats the row as unreadable (reads as unverified).
+    """
+    data = CapabilityRecord("main", CapabilityName.EXPORT_LIMIT).to_dict()
+    data["export_limit_zero_blocks_export"] = "false"
+    with pytest.raises(TypeError):
+        CapabilityRecord.from_dict(data)
+
+
 # --- The port is the only writer (design 4.4) ------------------------------------------------
 
 
@@ -428,7 +477,7 @@ async def test_admin_api_verified_capability_lifts_the_gate_for_exactly_that_dev
         put = await harness.client.put(
             "/admin/api/dispatch/devices/main/capabilities/battery_power_sign_convention",
             headers=headers,
-            json={"status": "verified", "verified_device_model": "RCT-Power-Storage-DC", "verified_firmware": "1.0.0"},
+            json={"status": "verified", "verified_device_model": "RCT-Power-Storage-DC", "verified_firmware": "1.0.0", "battery_discharge_positive": True},
         )
         assert put.status_code == 200
         assert put.json()["status"] == "verified"
@@ -439,6 +488,172 @@ async def test_admin_api_verified_capability_lifts_the_gate_for_exactly_that_dev
         )
         names = {row["name"]: row["status"] for row in unaffected.json()}
         assert names["battery_power_sign_convention"] == "unverified"
+
+
+async def test_admin_api_capabilities_get_round_trips_evidence_fields(tmp_path: Path) -> None:
+    """Round-trip plumbing only: the strategy code is a neutral fixture value, not a claim.
+
+    The code and the note say nothing about hardware; `power_mng_soc_strategy` has no resolved enum
+    in this project, so no value may appear here as if it were verified.
+    """
+    async with _admin_harness(tmp_path) as (harness, headers):
+        body = _verified_write_path_body()
+        put = await harness.client.put(
+            "/admin/api/dispatch/devices/main/capabilities/write_path_convention",
+            headers=headers,
+            json=body,
+        )
+        assert put.status_code == 200
+
+        get = await harness.client.get("/admin/api/dispatch/devices/main/capabilities", headers=headers)
+        assert get.status_code == 200
+        row = next(r for r in get.json() if r["name"] == "write_path_convention")
+        assert row["soc_strategy_external_code"] == body["soc_strategy_external_code"]
+        assert row["note"] == body["note"]
+        # Fields this capability does not govern are null, not an echoed inert value.
+        assert row["battery_discharge_positive"] is None
+        assert row["grid_import_positive"] is None
+        # PUT's own response is the same shape as GET's rows (round-trip consistency).
+        assert put.json()["soc_strategy_external_code"] == body["soc_strategy_external_code"]
+        assert put.json()["note"] == body["note"]
+        assert put.json()["battery_discharge_positive"] is None
+
+
+async def test_admin_api_reports_each_evidence_field_only_on_the_capability_it_governs(
+    tmp_path: Path,
+) -> None:
+    """The adapter reads each evidence field from exactly one capability; the API says so too."""
+    async with _admin_harness(tmp_path) as (harness, headers):
+        put = await harness.client.put(
+            "/admin/api/dispatch/devices/main/capabilities/battery_power_sign_convention",
+            headers=headers,
+            json={
+                "status": "verified",
+                "verified_device_model": "RCT-Power-Storage-DC",
+                "verified_firmware": "1.0.0",
+                "battery_discharge_positive": False,
+            },
+        )
+        assert put.status_code == 200
+
+        get = await harness.client.get("/admin/api/dispatch/devices/main/capabilities", headers=headers)
+        rows = {row["name"]: row for row in get.json()}
+
+        battery = rows["battery_power_sign_convention"]
+        assert battery["battery_discharge_positive"] is False
+        assert battery["grid_import_positive"] is None
+        assert battery["soc_strategy_external_code"] is None
+
+        grid = rows["grid_power_sign_convention"]
+        assert grid["grid_import_positive"] is True  # assumption default, still unverified
+        assert grid["battery_discharge_positive"] is None
+        assert grid["soc_strategy_external_code"] is None
+
+
+@pytest.mark.parametrize(
+    ("name", "field_name"),
+    [
+        ("write_path_convention", "battery_discharge_positive"),
+        ("battery_power_sign_convention", "soc_strategy_external_code"),
+        ("grid_power_sign_convention", "battery_discharge_positive"),
+    ],
+)
+async def test_admin_api_refuses_evidence_set_on_a_capability_it_does_not_govern(
+    tmp_path: Path, name: str, field_name: str
+) -> None:
+    """Silently storing an inert value would show an operator a setting the adapter ignores."""
+    async with _admin_harness(tmp_path) as (harness, headers):
+        resp = await harness.client.put(
+            f"/admin/api/dispatch/devices/main/capabilities/{name}",
+            headers=headers,
+            json={"status": "unverified", field_name: 1 if "code" in field_name else False},
+        )
+        assert resp.status_code == 422
+        assert field_name in resp.json()["detail"]
+        assert name in resp.json()["detail"]
+
+
+async def test_admin_api_put_replaces_the_record_so_an_omitted_evidence_field_resets(
+    tmp_path: Path,
+) -> None:
+    """PUT is a replace, not a merge: an omitted evidence field falls back to its default.
+
+    Pinned deliberately because it is a footgun on a sign convention — a follow-up PUT that only
+    means to change the note silently flips `battery_discharge_positive` back to the assumption
+    default unless the caller resends it. Documented in docs/operation.md.
+    """
+    async with _admin_harness(tmp_path) as (harness, headers):
+        route = "/admin/api/dispatch/devices/main/capabilities/battery_power_sign_convention"
+        verified = {
+            "status": "verified",
+            "verified_device_model": "RCT-Power-Storage-DC",
+            "verified_firmware": "1.0.0",
+            "battery_discharge_positive": False,
+        }
+        first = await harness.client.put(route, headers=headers, json=verified)
+        assert first.status_code == 200
+        assert first.json()["battery_discharge_positive"] is False
+
+        # Same request minus the evidence field (and not VERIFIED, which now demands it): the stored
+        # False is not preserved.
+        resent = await harness.client.put(route, headers=headers, json={"status": "unverified"})
+        assert resent.status_code == 200
+        assert resent.json()["battery_discharge_positive"] is True
+
+
+async def test_admin_api_refuses_verified_sign_convention_without_explicit_flag(tmp_path: Path) -> None:
+    """The flag defaults to True, so an omitted value is no evidence."""
+    async with _admin_harness(tmp_path) as (harness, headers):
+        resp = await harness.client.put(
+            "/admin/api/dispatch/devices/main/capabilities/grid_power_sign_convention",
+            headers=headers,
+            json={"status": "verified", "verified_device_model": "RCT-Power-Storage-DC", "verified_firmware": "1.0.0"},
+        )
+        assert resp.status_code == 400
+        assert "grid_import_positive" in resp.json()["detail"]
+
+
+async def test_admin_api_refuses_verified_write_path_without_explicit_soc_target_unit(tmp_path: Path) -> None:
+    """V-17: soc_target_unit has a non-None default ("ratio"), so like the sign flags only an
+    explicitly sent value counts as evidence that the register representation was attested.
+    """
+    async with _admin_harness(tmp_path) as (harness, headers):
+        body = _verified_write_path_body()
+        del body["soc_target_unit"]
+        resp = await harness.client.put(
+            "/admin/api/dispatch/devices/main/capabilities/write_path_convention",
+            headers=headers,
+            json=body,
+        )
+        assert resp.status_code == 400
+        assert "soc_target_unit" in resp.json()["detail"]
+
+
+@pytest.mark.parametrize("note", [None, "", "   "])
+async def test_admin_api_requires_a_non_empty_note_for_a_verified_write_path(
+    tmp_path: Path, note: str | None
+) -> None:
+    """The raw strategy code is uninterpretable without the evidence behind it, so it is required."""
+    async with _admin_harness(tmp_path) as (harness, headers):
+        body = _verified_write_path_body()
+        if note is None:
+            del body["note"]
+        else:
+            body["note"] = note
+        refused = await harness.client.put(
+            "/admin/api/dispatch/devices/main/capabilities/write_path_convention",
+            headers=headers,
+            json=body,
+        )
+        assert refused.status_code == 400
+        assert "note" in refused.json()["detail"]
+
+        accepted = await harness.client.put(
+            "/admin/api/dispatch/devices/main/capabilities/write_path_convention",
+            headers=headers,
+            json=_verified_write_path_body(),
+        )
+        assert accepted.status_code == 200
 
 
 async def test_admin_api_rejects_verified_write_path_with_missing_evidence(tmp_path: Path) -> None:
@@ -473,12 +688,12 @@ async def test_admin_api_copy_from_requires_matching_model_and_firmware(tmp_path
         await harness.client.put(
             "/admin/api/dispatch/devices/main/capabilities/grid_power_sign_convention",
             headers=headers,
-            json={"status": "verified", "verified_device_model": "RCT-Power-Storage-DC", "verified_firmware": "1.0.0"},
+            json={"status": "verified", "verified_device_model": "RCT-Power-Storage-DC", "verified_firmware": "1.0.0", "grid_import_positive": True},
         )
         await harness.client.put(
             "/admin/api/dispatch/devices/main/capabilities/battery_power_sign_convention",
             headers=headers,
-            json={"status": "verified", "verified_device_model": "RCT-Power-Storage-DC", "verified_firmware": "2.0.0"},
+            json={"status": "verified", "verified_device_model": "RCT-Power-Storage-DC", "verified_firmware": "2.0.0", "battery_discharge_positive": True},
         )
         # Matching model and firmware: the one capability recorded under that firmware is copied.
         copied = await harness.client.post(
@@ -506,23 +721,27 @@ async def test_admin_api_copy_from_requires_matching_model_and_firmware(tmp_path
         assert refused.status_code == 200
         assert {row["name"] for row in refused.json()} == set()
 
+        # Copying a device onto itself is a client error, not a no-op rewrite of its own evidence.
+        itself = await harness.client.post(
+            "/admin/api/dispatch/devices/main/capabilities:copy-from",
+            headers=headers,
+            json={
+                "source_device_id": "main",
+                "target_device_model": "RCT-Power-Storage-DC",
+                "target_firmware": "1.0.0",
+            },
+        )
+        assert itself.status_code == 400
+
 
 async def test_admin_api_withdraws_an_idle_capability_without_force(tmp_path: Path) -> None:
     async with _admin_harness(tmp_path) as (harness, headers):
-        await harness.client.put(
+        entered = await harness.client.put(
             "/admin/api/dispatch/devices/main/capabilities/write_path_convention",
             headers=headers,
-            json={
-                "status": "verified",
-                "verified_device_model": "RCT-Power-Storage-DC",
-                "verified_firmware": "1.0.0",
-                "soc_strategy_external_code": 1,
-                "enum_byte_width": 1,
-                "bool_byte_width": 1,
-                "write_frame_layout_verified": True,
-                "apply_sequence_verified": True,
-            },
+            json=_verified_write_path_body(),
         )
+        assert entered.status_code == 200
         withdrawn = await harness.client.put(
             "/admin/api/dispatch/devices/main/capabilities/write_path_convention",
             headers=headers,
@@ -601,6 +820,10 @@ def _verified_write_path_body() -> dict:
         "bool_byte_width": 1,
         "write_frame_layout_verified": True,
         "apply_sequence_verified": True,
+        "soc_target_unit": "ratio",
+        # A non-empty note is required for a verified write_path_convention. Fixture text only: it
+        # claims no hardware verification of the strategy code.
+        "note": "fixture value; no hardware verification claimed",
     }
 
 
@@ -715,6 +938,53 @@ async def test_admin_api_sets_device_limits_and_the_engineering_switch(tmp_path:
         assert harness.runtime.dispatch.device_limits("main").engineering_mode is True
 
 
+async def test_admin_api_rejects_non_finite_or_absurd_device_limits(tmp_path: Path) -> None:
+    async with _admin_harness(tmp_path) as (harness, headers):
+        for charge in ("Infinity", "NaN", "1e12"):
+            resp = await harness.client.put(
+                "/admin/api/dispatch/devices/main",
+                headers={**headers, "Content-Type": "application/json"},
+                content=f'{{"max_charge_power_w": {charge}, "max_discharge_power_w": 2500}}',
+            )
+            assert resp.status_code == 422, (charge, resp.text)
+
+
+async def test_capability_get_returns_the_evidence_a_put_accepts(tmp_path: Path) -> None:
+    body = {
+        "status": "unverified", "soc_strategy_external_code": 2, "enum_byte_width": 1, "bool_byte_width": 2,
+        "write_frame_layout_verified": True, "apply_sequence_verified": True, "sequence_order_relevant": True,
+        "soc_target_unit": "percent", "note": "bench evidence",
+    }
+    url = "/admin/api/dispatch/devices/main/capabilities"
+    async with _admin_harness(tmp_path) as (harness, headers):
+        assert (await harness.client.put(f"{url}/write_path_convention", headers=headers, json=body)).status_code == 200
+        listed = {row["name"]: row for row in (await harness.client.get(url, headers=headers)).json()}
+        row = listed["write_path_convention"]
+        assert {key: row[key] for key in body} == body
+        # GET -> edit -> PUT: server-managed fields are dropped, nulls of ungoverned fields are tolerated.
+        edited = {k: v for k, v in row.items() if k not in {"device_id", "name", "verified_at", "verified_by"}}
+        edited["bool_byte_width"] = 4
+        edited["battery_discharge_positive"] = None
+        resp = await harness.client.put(f"{url}/write_path_convention", headers=headers, json=edited)
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["bool_byte_width"] == 4
+
+
+async def test_capability_optional_fields_belong_to_their_own_capability(tmp_path: Path) -> None:
+    url = "/admin/api/dispatch/devices/main/capabilities"
+    async with _admin_harness(tmp_path) as (harness, headers):
+        wrong = await harness.client.put(
+            f"{url}/write_path_convention", headers=headers, json={"status": "unverified", "volatile": True}
+        )
+        assert wrong.status_code == 422
+        right = await harness.client.put(
+            f"{url}/setpoint_volatility", headers=headers,
+            json={"status": "unverified", "volatile": True, "refresh_interval_seconds": 30},
+        )
+        assert right.status_code == 200, right.text
+        assert (right.json()["volatile"], right.json()["refresh_interval_seconds"]) == (True, 30.0)
+
+
 def _admin_settings(tmp_path: Path, admin_path: Path, **overrides):
     from tests.api_helpers import dispatch_fixtures, make_settings
 
@@ -734,20 +1004,21 @@ def _admin_settings(tmp_path: Path, admin_path: Path, **overrides):
 
 @contextlib.asynccontextmanager
 async def _admin_harness(tmp_path: Path):
-    """A running app plus a read/write admin PAT, for the admin dispatch API's own tests."""
-    from app.admin.store import AdminStore
-    from tests.api_helpers import _fixed_pat, running_app
+    """A running app logged in as the admin, for the admin dispatch API's own tests.
 
-    token = _fixed_pat("AdminDispatchToken")
+    The dispatch admin API is session-only (SEC-01), so a PAT would be refused with 403.
+    """
+    from app.admin.store import AdminStore
+    from tests.api_helpers import admin_session_headers, running_app
+
     admin_path = tmp_path / "admin.db"
     store = AdminStore(admin_path, "s" * 48)
     password = store.initialize()
     assert store.change_password(password, "replacement-test-password")
-    with patch("app.admin.store.generate_pat", side_effect=[token]):
-        store.create_token("admin dispatch test token", "read/write", None)
     store.close()
     async with running_app(_admin_settings(tmp_path, admin_path)) as harness:
-        yield harness, {"Authorization": f"Bearer {token}"}
+        headers = await admin_session_headers(harness.client, "replacement-test-password")
+        yield harness, headers
 
 
 # --- The gate is armed in submit(): unverified hardware is never touched (AK-18) --------------

@@ -7,8 +7,15 @@
 """Export settings through the admin API: validation, write-only secrets, persistence."""
 
 
-import httpx
+import asyncio
+import threading
+from types import SimpleNamespace
 
+import httpx
+import pytest
+from fastapi import HTTPException
+
+from app.admin.api import _changed_session_only, _restart_export, _run_on_loop, _TransitionBusy
 from app.api.app_factory import create_app
 from app.config import DbType, QuestDbDownsampling, Settings
 
@@ -17,7 +24,7 @@ async def test_export_settings_round_trip(tmp_path):
     settings = Settings(_env_file=None, hmac_secret="s" * 48, admin_db_path=tmp_path / "rct.db")
     app = create_app(settings)
     password = app.state.first_start_password
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver") as client:
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver", headers={"Origin": "http://testserver"}) as client:
         csrf = (await client.get("/admin/api/session")).json()["csrf_token"]
         login = await client.post("/admin/api/login", headers={"X-CSRF-Token": csrf},
                                   json={"username": "admin", "password": password})
@@ -38,7 +45,7 @@ async def test_export_settings_round_trip(tmp_path):
         assert saved.json()["settings"]["questdb_password_configured"] is True
         # TSDB target/connection/retention settings restart the push exporter task in place,
         # not the whole application: none of them appear in restart_required any more.
-        assert saved.json()["restart_required"] == []
+        assert "restart_required" not in saved.json()
         assert "db_type" in saved.json()["live"]
         # an empty secret keeps the stored one; an invalid raw retention is rejected
         keep = await client.put("/admin/api/settings", headers=headers,
@@ -61,7 +68,7 @@ async def test_metrics_export_enabled_toggle_is_orthogonal_to_db_type(tmp_path):
     assert settings.metrics_export_enabled is True
     app = create_app(settings)
     password = app.state.first_start_password
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver") as client:
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver", headers={"Origin": "http://testserver"}) as client:
         csrf = (await client.get("/admin/api/session")).json()["csrf_token"]
         login = await client.post("/admin/api/login", headers={"X-CSRF-Token": csrf},
                                   json={"username": "admin", "password": password})
@@ -78,7 +85,7 @@ async def test_metrics_export_enabled_toggle_is_orthogonal_to_db_type(tmp_path):
         paused = await client.put("/admin/api/settings", headers=headers,
                                   json={"metrics_export_enabled": False})
         assert paused.status_code == 200
-        assert paused.json()["restart_required"] == []
+        assert "restart_required" not in paused.json()
         assert "metrics_export_enabled" in paused.json()["live"]
         after_pause = (await client.get("/admin/api/settings")).json()["settings"]
         # db_type and the hostname are still there: pausing does not reset the connection config.
@@ -86,11 +93,45 @@ async def test_metrics_export_enabled_toggle_is_orthogonal_to_db_type(tmp_path):
         assert after_pause["db_type"] == "questdb" and after_pause["questdb_hostname"] == "localhost"
 
 
+async def test_dashboard_tsdb_tile_distinguishes_paused_from_unconfigured_and_failing(tmp_path):
+    """`_tsdb_view` (surfaced via GET /admin/api/devices as `tsdb`) must let the dashboard tell
+    a deliberately paused export apart from an unconfigured one and from a genuinely stale one:
+    `healthy` stays `None` (neutral) when `db_type` is unset, and `export_enabled` is `False`
+    while `healthy` is `False` only when the export loop is actually not pushing because the
+    user paused it, not because of a real failure."""
+    settings = Settings(_env_file=None, hmac_secret="s" * 48, admin_db_path=tmp_path / "rct.db")
+    app = create_app(settings)
+    password = app.state.first_start_password
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver", headers={"Origin": "http://testserver"}) as client:
+        csrf = (await client.get("/admin/api/session")).json()["csrf_token"]
+        login = await client.post("/admin/api/login", headers={"X-CSRF-Token": csrf},
+                                  json={"username": "admin", "password": password})
+        changed = await client.post("/admin/api/change-password", headers={"X-CSRF-Token": login.json()["csrf_token"]},
+                                    json={"current_password": password, "new_password": "a much stronger password"})
+        headers = {"X-CSRF-Token": changed.json()["csrf_token"]}
+
+        not_configured = (await client.get("/admin/api/devices")).json()["tsdb"]
+        assert not_configured["configured"] is False and not_configured["healthy"] is None
+
+        body = {"db_type": "questdb", "questdb_hostname": "localhost", "questdb_downsampling": "off"}
+        assert (await client.put("/admin/api/settings", headers=headers, json=body)).status_code == 200
+
+        paused = await client.put("/admin/api/settings", headers=headers,
+                                  json={"metrics_export_enabled": False})
+        assert paused.status_code == 200
+        tsdb = (await client.get("/admin/api/devices")).json()["tsdb"]
+        assert tsdb["configured"] is True and tsdb["export_enabled"] is False
+        # The frontend tile keys the neutral "Export paused" branch off export_enabled, not off
+        # healthy, so healthy may legitimately be False here; the regression this guards against
+        # is export_enabled going missing or inverted, which would make the tile fall back to
+        # the red "Failing" branch for a deliberately paused export.
+
+
 async def test_resaving_an_unchanged_enabled_value_does_not_restart_the_exporter(tmp_path):
     settings = Settings(_env_file=None, hmac_secret="s" * 48, admin_db_path=tmp_path / "rct.db")
     app = create_app(settings)
     password = app.state.first_start_password
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver") as client:
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver", headers={"Origin": "http://testserver"}) as client:
         csrf = (await client.get("/admin/api/session")).json()["csrf_token"]
         login = await client.post("/admin/api/login", headers={"X-CSRF-Token": csrf},
                                   json={"username": "admin", "password": password})
@@ -179,7 +220,7 @@ async def test_export_target_change_takes_effect_without_a_restart(tmp_path):
                 json={"questdb_hostname": second.url},
             )
             assert response.status_code == 200, response.text
-            assert response.json()["restart_required"] == []
+            assert "restart_required" not in response.json()
             assert "questdb_hostname" in response.json()["live"]
             assert h.app.state.runtime.settings.questdb_hostname == second.url
 
@@ -279,7 +320,7 @@ async def test_disabling_export_stops_the_running_task_without_a_restart(tmp_pat
                     json={"metrics_export_enabled": False},
                 )
                 assert paused.status_code == 200, paused.text
-                assert paused.json()["restart_required"] == []
+                assert "restart_required" not in paused.json()
                 for _ in range(100):
                     if running_task.cancelled() or running_task.done():
                         break
@@ -342,3 +383,56 @@ async def test_app_starts_with_export_and_contains_failures(tmp_path):
         text = (await h.client.get("/metrics")).text
         assert 'rct_export_pushes_total{result="error"}' in text
         assert (await h.client.get("/admin/api/session")).status_code == 200
+
+
+def _request_with_loop(**hooks):
+    loop = asyncio.new_event_loop()
+    thread = threading.Thread(target=loop.run_forever, daemon=True)
+    thread.start()
+    state = SimpleNamespace(loop=loop, **hooks)
+    return SimpleNamespace(app=SimpleNamespace(state=state)), loop, thread
+
+
+def test_a_timed_out_transition_blocks_the_next_one_until_it_finishes():
+    release = threading.Event()
+
+    async def slow() -> None:
+        while not release.is_set():
+            await asyncio.sleep(0.01)
+
+    request, loop, thread = _request_with_loop(restart_export=slow)
+    try:
+        with pytest.raises(TimeoutError):
+            _run_on_loop(request, "restart_export", 0.05)
+        with pytest.raises(_TransitionBusy):
+            _run_on_loop(request, "restart_export", 0.05)
+        release.set()
+        request.app.state.live_transition.result(timeout=2)
+        _run_on_loop(request, "restart_export", 2)
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+        thread.join(timeout=2)
+
+
+def test_a_failed_export_restart_is_reported_not_swallowed():
+    async def broken() -> None:
+        raise RuntimeError("boom")
+
+    request, loop, thread = _request_with_loop(restart_export=broken)
+    try:
+        with pytest.raises(HTTPException) as caught:
+            _restart_export(request)
+        assert caught.value.status_code == 500
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+        thread.join(timeout=2)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [{"questdb_downsampling": "high"}, {"influxdb_token": None}, {"questdb_password": None}],
+)
+def test_a_pat_cannot_change_retention_presets_or_delete_credentials(body):
+    settings = Settings(_env_file=None, hmac_secret="s" * 48)
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(admin_desired_settings=settings)))
+    assert _changed_session_only(request, body) == set(body)

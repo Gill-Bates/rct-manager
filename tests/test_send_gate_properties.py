@@ -30,7 +30,7 @@ def _request(object_id: int = 1, command: Command = Command.READ) -> Transaction
     return TransactionRequest(DeviceKey(KEY), Frame(command, object_id), TransactionOrigin.CALLER, "read")
 
 
-# Feature: rct-rest-api, Property 7: minimum pause at the Send_Gate
+# Feature: rct-manager, Property 7: minimum pause at the Send_Gate
 @PROP
 @given(
     st.integers(0, 1000),
@@ -64,7 +64,7 @@ def test_minimum_pause_between_any_two_frames(interval_ms: int, steps: list[tupl
         assert b - a >= interval_ms / 1000 - 1e-9
 
 
-# Feature: rct-rest-api, Property 8: at most one connection and at most one transaction per endpoint
+# Feature: rct-manager, Property 8: at most one connection and at most one transaction per endpoint
 @PROP
 @given(
     st.lists(st.sampled_from(["respond", "ignore", "drop"]), min_size=1, max_size=6),

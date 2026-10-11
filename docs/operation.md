@@ -36,6 +36,27 @@ read succeeds.
 - `GET /health` is token-free and turns 503 once the shutdown has begun. The
   container health check queries it on the container's own address.
 
+## Admin dashboard
+
+- **Edit dashboard** opens the edit mode of the **Overview** page (move and resize widgets, **Add
+  widget**, **Reset layout**, **Done**). Changes autosave. On a phone the widgets are stacked and the
+  layout cannot be edited; the saved layout stays untouched.
+- Each inverter card shows the energy-flow graphic (from the cached readings, also with write
+  support off), a power card and one card per battery tower. The module count of a tower is derived
+  from its populated module serial slots; until all slots were read the card shows "Detecting
+  modules…", and a slot pattern that cannot describe a documented tower shows "Module layout
+  unclear" instead of a drawing.
+- The Energy Manager page shows a compact grid, house and battery energy-flow view beside the
+  controls when space allows. Both views use measured, sign-normalized readings.
+- If the server cannot be reached, the dashboard keeps showing the last data (up to one hour old,
+  dimmed, with a banner) and a "Connection lost" dialog without buttons probes the server in the background and reloads the page automatically once it answers again.
+- The layout is stored in `data/rct.db`, separate from the device settings, through
+  `GET`/`PUT`/`DELETE /admin/api/dashboard-layout` (admin API, not part of the public contract). The
+  server accepts only known widget ids, at most 32 widgets and a 12-column grid.
+- The About page checks GitHub for a newer release: results are cached for 1 h, errors for 60 s, and
+  a forced refresh runs at most once per 30 s.
+- `/admin/static/` answers 404 for any path with a dot-prefixed segment.
+
 ## Writes
 
 - Write support is enabled on the GUI **Inverters** page; the `read/write` role and the
@@ -46,7 +67,7 @@ read succeeds.
   labeled action is not automatically a safe default. The destructive `com_service` codes
   `6 erase_parameters_flash` and `11 erase_datalog` are therefore not shipped as writable; the
   codes `0, 5, 9, 10, 12, 13, 14, 15, 16, 18` are. To allow an erase action anyway, copy the
-  shipped file, add the code to its `allowed_values` and point `write_allowlist_path` at the copy.
+  shipped file, add the code to its `allowed_values` and use that file as the write allowlist (`write_allowlist_path` is not an environment setting).
 - Numeric limits are wire type limits, not safe operating limits or a promise
   that the firmware accepts a write.
 - The **Inverters** page shows a short explanation under a writable parameter where the catalog
@@ -82,6 +103,30 @@ sign conventions for battery power and grid power) are not configured through th
 They are **per-device capabilities**, persisted in the dispatch database and shown and set through
 the admin dispatch API (`/admin/api/dispatch/...`, not part of the public, documented contract).
 
+- **Each capability row carries only the evidence that governs it.** The dispatch adapter reads every
+  evidence field from exactly one capability, so `GET .../capabilities` reports it on that row only
+  and `null` on all others — `null` means "not applicable to this capability", never "unset":
+    - `battery_power_sign_convention` → `battery_discharge_positive`
+    - `grid_power_sign_convention` → `grid_import_positive`
+    - `write_path_convention` → `soc_strategy_external_code`
+
+  A `PUT` that sets an evidence field on a capability that does not govern it is refused with `422`
+  instead of storing a value the adapter would ignore. The same rule covers the remaining evidence
+  fields: `enum_byte_width`, `bool_byte_width`, `write_frame_layout_verified` and
+  `apply_sequence_verified` belong to `write_path_convention`, and
+  `export_limit_zero_blocks_export` to `export_limit_convention`. `note` is the exception — every
+  capability may carry one.
+
+- **`PUT` replaces the capability record; it is not a partial update.** An omitted evidence field is
+  reset to its assumption default rather than kept, so a value that was set earlier is lost unless
+  the request sends it again. Read the capability first and resend the fields you want to keep.
+
+- `soc_strategy_external_code` is returned as the raw register value, since the RCT register catalog
+  carries no enum label table for it (the meaning is device/firmware-specific, not a project-wide
+  constant). It is only interpretable together with `note`, so setting `write_path_convention` to
+  `verified` is refused with `400` unless the `PUT` supplies a non-empty `note`; record there what
+  the code means and what was observed (hardware model, firmware, behavior).
+
 - **Shipping state is `unverified`.** A fresh database ships every capability as `unverified` with
   assumption defaults the adapter works with (for example `battery_discharge_positive = true`,
   `grid_import_positive = true`). An `unverified` required capability blocks the dispatch mode it
@@ -99,6 +144,10 @@ the admin dispatch API (`/admin/api/dispatch/...`, not part of the public, docum
   verification plan before enabling dispatch in production; it is not part of this documentation
   site, because a filled-in sheet holds operator measurements that belong with the operator, not
   on a published page.
+- **A removed device loses its dispatch state.** Removing a device (or re-addressing it under the
+  same id) resets all its capabilities to `unverified`, switches engineering mode off and sets the
+  Energy Manager mode to Off, so a device later added under that id starts unverified. The reset runs only
+  after the new device graph was built.
 - **A capability or device-limit change is refused while an operation it affects is active.**
   Flipping a sign convention, re-verifying the write path, or changing the power limits/
   engineering-mode switch of a device with a running dispatch answers `409
@@ -106,10 +155,10 @@ the admin dispatch API (`/admin/api/dispatch/...`, not part of the public, docum
   the middle of an apply/control cycle. Stop or let the operation finish first.
 
 A device stuck in `fault_restore_pending` (the restore to the original inverter settings itself
-failed) is retried automatically on the next dispatch cycle once eligible, instead of staying
-stuck until an operator calls cancel/submit again. This is a minimal, immediate-retry mechanism
-with no backoff curve or attempt limit yet; a full backoff schedule is a separate, not yet
-implemented work package.
+failed) is retried automatically by the dispatch cycle, instead of staying stuck until an operator
+calls cancel/submit again. The delay between attempts doubles from 1 s up to 30 s; there is no
+attempt limit. The Energy Manager admin status carries the failed attempts (`restore_attempts`) and
+the next retry time (`next_restore_at`).
 
 ## Protocol catalog
 

@@ -17,8 +17,8 @@ MIN_BURSTS = 3  # never warn about fewer bursts per window, however quiet the li
 WARN_RATIO = 0.01  # bursts per received frame that start a disturbed phase
 CLEAR_RATIO = 0.005  # ratio below which a disturbed phase ends (hysteresis)
 REMIND_SECONDS = 900.0  # repeat the WARNING at most this often while disturbed
-# One-second buckets bound _frames to roughly window_seconds entries however busy the line gets
-# (Finding P2-2), matching the same fix applied to EndpointCounters's window deques.
+# One-second buckets bound _frames to roughly window_seconds entries however busy the line gets,
+# the same bound EndpointCounters's window deques use.
 _BUCKET_SECONDS = 1.0
 
 

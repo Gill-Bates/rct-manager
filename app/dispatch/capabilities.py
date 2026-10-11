@@ -20,15 +20,14 @@ This module stays vendor-neutral: it must not import ``app.gateway.rct``,
 ``app.gateway.rct_dispatch`` or ``app.gateway.conventions``.
 """
 
+import math
 from collections.abc import Iterable
 from dataclasses import dataclass, fields
 from datetime import datetime
 from enum import StrEnum
 from typing import Literal
 
-from app.dispatch.models import DispatchMode
-
-NOTE_MAX_LENGTH = 200
+from app.dispatch.models import NOTE_MAX_LENGTH, DispatchMode, check_printable_ascii
 
 
 class CapabilityName(StrEnum):
@@ -81,11 +80,38 @@ class CapabilityRecord:
     note: str | None = None
 
     def __post_init__(self) -> None:
-        if self.note is not None:
-            if len(self.note) > NOTE_MAX_LENGTH:
-                raise ValueError(f"note must contain at most {NOTE_MAX_LENGTH} characters")
-            if any(ord(char) < 32 or ord(char) > 126 for char in self.note):
-                raise ValueError("note must contain printable ASCII")
+        check_printable_ascii(self.note, "note", NOTE_MAX_LENGTH)
+        # Capability-specific value ranges are enforced here regardless of status, so the admin API
+        # is only an additional input bound, never the single safe one (H6): a directly constructed
+        # or historically mis-persisted record must not carry an out-of-range code or byte width.
+        # The bounds mirror app.admin.dispatch_api.CapabilityUpdate's own Field() limits.
+        if self.soc_strategy_external_code is not None and not 0 <= self.soc_strategy_external_code <= 255:
+            raise ValueError("soc_strategy_external_code must be within 0..255")
+        for width_name in ("enum_byte_width", "bool_byte_width"):
+            width = getattr(self, width_name)
+            if width is not None and not 1 <= width <= 4:
+                raise ValueError(f"{width_name} must be within 1..4")
+        if self.refresh_interval_seconds is not None and (
+            not math.isfinite(self.refresh_interval_seconds) or not 0.0 <= self.refresh_interval_seconds <= 86_400.0
+        ):
+            raise ValueError("refresh_interval_seconds must be finite and within 0..86400")
+        # Mirrors app.admin.dispatch_api's own _REQUIRED_FOR_VERIFIED/_missing_evidence gate, but
+        # enforces it at the dataclass boundary too (H6): a directly constructed/copied record, or
+        # a future caller that bypasses the admin API, must not be able to carry a VERIFIED
+        # capability record without the evidence that status claims. The dispatch gate decides on
+        # status alone (CapabilityRegistry.unverified_for), so a VERIFIED record with the safety
+        # evidence missing would otherwise pass the gate.
+        if self.status is CapabilityStatus.VERIFIED:
+            if self.name is CapabilityName.WRITE_PATH and (
+                self.soc_strategy_external_code is None
+                or self.enum_byte_width is None
+                or self.bool_byte_width is None
+                or not self.write_frame_layout_verified
+                or not self.apply_sequence_verified
+            ):
+                raise ValueError("WRITE_PATH cannot be verified without write-path evidence")
+            if self.name is CapabilityName.EXPORT_LIMIT and self.export_limit_zero_blocks_export is None:
+                raise ValueError("EXPORT_LIMIT cannot be verified without export_limit_zero_blocks_export")
 
     def to_dict(self) -> dict:
         """JSON-capable projection for the encrypted part of ``dispatch_capabilities``."""
@@ -106,13 +132,13 @@ class CapabilityRecord:
             device_id=data["device_id"],
             name=CapabilityName(data["name"]),
             status=CapabilityStatus(data["status"]),
-            battery_discharge_positive=bool(data.get("battery_discharge_positive", True)),
-            grid_import_positive=bool(data.get("grid_import_positive", True)),
-            soc_strategy_external_code=_optional_int(data.get("soc_strategy_external_code")),
-            enum_byte_width=_optional_int(data.get("enum_byte_width")),
-            bool_byte_width=_optional_int(data.get("bool_byte_width")),
-            write_frame_layout_verified=bool(data.get("write_frame_layout_verified", False)),
-            apply_sequence_verified=bool(data.get("apply_sequence_verified", False)),
+            battery_discharge_positive=_strict_bool(data, "battery_discharge_positive", True),
+            grid_import_positive=_strict_bool(data, "grid_import_positive", True),
+            soc_strategy_external_code=_strict_optional_int(data.get("soc_strategy_external_code")),
+            enum_byte_width=_strict_optional_int(data.get("enum_byte_width")),
+            bool_byte_width=_strict_optional_int(data.get("bool_byte_width")),
+            write_frame_layout_verified=_strict_bool(data, "write_frame_layout_verified", False),
+            apply_sequence_verified=_strict_bool(data, "apply_sequence_verified", False),
             sequence_order_relevant=_optional_bool(data.get("sequence_order_relevant")),
             soc_target_unit=data.get("soc_target_unit", "ratio"),
             export_limit_zero_blocks_export=_optional_bool(data.get("export_limit_zero_blocks_export")),
@@ -127,16 +153,50 @@ class CapabilityRecord:
         )
 
 
-def _optional_int(value: object) -> int | None:
-    return None if value is None else int(value)  # type: ignore[arg-type]
+def _strict_bool(data: dict, key: str, default: bool) -> bool:
+    """Fail-closed read of a safety-relevant bool field (H6): ``bool("false")`` is ``True``, so a
+    permissive coercion would silently accept a corrupted/malformed persisted value instead of
+    letting the store's existing (ValueError, TypeError) handling treat the row as unreadable.
+    """
+    value = data.get(key, default)
+    if not isinstance(value, bool):
+        raise TypeError(f"{key} must be a bool, got {type(value).__name__}")
+    return value
+
+
+def _strict_optional_int(value: object) -> int | None:
+    """Fail-closed read of a safety-relevant optional int field (H6): ``int("4")`` would silently
+    accept a value that was never actually an int.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"expected int, got {type(value).__name__}")
+    return value
 
 
 def _optional_float(value: object) -> float | None:
-    return None if value is None else float(value)  # type: ignore[arg-type]
+    """Fail-closed read of a safety-relevant optional float field (H6): a stored string or bool is
+    corruption, not a value to coerce. ``float("1.0")`` would silently accept a non-number.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise TypeError(f"expected a number, got {type(value).__name__}")
+    return float(value)
 
 
 def _optional_bool(value: object) -> bool | None:
-    return None if value is None else bool(value)
+    """Fail-closed read of a safety-relevant optional bool field (H6): ``bool("false")`` is
+    ``True``, so a permissive coercion would silently accept a corrupted persisted value. The
+    store's existing (ValueError, TypeError) handling then treats the row as unreadable, which for
+    a capability means it reads as unverified — the safe default.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, bool):
+        raise TypeError(f"expected a bool, got {type(value).__name__}")
+    return value
 
 
 def required_for(mode: DispatchMode, *, limit_export: bool) -> frozenset[CapabilityName]:
@@ -156,6 +216,13 @@ def required_for(mode: DispatchMode, *, limit_export: bool) -> frozenset[Capabil
         if limit_export:
             base.add(CapabilityName.EXPORT_LIMIT)
         return frozenset(base)
+    if mode is DispatchMode.HOLD:
+        # WRITE_PATH because a hold activates external control and therefore needs the external
+        # strategy code. BATTERY_POWER_SIGN because the *restore* path writes the captured,
+        # possibly non-zero snapshot.battery_setpoint back through the battery convention — a wrong
+        # sign there would turn a handback into a charge or discharge. The 0 W hold write itself is
+        # sign-free. No new CapabilityName is introduced for HOLD.
+        return frozenset({CapabilityName.WRITE_PATH, CapabilityName.BATTERY_POWER_SIGN})
     return frozenset()  # EXPORT_TO_GRID is refused before the gate (409 dispatch_mode_unavailable)
 
 

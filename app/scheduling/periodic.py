@@ -12,11 +12,11 @@ from collections.abc import Sequence
 
 from app.clock import Clock
 from app.config import DeviceKey
-from app.errors import ConfigError
+from app.errors import ConfigError, DeviceApiError
 from app.protocol.types import Command, DataType
 from app.protocol.values import decode_value, encode_value
 from app.scheduling.serializer import AccessSerializer
-from app.transport.endpoint import TransportEndpoint
+from app.transport.endpoint import EndpointState, TransportEndpoint
 from app.transport.types import TransactionOrigin, TransactionRequest, make_frame
 
 log = logging.getLogger(__name__)
@@ -26,6 +26,7 @@ SYSTEM_WRITABLE_OBJECT_IDS: frozenset[int] = frozenset({PAS_PERIOD_OBJECT_ID})
 MAX_PERIODIC_PER_DEVICE = 64
 RETRY_BASE_SECONDS = 10.0  # after a failed setup: 10, 20, 40 ... seconds up to the cap
 RETRY_MAX_SECONDS = 300.0
+WARN_AFTER_FAILURES = 3  # consecutive failed setups before the retry log escalates from INFO to WARNING
 FRESH_WINDOW_FACTOR = 3  # a registered value counts as fresh for this many pas.period (Requirement 17.29)
 REFRESH_AFTER_FACTOR = 2  # a registered value not updated for this many pas.period is read once (17.27)
 READBACK_TIMEOUT_SECONDS = 1.0  # shutdown readback: bounded, the shutdown deadline still applies
@@ -59,13 +60,35 @@ class PeriodicManager:
         self.period_enabled = False
         self._retry_delay = RETRY_BASE_SECONDS
         self._retry_at = 0.0  # monotonic; no new setup before this point after a failure
+        self._consecutive_failures = 0
+        self._failed_at = 0.0  # monotonic time and connection epoch of the latest failed setup
+        self._failed_epoch = -1
+        self.last_failure: str | None = None  # reason of the latest failed setup, for the retry log
         self._registered: set[int] = set()
         self._registered_epoch = -1
         self._setup_lock = asyncio.Lock()  # one setup at a time: it rewrites the device-global pas.period
 
     def is_registered(self, object_id: int) -> bool:
         """True while the registration holds on the connection it was made on."""
-        return object_id in self._registered and self._endpoint.connection_epoch == self._registered_epoch
+        return (
+            self._endpoint.state is EndpointState.CONNECTED
+            and self._endpoint.connection_epoch == self._registered_epoch
+            and object_id in self._registered
+        )
+
+    @property
+    def live(self) -> bool:
+        """Registration complete and still bound to the current connection (False after a reconnect)."""
+        return (
+            self.available
+            and self._endpoint.state is EndpointState.CONNECTED
+            and self._endpoint.connection_epoch == self._epoch
+        )
+
+    @property
+    def consecutive_failures(self) -> int:
+        """Failed setup rounds since the last success; 0 while the registration holds."""
+        return self._consecutive_failures
 
     @property
     def interval_seconds(self) -> int:
@@ -89,21 +112,56 @@ class PeriodicManager:
 
     async def ensure(self) -> bool:
         """(Re-)register when the connection changed since the last setup."""
-        if self.available and self._endpoint.connection_epoch == self._epoch:
+        if (
+            self.available
+            and self._endpoint.state is EndpointState.CONNECTED
+            and self._endpoint.connection_epoch == self._epoch
+        ):
             return True
-        if not self.available and self._clock.monotonic() < self._retry_at:
-            return False  # every attempt rewrites the device-global pas.period: back off
+        now = self._clock.monotonic()
+        if not self.available and now < self._retry_at:
+            # Every attempt rewrites the device-global pas.period: back off. A connection that was
+            # re-established since the failure ends the long wait early, but not before the base delay.
+            reconnected = self._endpoint.connection_epoch != self._failed_epoch
+            if not reconnected or now < self._failed_at + RETRY_BASE_SECONDS:
+                return False
         if self._setup_lock.locked():
             return self.available
         async with self._setup_lock:
             ok = await self.setup()
         if ok:
+            if self._consecutive_failures:
+                log.info(
+                    "Periodic reads set up successfully after %d failed attempt(s)", self._consecutive_failures
+                )
+            self._consecutive_failures = 0
             self._retry_delay = RETRY_BASE_SECONDS
         else:
-            self._retry_at = self._clock.monotonic() + self._retry_delay
-            log.warning("Periodic setup failed; next attempt in %.0f s", self._retry_delay)
+            self._consecutive_failures += 1
+            self._failed_at = self._clock.monotonic()
+            self._failed_epoch = self._endpoint.connection_epoch
+            self._retry_at = self._failed_at + self._retry_delay
+            # A single failure is usually a transient connection hiccup that the retry resolves
+            # by itself; only a persistent failure is worth a WARNING.
+            persistent = self._consecutive_failures >= WARN_AFTER_FAILURES
+            log.log(
+                logging.WARNING if persistent else logging.INFO,
+                "Setup of periodic reads failed (attempt %d%s): %s. Next attempt in %.0f s.",
+                self._consecutive_failures,
+                ", device still not reachable or unstable" if persistent else "",
+                self._describe_failure(),
+                self._retry_delay,
+            )
             self._retry_delay = min(self._retry_delay * 2, RETRY_MAX_SECONDS)
         return ok
+
+    def _describe_failure(self) -> str:
+        if self.last_failure == "connection replaced during registration":
+            return (
+                "the connection to the device was interrupted and re-established while the "
+                "measurements were being registered, so the registration restarts from scratch"
+            )
+        return self.last_failure or "unknown reason"
 
     def _pas_read(self, origin: TransactionOrigin) -> TransactionRequest:
         frame = make_frame(self._key.network_id, Command.READ, PAS_PERIOD_OBJECT_ID)
@@ -122,22 +180,31 @@ class PeriodicManager:
         except ValueError:
             return False
 
+    def _rollback_registrations(self) -> None:
+        """Drop every endpoint registration this setup round made and reset the per-round state."""
+        self._endpoint.unregister_all_periodic(self._key)
+        self._registered.clear()
+        self.registrations = 0
+        self.available = False
+
     async def setup(self) -> bool:
         self._endpoint.unregister_all_periodic(self._key)
         self.available, self.registrations = False, 0
         self._registered.clear()
+        self.last_failure = None
         try:
             result = await self._serializer.submit(self._pas_write(self._interval, TransactionOrigin.SYSTEM_WRITE))
             if not result.ok:
-                self.period_enabled = result.committed
+                self.period_enabled = self.period_enabled or result.committed
                 if not (result.committed and await self._confirmed_by_readback(self._interval)):
+                    self.last_failure = f"pas.period not confirmed (write error: {result.error!r})"
                     log.warning("Periodic reads unavailable for device (pas.period not confirmed)")
                     return False
                 log.debug("pas.period confirmed by readback (device does not answer WRITE)")
             self.period_enabled = True
             # One setup round belongs to exactly one connection; a reconnect during the READ
             # PERIODICALLY loop below must restart it rather than mix registrations made on
-            # different connections (Finding P2-1). The baseline is taken only now, once the
+            # different connections. The baseline is taken only now, once the
             # confirmed pas.period write has established the connection the loop runs on; taking
             # it before that write would always "change" on a first-ever connect.
             epoch = self._endpoint.connection_epoch
@@ -158,6 +225,7 @@ class PeriodicManager:
                     self._endpoint.unregister_all_periodic(self._key)
                     self._registered.clear()
                     self.registrations = 0
+                    self.last_failure = "connection replaced during registration"
                     return False
                 # Success means a value frame for this object id was actually observed: the device
                 # answers the registration with its first periodic value immediately.
@@ -167,8 +235,22 @@ class PeriodicManager:
                     continue
                 self._registered.add(object_id)
                 self.registrations += 1
-        except Exception as exc:  # noqa: BLE001  # the periodic feature must never disturb plain reads
-            log.warning("Periodic setup failed: %s", type(exc).__name__)
+        except DeviceApiError as exc:
+            # A throw past the loop above leaves the routes already registered on the endpoint; roll
+            # them back so a failed setup never leaves available == False while the demux still routes.
+            self._rollback_registrations()
+            if exc.code != "not_ready":
+                self.last_failure = f"{type(exc).__name__}: {exc}"
+                log.warning("Periodic setup failed: %s", self.last_failure, exc_info=True)
+                return False
+            # The serializer stopped accepting work (shutdown): expected, not a device fault.
+            self.last_failure = "device access is shutting down"
+            log.info("Periodic setup aborted: device access is shutting down")
+            return False
+        except Exception as exc:  # the periodic feature must never disturb plain reads
+            self._rollback_registrations()
+            self.last_failure = f"{type(exc).__name__}: {exc}"
+            log.warning("Periodic setup failed: %s", self.last_failure, exc_info=True)
             return False
         self._registered_epoch = epoch
         self._epoch = epoch
@@ -176,6 +258,7 @@ class PeriodicManager:
         if self.available:
             log.info("Periodic reads active: %d of %d registered", self.registrations, len(self._object_ids))
         else:
+            self.last_failure = f"{self.registrations} of {len(self._object_ids)} objects registered"
             log.warning("Periodic reads partial: %d of %d registered", self.registrations, len(self._object_ids))
         return self.available
 
@@ -197,5 +280,6 @@ class PeriodicManager:
         self._registered.clear()
         self.registrations = 0
         self.available = False
-        self.period_enabled = False
+        if sent:
+            self.period_enabled = False
         return sent

@@ -3,9 +3,9 @@ requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "rct-rest-api"
+name = "rct-manager"
 version = "1.0.0"
-description = "Vendor-neutral REST gateway for RCT Power inverters"
+description = "Your REST gateway for RCT Power inverters"
 requires-python = ">=3.13"
 authors = [{ name = "Gill-Bates" }]
 license = "MIT"
@@ -27,7 +27,7 @@ dev = [
     "hypothesis>=6.156",
     "pytest>=8.3",
     "pytest-asyncio>=1.4",
-    "ruff>=0.16",
+    "ruff>=0.17",
 ]
 docs = [
     "markdown==3.11",
@@ -49,6 +49,24 @@ testpaths = ["tests"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 
+[tool.ruff]
+# The code targets ~120 columns; without this Ruff assumes 88 and `ruff format --check` wants to
+# reflow the whole tree (PY-02).
+line-length = 120
+
 [tool.ruff.lint]
-# Modules carry a shebang in their file header but are run via `python -m app`.
-extend-ignore = ["EXE001"]
+# FAST: FastAPI-specific rules (not in Ruff's default set, checked for 0.16 and 0.17). S: flake8-bandit,
+# only S102/S110/S112 are default; this is an authenticated REST gateway with password hashing and a
+# TLS/token client.
+extend-select = ["FAST", "S"]
+# EXE001: modules carry a shebang in their file header but are run via `python -m app`.
+# S101: the app's asserts only narrow Optional types or state an invariant that the code path above
+# guarantees; the service is never started with `python -O` (no Dockerfile/entrypoint sets it).
+extend-ignore = ["EXE001", "S101"]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests use fixture credentials, loopback/any-address binds and local subprocesses.
+"tests/**" = ["S104", "S105", "S106", "S310", "S603", "S607", "S608"]
+# Every interpolated value goes through literal()/ident() or int() (defined in this module), so
+# S608 is a reviewed false positive here.
+"app/export/questdb_admin.py" = ["S608"]

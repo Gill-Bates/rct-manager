@@ -122,7 +122,12 @@ async def running_app(
         try:
             async with app.router.lifespan_context(app):
                 transport = httpx.ASGITransport(app=app, client=("127.0.0.1", 50000))
-                default = {"Authorization": f"Bearer {READ_TOKEN}"} if authorize else {}  # explicit headers override it
+                # A browser sends Origin on every state-changing request; model it so the
+                # same-origin CSRF guard (fails closed on a header-less mutation, SEC-02) is
+                # satisfied for the session-cookie flows. A per-request Origin header overrides it.
+                default = {"Origin": "http://test"}
+                if authorize:
+                    default["Authorization"] = f"Bearer {READ_TOKEN}"  # explicit headers override it
                 async with httpx.AsyncClient(transport=transport, base_url="http://test", headers=default) as client:
                     if settle:
                         await wait_settled(app)
@@ -213,7 +218,19 @@ DISPATCH_WRITE_NAMES = (
     "power_mng_battery_power_extern",
     "power_mng_use_grid_power_enable",
 )
-DISPATCH_READ_NAMES = ("battery_soc", "grid_power", "battery_power", "household_load_power")
+DISPATCH_READ_NAMES = (
+    "battery_soc",
+    "grid_power",
+    "battery_power",
+    "household_load_power",
+    # The two PV strings the Energy Manager's readings sum. Additive: the dispatch control loop does
+    # not read them, so no existing expectation changes.
+    "solar_a_power",
+    "solar_b_power",
+    # Read by the guided hardware verification to identify the inverter; never written.
+    "android_description",
+    "svnversion",
+)
 
 
 def dispatch_fixtures(directory: Path) -> dict[str, Path]:
@@ -243,3 +260,16 @@ def dispatch_fixtures(directory: Path) -> dict[str, Path]:
     registry_path.write_text(json.dumps(registry), encoding="utf-8")
     allowlist_path.write_text(json.dumps({"version": 1, "entries": allowlist_entries}), encoding="utf-8")
     return {"object_registry_path": registry_path, "write_allowlist_path": allowlist_path}
+
+
+async def admin_session_headers(client, password: str) -> dict[str, str]:
+    """Log the client in with a cookie session; returns the CSRF header every later admin call needs.
+
+    Device, trust and token changes are session-only, so a PAT cannot drive them in tests.
+    """
+    csrf = (await client.get("/admin/api/session")).json()["csrf_token"]
+    login = await client.post(
+        "/admin/api/login", headers={"X-CSRF-Token": csrf}, json={"username": "admin", "password": password}
+    )
+    assert login.status_code == 200, login.text
+    return {"X-CSRF-Token": login.json()["csrf_token"]}

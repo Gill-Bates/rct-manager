@@ -17,6 +17,9 @@ from dataclasses import dataclass
 
 log = logging.getLogger(__name__)
 
+# Consecutive not-yet-refreshed attempts before warning (then again at each doubling); a power of two.
+_NOT_REFRESHED_WARN_AFTER = 8
+
 STATE_TABLE = "_rct_export_state"
 _TTL_UNIT_HOURS = {"HOUR": 1, "DAY": 24, "WEEK": 24 * 7, "MONTH": 24 * 30, "YEAR": 24 * 365}
 _COUNTER_SUFFIXES = ("_total", "_sum", "_count")
@@ -58,6 +61,13 @@ def effective_raw_days(downsampling: str, raw_days: int | None, total_days: int)
     return min(days, total_days) if total_days > 0 else days  # an explicit raw value is validated against total
 
 
+def _split_columns(columns: dict[str, str]) -> tuple[list[str], list[str]]:
+    """Sorted SYMBOL (dimension) and DOUBLE (value) column names."""
+    dims = sorted(name for name, kind in columns.items() if kind == "SYMBOL")
+    values = sorted(name for name, kind in columns.items() if kind == "DOUBLE")
+    return dims, values
+
+
 def schema_signature(columns: dict[str, str]) -> str:
     """Short, stable hash of the SYMBOL/DOUBLE columns a rollup view projects.
 
@@ -66,8 +76,7 @@ def schema_signature(columns: dict[str, str]) -> str:
     the old view is never silently kept pointed at a stale projection (Requirement: no data loss
     once the raw TTL is shortened).
     """
-    dims = sorted(name for name, kind in columns.items() if kind == "SYMBOL")
-    values = sorted(name for name, kind in columns.items() if kind == "DOUBLE")
+    dims, values = _split_columns(columns)
     digest = hashlib.sha256(("|".join(dims) + "::" + "|".join(values)).encode()).hexdigest()
     return digest[:10]
 
@@ -92,8 +101,7 @@ def create_state_table_sql() -> str:
 
 def rollup_ddl(table: str, preset: Preset, columns: dict[str, str], view: str) -> str:
     """Materialized view over the symbol and DOUBLE columns present in the table."""
-    dims = sorted(name for name, kind in columns.items() if kind == "SYMBOL")
-    values = sorted(name for name, kind in columns.items() if kind == "DOUBLE")
+    dims, values = _split_columns(columns)
     if not values:
         raise ValueError("no numeric columns to roll up yet")
     projections = ["timestamp", *(ident(name) for name in dims)]
@@ -133,14 +141,16 @@ class QuestDbProvisioner:
         self.downsampling = downsampling
         self.total_days = total_days
         self.raw_days = effective_raw_days(downsampling, raw_days, total_days)
+        self._not_refreshed = 0
 
     def ensure_tables(self) -> None:
         self._exec(create_table_sql(self.table))
         self._exec(create_state_table_sql())
 
-    def run(self) -> bool:
+    def run(self, *, ensure: bool = True) -> bool:
         """Apply retention and rollups; False while the rollup is not ready (retry later)."""
-        self.ensure_tables()
+        if ensure:
+            self.ensure_tables()
         preset = PRESETS.get(self.downsampling)
         if preset is None:
             if self.downsampling == "manual":
@@ -153,17 +163,52 @@ class QuestDbProvisioner:
         if not any(kind == "DOUBLE" for kind in columns.values()):
             log.info("QuestDB rollup waits for the first data in '%s'", self.table)
             return False
-        # The view name is derived from the current column set, so a newly exported metric gets a
-        # new view automatically instead of silently staying out of an old, now-stale projection.
+        # The view name follows the column set (see schema_signature).
         view = rollup_view_name(self.table, preset, schema_signature(columns))
         self._exec(rollup_ddl(self.table, preset, columns, view))
         if not self._view_current(view):
-            log.warning("QuestDB rollup view '%s' is not refreshed yet; raw TTL is unchanged", view)
+            self._note_not_refreshed(view)
             return False
+        self._not_refreshed = 0
+        self._warn_about_superseded_rollups(view)
         # The raw TTL only shortens once the rollup holds the data that it would drop.
         return self._apply_ttl(view, self.total_days, view=True) and self._apply_ttl(
             self.table, self.raw_days or 0, view=False
         )
+
+    def _note_not_refreshed(self, view: str) -> None:
+        """A fresh or rebuilt view catches up on its own; only a persistent lag is worth a warning."""
+        self._not_refreshed += 1
+        attempts = self._not_refreshed
+        if attempts >= _NOT_REFRESHED_WARN_AFTER and attempts & (attempts - 1) == 0:
+            log.warning(
+                "QuestDB rollup view '%s' is still not refreshed after %d attempts; raw TTL is unchanged",
+                view, attempts,
+            )
+        else:
+            log.debug("QuestDB rollup view '%s' is not refreshed yet; raw TTL is unchanged", view)
+
+    def _warn_about_superseded_rollups(self, current: str) -> None:
+        """Report earlier service-created rollup views of this table that a schema change replaced.
+
+        Never auto-dropped: a schema change (e.g. a newly exported metric) rebuilds ``current``
+        from the raw table alone, which can only reconstruct whatever the (possibly already
+        shortened) raw TTL still holds. The superseded view may still hold older rollup data the
+        raw table no longer has — exactly the historical aggregates the raw TTL was only safe to
+        shorten because of. Dropping it immediately would destroy that data with no way back; it is
+        left in place for an administrator to remove once a verified retention/overlap window has
+        passed and no aggregate held only there is still needed.
+        """
+        rows = self._exec(
+            f"SELECT view_name FROM materialized_views() WHERE base_table_name = {literal(self.table)};"
+        ).get("dataset") or []
+        prefix = f"{self.table}_rollup_"
+        for (name, *_) in rows:
+            if str(name).startswith(prefix) and name != current:
+                log.warning(
+                    "QuestDB rollup view '%s' is superseded by '%s' and is kept, not dropped, to avoid"
+                    " losing historical rollup data the raw table may no longer hold", name, current
+                )
 
     def _view_current(self, view: str) -> bool:
         rows = self._exec(
@@ -183,7 +228,7 @@ class QuestDbProvisioner:
             f"SELECT ttl_days FROM {ident(STATE_TABLE)} WHERE measurement = {literal(self.table)} "
             f"AND object = {literal(name)} LATEST ON timestamp PARTITION BY object;"
         ).get("dataset") or []
-        return int(rows[0][0]) if rows else None
+        return int(rows[0][0]) if rows and rows[0][0] is not None else None
 
     def _apply_ttl(self, name: str, days: int, *, view: bool) -> bool:
         """Set the TTL on an object without one, or on one this service set earlier; never override."""
@@ -197,18 +242,40 @@ class QuestDbProvisioner:
             return False
         value, unit = rows[0][:2]
         existing = ttl_days(value, unit)
+        recorded = self._recorded_days(name)
         if value and existing == days:
+            # The TTL is already what we want. ALTER and the ownership INSERT are two separate SQL
+            # calls, so a drop between them earlier could have applied the TTL without recording it.
+            # Reconcile the missing marker here instead of returning blindly: otherwise this same
+            # early return keeps the gap invisible, and a later retention change would mistake our
+            # own unrecorded TTL for a foreign administrator TTL and refuse to adjust it.
+            if recorded != days:
+                self._record_ownership(name)
+                log.info("Reconciled missing TTL ownership marker for QuestDB object '%s' (%d days)", name, days)
             return True
-        if value and existing != self._recorded_days(name):
+        if value and existing != recorded:
             log.warning(
                 "QuestDB object '%s' keeps its administrator TTL of %s %s instead of %d day(s)", name, value, unit, days
             )
             return True
         kind = "MATERIALIZED VIEW" if view else "TABLE"
         self._exec(f"ALTER {kind} {ident(name)} SET TTL {int(days)} DAYS;")
+        self._record_ownership(name, days)
+        log.info("Set TTL of QuestDB object '%s' to %d day(s)", name, days)
+        return True
+
+    def _record_ownership(self, name: str, days: int | None = None) -> None:
+        """Record that this service owns ``name``'s current TTL. ``days`` defaults to the TTL now on
+        the object, so a reconcile writes the value that is actually in effect, not a stale target.
+        """
+        if days is None:
+            rows = self._exec(
+                f"SELECT ttlValue, ttlUnit FROM tables() WHERE table_name = {literal(name)};"
+            ).get("dataset") or []
+            days = ttl_days(rows[0][0], rows[0][1]) if rows else None
+            if days is None:
+                return
         self._exec(
             f"INSERT INTO {ident(STATE_TABLE)} (timestamp, measurement, object, ttl_days) VALUES "
             f"(now(), {literal(self.table)}, {literal(name)}, {int(days)});"
         )
-        log.info("Set TTL of QuestDB object '%s' to %d day(s)", name, days)
-        return True

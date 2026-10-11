@@ -12,7 +12,7 @@ import logging
 import socket
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta
 from enum import StrEnum
 
 from app.clock import Clock
@@ -55,6 +55,9 @@ class EndpointConfig:
     response_timeout_seconds: float = 5.0
     # The device does not answer WRITE at all (device test 2026-10-02), so writes wait only briefly.
     write_response_timeout_seconds: float = 0.3
+    # After an unanswered WRITE the lock is held this long, so a late echo is read as an
+    # unexpected frame instead of arriving after the readback READ went out (no transaction id).
+    write_quiet_window_seconds: float = 0.1
     # Bounds writer.drain(); a stuck send would otherwise hold the transaction lock forever.
     send_timeout_seconds: float = 5.0
     min_interval: timedelta = timedelta(milliseconds=300)
@@ -98,7 +101,6 @@ class TransportEndpoint:
         self._device_counters: dict[DeviceKey, DeviceCounters] = {}
         self._demux = Demultiplexer(self.counters, clock.monotonic, on_value, self._on_periodic)
         self._gate = SendGate(config.min_interval, clock, config.send_timeout_seconds)
-        self._reader: asyncio.StreamReader | None = None
         self._writer: asyncio.StreamWriter | None = None
         self._receiver_task: asyncio.Task[None] | None = None
         self._connect_lock = asyncio.Lock()
@@ -143,7 +145,15 @@ class TransportEndpoint:
         return self._device_counters.setdefault(device_key, DeviceCounters())
 
     def _on_periodic(self, plant_address: int | None, now: float) -> None:
-        self.counters_for(DeviceKey(self._key, plant_address)).last_periodic_monotonic = now
+        # A periodic push proves liveness like a transaction; device_status() reads only
+        # last_success_at, which would otherwise freeze for devices driven purely by periodic reads.
+        device = self.counters_for(DeviceKey(self._key, plant_address))
+        device.last_periodic_monotonic = now
+        device.last_success_monotonic = now
+        device.last_success_at = self._clock.now()
+        self.counters.last_periodic_monotonic = now
+        self.counters.last_success_monotonic = now
+        self.counters.last_success_at = device.last_success_at
 
     def register_periodic(self, device_key: DeviceKey, object_id: int) -> None:
         self._demux.register_periodic(device_key, object_id)
@@ -177,7 +187,7 @@ class TransportEndpoint:
         task, self._receiver_task = self._receiver_task, None
         if task is not None:
             task.cancel()
-        writer, self._writer, self._reader = self._writer, None, None
+        writer, self._writer = self._writer, None
         self._fail_pending(DeviceUnreachable("connection_closed"))
         if writer is not None:
             transport = getattr(writer, "transport", None)
@@ -212,10 +222,9 @@ class TransportEndpoint:
                     await asyncio.wait_for(writer.wait_closed(), 1.0)
                 raise DeviceUnreachable("socket_setup_failed") from None
             # Wrapped synchronously, with no await since obtaining ``reader``, so no chunk that
-            # arrives for this connection ever reaches the parser without a ledger entry
-            # (Finding P2-1).
+            # arrives for this connection ever reaches the parser without a ledger entry.
             ledger = ArrivalLedger(reader, self._clock.monotonic)
-            self._reader, self._writer = reader, writer
+            self._writer = writer
             self._epoch += 1
             parser = StreamParser(max_frame_bytes=self._cfg.max_frame_bytes)
             receiver = Receiver(
@@ -240,7 +249,7 @@ class TransportEndpoint:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
 
     async def _receive(
-        self, receiver: Receiver, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, ledger: "ArrivalLedger"
+        self, receiver: Receiver, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, ledger: ArrivalLedger
     ) -> None:
         error: DeviceApiError = DeviceUnreachable("connection_lost")
         try:
@@ -269,7 +278,8 @@ class TransportEndpoint:
                 )
             else:
                 log.info("Connection to %s ended: %s", self.endpoint_id, reason)
-            self._receiver_task = None
+            if self._receiver_task is asyncio.current_task():
+                self._receiver_task = None
             await self._drop_connection(error)
 
     def _fail_pending(self, error: DeviceApiError) -> None:
@@ -278,8 +288,13 @@ class TransportEndpoint:
             pending.future.set_exception(error)
 
     async def _drop_connection(self, error: DeviceApiError) -> None:
-        writer, self._writer, self._reader = self._writer, None, None
+        writer, self._writer = self._writer, None
+        self._demux.clear_periodic()
         self._fail_pending(error)
+        task = self._receiver_task
+        if task is not None and task is not asyncio.current_task():
+            self._receiver_task = None
+            task.cancel()  # the dropped connection's receiver must not outlive it
         if writer is not None:
             writer.close()
             with contextlib.suppress(OSError, TimeoutError, asyncio.CancelledError):
@@ -331,8 +346,7 @@ class TransportEndpoint:
         future: asyncio.Future[Frame] = asyncio.get_running_loop().create_future()
         frame = request.frame
 
-        def on_commit(sent_at, sent_monotonic: float) -> None:
-            self.counters.last_send_at = sent_at
+        def on_commit(_sent_at: datetime, sent_monotonic: float) -> None:
             self._demux.pending = PendingTransaction(frame.object_id, frame.plant_address, sent_monotonic, future)
 
         def precheck() -> Exception | None:
@@ -343,6 +357,7 @@ class TransportEndpoint:
             if isinstance(outcome.error, DeviceApiError):  # refused before the Commit_Point
                 return self._fail(request, outcome.error, outcome)
             if outcome.error is not None:
+                log.info("Connection to %s dropped: send failed (%s)", self.endpoint_id, type(outcome.error).__name__)
                 await self._drop_connection(DeviceUnreachable("send_failed"))
                 return self._fail(request, DeviceUnreachable("send_failed"), outcome)
             is_write = frame.command in WRITE_COMMANDS
@@ -354,14 +369,17 @@ class TransportEndpoint:
             except TimeoutError:
                 error = DeviceTimeout("response_timeout")
                 if is_write and response_timeout is None:
-                    # No answer to a WRITE is normal for this device; the connection stays so the
-                    # read-back runs on it (Requirement 9.18). This is not a transport failure: the
-                    # caller still sees TransactionResult.ok == False because no frame was received,
-                    # but failure statistics and device state must not be dragged down by a routine
-                    # write (Finding P3-1).
+                    # An unanswered WRITE is normal for this device: keep the connection for the
+                    # read-back (Requirement 9.18) and leave failure counters untouched; ok stays False.
+                    self._demux.pending = None
+                    await self._clock.sleep(self._cfg.write_quiet_window_seconds)
                     return TransactionResult(outcome)
                 # The response is still in flight and carries no transaction id, so only a new
                 # connection keeps it from answering the next transaction.
+                log.info(
+                    "Connection to %s dropped: no response to object 0x%08x within %.1f s; reconnecting",
+                    self.endpoint_id, frame.object_id, timeout,
+                )
                 await self._drop_connection(error)
                 return self._fail(request, error, outcome)
             except DeviceApiError as exc:

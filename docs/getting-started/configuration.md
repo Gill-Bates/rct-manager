@@ -5,7 +5,10 @@ Copy `settings.env.example` to `settings.env`. It only holds the start parameter
 Other settings are managed in the administration GUI and persisted in `data/rct.db`; the
 [optional environment variables](../configuration/environment.md) only seed the very first start
 (for example in automated deployments).
-Changes autosave and show a toast. Settings requiring a server restart are marked in the GUI.
+Changes autosave and show a toast; only the inverter list and the TSDB export fields are applied
+explicitly with **Apply changes** (see [Devices](#devices)). The TSDB **Enable export** switch takes
+effect immediately. Leaving a page with unapplied changes
+discards them without a browser warning. Every setting takes effect on its own; a changed listen address or port is switched in the background and the page reconnects by itself.
 Internal tuning (timeouts, retries, cache, limits and intervals) remains fixed in code.
 
 ## Administration storage
@@ -47,7 +50,7 @@ are folded back into `rct.db` on a clean shutdown. Rules:
 ## Device and Network
 
 ### Devices
-Configure inverter endpoints from the **Overview** dashboard with the plus button in the Inverters card; the editor opens in a modal and stores the devices encrypted in `data/rct.db`. A device consists of an IP address or host name and a port; the service assigns the device id (`main` for the first one, then `inverter-2`, `inverter-3`, ...) and keeps it while the device exists, so API paths and exports stay stable. A saved display name takes precedence; otherwise, the dashboard uses the inverter-reported name, then the device id. Editing the host keeps the id; duplicate addresses are rejected. Devices saved earlier keep their ids and custom names. A `DEVICES` environment variable is ignored; the service notes it at startup on INFO level.
+Configure inverter endpoints from the **Overview** dashboard with **Add inverter** in the Inverters card; the editor opens in a modal and stores the devices encrypted in `data/rct.db`. Edits stay a draft until **Apply changes**, which rebuilds the inverter connections without a restart; **Discard** drops them. Re-addressing or removing an inverter resets its verification evidence, engineering mode and Energy Manager mode (back to Off) and therefore asks for confirmation. A list the server rejects is rolled back and the previous configuration stays active. A device consists of an IP address or host name and a port; the service assigns the device id (`main` for the first one, then `inverter-2`, `inverter-3`, ...) and keeps it while the device exists, so API paths and exports stay stable. A saved display name takes precedence; otherwise, the dashboard uses the inverter-reported name, then the device id. Editing the host keeps the id; duplicate addresses are rejected. Devices saved earlier keep their ids and custom names. A `DEVICES` environment variable is ignored; the service notes it at startup on INFO level.
 
 ### BIND_ADDRESS
 Default: `127.0.0.1`
@@ -65,17 +68,24 @@ restricted. Docker Compose sets it because the container listens on `0.0.0.0`
 while the host publishes the port on `127.0.0.1`.
 
 ### BIND_PORT
-Default: `8080`
+Default: `8000`
 
 REST API listen port.
 
+The port can also be changed in the GUI; the service then re-binds in the background. In a
+container this moves only the internal listener: the published Docker port mapping and the
+`BIND_PORT` used by the container health check stay as they are, so the container reports
+unhealthy and the published port stops reaching the service until the environment (or compose)
+value and the port mapping match the new port. The GUI says so before it applies the change. After the first start the value saved in the GUI takes
+precedence over `BIND_PORT`.
+
 ### Behind reverse proxy
-GUI only. Confirms a TLS-terminating proxy in front of the service (secure cookies, client address handling). A `BEHIND_REVERSE_PROXY` variable is ignored with a warning. A consented non-loopback bind logs a warning until this option is enabled in the GUI.
+GUI only. Confirms a TLS-terminating proxy in front of the service and sets the secure flag on session cookies. It does not trust any forwarded header; that is `TRUSTED_PROXIES` below. A `BEHIND_REVERSE_PROXY` variable is ignored with a warning. A consented non-loopback bind logs a warning until this option is enabled in the GUI.
 
 ### TRUSTED_PROXIES
 Default: empty
 
-Comma-separated list of reverse-proxy networks (CIDR notation, at most 32). Used to extract the real client IP from the header set by the proxy. Without this, all callers share the proxy's address.
+Comma-separated list of reverse-proxy networks (CIDR notation, at most 32). Used to extract the real client IP from the header set by the proxy and to accept `X-Forwarded-Proto` for the administration interface. It is the only proxy trust list. Without it, all callers share the proxy's address. Behind a TLS-terminating proxy that is not listed, administration logins and changes fail with 403.
 
 ### FORWARDED_HEADER
 Default: empty
@@ -105,7 +115,7 @@ Serve the Prometheus endpoint `GET /metrics`. Set to `false` to answer 404.
 ## Push export (optional)
 
 Pushes the metrics of `/metrics` to InfluxDB 2 or QuestDB OSS at a fixed interval. Configure it on
-the GUI **TSDB** page; a change takes effect after a restart. It does not affect the Prometheus
+the GUI **TSDB** page; a saved change restarts the export at once, without a server restart. It does not affect the Prometheus
 endpoint. Details: [Push export](../configuration/export.md). The `DB_TYPE`, `INFLUXDB_*` and
 `QUESTDB_*` variables only seed the very first start and are listed in
 [Environment Variables](../configuration/environment.md).

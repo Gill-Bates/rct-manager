@@ -127,7 +127,6 @@ def _select_names(runtime: Runtime, names: str | None, fresh: bool) -> list[str]
 @router.get(
     "/{metric_name}",
     summary="Read one metric",
-    response_model=MetricValue,
     responses=problem_responses(*_COMMON, ErrorCode.UNKNOWN_METRIC, *_DEVICE_ERRORS),
 )
 async def get_metric(
@@ -147,7 +146,6 @@ async def get_metric(
 @router.get(
     "",
     summary="Read several metrics",
-    response_model=MetricCollection,
     responses=problem_responses(
         *_COMMON,
         ErrorCode.UNKNOWN_METRIC,

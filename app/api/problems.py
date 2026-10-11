@@ -29,8 +29,8 @@ INTERNAL_ERROR_DETAIL = "An internal error occurred. Quote the correlation id wh
 
 
 class ErrorCode(StrEnum):
-    MISSING_TOKEN = "missing_token"
-    INVALID_TOKEN = "invalid_token"
+    MISSING_TOKEN = "missing_token"  # noqa: S105 - an error code, not a credential
+    INVALID_TOKEN = "invalid_token"  # noqa: S105 - an error code, not a credential
     INSUFFICIENT_SCOPE = "insufficient_scope"
     WRITE_NOT_ALLOWED = "write_not_allowed"
     NOT_FOUND = "not_found"
@@ -70,8 +70,14 @@ class ErrorCode(StrEnum):
     DISPATCH_STORE_UNAVAILABLE = "dispatch_store_unavailable"
     DISPATCH_UNVERIFIED = "dispatch_unverified"
     DISPATCH_CAPABILITY_CONFLICT = "dispatch_capability_conflict"
+    DISPATCH_REGISTER_LOCKED = "dispatch_register_locked"
     DISPATCH_RECORD_CORRUPT = "dispatch_record_corrupt"
     DISPATCH_SNAPSHOT_STALE = "dispatch_snapshot_stale"
+    ENERGY_MANAGER_OFF = "energy_manager_off"
+    ENERGY_MANAGER_NOT_EXTERNAL = "energy_manager_not_external"
+    ENERGY_MANAGER_EXTERNAL = "energy_manager_external"
+    ENERGY_WRITE_SUPPORT_REQUIRED = "energy_write_support_required"
+    ENERGY_ACTION_UNAVAILABLE = "energy_action_unavailable"
     # Field-level keys: they appear only inside ``errors``, never as a top-level code.
     INVALID_FLOAT = "invalid_float"
     DECODE_LENGTH_MISMATCH = "decode_length_mismatch"
@@ -120,8 +126,14 @@ STATUS: dict[ErrorCode, int] = {
     E.DISPATCH_STORE_UNAVAILABLE: 503,
     E.DISPATCH_UNVERIFIED: 409,
     E.DISPATCH_CAPABILITY_CONFLICT: 409,
+    E.DISPATCH_REGISTER_LOCKED: 409,
     E.DISPATCH_RECORD_CORRUPT: 503,
     E.DISPATCH_SNAPSHOT_STALE: 503,
+    E.ENERGY_MANAGER_OFF: 409,
+    E.ENERGY_MANAGER_NOT_EXTERNAL: 409,
+    E.ENERGY_MANAGER_EXTERNAL: 409,
+    E.ENERGY_WRITE_SUPPORT_REQUIRED: 409,
+    E.ENERGY_ACTION_UNAVAILABLE: 409,
 }
 
 _TEXT: dict[ErrorCode, tuple[str, str]] = {
@@ -169,6 +181,13 @@ _TEXT: dict[ErrorCode, tuple[str, str]] = {
         "Dispatch capability conflict",
         "The capability has an active operation; retry with force to withdraw it anyway.",
     ),
+    E.DISPATCH_REGISTER_LOCKED: (
+        "Register controlled by dispatch",
+        (
+            "This register is a battery-dispatch control register and is locked while the inverter is "
+            "under dispatch or an energy mode other than Off; switch the inverter off to write it directly."
+        ),
+    ),
     E.DISPATCH_RECORD_CORRUPT: (
         "Dispatch record corrupt",
         "The persisted dispatch state for this device could not be read; operator action is required.",
@@ -177,12 +196,36 @@ _TEXT: dict[ErrorCode, tuple[str, str]] = {
         "Dispatch snapshot stale",
         "The device state could not be read freshly enough to start a new dispatch; retry.",
     ),
+    E.ENERGY_MANAGER_OFF: (
+        "Energy Manager is off",
+        "Energy Manager is off for this inverter - an operator must switch it to Manual or External first.",
+    ),
+    E.ENERGY_MANAGER_NOT_EXTERNAL: (
+        "Inverter is not in External mode",
+        (
+            "This inverter is in Manual mode, which only accepts commands from the admin GUI - an "
+            "operator must switch it to External to let an app control it through the API."
+        ),
+    ),
+    E.ENERGY_MANAGER_EXTERNAL: (
+        "Controlled by an external app",
+        "This inverter is controlled by an external app through the API - switch it to Manual to operate it here.",
+    ),
+    E.ENERGY_WRITE_SUPPORT_REQUIRED: (
+        "Write access required",
+        "Write access must be enabled before the Energy Manager can be set to Manual or External.",
+    ),
+    E.ENERGY_ACTION_UNAVAILABLE: (
+        "Action unavailable",
+        "This action is not available for this inverter right now.",
+    ),
 }
 
 # Internal codes that differ from the published key; also keeps the field-only keys off the top level.
 _ALIASES = {
     "budget_exhausted": E.DEVICE_BUDGET_EXHAUSTED,
     "shutdown": E.NOT_READY,
+    "restore_in_progress": E.DEVICE_MAINTENANCE,
     "invalid_float": E.PROTOCOL_ERROR,
     "decode_length_mismatch": E.PROTOCOL_ERROR,
 }
@@ -336,12 +379,22 @@ def _is_write_path(request: Request) -> bool:
     path = request.url.path.rstrip("/").split("/")
     if path[:4] != ["", "api", "v1", "devices"]:
         return False
-    if len(path) != 7:
+    # Bounded, never dropped: the energy status sits at depth 6, every other pattern at depth 7.
+    # This runs inside the global HTTP exception handler, where an IndexError on /api/v1/devices or
+    # /api/v1/devices/main would turn a plain 404 into an unhandled 500, so each clause below
+    # checks its own length too.
+    if not 6 <= len(path) <= 7:
         return False
     return (
-        (request.method == "PUT" and path[5] == "metrics")
-        or (request.method == "POST" and path[5] == "actions")
-        or (path[5:7] == ["battery", "dispatch"] and request.method in {"POST", "GET", "DELETE"})
+        (len(path) == 7 and request.method == "PUT" and path[5] == "metrics")
+        or (len(path) == 7 and request.method == "POST" and path[5] == "actions")
+        or (
+            len(path) == 7
+            and path[5:7] == ["battery", "dispatch"]
+            and request.method in {"POST", "GET", "DELETE"}
+        )
+        or (len(path) == 6 and path[5] == "energy" and request.method == "GET")
+        or (len(path) == 7 and path[5] == "energy" and path[6] == "command")
     )
 
 

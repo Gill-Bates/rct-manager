@@ -53,21 +53,34 @@
     --rct-line: #e5e7eb;
     --bs-primary: #88171a;
     --bs-primary-rgb: 136, 23, 26;
+    /* Focus ring: at least 3:1 against the page and card backgrounds of its theme. */
+    --rct-focus-ring: #88171a;
+    --rct-auth-card-shadow: 0 .25rem .75rem rgba(0, 0, 0, .08);
 }
 
 [data-bs-theme="dark"] {
     --rct-sidebar: #171a20;
     --rct-line: #363b45;
+    --rct-focus-ring: #f2878a;
+    --rct-auth-card-shadow: 0 .25rem .75rem rgba(0, 0, 0, .35);
 }
 
+/* Bootstrap's #6c757d is 4.4:1 on the light page and 2.9:1 on the dark cards; the theme's own
+   secondary text colour clears 4.5:1 in both. */
+.text-secondary {
+    color: var(--bs-secondary-color) !important;
+}
+
+/* sticky header (4.1rem) plus the .75rem .admin-navbar::after gap and a safety margin for targets/focus */
 html {
     scroll-padding-top: 6.5rem;
 }
 
-/* sticky header (4.1rem) plus a safety gap when scrolling to a target or focused field */
 body {
     min-width: 0;
     min-height: 100dvh;
+    display: flex;
+    flex-direction: column;
     font-family: 'IBM Plex Sans', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
     background: var(--bs-tertiary-bg);
 }
@@ -86,6 +99,25 @@ body {
     background: var(--rct-brand);
     min-height: 4.1rem;
     padding-inline: .3rem;
+}
+
+/* Gap under the sticky header: a strip hanging off the header's bottom edge hides scrolling content
+   so it never touches the banner. It belongs to the header (no fixed overlay, no extra scroll
+   height) and repeats the sidebar colour/border over the sidebar column so that stays seamless. */
+.admin-navbar::after {
+    content: "";
+    position: absolute;
+    inset: 100% 0 auto 0;
+    height: .75rem;
+    background: var(--bs-tertiary-bg);
+    pointer-events: none;
+}
+
+@media (min-width: 992px) {
+    .admin-navbar::after {
+        background: linear-gradient(to right,
+                var(--rct-sidebar) calc(14rem - 1px), var(--rct-line) 0 14rem, var(--bs-tertiary-bg) 0);
+    }
 }
 
 .navbar-brand {
@@ -111,24 +143,68 @@ body {
 
 :root {
     --rct-footer-height: 2.75rem;
+    /* The one knob for the content scale of every admin page (0.9 = the look of a 90% browser zoom).
+       Navbar, sidebar and footer stay at 100%; login and password pages have no #main-content. */
+    --content-zoom: .9;
+    /* The one vertical/horizontal gap between cards and tiles on every admin page. */
+    --rct-card-gap: 1.25rem;
+}
+
+/* Single mechanism for stacked cards: every top-level card, grid or row after the page heading
+   gets the same top margin, collapsible <details> cards included. Never add mt-* to these.
+   The Prometheus dependent-settings wrapper counts only while it holds its card: #main-content
+   can be a flex column (no margin collapsing), so an empty wrapper must not add a second gap. */
+#main-content .page-heading~:is(.card, .settings-grid, .energy-grid, #export-actions, .prometheus-dependent-settings:not(:empty)),
+#main-content .about-top-row~.card {
+    margin-top: var(--rct-card-gap);
+}
+
+#main-content .about-top-row {
+    --bs-gutter-x: var(--rct-card-gap);
+    --bs-gutter-y: var(--rct-card-gap);
+}
+
+#main-content {
+    zoom: var(--content-zoom);
+}
+
+@media (max-width: 767.98px) {
+
+    /* The content is zoomed, so a 44px touch target needs 44 / zoom CSS pixels. */
+    #main-content .btn,
+    #main-content .device-toggle {
+        min-height: calc(44px / var(--content-zoom));
+        min-width: calc(44px / var(--content-zoom));
+    }
+
+    #main-content .form-control,
+    #main-content .form-select,
+    #main-content summary,
+    #main-content .form-check,
+    #main-content .form-check-label {
+        min-height: calc(44px / var(--content-zoom));
+    }
 }
 
 /* Narrow viewports wrap the footer text to two lines, which grows .admin-footer past 2.75rem while
    .app-shell still reserves only that much — measured 55.375px of footer against 44px of reserve at
    320px, leaving the content/footer gap to chance rather than to the reserve. One variable feeds
    both the reserve and the footer's min-height, so raising it here keeps them in sync by
-   construction. 3.5rem covers the measured wrapped height; the cost is up to 12px of unused space
+   construction. 3.75rem covers the measured wrapped height (56.4px with the build hash); the cost is up to 12px of unused space
    below the content at widths where the text still fits on one line, which is not visible as
    anything other than the content stopping slightly earlier above the footer. */
 @media (max-width: 420px) {
     :root {
-        --rct-footer-height: 3.5rem;
+        --rct-footer-height: 3.75rem;
+        /* the build hash made the wrapped footer 56.4px, above 3.5rem */
     }
 }
 
 .app-shell {
     display: flex;
-    min-height: calc(100dvh - 4.1rem);
+    /* Fills what the header leaves (body is a column): a hard-coded header height was ~5px short of
+       the real one and made short pages scroll. */
+    flex: 1 0 auto;
     padding-bottom: var(--rct-footer-height);
 }
 
@@ -151,6 +227,20 @@ body {
 
 .admin-footer a {
     color: inherit;
+}
+
+.admin-footer-link {
+    display: inline-flex;
+    align-items: center;
+    gap: .3rem;
+    vertical-align: bottom;
+}
+
+.admin-footer-link-icon {
+    display: block;
+    flex: 0 0 14px;
+    width: 14px;
+    height: 14px;
 }
 
 .sidebar {
@@ -228,6 +318,15 @@ body {
     box-shadow: 0 2px 9px rgb(0 0 0 / 4%);
 }
 
+/* Inline machine values on the About page. */
+.about-page code {
+    color: var(--bs-body-color);
+    background: var(--bs-secondary-bg);
+    border-radius: .25rem;
+    padding: .15rem .35rem;
+    overflow-wrap: anywhere;
+}
+
 .card-header {
     border-color: var(--rct-line);
 }
@@ -239,6 +338,10 @@ body {
     --bs-btn-hover-border-color: var(--rct-brand-hover);
     --bs-btn-active-bg: var(--rct-brand-hover);
     --bs-btn-active-border-color: var(--rct-brand-hover);
+    /* Bootstrap hard-codes its own blue for the disabled state and the focus glow of .btn-primary. */
+    --bs-btn-disabled-bg: var(--rct-brand);
+    --bs-btn-disabled-border-color: var(--rct-brand);
+    --bs-btn-focus-shadow-rgb: var(--bs-primary-rgb);
 }
 
 .btn-outline-primary {
@@ -286,12 +389,6 @@ body {
     font-size: 1.45rem;
 }
 
-.kpi-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(min(13rem, 100%), 1fr));
-    gap: 1rem;
-}
-
 .kpi-card .card-body {
     display: flex;
     align-items: center;
@@ -303,19 +400,44 @@ body {
     font-size: 2.1rem;
 }
 
-.kpi-card strong {
-    font-size: 1.6rem;
-    line-height: 1.1;
+/* The label/value column of a KPI tile is a flex item, so its default min-width:auto refuses to
+   shrink below the longest word ("consumption", "Prometheus"). Words never break mid-word; the
+   tile shrinks its padding and value size on phones instead (see the 420px block). */
+.kpi-card .card-body>div {
+    min-width: 0;
+    overflow-wrap: normal;
+    word-break: normal;
 }
 
-/* 21rem, not 16rem: a card is laid out horizontally (image, readings, device facts), so a narrower
-   track squeezes it back into a tall single column. Measured against 23rem and 26rem: 21rem keeps
-   two cards side by side around 1000px of content width, where a wider minimum drops to one column
-   and makes the whole Inverters area taller again. */
+/* Value and unit stay on one line ("2,035 W"); the font scales down with the viewport. */
+.kpi-card strong {
+    font-size: clamp(1rem, 4.6vw, 1.6rem);
+    line-height: 1.1;
+    white-space: nowrap;
+}
+
+/* A text status ("Not configured") may wrap between words, unlike a number with its unit. */
+.kpi-card #tsdb-status-label {
+    white-space: normal;
+}
+
+@media (max-width: 420px) {
+    .kpi-card .card-body {
+        padding: .75rem;
+        gap: .5rem;
+    }
+
+    .kpi-card .material-icons {
+        font-size: 1.6rem;
+    }
+}
+
+/* One inverter per row over the full content width: each card already holds its own card grid
+   (power plus one column per battery tower), so a second card beside it would halve the space
+   those columns need. No max-width, so the area uses the width the content column offers. */
 .device-grid {
-    max-width: 75rem;
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(min(21rem, 100%), 1fr));
+    grid-template-columns: minmax(0, 1fr);
     gap: 1rem;
 }
 
@@ -341,58 +463,108 @@ body {
     gap: 0 .75rem;
 }
 
-.device-status-badge {
+.device-serial {
+    user-select: all;
+    overflow-wrap: anywhere;
+}
+
+.device-toggle {
     display: inline-flex;
     align-items: center;
-    gap: .4rem;
-    padding: .25rem .6rem;
-    border-radius: 1rem;
-    font-size: .75rem;
-    font-weight: 600;
-}
-
-.device-status-badge::before {
-    content: '';
-    width: .5rem;
-    height: .5rem;
+    justify-content: center;
+    padding: 0;
+    width: 2rem;
+    height: 2rem;
+    border: 0;
     border-radius: 50%;
+    background: transparent;
+    color: var(--bs-secondary-color);
 }
 
-.device-status-badge-online {
-    color: #198754;
-    background: rgb(25 135 84 / 12%);
+.device-toggle:hover {
+    background: var(--bs-secondary-bg);
+    color: var(--bs-body-color);
 }
 
-.device-status-badge-online::before {
-    background: #198754;
-    animation: device-status-pulse 2s ease-in-out infinite;
+.device-toggle .material-icons {
+    transition: transform .2s ease;
 }
 
-[data-bs-theme="dark"] .device-status-badge-online {
-    color: #4ade80;
-    background: rgb(74 222 128 / 14%);
+.device-item.is-collapsed .device-toggle .material-icons,
+.energy-panel.is-collapsed .device-toggle .material-icons {
+    transform: rotate(-90deg);
 }
 
-[data-bs-theme="dark"] .device-status-badge-online::before {
-    background: #4ade80;
+.device-item.is-collapsed .device-head {
+    margin-bottom: 0;
 }
 
-@keyframes device-status-pulse {
+.energy-panel.is-collapsed .energy-head {
+    margin-bottom: 0 !important;
+    /* beats Bootstrap's mb-3 on the header */
+}
 
-    0%,
-    100% {
-        box-shadow: 0 0 0 0 rgb(25 135 84 / 55%);
-    }
-
-    50% {
-        box-shadow: 0 0 0 .3rem rgb(25 135 84 / 0%);
-    }
+.energy-content[hidden],
+.device-item-main[hidden] {
+    display: none;
 }
 
 @media (prefers-reduced-motion: reduce) {
-    .device-status-badge-online::before {
-        animation: none;
+    .device-toggle .material-icons {
+        transition: none;
     }
+}
+
+/* One status badge for every page: a pill with a leading dot and the status text. Only the tone
+   changes the colours (success, neutral, warning, danger); the dot is the non-colour cue. The
+   theme-aware Bootstrap variables keep the contrast in light and dark mode. */
+.status-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: .4rem;
+    flex: 0 1 auto;
+    min-width: 0;
+    max-width: 100%;
+    padding: calc(.25rem - 1px) calc(.6rem - 1px);
+    border: 1px solid transparent;
+    border-radius: 1rem;
+    font-size: .75rem;
+    font-weight: 600;
+    line-height: 1.5;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    color: var(--status-badge-fg);
+    background: var(--status-badge-bg);
+}
+
+.status-badge::before {
+    content: '';
+    flex: 0 0 auto;
+    width: .5rem;
+    height: .5rem;
+    border-radius: 50%;
+    background: currentColor;
+}
+
+.status-badge-success {
+    --status-badge-fg: var(--bs-success-text-emphasis);
+    --status-badge-bg: var(--bs-success-bg-subtle);
+}
+
+.status-badge-neutral {
+    --status-badge-fg: var(--bs-secondary-color);
+    --status-badge-bg: var(--bs-secondary-bg);
+}
+
+.status-badge-warning {
+    --status-badge-fg: var(--bs-warning-text-emphasis);
+    --status-badge-bg: var(--bs-warning-bg-subtle);
+}
+
+.status-badge-danger {
+    --status-badge-fg: var(--bs-danger-text-emphasis);
+    --status-badge-bg: var(--bs-danger-bg-subtle);
 }
 
 .device-item {
@@ -406,7 +578,7 @@ body {
 .device-item h3 {
     font-size: 1.5rem;
     line-height: 1.2;
-    font-weight: 650;
+    font-weight: 500;
     overflow-wrap: anywhere;
 }
 
@@ -430,154 +602,284 @@ body {
     background: #b4232e;
 }
 
+/* Main area of one inverter card, mobile first: a single column (flow graphic, power card, then
+   one card per battery tower). Wider cards switch layout through the container queries below,
+   because the card's own width, not the viewport, is what decides whether columns fit. */
 .device-visual {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) 1px minmax(0, 1fr);
+    grid-template-columns: minmax(0, 1fr);
+    gap: 1rem;
     align-items: stretch;
+    min-width: 0;
+}
+
+/* The flow graphic shares the SVG of the Energy page's own .energy-flow-svg; only the panel around
+   it lives here. Hidden (not removed) when the device has no energy reading, so patchDeviceFlow()
+   can toggle it without rebuilding the SVG. The panel fills the row height and centres the graphic
+   so it never floats at the top of an empty box. */
+.device-flow-graphic {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
     gap: 1.5rem;
+    padding: .75rem;
+    border: 1px solid var(--rct-line);
+    border-radius: .6rem;
+    background: var(--bs-tertiary-bg);
 }
 
-.device-half {
-    min-width: 0;
+.device-flow-graphic .energy-flow-svg {
+    max-width: 34rem;
 }
 
-.device-half-title {
-    margin: 0 0 .6rem;
-    font-size: .8rem;
-    font-weight: 700;
-    letter-spacing: .04em;
-    text-transform: uppercase;
-    color: var(--bs-secondary-color);
-}
-
-.device-half-content {
-    display: grid;
-    grid-template-columns: 9.5rem minmax(0, 1fr);
-    align-items: start;
-    gap: 1.25rem;
-}
-
-.device-half-image {
+/* State badges below the graphic: the shared .status-badge, tone by state.
+   A hairline separates them from the graphic above; the parent's gap keeps the line clear of the
+   SVG, and the top padding keeps it clear of the badges. */
+.flow-badges {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: .5rem 1.5rem;
     width: 100%;
-    height: 12.5rem;
-    object-fit: contain;
-    object-position: left top;
+    max-width: 34rem;
+    padding-top: 1.5rem;
+    border-top: 1px solid var(--rct-line);
 }
 
-.device-divider {
-    background: var(--rct-line);
-}
-
-@container (max-width: 56rem) {
-    .device-visual {
-        grid-template-columns: minmax(0, 1fr);
-        gap: 1.25rem;
-    }
-
-    .device-divider {
-        height: 1px;
+/* On a phone the badges wrap to two rows with live text but fit one row as n/a; keep the row height. */
+@media (max-width: 575.98px) {
+    .device-flow-graphic .flow-badges {
+        min-height: 9.4rem;
     }
 }
 
-@container (max-width: 28rem) {
-    .device-half-content {
-        grid-template-columns: 5rem minmax(0, 1fr);
-        gap: .75rem;
-    }
-
-    .device-half-image {
-        height: 8rem;
-    }
-
-    /* Prefixed with .device-item so these beat the later base size rules of equal specificity. */
-    .device-item .device-half-inverter .device-metrics dd,
-    .device-item .device-half-battery .device-metrics dd {
-        font-size: 1.4rem;
-        white-space: nowrap;
-    }
-
-    .device-metric dt {
-        overflow-wrap: break-word;
-        hyphens: auto;
-    }
+.flow-badge {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: .2rem;
 }
 
-.device-fact-badge {
-    display: inline-block;
-    width: fit-content;
-    max-width: 100%;
-    font-size: 1rem;
-    font-weight: 500;
-    color: var(--bs-body-color);
-}
-
-/* A calm status line: a small neutral dot instead of a filled pill. */
-.device-fact-badge::before {
-    content: '';
-    display: inline-block;
-    width: .5rem;
-    height: .5rem;
-    margin-right: .5rem;
-    border-radius: 50%;
-    background: var(--bs-secondary-color);
-    vertical-align: .08em;
-}
-
-.device-readings {
-    min-width: 0;
-    display: grid;
-    gap: .85rem;
-}
-
-.device-metrics,
-.device-facts {
-    min-width: 0;
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: .75rem 1rem;
-}
-
-.device-metrics:empty,
-.device-facts:empty {
+.flow-badge[hidden] {
     display: none;
 }
 
-.device-metric dt,
-.device-metric dd {
-    overflow-wrap: anywhere;
-}
-
-.device-status-metric {
-    grid-column: 1 / -1;
-}
-
-.device-unit {
-    margin-left: .1em;
-    font-size: .7em;
-    font-weight: 500;
+.flow-badge-icon {
+    font-size: 1.1rem;
+    line-height: 1;
     color: var(--bs-secondary-color);
 }
 
-.device-half-battery .device-metrics {
-    grid-template-columns: 1fr;
+.flow-badge-caption {
+    font-size: .7rem;
+    color: var(--bs-secondary-color);
 }
 
-.device-half-battery .device-metrics dd {
-    font-size: 1.75rem;
+/* Power card, then the battery grid. Mobile: both are plain grid items of this panel. */
+.device-detail-panel {
+    min-width: 0;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    align-content: start;
+    gap: 1rem;
+}
+
+/* Battery cards fill the available width: one tower takes the full row, several share it in
+   columns of at least 22rem (enough for tower and readings side by side), so any number of towers
+   wraps instead of squeezing. */
+.device-battery-grid {
+    min-width: 0;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(22rem, 100%), 1fr));
+    align-items: stretch;
+    gap: 1rem;
+}
+
+.device-battery-grid:empty {
+    display: none;
+}
+
+/* Tablet (flow graphic on its own row): power and batteries in two columns where room allows,
+   otherwise stacked. The battery grid dissolves into the panel grid so its cards sit next to the
+   power card. */
+@container (min-width: 41.5rem) {
+    .device-detail-panel {
+        grid-template-columns: repeat(auto-fit, minmax(min(20rem, 100%), 1fr));
+    }
+
+    .device-battery-grid {
+        display: contents;
+    }
+}
+
+/* Desktop: flow graphic left (about 45%), details right with the power card on top and the
+   battery grid below it. */
+@container (min-width: 56rem) {
+    .device-visual.has-flow {
+        grid-template-columns: minmax(0, 45fr) minmax(0, 55fr);
+    }
+
+    .device-visual.has-flow .device-detail-panel {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    .device-visual.has-flow .device-battery-grid {
+        display: grid;
+    }
+
+    .device-visual.has-flow .device-battery-grid:empty {
+        display: none;
+    }
+
+    /* Several towers: the right column would grow far taller than the graphic, leaving it floating
+       in empty space. Power stays beside the graphic and the towers use the full width below. */
+    .device-visual.has-flow.has-many-batteries .device-detail-panel {
+        display: contents;
+    }
+
+    .device-visual.has-flow.has-many-batteries .device-flow-graphic {
+        grid-column: 1;
+        grid-row: 1;
+    }
+
+    .device-visual.has-flow.has-many-batteries .device-subcard-power {
+        grid-column: 2;
+        grid-row: 1;
+    }
+
+    .device-visual.has-flow.has-many-batteries .device-battery-grid {
+        grid-column: 1 / -1;
+        grid-row: 2;
+    }
+}
+
+.device-subcard {
+    min-width: 0;
+    container-type: inline-size;
+    display: flex;
+    flex-direction: column;
+    gap: .75rem;
+    padding: .85rem .9rem;
+    border: 1px solid var(--rct-line);
+    border-radius: .6rem;
+    background: var(--bs-tertiary-bg);
+}
+
+/* Header shared by the power card and every battery card: icon + title left, status chip right. */
+.device-subcard-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: .5rem;
+    min-width: 0;
+}
+
+.device-subcard-title {
+    display: flex;
+    align-items: center;
+    gap: .4rem;
+    min-width: 0;
+    font-size: .9rem;
+    font-weight: 700;
+    overflow-wrap: anywhere;
+}
+
+.device-subcard-title .material-icons {
+    font-size: 1.05rem;
+    color: var(--bs-secondary-color);
+}
+
+/* Image left, readings right. The two subcards size their image track separately: the inverter is
+   the card's subject and was a postage stamp in a shared 4rem column, while the battery tower is a
+   narrow vertical stack that needs far less width than the inverter does. */
+.device-subcard-body {
+    display: grid;
+    grid-template-columns: 5rem minmax(0, 1fr);
+    align-items: start;
+    gap: .85rem;
+    min-width: 0;
+}
+
+.device-subcard-power .device-subcard-body {
+    grid-template-columns: 8rem minmax(0, 1fr);
+}
+
+.device-subcard-image {
+    display: block;
+    width: 100%;
+    height: 7rem;
+    object-fit: contain;
+    object-position: center top;
+}
+
+/* The inverter fills its wider column instead of being capped by the shared 7rem height:
+   rct-inverter.svg is 120x127, so 8rem of width wants about 8.5rem of height. */
+.device-subcard-power .device-subcard-image {
+    height: 8.5rem;
+}
+
+.device-battery-column {
+    min-width: 0;
+}
+
+/* Battery tower built from three flush SVG slices (top once, one middle per module, bottom once)
+   instead of one static image. No gap/margin between slices, and none inside them: each slice is
+   drawn exactly to its own top and bottom edge, so the modules butt together into one case.
+   The width comes from JS (batterySliceWidth): it is derived from the module count so that a tall
+   tower gets narrower instead of taller, capped at BATTERY_TOWER_MAX_HEIGHT.
+   One drop shadow for the whole assembled tower - the slices deliberately carry no feDropShadow of
+   their own, which would outline every single module and make the stack read as separate boxes. */
+.device-battery-stack {
+    display: flex;
+    flex-direction: column;
+    width: min(100%, 5rem);
+    max-width: 100%;
+    filter: drop-shadow(0 2px 2.5px rgb(0 0 0 / 20%));
+}
+
+.device-battery-slice {
+    display: block;
+    width: 100%;
+    height: auto;
+}
+
+/* Diagnostic replacement for the tower when the reported module serials cannot describe a
+   documented tower; the full explanation is in the title attribute. */
+.device-battery-note {
+    font-size: .72rem;
+    line-height: 1.25;
+    color: var(--bs-secondary-color);
+}
+
+.device-subcard-readings {
+    min-width: 0;
+    display: grid;
+    gap: .6rem;
+}
+
+/* Charge level: the value, then its bar directly beneath, above the fact grid. */
+.device-charge {
+    min-width: 0;
+}
+
+.device-charge dt {
+    font-size: .78rem;
+    line-height: 1.2;
+    color: var(--bs-secondary-color);
+}
+
+.device-charge-value {
+    font-size: 1.6rem;
     font-weight: 700;
     line-height: 1.1;
     font-variant-numeric: tabular-nums;
 }
 
-.device-half-inverter .device-metrics dd {
-    font-size: 1.75rem;
-    line-height: 1.15;
-    font-variant-numeric: tabular-nums;
-}
-
 .device-soc-bar {
-    height: .5rem;
-    margin-top: .5rem;
+    height: .45rem;
+    margin-top: .4rem;
     border-radius: .25rem;
     overflow: hidden;
     background: var(--bs-secondary-bg);
@@ -589,19 +891,88 @@ body {
     background: var(--bs-success);
 }
 
-.device-status-metric.is-notice .device-fact-badge::before {
-    background: var(--bs-warning);
+/* Each metric cell and the charge value wrap their dt/dd in their own <dl> for valid list
+   semantics (A11Y-02); the <dl> is a pure grouping element and must add no spacing of its own. */
+.device-metric-pair,
+.device-charge-pair {
+    margin: 0;
 }
 
-.device-notice-text {
-    margin-top: .25rem;
-    font-size: .85rem;
-    line-height: 1.35;
+/* The key-value grid: 2 columns, so the power card reads as 2x3 and a battery card as 2x2. */
+.device-metric-grid {
+    min-width: 0;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: .5rem;
+}
+
+.device-metric-grid:empty {
+    display: none;
+}
+
+.device-metric-card {
+    min-width: 0;
+    padding: .45rem .55rem;
+    border: 1px solid var(--rct-line);
+    border-radius: .45rem;
+    background: var(--bs-body-bg);
+    overflow-wrap: anywhere;
+}
+
+.device-metric-card-icon {
+    display: block;
+    margin-bottom: .15rem;
+    font-size: .95rem;
     color: var(--bs-secondary-color);
 }
 
-.device-facts .device-metric dd {
+.device-metric-card dt {
+    font-size: .72rem;
+    line-height: 1.2;
+    color: var(--bs-secondary-color);
+}
+
+.device-metric-card dd {
+    margin: 0;
     font-size: .95rem;
+    font-weight: 600;
+    line-height: 1.25;
+    font-variant-numeric: tabular-nums;
+}
+
+.device-unit {
+    margin-left: .15em;
+    font-size: .72em;
+    font-weight: 500;
+    color: var(--bs-secondary-color);
+}
+
+/* Narrow subcard: the image moves above the readings so the value columns keep their width. Width
+   becomes auto so the illustration keeps its own aspect ratio instead of being stretched across
+   the full row. Keyed to the subcard's own width: it differs from the card's in every layout. */
+@container (max-width: 19rem) {
+
+    /* Matches the specificity of the power card's image-column rule above, otherwise it would keep
+       its two-track grid here and the stacked layout would never apply. */
+    .device-subcard-body,
+    .device-subcard-power .device-subcard-body {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    .device-subcard-image,
+    .device-subcard-power .device-subcard-image {
+        width: auto;
+        max-width: 100%;
+        height: 5rem;
+        margin-inline: auto;
+        object-position: center;
+    }
+
+    /* The tower keeps its computed width (it is already height-capped and narrow); it only moves to
+       the middle of the row now that the image sits above the readings. */
+    .device-battery-stack {
+        margin-inline: auto;
+    }
 }
 
 @media (max-width: 420px) {
@@ -618,24 +989,20 @@ body {
     }
 }
 
-.device-metric dt {
-    font-size: .85rem;
-    line-height: 1.2;
-}
-
-.device-metric dd {
-    font-size: .9rem;
-    line-height: 1.25;
-}
-
 /* Cards in one grid row share the row height (stretch), and the body fills that height so the
-   card border ends where the row ends. Scoped to .settings-grid: .export-grid is a multi-column
-   masonry layout and .device-item cards on the dashboard must keep their natural height. */
+   card border ends where the row ends. Scoped to .settings-grid: .device-item cards on the
+   dashboard must keep their natural height. */
 .settings-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(min(19rem, 100%), 1fr));
-    gap: 1.25rem;
+    /* At most four columns: a track is never narrower than a quarter of the row. */
+    grid-template-columns: repeat(auto-fit, minmax(max(min(19rem, 100%), calc((100% - 3 * var(--rct-card-gap)) / 4)), 1fr));
+    gap: var(--rct-card-gap);
     align-items: stretch;
+}
+
+/* A card that takes a whole row of the settings grid. */
+.settings-grid>.card-span-all {
+    grid-column: 1 / -1;
 }
 
 .settings-grid>.card {
@@ -645,6 +1012,398 @@ body {
 
 .settings-grid>.card>.card-body {
     flex: 1 1 auto;
+}
+
+/* Energy Manager: one panel per inverter, controls with a compact live-flow view. */
+.energy-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--rct-card-gap);
+}
+
+.energy-panel {
+    container-type: inline-size;
+    min-width: 0;
+}
+
+.energy-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: .75rem;
+}
+
+.energy-head-title {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: .6rem;
+    min-width: 0;
+}
+
+.energy-mode-switch {
+    display: inline-flex;
+    border: 1px solid var(--bs-border-color);
+    border-radius: var(--bs-border-radius);
+    overflow: hidden;
+}
+
+.energy-mode-option {
+    display: inline-flex;
+    align-items: center;
+    gap: .35rem;
+    min-height: 2.5rem;
+    padding: .35rem .8rem;
+    border: 0;
+    border-inline-start: 1px solid var(--bs-border-color);
+    background: transparent;
+    color: var(--bs-body-color);
+    font-weight: 600;
+    cursor: pointer;
+}
+
+.energy-mode-option:first-child {
+    border-inline-start: 0;
+}
+
+.energy-mode-option .material-icons {
+    font-size: 1.15rem;
+}
+
+.energy-mode-option:hover {
+    background: var(--bs-tertiary-bg);
+}
+
+.energy-mode-option.is-selected {
+    background: var(--bs-primary);
+    color: var(--bs-white);
+}
+
+/* Selected, but blocked by an unfinished setup: outlined instead of solid. */
+.energy-mode-option.is-selected.is-pending {
+    background: var(--bs-warning-bg-subtle);
+    color: var(--bs-warning-text-emphasis);
+    box-shadow: inset 0 0 0 2px var(--bs-warning-border-subtle);
+}
+
+.energy-setup-lead {
+    color: var(--bs-warning-text-emphasis);
+}
+
+.energy-mode-option:focus-visible {
+    outline: 2px solid var(--bs-primary);
+    outline-offset: -2px;
+    box-shadow: inset 0 0 0 4px var(--bs-body-bg);
+}
+
+.energy-mode-option[aria-disabled="true"] {
+    cursor: progress;
+    opacity: .65;
+}
+
+.energy-mode-note {
+    margin-bottom: 1rem;
+}
+
+.energy-body {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+}
+
+.energy-control {
+    min-width: 0;
+}
+
+.energy-operate {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 1.5rem;
+    align-items: stretch;
+}
+
+.energy-operate-main {
+    min-width: 0;
+}
+
+.energy-flow-lite {
+    display: grid;
+    place-items: center;
+    min-width: 0;
+    padding: .75rem;
+    border: 1px solid var(--rct-line);
+    border-radius: .6rem;
+    background: var(--bs-tertiary-bg);
+}
+
+.energy-operate[hidden],
+.energy-flow-lite[hidden] {
+    display: none;
+}
+
+.energy-flow-lite .energy-flow-svg {
+    max-width: none;
+}
+
+.energy-flow-lite .flow-node-label {
+    font-size: 16px;
+}
+
+.energy-flow-lite .flow-node-value {
+    font-size: 19px;
+}
+
+@container (min-width: 52rem) {
+    .energy-operate {
+        grid-template-columns: minmax(0, 1fr) minmax(0, 22rem);
+    }
+}
+
+.energy-flow-svg {
+    display: block;
+    width: 100%;
+    max-width: 30rem;
+    height: auto;
+    margin-inline: auto;
+}
+
+.flow-node-ring {
+    fill: var(--bs-body-bg);
+    stroke: var(--bs-border-color);
+    stroke-width: 2;
+}
+
+.flow-node-icon {
+    font-family: 'Material Icons', sans-serif;
+    font-size: 30px;
+    fill: var(--bs-secondary-color);
+    text-anchor: middle;
+    dominant-baseline: central;
+}
+
+.flow-node-label {
+    font-size: 12px;
+    fill: var(--bs-secondary-color);
+    text-anchor: middle;
+}
+
+.flow-node-value {
+    font-size: 15px;
+    font-weight: 600;
+    fill: var(--bs-body-color);
+    text-anchor: middle;
+    font-variant-numeric: tabular-nums;
+}
+
+.flow-node.is-stale .flow-node-value {
+    fill: var(--bs-secondary-color);
+}
+
+.flow-track {
+    fill: none;
+    stroke: var(--bs-border-color);
+    stroke-width: 3;
+    stroke-linecap: round;
+}
+
+.flow-dots {
+    fill: none;
+    stroke: var(--flow-color, var(--bs-secondary-color));
+    stroke-width: 5;
+    stroke-linecap: round;
+    stroke-dasharray: 0.1 14;
+    animation: energy-flow-dash 1.4s linear infinite;
+}
+
+.flow-arrow {
+    fill: var(--flow-color, var(--bs-secondary-color));
+}
+
+.flow-line.is-idle .flow-dots {
+    animation: none;
+    stroke-dasharray: none;
+    stroke: none;
+}
+
+.flow-line.is-idle .flow-arrow {
+    display: none;
+}
+
+.flow-line.is-reverse .flow-dots {
+    animation-direction: reverse;
+}
+
+/* Flow colours: green marks energy reaching the house or the grid, whether generated (PV), exported, or drawn
+   from storage (battery discharge); orange/red marks energy drawn from the grid (import); blue/
+   neutral marks energy going into storage (battery charge) rather than being spent, so storing is
+   visually distinct from both generation and consumption. */
+.flow-line.flow-pv,
+.flow-line.flow-export,
+.flow-line.flow-discharge {
+    --flow-color: #198754;
+}
+
+.flow-line.flow-import {
+    --flow-color: #c2410c;
+}
+
+.flow-line.flow-charge {
+    --flow-color: #0d6efd;
+}
+
+[data-bs-theme="dark"] .flow-line.flow-pv,
+[data-bs-theme="dark"] .flow-line.flow-export,
+[data-bs-theme="dark"] .flow-line.flow-discharge {
+    --flow-color: #4ade80;
+}
+
+[data-bs-theme="dark"] .flow-line.flow-import {
+    --flow-color: #fb923c;
+}
+
+[data-bs-theme="dark"] .flow-line.flow-charge {
+    --flow-color: #60a5fa;
+}
+
+/* One dash period (14 user units) per cycle; every line runs at the same constant speed. */
+@keyframes energy-flow-dash {
+    to {
+        stroke-dashoffset: -14.1;
+        /* one full dash period (0.1 + 14) */
+    }
+}
+
+/* Dots stand still; the arrowhead on every active line keeps the direction readable. */
+@media (prefers-reduced-motion: reduce) {
+    .flow-dots {
+        animation: none;
+    }
+}
+
+.energy-status {
+    display: flex;
+    align-items: flex-start;
+    gap: .5rem;
+    padding: .6rem .8rem;
+    border: 1px solid var(--rct-line);
+    border-radius: .5rem;
+    margin-bottom: 1rem;
+}
+
+.energy-status.is-ready {
+    border-color: var(--bs-success-border-subtle);
+    background: var(--bs-success-bg-subtle);
+}
+
+.energy-status.is-blocked {
+    border-color: var(--bs-warning-border-subtle);
+    background: var(--bs-warning-bg-subtle);
+}
+
+/* Operate: current mode + one plain sentence (design §8/§10). */
+.energy-mode {
+    margin-bottom: 1rem;
+}
+
+.energy-mode .energy-soc {
+    margin-top: .15rem;
+}
+
+.energy-freshness {
+    margin-top: .3rem;
+}
+
+/* Setup: the state-independent readiness checklist (design §12). Shown only when a step is unmet. */
+.energy-setup {
+    border: 1px solid var(--bs-warning-border-subtle);
+    background: var(--bs-warning-bg-subtle);
+    border-radius: .5rem;
+    padding: .7rem .9rem;
+    margin-bottom: 1rem;
+}
+
+.energy-setup-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: grid;
+    gap: .3rem;
+}
+
+.energy-setup-item {
+    display: flex;
+    align-items: center;
+    gap: .4rem;
+}
+
+.energy-setup-item .material-icons {
+    font-size: 1.1rem;
+}
+
+.energy-setup-item.is-met .material-icons {
+    color: var(--bs-success);
+}
+
+.energy-setup-item.is-unmet {
+    color: var(--bs-secondary-color);
+}
+
+.energy-setup-step {
+    margin-top: .8rem;
+    padding-top: .7rem;
+    border-top: 1px solid var(--rct-line);
+}
+
+.energy-expert-switch {
+    padding-top: .3rem;
+}
+
+.energy-actions {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: .5rem;
+}
+
+.energy-actions .energy-action-auto {
+    grid-column: 1 / -1;
+}
+
+.energy-actions .btn.is-selected {
+    background: var(--rct-brand);
+    border-color: var(--rct-brand);
+    color: #fff;
+}
+
+.energy-target {
+    margin-top: .9rem;
+}
+
+.energy-target .form-range {
+    width: 100%;
+}
+
+.energy-target-scale {
+    display: flex;
+    justify-content: space-between;
+    font-size: .8rem;
+    color: var(--bs-secondary-color);
+}
+
+.energy-advanced summary,
+.energy-expert summary,
+.energy-diagnostics summary {
+    cursor: pointer;
+    color: var(--bs-secondary-color);
+}
+
+.energy-expert-warning {
+    margin: .5rem 0 0;
+}
+
+.energy-advanced-section {
+    border-top: 1px solid var(--rct-line);
+    padding-top: .9rem;
+    margin-top: .9rem;
 }
 
 .setting-row {
@@ -659,6 +1418,16 @@ body {
 
 .setting-row label {
     font-weight: 600;
+}
+
+/* Cards in the settings grid use a tighter row rhythm, so the TSDB page (cards, console and Apply bar)
+   fits a 1536x864 viewport without touching the card gap token. */
+.settings-grid .setting-row {
+    padding: .35rem 0;
+}
+
+.settings-grid>.card>.card-body {
+    padding-block: .75rem;
 }
 
 .setting-row .form-text {
@@ -685,8 +1454,19 @@ body {
     align-items: end;
 }
 
+.device-list {
+    display: grid;
+    gap: .8rem;
+}
+
+/* Saving is reported by the toast only; the status text stays for screen readers (aria-live). */
 .save-state {
-    min-height: 1.5rem;
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
 }
 
 .parameter-list {
@@ -719,41 +1499,64 @@ body {
     overflow-wrap: anywhere;
 }
 
-.prometheus-settings>summary {
-    cursor: pointer;
-    font-weight: 600;
+/* The master toggle sits above the status grid inside the top card, separated by a hairline. */
+.prometheus-toggle {
+    padding-bottom: 1rem;
+    margin-bottom: 1rem;
+    border-bottom: 1px solid var(--rct-line);
 }
 
-.prometheus-settings #settings-sections>.card {
-    border: 0;
-}
-
-.prometheus-settings #settings-sections>.card>.card-body {
+.prometheus-toggle .setting-row {
     padding: 0;
+    border-top: 0;
 }
 
-.prometheus-table {
+/* Every page with a parameter table (Prometheus, Inverters) fills the viewport down to the footer and
+   keeps the pager at the card bottom when the table is short; taller content scrolls the page.
+   This is the only place that sets the height behaviour (guarded by design rule R11). */
+#main-content:has(>.param-card),
+.param-card>.card-body {
+    display: flex;
+    flex-direction: column;
+}
+
+#main-content>.param-card,
+.param-card .param-table-wrap {
+    flex: 1 0 auto;
+}
+
+/* A long hint wraps inside its own column, so the primary action stays top right on every page. */
+.param-card-head>div {
+    flex: 1 1 18rem;
+    min-width: 0;
+}
+
+.param-card-head>.btn {
+    flex: none;
+}
+
+.param-table {
     table-layout: fixed;
 }
 
-.prometheus-table th:first-child {
+.param-table .col-handle {
     width: 3rem;
 }
 
-.prometheus-table th:nth-child(2) {
+.param-table th.col-name {
     width: 28%;
 }
 
-.prometheus-table th:last-child {
+.param-table .col-actions {
     width: 4rem;
 }
 
-.prometheus-table td,
-.prometheus-table th {
+.param-table td,
+.param-table th {
     overflow-wrap: anywhere;
 }
 
-.prometheus-table .metric-name {
+.param-table .metric-name {
     overflow-wrap: normal;
 }
 
@@ -808,12 +1611,11 @@ body {
         grid-template-columns: repeat(2, minmax(0, 1fr));
     }
 
-    .prometheus-table th:nth-child(3),
-    .prometheus-table td:nth-child(3) {
+    .param-table .col-description {
         display: none;
     }
 
-    .prometheus-table th:nth-child(2) {
+    .param-table th.col-name {
         width: auto;
     }
 }
@@ -883,6 +1685,8 @@ body {
 
 .auth-card {
     width: min(100%, 28rem);
+    /* .shadow-sm on the card is !important and reads this variable, so override the variable. */
+    --bs-box-shadow-sm: var(--rct-auth-card-shadow);
 }
 
 .auth-logo {
@@ -927,30 +1731,28 @@ samp,
     user-select: all;
 }
 
-.token-row {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 1rem;
-    padding: .9rem 0;
-    border-top: 1px solid var(--rct-line);
+/* Positioned so the absolutely placed .visually-hidden header text cannot widen the page. */
+.token-table-wrap {
+    position: relative;
+    overflow-x: auto;
 }
 
-.token-row:first-child {
-    border-top: 0;
-}
-
-.token-row>div {
-    min-width: 0;
+.token-table th,
+.token-table td {
     overflow-wrap: anywhere;
+}
+
+.token-table .token-nowrap {
+    white-space: nowrap;
 }
 
 .toast-region {
     position: fixed;
     z-index: 1100;
-    top: max(1rem, env(safe-area-inset-top));
+    /* Bottom right, above the fixed footer, so the header buttons and the mode switcher stay uncovered. */
+    bottom: calc(var(--rct-footer-height) + 1rem + env(safe-area-inset-bottom));
     right: max(1rem, env(safe-area-inset-right));
-    max-width: min(23rem, calc(100vw - 2rem));
+    max-width: min(23rem, calc(100vw - 2rem - env(safe-area-inset-left) - env(safe-area-inset-right)));
     display: grid;
     gap: .5rem;
     pointer-events: none;
@@ -960,24 +1762,45 @@ samp,
     margin: 0;
     box-shadow: 0 5px 20px rgb(0 0 0 / 12%);
     pointer-events: auto;
-    opacity: 0;
-    transform: translateX(2rem);
-    transition: opacity .25s ease, transform .25s ease;
+    /* Every toast enters and leaves through the right edge; no fade, so none looks half-visible. */
+    transform: translateX(calc(100% + 2rem));
+    visibility: hidden;
+    transition: transform .3s ease, visibility 0s linear .3s;
+}
+
+.toast-region .btn-close {
+    flex: 0 0 auto;
+    margin: -.25rem -.5rem -.25rem 0;
 }
 
 .toast-region .alert.is-visible {
-    opacity: 1;
     transform: translateX(0);
+    visibility: visible;
+    transition: transform .3s ease, visibility 0s;
 }
 
-.toast-region .alert.is-leaving {
-    opacity: 0;
-    transform: translateX(2rem);
+@media (prefers-reduced-motion: reduce) {
+    .toast-region .alert {
+        transition: none;
+    }
 }
 
-:focus-visible {
-    outline: 3px solid #b83d41;
+:focus-visible,
+.btn:focus-visible,
+.btn-close:focus-visible,
+.form-control:focus-visible,
+.form-select:focus-visible,
+.form-check-input:focus-visible,
+.dropdown-item:focus-visible,
+.btn-check:focus-visible+.btn {
+    outline: 3px solid var(--rct-focus-ring);
     outline-offset: 2px;
+    box-shadow: none;
+}
+
+/* The header is brand red in both themes, so the ring there is white. */
+.admin-navbar :focus-visible {
+    outline-color: #fff;
 }
 
 @media (max-width: 575.98px) {
@@ -994,9 +1817,6 @@ samp,
         margin-left: auto;
     }
 
-    .token-row {
-        align-items: flex-start;
-    }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -1010,43 +1830,43 @@ samp,
     }
 }
 
-.export-layout {
-    grid-column: 1 / -1;
-    min-width: 0;
-}
-
 /* A persistent save error for one section, inserted as a sibling before that section's anchor
-   (never inside it, so an aria-live container cannot double-announce it and the TSDB "no Save
-   button" checks that count buttons inside .export-layout stay unaffected). */
+   (never inside it, so an aria-live container cannot double-announce it). */
 .save-alert {
     grid-column: 1 / -1;
     margin-bottom: 1rem;
 }
 
-/* Row-based grid like .settings-grid: cards sharing a row stretch to the tallest card in that
-   row, so the right column's top/bottom edges line up with the left column's (reported as
-   misaligned "Username"/"Retention" cards). A CSS multi-column masonry was tried earlier to avoid
-   dead space under shorter cards, but multi-column only balances total column height, not
-   per-row alignment, which is the misalignment the user reported; equal row heights wins here. */
-.export-grid {
+.tsdb-console {
+    padding: .55rem .7rem;
+    border: 1px solid var(--rct-line);
+    border-radius: .45rem;
+    background: #111418;
+    color: #d7e0e8;
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: .8rem;
+    line-height: 1.5;
+}
+
+.tsdb-console-line {
     display: grid;
-    gap: 1.25rem;
-    align-items: stretch;
+    grid-template-columns: 3.5rem minmax(0, 1fr);
+    gap: .65rem;
 }
 
-.export-grid>.card {
-    display: flex;
-    flex-direction: column;
-    margin-bottom: 0;
+.tsdb-console-time {
+    color: #8fa2b3;
 }
 
-.export-grid>.card>.card-body {
-    flex: 1 1 auto;
-}
+@media (forced-colors: active) {
+    .tsdb-console {
+        border: 1px solid CanvasText;
+        background: Canvas;
+        color: CanvasText;
+    }
 
-@media (min-width: 992px) {
-    .export-grid {
-        grid-template-columns: 1fr 1fr;
+    .tsdb-console-time {
+        color: CanvasText;
     }
 }
 
@@ -1090,4 +1910,185 @@ samp,
 
 .device-flow-draw {
     color: var(--bs-warning-text-emphasis);
+}
+
+/* Connection-lost modal: the page behind it is blurred and inert until the server answers again. */
+body.is-reconnecting .main-content,
+body.is-reconnecting .sidebar {
+    opacity: .35;
+    filter: blur(8px) saturate(.8);
+    pointer-events: none;
+    transition: opacity .2s ease, filter .2s ease;
+}
+
+body.is-reconnecting .modal-backdrop.show {
+    background-color: rgb(15 23 42 / 60%);
+}
+
+#reconnect-modal .modal-dialog {
+    max-width: 460px;
+}
+
+#reconnect-modal .spinner-border {
+    width: 2.25rem;
+    height: 2.25rem;
+}
+
+@keyframes reconnect-soft-pulse {
+
+    0%,
+    100% {
+        transform: scale(1);
+        box-shadow: 0 0 0 rgb(var(--bs-primary-rgb), 0);
+    }
+
+    50% {
+        transform: scale(1.012);
+        box-shadow: 0 0 .85rem rgb(var(--bs-primary-rgb), .22);
+    }
+}
+
+body.is-reconnecting #reconnect-modal.show .reconnect-pulse {
+    animation: reconnect-soft-pulse 1.9s ease-in-out infinite;
+    transform-origin: center;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    body.is-reconnecting #reconnect-modal.show .reconnect-pulse {
+        animation: none;
+    }
+}
+
+/* Last-known-good dashboard: dimmed (still readable) content under an inline banner above the grid. */
+.is-offline {
+    opacity: .8;
+    transition: opacity .2s;
+}
+
+.dashboard-offline-banner[hidden] {
+    display: none;
+}
+
+.confirm-message {
+    white-space: pre-line;
+}
+
+/* Above the inverter dialog it can be opened from. */
+#confirm-modal {
+    z-index: 1075;
+}
+
+/* Touch targets: 44px minimum on phones (the lint rule's threshold); desktop sizes stay untouched. */
+@media (max-width: 767.98px) {
+
+    .btn,
+    .icon-button,
+    .device-toggle,
+    .form-control,
+    .form-select {
+        min-height: 44px;
+    }
+
+    .btn,
+    .icon-button,
+    .device-toggle {
+        min-width: 44px;
+    }
+
+    /* Beats the fixed 2.3rem header height and the .icon-button box above. */
+    .navbar .btn,
+    .icon-button {
+        height: auto;
+        min-height: 44px;
+    }
+
+    summary {
+        display: flex;
+        align-items: center;
+        min-height: 44px;
+    }
+
+    .form-check {
+        display: flex;
+        align-items: center;
+        gap: .5rem;
+        min-height: 44px;
+        padding-left: 0;
+    }
+
+    .form-check .form-check-input {
+        float: none;
+        margin: 0;
+        flex: 0 0 auto;
+    }
+
+    .form-check-label,
+    .parameter-item {
+        min-height: 44px;
+    }
+
+    /* Centres the label text in its 44px box, level with the centred switch; the gap stands in
+       for the collapsed space before an inline <span>. */
+    .form-check-label {
+        display: flex;
+        align-items: center;
+        column-gap: .25em;
+    }
+}
+
+/* Three 44px header buttons no longer fit beside the brand text on a phone: keep the text for
+   screen readers only, so the header stays on one row. */
+@media (max-width: 420px) {
+    .admin-navbar .navbar-brand>span {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        overflow: hidden;
+        clip-path: inset(50%);
+        white-space: nowrap;
+    }
+}
+
+/* Forced-colors (Windows high contrast and similar): the status indicators above convey state
+   through foreground/background color only, which forced-colors strips. Restore a border and
+   SystemColor keywords so online/ok/bad/warning stay distinguishable, and give the SoC bar a
+   border plus a Highlight fill since its coloured fill level is otherwise invisible (CSS-02). */
+@media (forced-colors: active) {
+
+    /* Status badges: the transparent border becomes visible and a system foreground replaces the
+       tone colours. The dot follows the text colour; the status text carries the meaning. */
+    .status-badge {
+        border-color: currentColor;
+        color: CanvasText;
+    }
+
+    .status-badge::before,
+    .status-dot,
+    .status-dot.online,
+    .status-dot.offline {
+        background: CanvasText;
+    }
+
+    /* "ok"/"online" versus "bad"/"offline" must not rely on colour alone here: the accompanying
+       text label (rendered beside each chip/dot) carries the distinction, and the border makes the
+       chip visible. The feed/draw/charge flow lines keep their own arrowhead and text labels. */
+
+    /* SoC bar: outline the track and paint the fill with the system Highlight so the charge level
+       stays visible when the custom green fill is dropped. */
+    .device-soc-bar {
+        border: 1px solid CanvasText;
+    }
+
+    .device-soc-fill {
+        background: Highlight;
+        forced-color-adjust: none;
+    }
+}
+
+/* Guided hardware verification dialog (Energy page, Basic mode) */
+@media (prefers-reduced-motion: reduce) {
+    .energy-assistant-progress .spinner-border,
+    .energy-assistant-waiting .spinner-border {
+        animation: none;
+    }
 }

@@ -33,7 +33,10 @@ class FakeQuestDb:
             return {"dataset": [[k, v] for k, v in self.columns.items()]}
         if "materialized_views()" in sql:
             view = rollup_view_name("rct", PRESETS["medium"], schema_signature(self.columns))
-            return {"dataset": [[view, "rct", "valid", 5, 5 if self.view_ok else 9]]}
+            rows = [[view, "rct", "valid", 5, 5 if self.view_ok else 9]]
+            if "WHERE base_table_name" in sql:
+                rows.append(["rct_rollup_1m_vold", "rct", "valid", 5, 5])
+            return {"dataset": rows}
         if "ttlValue" in sql:
             return {"dataset": [[self.ttl[0], self.ttl[1]]]}
         if "LATEST ON" in sql:
@@ -107,6 +110,29 @@ def test_own_ttl_is_updated_but_unlimited_never_alters() -> None:
     assert db.altered() == []
 
 
+def test_a_correct_ttl_without_an_ownership_marker_is_reconciled_not_ignored() -> None:
+    """P2 atomicity: ALTER and the ownership INSERT are two SQL calls. If a crash applied the TTL
+    but never recorded it, the next run sees the right TTL with no marker. The early return must
+    not leave that gap permanent — otherwise a later retention change mistakes our own TTL for a
+    foreign administrator TTL. The marker is written (reconciled) instead.
+    """
+    db = FakeQuestDb(ttl=(90, "DAY"), recorded=None)
+    assert QuestDbProvisioner(db, "rct", "off", None, 90).run()
+    assert db.altered() == []  # the TTL is already correct; no destructive re-ALTER
+    inserts = [s for s in db.sql if s.startswith("INSERT INTO") and "_rct_export_state" in s]
+    assert len(inserts) == 1 and "90" in inserts[0]
+
+
+def test_an_own_recorded_ttl_that_already_matches_needs_no_reconcile() -> None:
+    """The counterpart: TTL correct and already recorded as ours writes neither an ALTER nor a
+    duplicate ownership marker.
+    """
+    db = FakeQuestDb(ttl=(90, "DAY"), recorded=90)
+    assert QuestDbProvisioner(db, "rct", "off", None, 90).run()
+    assert db.altered() == []
+    assert not any(s.startswith("INSERT INTO") and "_rct_export_state" in s for s in db.sql)
+
+
 def test_downsampling_sets_view_and_raw_ttl() -> None:
     db = FakeQuestDb()
     assert QuestDbProvisioner(db, "rct", "medium", 3, 90).run()
@@ -132,6 +158,16 @@ def test_rollup_view_follows_a_changed_column_set() -> None:
     assert any('"rct_new_metric_avg"' in s for s in db2.sql if s.startswith("CREATE MATERIALIZED"))
 
 
+def test_superseded_rollup_views_are_kept_not_dropped() -> None:
+    """A schema change can only rebuild the new view from the raw table, which may hold less
+    history than an old, already-shortened raw TTL allows the superseded view to cover. Dropping
+    it would destroy that historical rollup data irrecoverably, so it must survive the run."""
+    db = FakeQuestDb()
+    assert QuestDbProvisioner(db, "rct", "medium", 3, 90).run()
+    assert not any(s.startswith("DROP MATERIALIZED VIEW") for s in db.sql)
+    assert not any(s.startswith("UPDATE") and "ttl_days = NULL" in s for s in db.sql)
+
+
 def test_raw_ttl_waits_for_a_current_view_and_for_data() -> None:
     db = FakeQuestDb(view_ok=False)
     assert not QuestDbProvisioner(db, "rct", "medium", None, 90).run()
@@ -139,3 +175,14 @@ def test_raw_ttl_waits_for_a_current_view_and_for_data() -> None:
     empty = FakeQuestDb(columns={"timestamp": "TIMESTAMP", "device": "SYMBOL"})
     assert not QuestDbProvisioner(empty, "rct", "medium", None, 90).run()
     assert not any(s.startswith("CREATE MATERIALIZED") for s in empty.sql)
+
+
+def test_a_view_that_is_not_refreshed_yet_warns_only_when_the_lag_persists(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level("DEBUG", logger="app.export.questdb_admin")
+    provisioner = QuestDbProvisioner(FakeQuestDb(view_ok=False), "rct", "medium", None, 90)
+    for _ in range(7):
+        assert not provisioner.run()
+    assert not [r for r in caplog.records if r.levelname == "WARNING"]
+    assert not provisioner.run()  # 8th consecutive attempt
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 1 and "after 8 attempts" in warnings[0].getMessage()

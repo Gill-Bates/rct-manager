@@ -27,7 +27,9 @@ UNDOCUMENTED = "wifi_server_ip"
 async def _logged_in(tmp_path):
     app = create_app(Settings(_env_file=None, hmac_secret="s" * 48, admin_db_path=tmp_path / "rct.db"))
     password = app.state.first_start_password
-    client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver")
+    client = httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://testserver", headers={"Origin": "http://testserver"}
+    )
     await client.__aenter__()
     csrf = (await client.get("/admin/api/session")).json()["csrf_token"]
     login = await client.post("/admin/api/login", headers={"X-CSRF-Token": csrf},
@@ -75,18 +77,18 @@ async def test_admin_parameters_carry_the_explanation_for_the_gui(tmp_path):
     await client.aclose()
 
 
-def test_writable_rows_render_the_explanation_as_text_tied_to_the_checkbox():
-    """Visible text, not a tooltip, and described-by so the checkbox announces it; nothing when empty."""
+def test_writable_rows_render_the_explanation_as_text_tied_to_the_row_menu():
+    """Visible text, not a tooltip, and described-by so the row menu announces it; nothing when empty."""
     js = ADMIN_JS.read_text(encoding="utf-8")
-    assert "if (item.help_text) {" in js
-    assert "element('small', 'parameter-help', item.help_text)" in js
-    assert "box.setAttribute('aria-describedby', help.id)" in js
-    assert "help.id = `write-help-${item.name}`" in js
+    assert "if (parameter.help_text) {" in js
+    assert "element('small', 'parameter-help d-block mt-1', parameter.help_text)" in js
+    assert "help.id = `write-help-${parameter.name}`" in js
+    assert "parameterActionMenu(parameter.name, [" in js and "toggle.setAttribute('aria-describedby', describedBy)" in js
     # The search over the writable list covers the explanation as well.
     assert "${item.help_text || ''}" in js
 
 
 def test_inverters_page_names_the_explanation_and_the_limit_semantics():
     html = (ROOT / "app/admin/templates/inverters.html").read_text(encoding="utf-8")
-    assert "its explanation appears under the name" in html
+    assert "its explanation appears under the description" in html
     assert "wire type limits, not safe operating limits" in html

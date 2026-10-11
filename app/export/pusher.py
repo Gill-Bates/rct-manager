@@ -28,8 +28,16 @@ log = logging.getLogger(__name__)
 
 HTTP_TIMEOUT_SECONDS = 10.0
 MAX_BACKOFF_SECONDS = 300.0
+# How often the QuestDB rollup health is re-checked once its schema is provisioned, so a view that
+# regresses to invalid or stops refreshing is noticed while the shortened raw TTL is still active.
+PROVISION_RECHECK_SECONDS = 300.0
 _BODY_LIMIT = 300
 _RESPONSE_LIMIT = 1_048_576  # bounded read of QuestDB /exec JSON replies
+
+
+def _backoff(interval: float, failures: int) -> float:
+    """Delay after ``failures`` consecutive failures: doubling from ``interval``, capped."""
+    return min(interval * 2 ** min(failures, 8), max(interval, MAX_BACKOFF_SECONDS))
 
 
 class PushError(Exception):
@@ -66,8 +74,16 @@ class Target:
         return cls(endpoint.base_url, "/write", headers, settings.questdb_verify_tls, exec_path="/exec")
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Refuse redirects so the Authorization header is never forwarded to another host."""
+
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
 def _request(target: Target, path: str, data: bytes | None) -> bytes:
-    request = urllib.request.Request(target.base_url + path, data=data, headers=target.headers)
+    # base_url is built by Endpoint.base_url and is always http or https.
+    request = urllib.request.Request(target.base_url + path, data=data, headers=target.headers)  # noqa: S310
     if data is not None:
         request.add_header("Content-Type", "text/plain; charset=utf-8")
     context = None
@@ -76,7 +92,8 @@ def _request(target: Target, path: str, data: bytes | None) -> bytes:
         context.check_hostname = False
         context.verify_mode = ssl.CERT_NONE
     try:
-        with urllib.request.urlopen(request, timeout=HTTP_TIMEOUT_SECONDS, context=context) as response:
+        opener = urllib.request.build_opener(_NoRedirect, urllib.request.HTTPSHandler(context=context))
+        with opener.open(request, timeout=HTTP_TIMEOUT_SECONDS) as response:
             return response.read(_RESPONSE_LIMIT)
     except urllib.error.HTTPError as exc:
         detail = exc.read(_BODY_LIMIT).decode("utf-8", "replace").strip()
@@ -112,6 +129,11 @@ class PushExporter:
         self._clock = clock
         self._target = Target.from_settings(settings)
         self._failures = 0
+        self._tables_ready = False
+        self._provisioned_columns: frozenset[str] | None = None
+        self._provision_failures = 0
+        self._provision_retry_at = 0.0
+        self._provision_recheck_at = 0.0
         self._provisioner: QuestDbProvisioner | None = None
         if settings.db_type is DbType.QUESTDB:
             target = self._target
@@ -128,8 +150,9 @@ class PushExporter:
 
     def _push_lines(self, lines: list[str]) -> None:
         """Blocking I/O only; runs in a worker thread with already built, immutable lines."""
-        if self._provisioner is not None:
+        if self._provisioner is not None and not self._tables_ready:
             self._provisioner.ensure_tables()  # symbol columns exist before the first line arrives
+            self._tables_ready = True
         for body in batches(lines):
             write(self._target, body)
 
@@ -138,13 +161,9 @@ class PushExporter:
         interval = float(self._settings.metrics_export_interval_seconds)
         try:
             # collect() reads loop-owned state (queues, budget, counters), so it stays on the loop.
-            lines = build_lines(self._exporter.collect(), self.measurement, time.time_ns())
+            samples = list(self._exporter.collect())
+            lines = build_lines(samples, self.measurement, time.time_ns())
             await asyncio.to_thread(self._push_lines, lines)
-            if self._provisioner is not None:
-                # Re-run every cycle: a newly exported metric adds a DOUBLE column at any time, and
-                # run() derives the rollup view name from the live column set, so a stale rollup
-                # projection is replaced instead of kept once provisioning first succeeded.
-                await asyncio.to_thread(self._provisioner.run)
         except PushError as exc:
             self._record_failure(str(exc))
             if not exc.retryable:
@@ -157,9 +176,51 @@ class PushExporter:
                 log.info("Metrics export recovered after %d failed attempt(s)", self._failures)
             self._failures = 0
             self._stats.export_success += 1
-            self._stats.export_last_success_unix = time.time()
+            # Only a cycle that actually sent at least one line counts as a successful *export*: an
+            # empty build_lines() (no samples, or all non-finite) makes no write() call, so marking
+            # it as a last-success would let the TSDB status show "healthy / recently exported" when
+            # not a byte reached the database.
+            if lines:
+                self._stats.export_last_success_unix = time.time()
+            await self._provision(frozenset(name for name, _, _ in samples) | {k for _, t, _ in samples for k in t})
             return interval
-        return min(interval * 2 ** min(self._failures, 8), max(interval, MAX_BACKOFF_SECONDS))
+        return _backoff(interval, self._failures)
+
+    async def _provision(self, columns: frozenset[str]) -> None:
+        """Retention and rollup health after a stored write; its failures never taint the export.
+
+        Two concerns, deliberately separated: the schema DDL (``CREATE MATERIALIZED VIEW``) only
+        needs to run when the column set changes, but the rollup *health* must keep being checked.
+        The provisioner's ``run()`` does both — its DDL is ``IF NOT EXISTS`` (idempotent) and it
+        re-checks ``_view_current`` and reconciles the TTL every time — so this method re-invokes it
+        periodically even when the columns are unchanged. Without that re-check a view that turns
+        ``invalid`` or stops refreshing days later goes unnoticed while the shortened raw TTL keeps
+        deleting data no working rollup holds. A changed column set runs immediately (bypassing the
+        throttle); an unchanged set runs on a periodic cadence.
+        """
+        if self._provisioner is None:
+            return
+        now = self._clock.monotonic()
+        schema_changed = columns != self._provisioned_columns
+        if not schema_changed and now < self._provision_recheck_at:
+            return
+        if now < self._provision_retry_at:
+            return
+        try:
+            ready = await asyncio.to_thread(lambda: self._provisioner.run(ensure=False))
+        except Exception as exc:  # noqa: BLE001 - provisioning must never fail the export
+            self._provision_failures += 1
+            interval = float(self._settings.metrics_export_interval_seconds)
+            self._provision_retry_at = now + _backoff(interval, self._provision_failures)
+            if self._provision_failures & (self._provision_failures - 1) == 0:
+                log.warning("QuestDB provisioning failed (attempt %d): %s", self._provision_failures, exc)
+            return
+        self._provision_failures = 0
+        # Re-check the rollup health on a steady cadence regardless of the result: a ``ready`` view
+        # can later regress, and a not-yet-ready one must keep being retried.
+        self._provision_recheck_at = now + PROVISION_RECHECK_SECONDS
+        if ready:
+            self._provisioned_columns = columns
 
     def _record_failure(self, message: str) -> None:
         self._failures += 1

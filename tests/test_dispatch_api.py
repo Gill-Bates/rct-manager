@@ -21,6 +21,7 @@ from tests.api_helpers import (
     PORT,
     WRITE_TOKEN,
     _fixed_pat,
+    admin_session_headers,
     dispatch_capabilities,
     dispatch_fixtures,
     float_payload,
@@ -112,6 +113,136 @@ async def test_grid_charge_then_delete_restores_device(tmp_path: Path) -> None:
         assert stopped.json()["restore_required"] is False
 
 
+async def test_a_generic_write_to_a_dispatch_register_is_refused_during_an_active_dispatch(
+    tmp_path: Path,
+) -> None:
+    """P1 ownership: while a dispatch controls the inverter, the four dispatch-control registers may
+    not be written through the generic PAT endpoint — the controller keeps no consistent state of a
+    parallel raw write. Fail-closed: 409 dispatch_register_locked, no device transaction.
+    """
+    async with running_app(settings(tmp_path)) as harness:
+        seed_payloads(harness)
+        armed = await harness.client.post(
+            "/api/v1/devices/main/battery/dispatch",
+            headers=WRITER,
+            json={
+                "mode": "charge_from_grid",
+                "target_soc_percent": 80,
+                "max_power_w": 4000,
+                "valid_until": (datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+            },
+        )
+        assert armed.status_code == 200, armed.text
+        blocked = await harness.client.put(
+            "/api/v1/devices/main/metrics/power_mng_battery_power_extern",
+            headers=WRITER,
+            json={"value": 1500.0},
+        )
+    assert blocked.status_code == 409, blocked.text
+    assert blocked.json()["code"] == "dispatch_register_locked"
+
+
+async def test_a_generic_write_to_a_dispatch_register_is_allowed_when_idle(tmp_path: Path) -> None:
+    """The lock is scoped to an active dispatch: with no dispatch and the Energy Manager off, the
+    same register is writable through the generic endpoint (the escape hatch still exists).
+    """
+    async with running_app(settings(tmp_path)) as harness:
+        seed_payloads(harness)
+        response = await harness.client.put(
+            "/api/v1/devices/main/metrics/power_mng_battery_power_extern",
+            headers=WRITER,
+            json={"value": 0.0},
+        )
+    assert response.status_code == 200, response.text
+
+
+async def test_an_existing_request_body_produces_the_recorded_response(tmp_path: Path) -> None:
+    """AC-16: the body an existing client sends today must still produce the same response, field
+    for field. Recorded here so a regression shows up as a diff instead of as a silent change.
+    """
+    async with running_app(settings(tmp_path)) as harness:
+        seed_payloads(harness)
+        response = await harness.client.post(
+            "/api/v1/devices/main/battery/dispatch",
+            headers=WRITER,
+            json={
+                "mode": "charge_from_grid",
+                "target_soc_percent": 80,
+                "max_power_w": 4000,
+                "valid_until": (datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+            },
+        )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    # Generated per operation, so they are asserted for shape rather than value.
+    assert isinstance(body.pop("operation_id"), str)
+    assert isinstance(body.pop("valid_until"), str)
+    assert body == {
+        "device_id": "main",
+        "mode": "charge_from_grid",
+        "state": "charging",
+        "phase": "controlling",
+        "control_state": "controlled",
+        "restore_required": False,
+        "target_soc_percent": 80.0,
+        "max_power_w": 3000.0,
+        "max_power_w_requested": 4000.0,
+        "max_power_w_clamped": True,
+        "commanded_direction": "charge",
+        "commanded_power_w": 3000.0,
+        "stop_reason": None,
+        "fault_code": None,
+        "replaced": False,
+    }
+
+
+async def test_a_hold_body_is_accepted_and_reports_a_held_battery(tmp_path: Path) -> None:
+    """`hold` carries no SoC goal and no power budget; the commanded figures carry the zero."""
+    async with running_app(settings(tmp_path)) as harness:
+        seed_payloads(harness)
+        response = await harness.client.post(
+            "/api/v1/devices/main/battery/dispatch",
+            headers=WRITER,
+            json={
+                "mode": "hold",
+                "max_power_w": 0,
+                "valid_until": (datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+            },
+        )
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["state"] == "holding"
+        assert body["phase"] == "controlling"
+        assert body["control_state"] == "controlled"
+        assert body["target_soc_percent"] is None
+        assert body["max_power_w"] == 0.0
+        assert body["commanded_direction"] == "none"
+        assert body["commanded_power_w"] == 0.0
+        stopped = await harness.client.delete("/api/v1/devices/main/battery/dispatch", headers=WRITER)
+        assert stopped.status_code == 200, stopped.text
+        assert stopped.json()["state"] == "idle"
+
+
+async def test_mode_dependent_bodies_are_rejected_before_the_device_is_touched(tmp_path: Path) -> None:
+    valid_until = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+    bad_bodies = [
+        {"mode": "hold", "target_soc_percent": 80, "max_power_w": 0, "valid_until": valid_until},
+        {"mode": "hold", "max_power_w": 500, "valid_until": valid_until},
+        {"mode": "charge_from_grid", "max_power_w": 2000, "valid_until": valid_until},
+        {"mode": "charge_from_grid", "target_soc_percent": 80, "max_power_w": 0, "valid_until": valid_until},
+    ]
+    async with running_app(settings(tmp_path)) as harness:
+        seed_payloads(harness)
+        for body in bad_bodies:
+            response = await harness.client.post(
+                "/api/v1/devices/main/battery/dispatch", headers=WRITER, json=body
+            )
+            assert response.status_code == 422, (body, response.text)
+            assert response.json()["code"] == "invalid_request"
+        status = await harness.client.get("/api/v1/devices/main/battery/dispatch", headers=WRITER)
+        assert status.json()["state"] == "idle"
+
+
 async def test_dispatch_requires_write_role(tmp_path: Path) -> None:
     async with running_app(settings(tmp_path)) as harness:
         response = await harness.client.get("/api/v1/devices/main/battery/dispatch")
@@ -127,6 +258,37 @@ async def test_dispatch_route_is_hidden_when_writes_are_disabled() -> None:
     assert response.json()["code"] == "write_disabled"
 
 
+async def test_readiness_stays_red_while_a_dispatch_record_is_unreadable(tmp_path: Path) -> None:
+    """C2 regression: an unreadable dispatch record means battery settings were NOT automatically
+    restored (controller.recover()'s own contract), so a green readiness must not precede that —
+    even once every device otherwise answers heartbeats fine.
+    """
+    device_settings = settings(tmp_path)
+    from app.dispatch.store import DispatchStore
+
+    store = DispatchStore(device_settings.dispatch_db_path, SECRET)
+    store.initialize()
+    from app.dispatch.models import DispatchRecord, DispatchState
+
+    store.put(DispatchRecord("main", state=DispatchState.PRECHECK))
+    with store.connect() as db:
+        db.execute("UPDATE dispatch_operations SET encrypted=? WHERE device_id='main'", (b"garbage",))
+    store.close()
+
+    async with running_app(device_settings) as harness:
+        response = await harness.client.get("/api/v1/readiness", headers=WRITER)
+        assert response.status_code == 503
+        assert harness.runtime.dispatch.recovery_ready() is False
+        assert harness.runtime.dispatch.unreadable_devices == ("main",)
+
+
+async def test_readiness_is_green_once_dispatch_recovery_completes_cleanly(tmp_path: Path) -> None:
+    async with running_app(settings(tmp_path)) as harness:
+        response = await harness.client.get("/api/v1/readiness", headers=WRITER)
+        assert response.status_code == 200
+        assert harness.runtime.dispatch.recovery_ready() is True
+
+
 def test_dispatch_fixture_contains_exact_write_registers(tmp_path: Path) -> None:
     paths = dispatch_fixtures(tmp_path)
     allowlist = json.loads(paths["write_allowlist_path"].read_text(encoding="utf-8"))
@@ -140,6 +302,7 @@ async def test_reconfiguration_is_rejected_when_an_affected_devices_restore_fail
     config = settings(tmp_path, devices=[DeviceEntry(device_id="main", host=HOST, port=PORT)])
     admin_write_token(config)
     async with running_app(config) as harness:
+        ADMIN_WRITER = await admin_session_headers(harness.client, "replacement-test-password")
         seed_payloads(harness)
         started = await harness.client.post(
             "/api/v1/devices/main/battery/dispatch",
@@ -186,6 +349,7 @@ async def test_reconfiguration_succeeds_and_rebuilds_limits_after_a_clean_restor
     config = settings(tmp_path, devices=[DeviceEntry(device_id="main", host=HOST, port=PORT)])
     admin_write_token(config)
     async with running_app(config) as harness:
+        ADMIN_WRITER = await admin_session_headers(harness.client, "replacement-test-password")
         seed_payloads(harness)
         started = await harness.client.post(
             "/api/v1/devices/main/battery/dispatch",
@@ -226,5 +390,132 @@ async def test_reconfiguration_succeeds_and_rebuilds_limits_after_a_clean_restor
                 "valid_until": (datetime.now(UTC) + timedelta(hours=1)).isoformat(),
             },
         )
-        assert dispatch_response.status_code == 200, dispatch_response.text
-        assert dispatch_response.json()["state"] == "charging"
+        # A re-addressed device is a different physical device: its VERIFIED capabilities were reset,
+        # so it is refused as unverified (not for missing limits).
+        assert dispatch_response.status_code == 409, dispatch_response.text
+        assert dispatch_response.json()["code"] == "dispatch_unverified"
+
+
+async def test_readdressing_clears_unverified_evidence_and_engineering_mode_too(tmp_path: Path) -> None:
+    """A revoke keeps a capability's evidence while it is UNVERIFIED (by design); a readdressing
+    must not let that leftover evidence, or an engineering-mode switch, follow onto whatever
+    physical device now answers under the same device_id — not only the capabilities that still
+    happened to be VERIFIED when the device list was saved."""
+    config = settings(tmp_path, devices=[DeviceEntry(device_id="main", host=HOST, port=PORT)])
+    token = admin_write_token(config)
+    headers = {"Authorization": f"Bearer {token}"}
+    async with running_app(config) as harness:
+        ADMIN_WRITER = await admin_session_headers(harness.client, "replacement-test-password")
+        headers = ADMIN_WRITER  # PAT calls would be refused once the cookie session exists
+        # UNVERIFIED but carrying evidence a revoke would leave behind (strategy code, note).
+        put_cap = await harness.client.put(
+            "/admin/api/dispatch/devices/main/capabilities/write_path_convention",
+            headers=headers,
+            json={
+                "status": "unverified",
+                "soc_strategy_external_code": 2,
+                "enum_byte_width": 1,
+                "bool_byte_width": 1,
+                "write_frame_layout_verified": True,
+                "apply_sequence_verified": True,
+                "note": "evidence from the previous physical device",
+            },
+        )
+        assert put_cap.status_code == 200, put_cap.text
+        assert put_cap.json()["soc_strategy_external_code"] == 2
+
+        put_limits = await harness.client.put(
+            "/admin/api/dispatch/devices/main",
+            headers=headers,
+            json={"max_charge_power_w": 3000, "max_discharge_power_w": 5000, "engineering_mode": True},
+        )
+        assert put_limits.status_code == 200, put_limits.text
+        assert harness.runtime.dispatch.device_limits("main").engineering_mode is True
+
+        response = await harness.client.put(
+            "/admin/api/settings", headers=ADMIN_WRITER,
+            json={"devices": [{"host": "192.0.2.91", "port": 48998}]},
+        )
+        assert response.status_code == 200, response.text
+
+        after = await harness.client.get(
+            "/admin/api/dispatch/devices/main/capabilities", headers=headers
+        )
+        write_path = next(r for r in after.json() if r["name"] == "write_path_convention")
+        assert write_path["status"] == "unverified"
+        assert write_path["soc_strategy_external_code"] is None
+        assert write_path["note"] is None
+        assert harness.runtime.dispatch.device_limits("main").engineering_mode is False
+
+
+async def test_failed_graph_build_leaves_identity_bound_state_untouched(tmp_path: Path) -> None:
+    """A readdressing whose new graph does not build must roll back completely: the old device
+    keeps running, so its capability evidence and engineering mode must not have been reset."""
+    config = settings(tmp_path, devices=[DeviceEntry(device_id="main", host=HOST, port=PORT)])
+    token = admin_write_token(config)
+    headers = {"Authorization": f"Bearer {token}"}
+    async with running_app(config) as harness:
+        ADMIN_WRITER = await admin_session_headers(harness.client, "replacement-test-password")
+        headers = ADMIN_WRITER  # PAT calls would be refused once the cookie session exists
+        put_cap = await harness.client.put(
+            "/admin/api/dispatch/devices/main/capabilities/write_path_convention",
+            headers=headers,
+            json={"status": "unverified", "soc_strategy_external_code": 2, "note": "keep me"},
+        )
+        assert put_cap.status_code == 200, put_cap.text
+        put_limits = await harness.client.put(
+            "/admin/api/dispatch/devices/main",
+            headers=headers,
+            json={"max_charge_power_w": 3000, "max_discharge_power_w": 5000, "engineering_mode": True},
+        )
+        assert put_limits.status_code == 200, put_limits.text
+
+        with patch("app.api.app_factory._build_device_graph", side_effect=RuntimeError("boom")):
+            response = await harness.client.put(
+                "/admin/api/settings", headers=ADMIN_WRITER,
+                json={"devices": [{"host": "192.0.2.91", "port": 48998}]},
+            )
+        assert response.status_code >= 400, response.text
+
+        after = await harness.client.get("/admin/api/dispatch/devices/main/capabilities", headers=headers)
+        write_path = next(r for r in after.json() if r["name"] == "write_path_convention")
+        assert write_path["soc_strategy_external_code"] == 2
+        assert write_path["note"] == "keep me"
+        assert harness.runtime.dispatch.device_limits("main").engineering_mode is True
+        assert harness.runtime.devices["main"].host == HOST
+
+
+async def test_a_device_added_after_a_removal_does_not_inherit_the_removed_ones_capabilities(tmp_path: Path) -> None:
+    """remove -> save -> add without a device_id -> save hands the freed id "main" to new hardware;
+    the removed device's verified capabilities and engineering mode must not follow that id."""
+    config = settings(tmp_path, devices=[DeviceEntry(device_id="main", host=HOST, port=PORT)])
+    admin_write_token(config)
+    async with running_app(config) as harness:
+        headers = await admin_session_headers(harness.client, "replacement-test-password")
+        # The fixture verified "main"; engineering mode is switched on for the removed device.
+        assert any(r.status.value == "verified" for r in harness.runtime.dispatch.capabilities("main"))
+        put_limits = await harness.client.put(
+            "/admin/api/dispatch/devices/main", headers=headers,
+            json={"max_charge_power_w": 3000, "max_discharge_power_w": 5000, "engineering_mode": True},
+        )
+        assert put_limits.status_code == 200, put_limits.text
+
+        removed = await harness.client.put(
+            "/admin/api/settings", headers=headers,
+            json={"devices": [{"device_id": "slave1", "host": "192.0.2.50", "port": 48990}]},
+        )
+        assert removed.status_code == 200, removed.text
+        assert "main" not in harness.runtime.devices
+
+        added = await harness.client.put(
+            "/admin/api/settings", headers=headers,
+            json={"devices": [
+                {"device_id": "slave1", "host": "192.0.2.50", "port": 48990},
+                {"host": "192.0.2.51", "port": 48991},
+            ]},
+        )
+        assert added.status_code == 200, added.text
+        assert "main" in harness.runtime.devices
+        assert all(r.status.value == "unverified" for r in harness.runtime.dispatch.capabilities("main"))
+        limits = harness.runtime.dispatch.device_limits("main")
+        assert limits is None or limits.engineering_mode is False

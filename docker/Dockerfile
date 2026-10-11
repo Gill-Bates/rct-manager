@@ -86,7 +86,7 @@ LABEL org.opencontainers.image.title="rct-api" \
 # loopback BIND_ADDRESS (unreachable through any port mapping) turns the container unhealthy.
 # The port follows BIND_PORT from settings.env; the image ships no HTTP client tools.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-    CMD ["python", "-c", "import os,socket,urllib.request as u; u.urlopen('http://%s:%s/health' % (socket.gethostbyname(socket.gethostname()), os.environ.get('BIND_PORT', '8080')), timeout=3)"]
+    CMD ["python", "-c", "import os,socket,urllib.request as u; u.urlopen('http://%s:%s/health' % (socket.gethostbyname(socket.gethostname()), os.environ.get('BIND_PORT', '8000')), timeout=3)"]
 
 # Exec form; the entrypoint ends in `exec gosu`, so the server is PID 1 and receives SIGTERM
 # directly for its graceful shutdown.

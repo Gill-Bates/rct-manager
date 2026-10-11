@@ -28,6 +28,7 @@ class BodyLimitMiddleware:
         response = build_problem(
             Request(scope),
             ErrorCode.INVALID_REQUEST,
+            status=413,  # Content Too Large; still a problem document with the invalid_request code
             detail=_DETAIL,
             errors=[FieldError(parameter="body", code=ErrorCode.INVALID_REQUEST.value, detail=_DETAIL)],
             headers={"Connection": "close"},  # the unread body must not be parsed as the next request
@@ -54,7 +55,7 @@ class BodyLimitMiddleware:
             if message["type"] == "http.request":
                 received += len(message.get("body", b""))
                 if received > self._max:
-                    # FastAPI maps a failing receive to 400, so the 422 is sent here and the app sees a disconnect.
+                    # FastAPI maps a failing receive to 400, so the 413 is sent here and the app sees a disconnect.
                     rejected = True
                     await self._reject(scope, receive, send)
                     return {"type": "http.disconnect"}

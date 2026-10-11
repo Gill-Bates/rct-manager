@@ -12,6 +12,18 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Literal
 
+NOTE_MAX_LENGTH = 200
+
+
+def check_printable_ascii(value: str | None, field: str, max_len: int) -> None:
+    """Reject a free-text field that is too long or holds a non-printable or non-ASCII character."""
+    if value is None:
+        return
+    if len(value) > max_len:
+        raise ValueError(f"{field} must contain at most {max_len} characters")
+    if any(ord(char) < 32 or ord(char) > 126 for char in value):
+        raise ValueError(f"{field} must contain printable ASCII")
+
 
 class DispatchRecordCorrupt(ValueError):
     """A persisted ``DispatchRecord`` is incomplete, inconsistent, or otherwise untrustworthy.
@@ -26,6 +38,8 @@ class DispatchMode(StrEnum):
     CHARGE_FROM_GRID = "charge_from_grid"
     DISCHARGE_TO_LOAD = "discharge_to_load"
     EXPORT_TO_GRID = "export_to_grid"
+    # Pin the battery at 0 W under external control: no SoC goal, no power budget.
+    HOLD = "hold"
 
 
 class DispatchState(StrEnum):
@@ -39,6 +53,7 @@ class DispatchState(StrEnum):
     RESTORING = "restoring"
     FAULT = "fault"
     FAULT_RESTORE_PENDING = "fault_restore_pending"
+    HOLDING = "holding"
 
 
 class DispatchPhase(StrEnum):
@@ -87,7 +102,9 @@ class PowerSetpoint:
 @dataclass(frozen=True, slots=True)
 class DispatchCommand:
     mode: DispatchMode
-    target_soc_percent: float
+    # The business stop goal, not a register value: None for a mode without one (HOLD). The field
+    # keeps its position and gets no default, so the positional call sites stay valid.
+    target_soc_percent: float | None
     max_power_w: float
     valid_until: datetime
     expected_operation_id: str | None = None
@@ -97,7 +114,7 @@ class DispatchCommand:
 class DispatchIntent:
     operation_id: str
     mode: DispatchMode
-    target_soc_percent: float
+    target_soc_percent: float | None
     max_power_w: float
     max_power_w_requested: float
     valid_until: datetime
@@ -146,9 +163,21 @@ class ControlTelemetry:
         )
         if not all(math.isfinite(value) for value in required):
             raise ValueError("control telemetry values must be finite")
+        # SoC is a percentage by this type's contract: the adapter has already converted the raw
+        # reading by its catalog unit, so a value outside 0..100 here is a unit/decoding fault, not
+        # a plausible charge level. Rejecting it at the domain boundary makes the range unambiguous
+        # for every producer (not only the RCT adapter) so a discharge guard cannot act on a SoC the
+        # firmware never meant (the ratio/percent safety finding).
+        if not 0.0 <= self.soc_percent <= 100.0:
+            raise ValueError("control telemetry soc_percent must be within 0..100")
         optional = (self.household_load_w, self.household_age_seconds)
         if any(value is not None and not math.isfinite(value) for value in optional):
             raise ValueError("household telemetry values must be finite when present")
+        ages = (self.soc_age_seconds, self.grid_age_seconds, self.battery_age_seconds)
+        if any(age < 0 for age in ages):
+            raise ValueError("control telemetry ages must not be negative")
+        if self.household_age_seconds is not None and self.household_age_seconds < 0:
+            raise ValueError("household telemetry age must not be negative")
 
 
 @dataclass(frozen=True, slots=True)
@@ -195,6 +224,23 @@ class DispatchConfig:
         for name in numeric_fields:
             if not math.isfinite(getattr(self, name)):
                 raise ValueError(f"{name} must be finite")
+        # Durations, powers, intervals and telemetry ages are physically non-negative; a negative
+        # value is nonsensical and some of them are unsafe. min_soc/max_soc have their own 0..100
+        # check below, so they are excluded here.
+        non_negative_fields = (
+            "grid_import_reserve_w", "grid_control_deadband_w", "power_write_deadband_w",
+            "min_write_interval_seconds", "cycle_interval_seconds", "telemetry_timeout_seconds",
+            "control_telemetry_max_age_seconds", "soc_telemetry_max_age_seconds",
+        )  # fmt: skip
+        for name in non_negative_fields:
+            if getattr(self, name) < 0:
+                raise ValueError(f"{name} must not be negative")
+        # The operation-duration caps must be strictly positive: a zero or negative cap makes
+        # submit() derive an effective deadline at or before "now", so it writes hardware and the
+        # very next tick() immediately expires it (the TTL safety bound never actually holds).
+        for name in ("max_operation_duration_seconds", "max_operation_duration_engineering_seconds"):
+            if getattr(self, name) <= 0:
+                raise ValueError(f"{name} must be positive")
         if self.min_soc < 0 or self.max_soc > 100 or self.min_soc >= self.max_soc:
             raise ValueError("min_soc must be smaller than max_soc, both within 0..100")
         if self.max_operation_duration_engineering_seconds > self.max_operation_duration_seconds:
@@ -231,11 +277,20 @@ def _tz_aware_or_none(value: object, field_name: str) -> datetime | None:
     return _tz_aware(datetime.fromisoformat(value), field_name)
 
 
+def _optional_number(value: object, field_name: str) -> float | None:
+    """A persisted ``float | None`` field: absent/null is a real value, a non-number is corruption."""
+    if value is None:
+        return None
+    return float(_strict_number(value, field_name, float))
+
+
 def _intent_from_dict(intent_data: dict) -> DispatchIntent:
     return DispatchIntent(
         operation_id=intent_data["operation_id"],
         mode=DispatchMode(intent_data["mode"]),
-        target_soc_percent=_strict_number(intent_data["target_soc_percent"], "target_soc_percent", float),
+        # A mode without a SoC goal (HOLD) persists target_soc_percent as null, and a record
+        # written before the field could be null carries a number — both load; a string does not.
+        target_soc_percent=_optional_number(intent_data.get("target_soc_percent"), "target_soc_percent"),
         max_power_w=_strict_number(intent_data["max_power_w"], "max_power_w", float),
         max_power_w_requested=_strict_number(
             intent_data["max_power_w_requested"], "max_power_w_requested", float
@@ -274,11 +329,8 @@ def validate_record_invariants(record: "DispatchRecord") -> None:
             raise DispatchRecordCorrupt("state is idle but intent is present")
         if record.restore_required:
             raise DispatchRecordCorrupt("state is idle but restore_required is set")
-    # PRECHECK is briefly reachable with no intent yet: submit() writes the durable intent before
-    # advancing the state in the very same put() call is not possible here, but recover()'s own
-    # handling of a crash in that narrow window constructs exactly this combination directly
-    # (DispatchRecord(device_id, state=PRECHECK) with no intent at all) and relies on from_dict()
-    # being able to round-trip it back out again.
+    # PRECHECK without an intent is legal: recover() builds and persists exactly that combination,
+    # so from_dict() must be able to round-trip it.
     elif record.state is not DispatchState.PRECHECK and record.intent is None:
         raise DispatchRecordCorrupt(f"state is {record.state.value} but intent is missing")
     if record.state in (DispatchState.RESTORING, DispatchState.FAULT_RESTORE_PENDING) and not record.restore_required:
@@ -298,10 +350,10 @@ class DispatchRecord:
     restore_required: bool = False
     plan: list[dict[str, str]] = field(default_factory=list)
     record_version: int = 0
-    # D1 (minimal slice, see design.md §6.2 for the full backoff feature): the earliest time a
-    # FAULT_RESTORE_PENDING device is eligible for an automatic retry. No backoff curve, no
-    # attempt counter yet — those belong to the deferred Arbeitspaket 3.
+    # Earliest time a FAULT_RESTORE_PENDING device is eligible for an automatic retry, and the
+    # number of consecutive failed restore attempts that drives the backoff.
     next_restore_at: datetime | None = None
+    restore_attempts: int = 0
 
     def to_dict(self) -> dict:
         data = asdict(self)
@@ -344,6 +396,7 @@ class DispatchRecord:
             next_restore_at = _tz_aware_or_none(data.get("next_restore_at"), "next_restore_at")
             stop_reason = StopReason(data["stop_reason"]) if data.get("stop_reason") else None
             record_version = _strict_number(data.get("record_version", 0), "record_version", int)
+            restore_attempts = max(0, _strict_number(data.get("restore_attempts", 0), "restore_attempts", int))
         except (KeyError, TypeError, ValueError) as exc:
             raise DispatchRecordCorrupt(f"dispatch record is malformed: {exc}") from exc
         record = cls(
@@ -359,13 +412,19 @@ class DispatchRecord:
             plan=list(data.get("plan", [])),
             record_version=record_version,
             next_restore_at=next_restore_at,
+            restore_attempts=restore_attempts,
         )
         validate_record_invariants(record)
         return record
 
 
 def phase_for(state: DispatchState) -> DispatchPhase:
-    if state in (DispatchState.CHARGING, DispatchState.DISCHARGING, DispatchState.TARGET_REACHED):
+    if state in (
+        DispatchState.CHARGING,
+        DispatchState.DISCHARGING,
+        DispatchState.HOLDING,
+        DispatchState.TARGET_REACHED,
+    ):
         return DispatchPhase.CONTROLLING
     if state in (DispatchState.FAULT, DispatchState.FAULT_RESTORE_PENDING):
         return DispatchPhase.FAULT

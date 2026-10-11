@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block title %}Energy Manager – RCT Administration{% endblock %}
+{% block content %}
+<div class="page-heading">
+    <div>
+        <h1>Energy Manager</h1>
+        <p class="text-secondary mb-0">Battery control per inverter. <strong>Manual</strong> lets you charge, keep the
+            battery idle or discharge it from this page; <strong>External</strong> hands control to a third-party app
+            that uses the REST API with a token. The live energy flow is on the dashboard.</p>
+    </div>
+    <div class="form-check form-switch energy-expert-switch">
+        <input class="form-check-input" type="checkbox" role="switch" id="energy-expert-mode" autocomplete="off">
+        <label class="form-check-label" for="energy-expert-mode">Expert mode: <span id="energy-expert-state">Off</span></label>
+    </div>
+</div>
+<div id="energy-list" class="energy-grid"></div>
+{% endblock %}

@@ -2,7 +2,7 @@
 
 `GET /metrics` serves the Prometheus text format. A scrape never reads the
 device; it exports cached values. With the metrics endpoint switched off (GUI **Prometheus** page or
-`ENABLE_METRICS_ENDPOINT=false` as a first-start seed) the route is not mounted and answers 404.
+`ENABLE_METRICS_ENDPOINT=false` as a first-start seed) `/metrics` answers 404.
 
 By default a scrape needs `Authorization: Bearer <token>` with a `read` token.
 The **Prometheus** page lets an administrator change this requirement and enter
@@ -39,10 +39,13 @@ rct_inverter_state{device="main",state="feed_in"} 0
 ## Freshness
 
 The numeric values selected on the **Prometheus** page (initially the preselected set) are
-registered as periodic reads after every (re)connect. The Overview dashboard needs a few more
-values (operating state, battery status, battery target and next calibration date); they are
-added to the periodic reads as long as the limit below leaves room, even when they are not
-exposed on `/metrics`. A value counts as fresh for at most three times the periodic
+registered as periodic reads after every (re)connect. Two further groups are added even when they
+are not exposed on `/metrics`: the energy-flow figures (battery SoC, grid, PV, house load and
+battery power), which feed the dashboard graphic and the Energy Manager, and the values of the
+dashboard cards (operating state, temperatures, battery status, cycles, SoC target, next
+calibration date and the battery module serials). The energy-flow figures always get a slot: when
+the selection is full, exposed metrics from its end are left out of the periodic reads (logged as a
+warning). The card values only fill the room that is left. A value counts as fresh for at most three times the periodic
 interval after its last update; a value that cannot be refreshed ages visibly
 (`rct_device_metric_age_seconds`) and leaves `/metrics` after the grace period.
 At most 64 values per device are possible; more refuse the start
