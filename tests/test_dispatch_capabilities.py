@@ -348,6 +348,42 @@ def test_optional_bool_is_fail_closed_on_deserialization() -> None:
         CapabilityRecord.from_dict(data)
 
 
+@pytest.mark.parametrize(
+    "name, missing_key",
+    [
+        (CapabilityName.BATTERY_POWER_SIGN, "battery_discharge_positive"),
+        (CapabilityName.GRID_POWER_SIGN, "grid_import_positive"),
+        (CapabilityName.WRITE_PATH, "soc_target_unit"),
+        (CapabilityName.WRITE_PATH, "note"),
+    ],
+)
+def test_verified_from_dict_requires_explicit_evidence_keys(name: CapabilityName, missing_key: str) -> None:
+    """P2-02: a persisted VERIFIED record whose evidence key is absent must be rejected. The sign
+    flags and soc_target_unit have a non-None default that from_dict() would otherwise fill, so a
+    defaulted assumption would read back as confirmed hardware. Presence is required instead, which
+    rejects an older VERIFIED row that predates the now-mandatory soc_target_unit."""
+    data = verified("main", name).to_dict()
+    del data[missing_key]
+    with pytest.raises(ValueError, match="missing evidence"):
+        CapabilityRecord.from_dict(data)
+
+
+def test_verified_from_dict_accepts_a_record_with_all_evidence_keys_present() -> None:
+    """The guard is presence-only: a complete VERIFIED record still round-trips unchanged."""
+    for name in (CapabilityName.BATTERY_POWER_SIGN, CapabilityName.GRID_POWER_SIGN, CapabilityName.WRITE_PATH):
+        record = verified("main", name, note="checked on site")
+        assert CapabilityRecord.from_dict(record.to_dict()) == record
+
+
+def test_unverified_from_dict_does_not_require_evidence_keys() -> None:
+    """Only a VERIFIED record is held to the evidence contract; an unverified row loads with the
+    assumption defaults even when the keys are absent (it releases nothing)."""
+    data = CapabilityRecord("main", CapabilityName.WRITE_PATH).to_dict()
+    for key in ("soc_target_unit", "note"):
+        data.pop(key, None)
+    assert CapabilityRecord.from_dict(data).status is CapabilityStatus.UNVERIFIED
+
+
 # --- The port is the only writer (design 4.4) ------------------------------------------------
 
 

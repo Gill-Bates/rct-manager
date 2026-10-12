@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rct-manager"
-version = "1.0.0"
+version = "1.1.0"
 description = "Your REST gateway for RCT Power inverters"
 requires-python = ">=3.13"
 authors = [{ name = "Gill-Bates" }]
@@ -15,6 +15,8 @@ dependencies = [
     "cryptography>=50.0.2",
     "fastapi>=0.139",
     "jinja2>=3.1.6",
+    "markdown==3.11",
+    "nh3==0.3.7",
     "pydantic>=2.13",
     "pydantic-settings>=2.14",
     "starlette>=1.7",
@@ -30,7 +32,6 @@ dev = [
     "ruff>=0.17",
 ]
 docs = [
-    "markdown==3.11",
     "mkdocs==1.6.1",
     "mkdocs-git-revision-date-localized-plugin==1.6.0",
     "mkdocs-material==9.7.7",
@@ -43,6 +44,7 @@ include = ["app*"]
 [tool.setuptools.package-data]
 "app.catalog" = ["*.json"]
 "app.admin" = ["templates/*.html", "static/*", "static/**/*"]
+"app.api" = ["docs_static/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -58,7 +60,7 @@ line-length = 120
 # FAST: FastAPI-specific rules (not in Ruff's default set, checked for 0.16 and 0.17). S: flake8-bandit,
 # only S102/S110/S112 are default; this is an authenticated REST gateway with password hashing and a
 # TLS/token client.
-extend-select = ["FAST", "S"]
+extend-select = ["FAST", "S", "DTZ"]
 # EXE001: modules carry a shebang in their file header but are run via `python -m app`.
 # S101: the app's asserts only narrow Optional types or state an invariant that the code path above
 # guarantees; the service is never started with `python -O` (no Dockerfile/entrypoint sets it).

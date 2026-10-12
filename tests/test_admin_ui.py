@@ -28,8 +28,15 @@ JS = ADMIN_DIR / "static/js/admin.js"
 TEMPLATES = ADMIN_DIR / "templates"
 
 
+E2E_ADMIN_FLOW = Path(__file__).resolve().parent / "e2e" / "admin_flow.mjs"
+
+
 # The Swagger UI sidebar ships user-visible text too, so it is covered by the English-only check.
-DOCS_NAV = Path(__file__).resolve().parent.parent / "app" / "api" / "docs_nav.py"
+# The sidebar's styles and script live in self-hosted assets (served under /docs-assets), so the
+# check covers those files as well, not only the Python module that injects the <link>/<script>.
+API_DIR = Path(__file__).resolve().parent.parent / "app" / "api"
+DOCS_NAV = API_DIR / "docs_nav.py"
+DOCS_NAV_ASSETS = [API_DIR / "docs_static" / "docs-nav.css", API_DIR / "docs_static" / "docs-nav.js"]
 
 
 PAGES = ("dashboard", "inverters", "energy", "tsdb", "prometheus", "tokens", "settings")
@@ -127,6 +134,10 @@ async def test_about_update_check_requires_login_and_renders_release_controls(tm
         assert 'id="update-current-version"' in page.text
         assert 'id="update-latest-version"' in page.text
         assert '/admin/static/js/about.js' in page.text
+        # The changelog is rendered as sanitized Markdown/HTML, not escaped text: the native
+        # <details> disclosure must survive and nothing may arrive double-escaped.
+        assert "<details" in page.text and "<summary>Previous versions...</summary>" in page.text
+        assert "&lt;details&gt;" not in page.text
         result = await client.get("/admin/api/check-updates")
         assert result.status_code == 200
         assert result.json()["latest_version"] == "1.1.0"
@@ -147,8 +158,46 @@ def test_frontend_has_no_german_text():
                  *ADMIN_DIR.glob("static/img/*.svg"),
                  ADMIN_DIR / "static/css/admin.css", ADMIN_DIR / "static/css/about.css",
                  ADMIN_DIR / "api.py", ADMIN_DIR / "ui.py",
-                 DOCS_NAV]:
+                 DOCS_NAV, *DOCS_NAV_ASSETS]:
         assert not german.search(path.read_text(encoding="utf-8")), path.name
+
+
+def test_render_changelog_sanitizes_markdown_and_keeps_the_details_disclosure(tmp_path, monkeypatch):
+    """The About page renders CHANGELOG.md as sanitized Markdown: the <details>/<summary>
+    disclosure and every list item survive, a disallowed tag is stripped, and nothing is
+    double-escaped. This is the contract the old line parser broke (it escaped tags and dropped
+    items in releases without a ### group)."""
+    from app.admin import ui
+
+    changelog = tmp_path / "CHANGELOG.md"
+    changelog.write_text(
+        "## [1.0.1] - 2026-xx-xx\n\n"
+        "- `Fix` Changelog rendering\n\n"
+        '<details markdown="1">\n'
+        "<summary>Previous versions...</summary>\n\n"
+        "## [1.0.0] - 2026-10-11\n\n"
+        "- Initial Release\n"
+        '<script>alert(1)</script>\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(ui, "_CHANGELOG", changelog)
+    html = ui._render_changelog()
+
+    assert "<details" in html and "<summary>Previous versions...</summary>" in html
+    assert "1.0.1" in html and "1.0.0" in html
+    assert "Initial Release" in html  # the old parser silently dropped this ungrouped item
+    assert "<code>Fix</code>" in html
+    # nh3 drops the script tag, and real HTML (not escaped entities) reaches the DOM.
+    assert "<script" not in html and "alert(1)" not in html
+    assert "&lt;details&gt;" not in html
+
+
+def test_render_changelog_reports_a_safe_fallback_when_the_file_is_missing(tmp_path, monkeypatch):
+    from app.admin import ui
+
+    monkeypatch.setattr(ui, "_CHANGELOG", tmp_path / "does-not-exist.md")
+    html = ui._render_changelog()
+    assert html == "<p>Failed to read changelog.</p>"
 
 
 def test_connection_monitor_probes_health_and_the_modal_is_wired_into_every_page():
@@ -299,6 +348,16 @@ def test_metrics_fields_hide_behind_the_master_toggle():
     assert "$('prometheus-toggle')" in js
 
 
+def test_token_table_shows_masked_suffix_between_permission_and_created():
+    html = (ADMIN_DIR / "templates/tokens.html").read_text(encoding="utf-8")
+    js = (ADMIN_DIR / "static/js/admin.js").read_text(encoding="utf-8")
+    headers = re.findall(r'<th scope="col">([^<]+)</th>', html)
+    assert headers.index("Token") == headers.index("Permission") + 1 == headers.index("Created") - 1
+    # The masked suffix renders as a boxed monospace code element; old tokens fall back to a placeholder.
+    assert "element('code', 'token-suffix', `…${token.suffix}`)" in js
+    assert "cell.append('—')" in js
+
+
 def test_token_expiry_uses_presets_with_a_ninety_day_default():
     html = (ADMIN_DIR / "templates/tokens.html").read_text(encoding="utf-8")
     js = (ADMIN_DIR / "static/js/admin.js").read_text(encoding="utf-8")
@@ -315,6 +374,15 @@ def test_token_expiry_uses_presets_with_a_ninety_day_default():
     # Tokens live in a modal over a table; the secret is cleared when the modal closes.
     assert 'id="add-token-modal"' in html and 'id="new-token-box"' not in html
     assert "hidden.bs.modal" in js and "$('new-token-value').textContent = '';" in js
+
+
+def test_token_copy_has_a_browser_regression_check_for_the_http_modal_fallback():
+    """The browser test must cover the path used on a non-TLS LAN deployment, not only Clipboard API success."""
+    e2e = E2E_ADMIN_FLOW.read_text(encoding="utf-8")
+    assert "token copy icon is centred in its button" in e2e
+    assert "Clipboard denied" in e2e
+    assert "insideOpenModal" in e2e
+    assert "copying the PAT falls back inside the open modal and enables Done" in e2e
 
 
 def test_parameter_action_buttons_have_touch_target_size():
@@ -382,7 +450,7 @@ def test_export_group_is_withheld_as_a_group_and_revalidated_at_send_time():
     queue = js[js.index("function queueExportSettings()"):js.index("function refreshExportBar()")]
     assert "setSectionState('export', 'incomplete', missingExportHint(type));" in queue
     assert "scheduleSettingsFlush" not in queue and "flushSettings" not in queue  # no autosave for the export form
-    apply = js[js.index("async function applyExport()"):js.index("function tsdbStatusView()")]
+    apply = js[js.index("async function applyExport()"):js.index("function appendTsdbConsoleLine(")]
     assert "if (!exportReady(type)) { queueExportSettings(); return; }" in apply
     assert "pendingExportGroup = true;" in apply and "flushSettings({ sections: ['export'] })" in apply
     # The debounced autosave only covers the general settings, never the export group.
@@ -677,6 +745,45 @@ def test_device_remove_handler_confirms_saves_and_keeps_focus():
     assert "devices.splice(index, 1)" not in js
     # Focus: back to the trash on cancel or failure, else the next row or the new row's host input.
     assert "if (button.isConnected) button.focus();" in handler and "#device-new-host" in handler
+
+
+def test_dashboard_card_trash_icon_reuses_the_modal_delete_flow():
+    """The dashboard inverter card surfaces the same delete as the modal: a danger trash icon that
+    maps the GET /devices card to the draft inverter by its server id and hands off to removeDevice,
+    so the confirm dialog, busy-guard, PUT /settings and refresh stay a single implementation."""
+    js = JS.read_text(encoding="utf-8")
+    css = (ADMIN_DIR / "static/css/admin.css").read_text(encoding="utf-8")
+    # The card builds the same Material danger button as the modal, with the icon kept aria-hidden.
+    card = js[js.index("function createDeviceCard("):js.index("function patchDeviceCard(")]
+    # The standard square icon-button shape, not the round .device-toggle: no border-radius: 50%.
+    assert "const remove = element('button', 'device-remove icon-button btn btn-outline-danger');" in card
+    assert "element('span', 'material-icons', 'delete_outline')" in card
+    assert "removeIcon.setAttribute('aria-hidden', 'true');" in card
+    # The trash click goes through the dashboard handler, never a second delete implementation.
+    assert "removeDashboardDevice(ref, remove)" in card
+    # The button is in the header row and carries an accessible label naming the inverter.
+    patch = js[js.index("function patchDeviceCard("):js.index("const DASHBOARD_INTERVAL_MS")]
+    assert "ref.removeId = device.id;" in patch
+    assert "`Remove inverter ${device.name || device.id || device.host || NOT_AVAILABLE}`" in patch
+    assert "ref.remove.setAttribute('aria-label', removeLabel);" in patch
+    assert "ref.remove]" in patch  # appended to both the connected and the disconnected header row
+    # The handler respects the busy-guard, loads the draft lazily (SEC-06) and reuses removeDevice.
+    handler = js[js.index("async function removeDashboardDevice("):js.index("// Deleting reconfigures")]
+    assert "if (deviceUi.busy) return;" in handler
+    assert "await ensureDeviceDraft();" in handler
+    # Mapped by the server-assigned id (card device.id === draft device_id), not a client _uid.
+    assert "entry.device_id === ref.removeId" in handler
+    assert "await removeDevice(device._uid, button);" in handler
+    # The lazy loader fetches settings once and mints the draft identities via adoptDevices.
+    loader = js[js.index("async function ensureDeviceDraft("):js.index("async function removeDashboardDevice(")]
+    assert "if (Array.isArray(settingsDraft.devices)) return;" in loader
+    assert "await api('settings')" in loader
+    assert "adoptDevices(settingsDraft.devices)" in loader
+    # The icon button is styled to sit in the compact header, and is NOT round (unlike .device-toggle).
+    remove_css = css[css.index(".device-remove {"):css.index(".device-remove .material-icons")]
+    assert "border-radius: 50%" not in remove_css
+
+
 def test_build_group_body_is_shared_so_a_group_rerender_adds_no_second_heading():
     js = JS.read_text(encoding="utf-8")
     builder = js[js.index("function buildGroupBody(group)"):js.index("function groupSectionId(")]
@@ -767,6 +874,20 @@ def test_dates_follow_the_browser_locale():
     block = js[start:js.index("function ", start + 10)]
     assert "Intl.DateTimeFormat(undefined" in block
     assert "'en-GB'" not in block and "toLocaleDateString" not in block
+
+
+def test_time_and_power_helpers_follow_the_browser_locale():
+    js = (ADMIN_DIR / "static/js/admin.js").read_text(encoding="utf-8")
+    hhmm = js[js.index("const hhmm"):js.index("function element(")]
+    assert "toLocaleTimeString(undefined" in hhmm and "'en-GB'" not in hhmm
+    power_start = js.index("const power = (value)")
+    power = js[power_start:js.index("const modalEl", power_start)]
+    assert "toLocaleString(undefined" in power and "'en-GB'" not in power
+
+
+def test_shipped_admin_js_pins_no_region_locale():
+    for name in ("static/js/admin.js", "static/js/connection.js"):
+        assert "'en-GB'" not in (ADMIN_DIR / name).read_text(encoding="utf-8"), name
 
 
 @pytest.mark.asyncio
@@ -908,7 +1029,8 @@ def test_energy_poll_is_bounded_keeps_panels_and_never_overwrites_a_running_acti
     # Panels of surviving devices are kept; polls requested before an action finished are dropped.
     assert "energyPanels.clear()" not in poll.split("const ordered")[0]
     assert "panel.acceptsPoll(requestedAt)" in poll
-    assert "pendingMode ?? device.mode" in js
+    assert "pendingMode === 'off' ? null" in js
+    assert "device.mode === 'off' && !offConfirmed() ? null : device.mode" in js
     # A selected mode that the unfinished setup blocks is shown as pending, never as active.
     assert "setupLead.hidden = !pendingSetup" in js and "'is-pending'" in js
     assert ".energy-mode-option.is-selected.is-pending" in (ADMIN_DIR / "static/css/admin.css").read_text(encoding="utf-8")

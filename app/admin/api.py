@@ -8,16 +8,19 @@
 
 import asyncio
 import hmac
+import json
 import logging
 import re
 import threading
 import time
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from ipaddress import ip_address
 from secrets import token_urlsafe
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from app.admin.store import SESSION_SECONDS
@@ -316,6 +319,59 @@ def session(request: Request, response: Response) -> dict:
     return {"authenticated": True, "must_change_password": state["must_change_password"], "csrf_token": csrf}
 
 
+# Idle interval between SSE heartbeats (``: ping`` comment lines). Keeps reverse proxies and idle
+# timeouts from dropping an otherwise-silent stream; bounded so the generator never blocks forever.
+_SSE_HEARTBEAT_SECONDS = 15.0
+
+
+def _sse_frame(event) -> str:
+    """Serialise one hub Event to an SSE frame: id + named event type + JSON data line."""
+    payload = json.dumps(event.data, ensure_ascii=False)
+    return f"id: {event.id}\nevent: {event.type}\ndata: {payload}\n\n"
+
+
+@router.get("/events")
+async def events(request: Request) -> StreamingResponse:
+    """Central, domain-agnostic SSE feed of in-process events (text/event-stream).
+
+    Authenticated like the rest of the admin read API: ``require_admin`` accepts the same-origin
+    ``rct_admin_session`` cookie that the browser's ``EventSource`` sends automatically (a valid PAT
+    also passes), so there is no token in the URL and no new secret. The endpoint owns only transport
+    and subscription lifecycle; it serialises whatever typed events the hub carries (Phase 1: the
+    ``tsdb.log`` events published by the logging handler) without any domain knowledge.
+
+    ``Last-Event-ID`` is read and ignored for durability (Phase 1 does no reliable replay); a
+    reconnecting client simply receives whatever is still in the per-type backlog.
+    """
+    require_admin(request)
+    hub = request.app.state.event_hub
+    _ = request.headers.get("last-event-id")  # accepted cleanly; no durable replay in Phase 1
+
+    async def generator() -> AsyncIterator[str]:
+        async with hub.subscribe() as (backlog, queue):
+            for event in backlog:  # replay the recent per-type backlog, then stream live
+                yield _sse_frame(event)
+            while True:
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=_SSE_HEARTBEAT_SECONDS)
+                except TimeoutError:
+                    yield ": ping\n\n"  # heartbeat; keeps proxies/idle timeouts from dropping the stream
+                    continue
+                yield _sse_frame(event)
+
+    # RequestContextMiddleware already forces Cache-Control: no-store on every response (stronger than
+    # no-cache, correct for a live stream), so it is not repeated here. X-Accel-Buffering disables
+    # proxy buffering so events are flushed to the browser immediately.
+    return StreamingResponse(
+        generator(),
+        media_type="text/event-stream",
+        headers={
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",  # tell nginx not to buffer the stream
+        },
+    )
+
+
 @router.get("/check-updates")
 def check_updates(request: Request, response: Response, force: bool = False) -> dict:
     """Check the latest RCT REST API release for a signed-in administrator."""
@@ -399,37 +455,6 @@ def _settings_persisted(settings: Settings) -> dict[str, Any]:
         if secret is not None:
             result[key] = secret.get_secret_value()
     return result
-
-
-_NAME_MIGRATION = "devices_display_name_repaired"
-
-
-def _is_address_name(device) -> bool:
-    return device.display_name in {f"{device.host}:{device.port}", device.host}
-
-
-def repair_device_names(store, desired: Settings) -> Settings:
-    """Older saves stored host:port as display_name, which then beat the name the inverter reports.
-
-    Runs once per database, at startup (a GET must never persist), and drops only those
-    address-shaped names, so an operator-chosen name stays. Returns the settings to run with.
-    """
-    if store.get(_NAME_MIGRATION):
-        return desired
-    if any(_is_address_name(device) for device in desired.devices):
-        repaired = []
-        for device in desired.devices:
-            entry = device.model_dump(mode="json")
-            if _is_address_name(device):
-                entry["display_name"] = None
-            repaired.append(entry)
-        try:
-            desired = store.merge_operator_settings(desired, {"devices": repaired})
-        except ValidationError:
-            log.warning("Device name repair skipped: the stored settings did not validate")
-            return desired
-    store.put(_NAME_MIGRATION, True)
-    return desired
 
 
 @router.get("/settings")
@@ -748,7 +773,9 @@ def _check_listener(running: Settings, desired: Settings, body: dict[str, Any]) 
         return  # the model validation of the merge reports the malformed value
     if (address, port) == (str(running.bind_address), running.bind_port):
         return
-    reason = probe_listener(address, port, port_unchanged=port == running.bind_port)
+    reason = probe_listener(
+        address, port, port_unchanged=port == running.bind_port, current_address=str(running.bind_address)
+    )
     if reason is not None:
         raise HTTPException(409, f"{reason} The previous listener stays active.")
 
@@ -802,6 +829,16 @@ def _enable_write_support(request: Request, generation: int) -> None:
     except _TransitionBusy:
         _revert_write_support(request, generation)
         raise HTTPException(409, _BUSY_DETAIL) from None
+    except TimeoutError as exc:
+        # The waiter gave up but enable_dispatch keeps running (see _run_on_loop). Reverting the
+        # switch now would leave the saved/global write switch off while a still-building dispatch
+        # may finish and activate. Keep central ownership of the future instead: revert only on a
+        # later genuine failure, keep the enabled state on a late success.
+        log.error("Enabling battery dispatch did not finish within %.0f s", _RECONFIGURE_TIMEOUT_SECONDS)
+        _defer_write_support_reconcile(request, generation)
+        raise HTTPException(
+            504, "Write support is still being enabled; check the status before changing it again."
+        ) from exc
     except Exception:
         # Writes would be accepted by the router but have no dispatch to run on: fail closed.
         log.exception("Building battery dispatch for the enabled write support failed")
@@ -826,18 +863,7 @@ def _revert_write_support(request: Request, generation: int) -> None:
 
     Skipped when a newer save has changed the switch since: that save owns the value now.
     """
-    state = request.app.state
-    with _SETTINGS_LOCK:
-        if getattr(state, "write_support_generation", 0) != generation:
-            return
-        reverted = _store(request).merge_operator_settings(
-            state.admin_desired_settings, {"enable_write_support": False}
-        )
-        state.admin_desired_settings = reverted
-        state.runtime.settings = state.runtime.settings.model_copy(
-            update={"enable_write_support": False}
-        )
-        state.security.write_enabled = False
+    _revert_write_support_on_state(request.app.state, _store(request), generation)
 
 
 def _approve_default_writes(request: Request) -> None:
@@ -919,6 +945,57 @@ def _defer_devices_rollback(request: Request, updated: Settings, previous: Setti
         # Offloaded: _revert_devices_on_state takes _SETTINGS_LOCK and writes SQLite, which must
         # not run on the event loop thread the done-callback fires on.
         loop.run_in_executor(None, _revert_devices_on_state, state, store, updated, previous)
+
+    future.add_done_callback(_on_done)
+
+
+def _revert_write_support_on_state(state, store, generation: int) -> None:
+    """Core write-support rollback, independent of a live HTTP request.
+
+    Takes ``state``/``store`` rather than a request so the deferred post-timeout reconcile (see
+    ``_defer_write_support_reconcile``) can run it after the HTTP caller is gone. Generation-guarded
+    like ``_revert_write_support``: a newer save that already changed the switch owns the value now.
+    """
+    with _SETTINGS_LOCK:
+        if getattr(state, "write_support_generation", 0) != generation:
+            return
+        reverted = store.merge_operator_settings(
+            state.admin_desired_settings, {"enable_write_support": False}
+        )
+        state.admin_desired_settings = reverted
+        state.runtime.settings = state.runtime.settings.model_copy(
+            update={"enable_write_support": False}
+        )
+        state.security.write_enabled = False
+
+
+def _defer_write_support_reconcile(request: Request, generation: int) -> None:
+    """After an enable timed out, keep ownership of the still-running ``enable_dispatch`` future.
+
+    The HTTP waiter is gone, but the coroutine runs on. A clean completion keeps the enabled state
+    the operator asked for; a later genuine failure reverts the switch so the gateway is not left
+    accepting writes it has no dispatch to run on. A cancellation needs no revert.
+    """
+    state = request.app.state
+    future = getattr(state, "live_transition", None)
+    loop = getattr(state, "loop", None)
+    store = getattr(state, "admin_store", None)
+    if future is None or loop is None or store is None:
+        return
+
+    def _on_done(fut) -> None:
+        try:
+            exc = fut.exception()
+        except asyncio.CancelledError:  # the coroutine was cancelled: nothing to roll back
+            return
+        if exc is None:  # late success: keep the enabled state
+            return
+        log.error(
+            "A write-support enable that outlived its HTTP wait failed; reverting the write switch"
+        )
+        # Offloaded: _revert_write_support_on_state takes _SETTINGS_LOCK and writes SQLite, which
+        # must not run on the event loop thread the done-callback fires on.
+        loop.run_in_executor(None, _revert_write_support_on_state, state, store, generation)
 
     future.add_done_callback(_on_done)
 
@@ -1314,6 +1391,7 @@ def devices(request: Request) -> dict:
         flow = runtime.energy_readings.readings(item.device_id) if runtime.energy_readings else None
         result.append({
             "id": item.device_id, "name": item.display_name or reported or item.device_id,
+            "name_is_fallback": not (item.display_name or reported),
             "serial_number": runtime.gateway.reported_serial(item.device_id),
             "status": status.state.value, "host": item.host, "port": item.port,
             "last_success_at": status.last_success_at.isoformat() if status.last_success_at else None,

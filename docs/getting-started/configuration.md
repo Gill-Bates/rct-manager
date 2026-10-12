@@ -30,11 +30,10 @@ The GUI never displays the secret.
 `ADMIN_DB_PATH` overrides the database location (default `<project>/data/rct.db`).
 
 The very first start prints the generated `admin` password in clear text in the boxed
-`FIRST START - admin login` block on stdout, so it can be copied straight from the console. It is
-also saved to `initial-admin-password` in the same directory, with mode `0600`, as a fallback for
-runs without a visible console. The password never appears in the log. Change it at first login
-and delete the file; keep the directory out of version control and out of backups that are shared
-more widely than the database itself.
+`FIRST START` block on stdout, so it can be copied straight from the console; it is shown only on
+this initial bootstrap, not on later restarts. The console output is persisted and centrally
+collected in systemd/Docker/Kubernetes, so the password may remain in log history — a deliberately
+accepted tradeoff. Change it at first login.
 
 The database runs in SQLite WAL mode (`synchronous=NORMAL`, 5 s busy timeout), so concurrent
 autosaves, sessions and token bookkeeping do not block each other. While the service runs,

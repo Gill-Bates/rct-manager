@@ -7,10 +7,12 @@
 """Battery dispatch state machine and recovery loop (REQ-100..REQ-125)."""
 
 import asyncio
+import contextlib
 import logging
 import math
 import uuid
 from collections.abc import Iterable
+from dataclasses import replace
 from datetime import datetime, timedelta
 
 from app.clock import Clock
@@ -464,9 +466,19 @@ class DispatchController:
                 if record.next_restore_at is not None and self._clock.now() >= record.next_restore_at:
                     await self._restore(record, record.stop_reason or StopReason.DEVICE_ERROR, record.fault_code)
                 return self._status(record)
-            if record.state in (DispatchState.APPLYING, DispatchState.REPLACING, DispatchState.RESTORING):
-                # An interrupted apply/restore (failed _put, unexpected error) left hardware
-                # half-written; submit() holds this lock while it runs, so this is never live.
+            if record.state in (
+                DispatchState.PRECHECK,
+                DispatchState.APPLYING,
+                DispatchState.REPLACING,
+                DispatchState.RESTORING,
+            ):
+                # An interrupted precheck/apply/restore left hardware possibly half-written;
+                # submit() holds this lock while it runs, so this is never live. PRECHECK is
+                # included because submit() persists the intent as PRECHECK *before* read_snapshot()
+                # (D-08); if that read raised there is no cleanup path, so without this the record
+                # stays PRECHECK forever and its TTL is never processed. For PRECHECK+snapshot=None
+                # _restore_guarded() resets to IDLE without a hardware restore (nothing was written
+                # yet); a PRECHECK that already carries a snapshot is restored like any other.
                 await self._restore(record, StopReason.DEVICE_ERROR, "recovery_required")
                 return self._status(record)
             if record.state not in (
@@ -602,6 +614,18 @@ class DispatchController:
             await self._restore(record, StopReason.OPERATOR_CANCELLED)
             return self._status(record)
 
+    async def switch_to_internal(self, device_id: str, *, idle_only: bool = False) -> None:
+        async with self._lock(device_id):
+            record = await self._get(device_id)
+            async with self._gateway.restore_barrier(device_id):
+                if record.state is not DispatchState.IDLE or record.intent is not None or record.restore_required:
+                    if idle_only:
+                        raise DispatchRejected("dispatch_operation_conflict")
+                    await self._restore_guarded(record, StopReason.OPERATOR_CANCELLED)
+                    if record.state is not DispatchState.IDLE or record.restore_required:
+                        raise DispatchRejected("dispatch_restore_required")
+                await self._gateway.apply_internal_strategy(device_id)
+
     def set_limits(self, limits: dict[str, DeviceLimits]) -> None:
         """Replace the per-device power limits in place, for a live device-list reconfiguration."""
         self._limits = limits
@@ -661,6 +685,38 @@ class DispatchController:
             await self._raise_if_active(device_id)
             await asyncio.to_thread(self._store.put_soc_target_policy, policy)
             self._soc_target_policies.replace(policy)
+
+    async def reset_identity_bound_state(self, device_ids: Iterable[str]) -> None:
+        """Clear the identity-bound persistent state of every device in ``device_ids`` atomically.
+
+        For a device-list reconfiguration that frees or re-addresses a device_id: the old physical
+        device's capability evidence, engineering-mode switch and SoC-target policy must not survive
+        onto whatever device now answers at that id. All of it is reset in ONE store transaction, so
+        a mid-sequence failure can no longer leave a persisted mix (verification wiped but policy
+        kept, or engineering mode off but capabilities intact) that the reconfiguration cannot roll
+        back. The in-memory registries are updated only after the commit returns, the same
+        commit-then-publish order the single-device setters follow. The power limits are a
+        site/installation property, so they are kept; only the engineering switch is cleared.
+
+        Takes every affected device's lock first (in a deterministic order to avoid a lock cycle)
+        and refuses while any of them has an active operation, exactly like the single-device
+        setters: a reset must not land in the middle of an apply sequence.
+        """
+        ids = sorted(set(device_ids))
+        if not ids:
+            return
+        async with contextlib.AsyncExitStack() as stack:
+            for device_id in ids:
+                await stack.enter_async_context(self._lock(device_id))
+            for device_id in ids:
+                await self._raise_if_active(device_id)
+            await asyncio.to_thread(self._store.reset_identity_bound_state, ids)
+            for device_id in ids:
+                self._capabilities.reset(device_id)
+                self._soc_target_policies.reset(device_id)
+                limits = self._limits.get(device_id)
+                if limits is not None and limits.engineering_mode:
+                    self._limits[device_id] = replace(limits, engineering_mode=False)
 
     def capabilities(self, device_id: str) -> tuple[CapabilityRecord, ...]:
         return self._capabilities.all(device_id)

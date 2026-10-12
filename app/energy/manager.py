@@ -99,6 +99,7 @@ class EnergyManager:
         approved_writes: Callable[[], Awaitable[tuple[str, ...]]] | None,
         allowlist_candidates: Callable[[], frozenset[str]] | None,
         required_writes: tuple[str, ...],
+        internal_strategy_write: str,
         revoke_writes: Callable[[Iterable[str]], Awaitable[Sequence[str]]] | None = None,
         modes: Mapping[str, ModeRecord] | None = None,
     ) -> None:
@@ -119,6 +120,7 @@ class EnergyManager:
         self._approved_writes = approved_writes
         self._allowlist_candidates = allowlist_candidates
         self._required_writes = required_writes
+        self._internal_strategy_write = internal_strategy_write
         # Separate compensation primitive: the add-only ``approve_writes`` cannot remove a name, so
         # a failed commit's rollback must go through a replace/remove path instead (P2). When no
         # revoker is injected, the rollback is skipped rather than silently no-op'd through the
@@ -164,6 +166,9 @@ class EnergyManager:
     def mode_record(self, device_id: str) -> ModeRecord:
         """The mode row of one device, for the admin surface's display-only fields."""
         return self._record(device_id)
+
+    def mode_recorded(self, device_id: str) -> bool:
+        return device_id in self._mode_states
 
     async def approved_write_names(self) -> tuple[str, ...]:
         """The live write allowlist, state-independent, for the admin Setup checklist.
@@ -463,28 +468,50 @@ class EnergyManager:
             await self._handback(device_id)  # raises dispatch_restore_required, mode stays as it was
 
     async def _switch_off(self, device_id: str, actor: str | None) -> None:
-        """Design 2.6.2: hand back first, refuse while the device is still controlled, remove no
-        write approval — another feature, another device or the operator's own selection may depend
-        on those registers.
-        """
+        """Confirm the inverter's Internal strategy before recording Off."""
         current = self._record(device_id)
-        if not current.armed:
-            return  # off from off is a true no-op: an expert-API dispatch stays untouched
-        await self._release(device_id)
-        if self._store is None:
+        if not current.armed and not self._write_support_enabled():
+            raise EnergyRejected("energy_write_support_required", device_id=device_id)
+        if (
+            self._port is None
+            or self._store is None
+            or self._approve_writes is None
+            or self._approved_writes is None
+            or self._allowlist_candidates is None
+        ):
             raise EnergyRejected("dispatch_store_unavailable", device_id=device_id)
-        record = ModeRecord(
-            device_id=device_id,
-            mode=EnergyMode.OFF,
-            # Kept for display: it records what a mode switch once contributed, and switching off
-            # revokes none of it.
-            added_write_names=current.added_write_names,
-            # Switching off is a mode change like any other: record when and by whom, so the audit
-            # trail does not lose the last transition (its contract is "UTC, last mode change").
-            changed_at=self._clock.now(),
-            changed_by=_actor_name(actor),
-        )
-        await asyncio.to_thread(self._store.put_energy_state, record)
+        name = self._internal_strategy_write
+        if name not in self._allowlist_candidates():
+            raise EnergyRejected("energy_write_support_required", device_id=device_id, missing=[name])
+        async with self._approval_lock:
+            existing = list(await self._approved_writes())
+            added = name not in existing
+            if added:
+                await self._approve_writes(existing + [name])
+            try:
+                try:
+                    await self._port.switch_to_internal(device_id, idle_only=not current.armed)
+                except DispatchRejected as exc:
+                    if exc.code == "dispatch_restore_required":
+                        raise EnergyRejected(exc.code, device_id=device_id) from exc
+                    raise
+                if not current.armed and self.mode_recorded(device_id):
+                    return
+                record = ModeRecord(
+                    device_id=device_id,
+                    mode=EnergyMode.OFF,
+                    added_write_names=tuple(dict.fromkeys((*current.added_write_names, *((name,) if added else ())))),
+                    changed_at=self._clock.now(),
+                    changed_by=_actor_name(actor),
+                )
+                await asyncio.to_thread(self._store.put_energy_state, record)
+            except Exception:
+                if added:
+                    if self._revoke_writes is not None:
+                        await self._revoke_writes([name])
+                    else:
+                        log.error("Off failed and write approval for %s remains (device=%s)", name, device_id)
+                raise
         self._mode_states[device_id] = record
         log.warning("Energy Manager switched off: device=%s (write approvals left untouched)", device_id)
 

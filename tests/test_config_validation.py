@@ -119,8 +119,10 @@ def test_metrics_endpoint_switch_is_operator_settable(monkeypatch, caplog, raw, 
     assert "ENABLE_METRICS_ENDPOINT" not in " ".join(r.getMessage() for r in caplog.records)
 
 
-def test_metrics_endpoint_is_enabled_by_default() -> None:
-    assert load_settings().enable_metrics_endpoint is True
+def test_metrics_endpoint_is_disabled_by_factory_default() -> None:
+    # Factory default is off: a fresh install starts with the scrape endpoint disabled and the
+    # operator opts in explicitly. An existing install keeps its persisted operator_settings value.
+    assert load_settings().enable_metrics_endpoint is False
 
 
 def test_operator_environment_precedes_dotenv(monkeypatch, tmp_path) -> None:

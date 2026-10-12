@@ -33,9 +33,8 @@ try {
     await sleep(200);
   }
   if (!ready) throw new Error('isolated test server did not start');
-  const announced = /Password file:\s+(\S+)\s+\(0600\)/.exec(server.output())?.[1];
-  if (!announced || !path.resolve(announced).startsWith(dbDir + path.sep)) throw new Error('isolated password file was not announced');
-  const initial = fs.readFileSync(path.resolve(announced), 'utf8').trim();
+  const initial = /One-time password:\s+(\S+)/.exec(server.output())?.[1];
+  if (!initial) throw new Error('first-start password was not printed in the banner');
 
   browser = await engine.launch();
   const context = await browser.newContext({

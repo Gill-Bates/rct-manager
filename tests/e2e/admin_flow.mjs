@@ -66,13 +66,9 @@ async function stop(server) {
 const dbDir = fs.mkdtempSync(path.join(OUT, 'db-'));
 const db = path.join(dbDir, 'e2e.db');
 function firstStartPassword(output) {
-  const announced = /Password file:\s+(\S+)\s+\(0600\)/.exec(output)?.[1];
-  if (!announced) throw new Error('first-start password file was not announced');
-  const file = path.resolve(announced);
-  if (!file.startsWith(dbDir + path.sep) || path.basename(file) !== 'initial-admin-password') {
-    throw new Error('first-start password file is outside the isolated test database');
-  }
-  return fs.readFileSync(file, 'utf8').trim();
+  const password = /One-time password:\s+(\S+)/.exec(output)?.[1];
+  if (!password) throw new Error('first-start password was not printed in the banner');
+  return password;
 }
 const httpPort = await freePort();
 const devicePort = await freePort();
@@ -80,9 +76,9 @@ const base = `http://127.0.0.1:${httpPort}`;
 const fake = spawnPy(['tests.e2e.fake_inverter', String(devicePort)], path.join(OUT, 'fake.log'));
 await sleep(1500);
 let server = await startServer(db, httpPort, devicePort, 'first');
-// The banner names a private password file; the test reads only its own isolated fixture.
+// The one-time password is printed directly in the first-start banner on the console.
 const initial = firstStartPassword(server.output());
-check('initial password read from the private file', Boolean(initial));
+check('initial password read from the first-start banner', Boolean(initial));
 check('no admin token printed at first start', !/Initial admin token/.test(server.output()));
 
 const browser = await engine.launch();
@@ -1127,9 +1123,44 @@ check('result state shows the PAT once', token.length > 0 && (await page.locator
 check('new row appears without reload', (await page.locator('#tokens-list tr', { hasText: 'e2e-monitor' }).count()) === 1);
 const call = async () => (await fetch(`${base}/api/v1/devices/sim/metrics/grid_power`, { headers: { Authorization: `Bearer ${token}` } })).status;
 check('new PAT is accepted by the API', (await call()) === 200);
+const copyGeometry = await page.locator('#copy-token').evaluate((button) => {
+  const icon = button.querySelector('.material-icons');
+  const box = button.getBoundingClientRect();
+  const glyph = icon?.getBoundingClientRect();
+  return glyph && {
+    horizontalOffset: (glyph.left + glyph.width / 2) - (box.left + box.width / 2),
+    verticalOffset: (glyph.top + glyph.height / 2) - (box.top + box.height / 2),
+  };
+});
+check('token copy icon is centred in its button', Boolean(copyGeometry)
+  && Math.abs(copyGeometry.horizontalOffset) <= 0.5 && Math.abs(copyGeometry.verticalOffset) <= 0.5,
+JSON.stringify(copyGeometry));
+// Chromium treats loopback HTTP as secure and normally takes navigator.clipboard. Force its
+// rejection so the test exercises the real LAN/HTTP fallback inside Bootstrap's focus trap.
+await page.evaluate(() => {
+  Object.defineProperty(navigator, 'clipboard', {
+    configurable: true,
+    value: { writeText: () => Promise.reject(new DOMException('Clipboard denied', 'NotAllowedError')) },
+  });
+  const originalExecCommand = document.execCommand.bind(document);
+  window.__tokenCopyFallback = null;
+  document.execCommand = (command) => {
+    if (command !== 'copy') return originalExecCommand(command);
+    const textarea = document.activeElement;
+    window.__tokenCopyFallback = {
+      value: textarea?.value,
+      insideOpenModal: Boolean(textarea?.closest('.modal.show')),
+    };
+    return true;
+  };
+});
 await page.click('#copy-token');
-await page.waitForFunction(() => !document.querySelector('#token-done').disabled);
-check('copying the PAT enables Done', true);
+await page.waitForFunction(() => window.__tokenCopyFallback !== null);
+await page.waitForFunction(() => document.getElementById('toast-region').textContent.includes('Token copied.'));
+const copiedToken = await page.evaluate(() => window.__tokenCopyFallback);
+check('copying the PAT falls back inside the open modal and enables Done', copiedToken?.value === token
+  && copiedToken.insideOpenModal && !(await page.locator('#token-done').isDisabled())
+  && (await toastText()).includes('Token copied.'), JSON.stringify(copiedToken));
 await page.click('#token-done');
 await page.waitForSelector('#add-token-modal', { state: 'hidden' });
 await page.waitForSelector('.modal-backdrop', { state: 'detached' });
@@ -1354,6 +1385,12 @@ check('the new inverter appears as a saved row and the add row is empty again', 
 check('focus moves to the empty host input after an add', await page.evaluate(() => document.activeElement?.id === 'device-new-host'));
 check('the result is announced in a polite status region', (await page.locator('#device-status[role="status"]').innerText()).includes('192.0.2.10:18899 added'));
 await shot('inverter-added');
+// Closing the modal after a successful add shows the on-close success toast the operator asked for.
+await clearToasts();
+await page.click('#inverters-modal .btn-close');
+await page.waitForSelector('#inverters-modal', { state: 'hidden' });
+await page.waitForFunction(() => [...document.querySelectorAll('#toast-region .alert')].some((node) => node.dataset.kind === 'success' && /inverter added/i.test(node.dataset.message)), null, { timeout: 3000 });
+check('closing after a successful add shows a success toast', (await page.locator('#toast-region .alert-success').count()) >= 1);
 await page.reload();
 await page.click('#add-inverter');
 await page.waitForSelector('#inverters-modal.show .device-settings-item input[data-field="host"]');
@@ -1440,8 +1477,12 @@ await page.click('#add-inverter');
 await page.waitForSelector('#inverters-modal.show .device-settings-item input[data-field="host"]');
 await page.waitForSelector('#device-list .device-settings-item');
 check('the deletion persists after a reload', (await savedRows()) === 1 && (await trashFor('192.0.2.10').count()) === 0);
+// This open did no add (only a reload), so closing it must not toast.
+await clearToasts();
 await page.click('#inverters-modal .btn-close');
 await page.waitForSelector('#inverters-modal', { state: 'hidden' });
+await sleep(300);
+check('closing without an add shows no toast', (await page.locator('#toast-region .alert').count()) === 0);
 // (g) no stray bottom-right Close button
 await page.click('#add-inverter');
 await page.waitForSelector('#inverters-modal.show .device-settings-item input[data-field="host"]');
@@ -1863,11 +1904,34 @@ await shot('prometheus-master-toggle-on');
       }
       await route.fulfill({ response, json: list });
     });
+    let hardwareStrategy = { device_id: 'sim', device_name: 'RCT inverter', code: 127, label: null, stale: false };
+    await ep.route('**/admin/api/energy/hardware-strategies', (route) => route.fulfill({ json: [hardwareStrategy] }));
 
     // Before any verification: the device ships unverified, so Operate must show the Setup checklist
     // and its single "Complete setup"/"Set up manual control" CTA — and must NOT leak raw capability
     // names (write_path_convention etc.) onto the Operate surface (requirement 5, design §9/§12).
     await ep.goto(`${energyBase}/ui/energy`);
+    await ep.waitForFunction(() => /Unknown \(code 127\)/.test(
+      document.querySelector('#energy-hardware-strategies')?.textContent || ''
+    ));
+    check('unknown inverter SOC strategy shows its raw code',
+      /Unknown \(code 127\)/.test(await ep.locator('#energy-hardware-strategies').innerText()));
+    hardwareStrategy = { ...hardwareStrategy, code: null };
+    await ep.reload();
+    await ep.waitForFunction(() => /Inverter SOC strategy: n\/a/.test(
+      document.querySelector('#energy-hardware-strategies')?.textContent || ''
+    ));
+    check('unavailable inverter SOC strategy shows n/a',
+      /Inverter SOC strategy: n\/a/.test(await ep.locator('#energy-hardware-strategies').innerText()));
+    hardwareStrategy = { ...hardwareStrategy, code: 1, label: 'Constant' };
+    await ep.reload();
+    await ep.waitForFunction(() => /Constant \(code 1\)/.test(
+      document.querySelector('#energy-hardware-strategies')?.textContent || ''
+    ));
+    check('new inverter with Constant strategy is not shown as Off',
+      /Constant \(code 1\)/.test(await ep.locator('#energy-hardware-strategies').innerText())
+      && (await ep.locator('.energy-mode-option[aria-checked="true"]').count()) === 0
+      && /Not yet managed/.test(await ep.locator('.energy-mode-evidence').innerText()));
     await ep.waitForSelector('.energy-panel');
     await ep.waitForSelector('.energy-setup:not([hidden])', { timeout: 15000 }).catch(() => { });
     check('Setup checklist is shown while hardware is unverified', await ep.locator('.energy-setup:not([hidden])').count() >= 1);
@@ -2198,7 +2262,7 @@ await shot('prometheus-master-toggle-on');
     const buttons = ['Charge battery', 'Keep battery idle', 'Discharge battery']
       .map((name) => ep.locator('.energy-actions button', { hasText: new RegExp(`^${name}$`) }));
     check('all Energy Manager actions use filled buttons',
-      await ep.locator('.energy-actions button').evaluateAll((nodes) => nodes.length === 4
+      await ep.locator('.energy-actions button').evaluateAll((nodes) => nodes.length === 3
         && nodes.every((button) => button.classList.contains('btn-primary')
           && ![...button.classList].some((name) => name.startsWith('btn-outline-')))));
     const states = async () => Promise.all(buttons.map((button) => button.isDisabled()));
@@ -2228,7 +2292,7 @@ await shot('prometheus-master-toggle-on');
       (await ep.locator('.energy-mode-switch[role=radiogroup]').count()) === 1
       && (await radios.allInnerTexts()).map((text) => text.replace(/\s+/g, ' ').trim().replace(/^\S+ /, '')).join('|') === 'Off|Manual|External',
       JSON.stringify(await radios.allInnerTexts()));
-    check('initially Off is selected and the only tab stop', /Off$/.test(await checkedMode()),
+    check('initially no mode is selected while Off is the tab stop', !await checkedMode(),
       String(await checkedMode()));
     check('roving tabindex: exactly one radio is tabbable', (await ep.locator('.energy-mode-switch [role=radio][tabindex="0"]').count()) === 1);
     check('every radio has an aria-label that starts with its visible text',
@@ -2249,7 +2313,7 @@ await shot('prometheus-master-toggle-on');
     await radios.first().focus();
     await ep.keyboard.press('ArrowRight');
     check('ArrowRight moves the focus to Manual without selecting it',
-      (await ep.evaluate(() => document.activeElement?.textContent.trim().endsWith('Manual'))) && modeCalls.length === 0 && /Off$/.test(await checkedMode()));
+      (await ep.evaluate(() => document.activeElement?.textContent.trim().endsWith('Manual'))) && modeCalls.length === 0 && !await checkedMode());
     await switchMode(() => ep.keyboard.press('Space'), 'Manual');
     check('Space selects Manual and the focus stays on the control',
       /Manual$/.test(await checkedMode()) && modeCalls.length === 1 && modeCalls[0].mode === 'manual'
@@ -2259,11 +2323,11 @@ await shot('prometheus-master-toggle-on');
     check('Manual enables the available actions', afterArm.some((disabled) => !disabled), JSON.stringify(afterArm));
     const liteEdges = await ep.locator('.energy-panel .energy-operate').evaluate((operation) => {
       const mode = operation.querySelector('.energy-mode').getBoundingClientRect();
-      const automatic = operation.querySelector('.energy-action-auto').getBoundingClientRect();
+      const lastAction = operation.querySelector('.energy-actions button:last-child').getBoundingClientRect();
       const graphic = operation.querySelector('.energy-flow-lite').getBoundingClientRect();
-      return { top: graphic.top - mode.top, bottom: graphic.bottom - automatic.bottom };
+      return { top: graphic.top - mode.top, bottom: graphic.bottom - lastAction.bottom };
     });
-    check('Lite graphic aligns with Current mode and Return to automatic',
+    check('Lite graphic aligns with Manager status and the last action',
       Math.abs(liteEdges.top) <= 1 && Math.abs(liteEdges.bottom) <= 1, JSON.stringify(liteEdges));
 
     // A token cannot command a Manual inverter: 409 energy_manager_not_external (the PAT is created below via the API).
@@ -2294,8 +2358,21 @@ await shot('prometheus-master-toggle-on');
     const holdDiag = await ep.evaluate(async () => ({ buttons: [...document.querySelectorAll('.energy-actions button')].map((b) => [b.textContent.trim(), b.disabled, b.title]), status: document.querySelector('.energy-status')?.innerText, mode: document.querySelector('.energy-mode')?.innerText, api: await (await fetch('/admin/api/energy/devices')).json().then((l) => ({ state: l[0].state, connected: l[0].connected, mode: l[0].mode, actions: l[0].actions, stop: l[0].stop_reason, restore: l[0].restore_attempts })) }));
     await ep.screenshot({ path: path.join(OUT, 'energy-after-charge.png'), fullPage: true });
     check('Keep battery idle sends a hold command without a target SoC', hold?.action === 'hold' && !('target_soc_percent' in hold), JSON.stringify(hold) + JSON.stringify(holdDiag));
-    const auto = await cmd(() => ep.locator('.energy-actions button', { hasText: 'Return to automatic' }).click());
-    check('Return to automatic sends auto', auto?.action === 'auto', JSON.stringify(auto));
+    hardwareStrategy = { ...hardwareStrategy, code: 4, label: 'Internal' };
+    await ep.reload();
+    await ep.waitForSelector('.energy-panel');
+    const commandCount = commands.length;
+    await switchMode(() => radios.nth(0).click(), 'Off');
+    check('Off hands control back without a separate auto command', commands.length === commandCount
+      && /Off$/.test(await checkedMode()) && (await states()).every(Boolean), JSON.stringify(modeCalls));
+    hardwareStrategy = { ...hardwareStrategy, code: 1, label: 'Constant' };
+    await ep.reload();
+    await ep.waitForFunction(() => /Off is unconfirmed/.test(document.querySelector('.energy-mode-evidence')?.textContent || ''));
+    check('an external change to Constant removes the confirmed Off indication',
+      (await ep.locator('.energy-mode-option[aria-checked="true"]').count()) === 0);
+    hardwareStrategy = { ...hardwareStrategy, code: 4, label: 'Internal' };
+    await ep.reload();
+    await ep.waitForFunction(() => !!document.querySelector('.energy-mode-option[aria-checked="true"]'));
 
     // External: the GUI is refused and the controls are disabled with an info line; a PAT may command.
     await switchMode(() => radios.nth(2).click(), 'External');
@@ -2457,7 +2534,7 @@ const finalRestart = problems.length;
 await stop(server);
 server = await startServer(db, httpPort, devicePort, 'second');
 scrubExpected(finalRestart, (p) => expectedRestartProblem(p, base));
-check('no initial password printed after restart', !/FIRST START - admin login/.test(server.output()));
+check('no initial password printed after restart', !/FIRST START/.test(server.output()));
 await page.goto(base + '/ui/prometheus');
 check('session survives restart', page.url().endsWith('/ui/prometheus'));
 await page.waitForSelector('#exposed-list .metric-row');

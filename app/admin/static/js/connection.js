@@ -177,7 +177,7 @@
       return;
     }
     hint.textContent = reconnectState.lastCheck
-      ? `Attempt ${reconnectState.attempts}, last check ${reconnectState.lastCheck.toLocaleTimeString('en-GB')}.`
+      ? `Attempt ${reconnectState.attempts}, last check ${reconnectState.lastCheck.toLocaleTimeString(undefined)}.`
       : 'Waiting for the first attempt …';
   }
 

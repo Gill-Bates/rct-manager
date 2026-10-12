@@ -216,13 +216,15 @@ class StreamParser:
         480 bytes too large), while 278 of 278 short responses declare it correctly - which is why
         only long commands take this path and the short path stays bit-for-bit as it was.
 
-        At most two candidate boundaries are tried: before a trailing run of ``0x00`` separator
-        bytes, then one byte into that run in case the low CRC byte is itself ``0x00``. That order
-        matters because appending a zero byte to a valid CRC drives the register to zero, so a
-        separator could otherwise slip in as payload. Trying the shorter candidate first resolves
-        the ambiguity in favour of the true frame; a wrong shorter boundary fails the CRC and falls
-        back. With two candidates the chance of accepting a wrong boundary stays at or below
-        2 * 2**-16 per frame, far below a backwards search over many lengths. The received
+        Up to three candidate boundaries are tried: before a trailing run of ``0x00`` separator
+        bytes, then two bytes and one byte into that run, for a CRC whose two low bytes or whose
+        single low byte are themselves ``0x00`` (the whole CRC may be ``0x0000``). The shortest
+        candidate stays first because appending a zero byte to a valid CRC drives the register to
+        zero, so a separator could otherwise slip in as payload; trying it first resolves that
+        ambiguity in favour of the true frame, and a wrong shorter boundary fails the CRC and falls
+        back. When a real next start byte follows the run, the device's one separator null is held
+        back (at most ``zero_run - 1`` zeros may be CRC bytes), so a frame whose CRC low byte is
+        0x00 plus a separator is not mistaken for a one-byte-longer 0x0000-CRC frame. The received
         length bytes stay in the CRC input. When no subsequent start byte is buffered yet, the
         current end of the buffer is tried as a provisional boundary instead: accepted only if it
         verifies, otherwise ``_Incomplete`` is raised so the caller waits for more data rather than
@@ -264,8 +266,26 @@ class StreamParser:
         zero_start = boundary
         while zero_start > pos and self._buf[zero_start - 1] == 0:
             zero_start -= 1
-        candidates = [zero_start, zero_start + 1] if zero_start < boundary else [boundary]
-        for end in candidates:
+        # The frame end is at most two bytes into the trailing zero run, since a CRC is two bytes
+        # and both may be 0x00 (the whole CRC is 0x0000); the rest of the run are separator nulls.
+        # So the end is one of up to three candidates: ``zero_start`` (no CRC zero byte) and up to
+        # two bytes into the run (a 0x00 low CRC byte, then a 0x0000 CRC).
+        #
+        # When a frame whose CRC low byte is 0x00 is followed by a separator null, both the one-
+        # and two-zero candidates can verify at once: appending a zero byte to a valid CRC drives
+        # the register towards zero, so a 0x0000-CRC frame's one-byte-short boundary and a 0x00-low
+        # frame's one-byte-long boundary each re-verify for about half of such frames (not merely
+        # at 2**-16). Candidate order alone cannot separate the two: whichever is tried first wins,
+        # and the true end is sometimes the shorter and sometimes the longer. The length field
+        # breaks the tie. The device gets the end wrong in a consistent direction - a long response
+        # either under-declares (the length field is a few bytes short) or over-declares (it points
+        # far past the frame) - so the true end is the verifying candidate whose measured length is
+        # closest to the declared one. Equal distance keeps the shorter candidate, so a separator
+        # null never slips into the payload.
+        zero_run = boundary - zero_start
+        crc_zeros = min(2, zero_run)
+        best: tuple[Frame, int, int] | None = None  # (frame, end, measured)
+        for end in (zero_start + n for n in range(crc_zeros + 1)):
             if end <= min_end:
                 continue
             body = self._unescape_until(pos, end)
@@ -275,8 +295,12 @@ class StreamParser:
                 frame = decode_frame(header + body, measured_length=True)
             except ProtocolError:
                 continue
-            self._stats.length_field_corrected += 1
             measured = len(body) - 2  # comparable to the declared length: [address,] id and data
+            if best is None or abs(measured - declared) < abs(best[2] - declared):
+                best = (frame, end, measured)
+        if best is not None:
+            frame, end, measured = best
+            self._stats.length_field_corrected += 1
             log.debug(
                 "Corrected length field: command=0x%02x declared_length=%d measured_length=%d object_id=0x%08x",
                 header[0],

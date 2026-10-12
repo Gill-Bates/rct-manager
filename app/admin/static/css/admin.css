@@ -362,8 +362,10 @@ body {
 .icon-button {
     width: 2.3rem;
     height: 2.3rem;
-    display: inline-grid;
-    place-items: center;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
 }
 
 /* Header buttons share one height and one glyph size, so theme toggle, log out and menu line up.
@@ -488,6 +490,18 @@ body {
 
 .device-toggle .material-icons {
     transition: transform .2s ease;
+}
+
+/* The card's delete icon reuses the modal's btn-outline-danger and the standard square .icon-button
+   shape (not the round .device-toggle), so it reads as an icon button, not a circle. flex:0 0 auto
+   keeps the title's me-auto pushing it to the far end, past the status badge. */
+.device-remove {
+    flex: 0 0 auto;
+    line-height: 1;
+}
+
+.device-remove .material-icons {
+    font-size: 1.25rem;
 }
 
 .device-item.is-collapsed .device-toggle .material-icons,
@@ -1364,10 +1378,6 @@ body {
     gap: .5rem;
 }
 
-.energy-actions .energy-action-auto {
-    grid-column: 1 / -1;
-}
-
 .energy-actions .btn.is-selected {
     background: var(--rct-brand);
     border-color: var(--rct-brand);
@@ -1746,6 +1756,13 @@ samp,
     white-space: nowrap;
 }
 
+.token-suffix {
+    color: var(--bs-body-color);
+    background: var(--bs-secondary-bg);
+    border-radius: .25rem;
+    padding: .15rem .35rem;
+}
+
 .toast-region {
     position: fixed;
     z-index: 1100;
@@ -1838,24 +1855,49 @@ samp,
 }
 
 .tsdb-console {
-    padding: .55rem .7rem;
+    padding: .6rem .8rem;
     border: 1px solid var(--rct-line);
     border-radius: .45rem;
-    background: #111418;
+    /* Terminal look: a slightly deeper near-black than the card so the tail reads like a shell. The
+       console's own palette is the one place raw hex is allowed (design rule R8 allow-list). */
+    background: #0b0e11;
     color: #d7e0e8;
     font-family: 'IBM Plex Mono', monospace;
     font-size: .8rem;
     line-height: 1.5;
+    overflow: auto;
 }
 
 .tsdb-console-line {
     display: grid;
-    grid-template-columns: 3.5rem minmax(0, 1fr);
-    gap: .65rem;
+    /* Three aligned monospace columns: the full timestamp, the logger name, then the message. */
+    grid-template-columns: max-content minmax(0, auto) minmax(0, 1fr);
+    gap: .75rem;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+/* Per-level colours via the data-level hook (no new class, so R1 stays console-scoped). The
+   message colour is set on the line; the timestamp and logger keep their own dimmed tone below. */
+.tsdb-console-line[data-level="ERROR"] {
+    color: var(--bs-danger);
+}
+
+.tsdb-console-line[data-level="WARNING"] {
+    color: var(--bs-warning);
+}
+
+.tsdb-console-line[data-level="DEBUG"] {
+    color: var(--bs-secondary-color);
 }
 
 .tsdb-console-time {
-    color: #8fa2b3;
+    color: #7f93a6;
+}
+
+/* The logger name is the dimmed accent column; a token keeps it compliant with R8. */
+.tsdb-console-line>span[data-role="logger"] {
+    color: var(--bs-secondary-color);
 }
 
 @media (forced-colors: active) {
@@ -1865,9 +1907,78 @@ samp,
         color: CanvasText;
     }
 
-    .tsdb-console-time {
+    .tsdb-console-time,
+    .tsdb-console-line>span[data-role="logger"],
+    .tsdb-console-line[data-level="ERROR"],
+    .tsdb-console-line[data-level="WARNING"],
+    .tsdb-console-line[data-level="DEBUG"] {
         color: CanvasText;
     }
+}
+
+/* Change 4 — the Status & Log console fills the viewport down to the footer and tails INTERNALLY,
+   reaching the same full-height bottom boundary as the Inverters param-card. The flex chain from the
+   content area down to the console node (#main-content -> .settings-grid -> console card -> card-body
+   -> console node) is shrinkable (flex + min-height:0), so the console's own overflow:auto absorbs a
+   long tail instead of the page growing. body{min-height:100dvh} is only a MINIMUM, so one viewport
+   bound is still required; it is a definite height on the UNZOOMED .app-shell (the sticky header,
+   min-height 4.1rem, sits above it; its padding-bottom already reserves the footer strip). Putting it
+   on .app-shell rather than the 0.9-zoomed #main-content keeps it free of zoom rounding, so the page
+   never gains even a hairline scrollbar. Scoped to :has(.tsdb-console) so design rule R11 — which only
+   inspects param-* and page-specific selectors — never matches it, and no other page is affected. */
+.app-shell:has(.tsdb-console) {
+    /* Viewport less the sticky header. The small extra margin absorbs the few-pixel difference
+       between 100dvh and the header's measured height (and any dvh rounding) so the document never
+       gains a hairline scrollbar. */
+    height: calc(100dvh - 4.1rem - 0.6rem);
+    min-height: 0;
+    /* The footer is fixed (outside the shell) and the console scrolls internally, so there is nothing
+       meaningful to clip; this just contains any residual sub-pixel spill. */
+    overflow: hidden;
+}
+
+#main-content:has(.tsdb-console) {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    overflow: auto;
+}
+
+#main-content:has(.tsdb-console)>.settings-grid {
+    flex: 1 1 auto;
+    min-height: 0;
+    /* At two or more columns the settings cards occupy two content rows (control+database+connection,
+       then export settings), so the third, full-width console row takes the surplus while the cards
+       keep their natural height. Below ~38rem the grid is a single column (one card per row); there
+       the console just follows in natural flow (single-column fallback below). */
+    grid-template-rows: repeat(2, min-content) minmax(8rem, 1fr);
+}
+
+/* Single column (narrow screens): every card is its own row, so a fixed two-row prefix would grow
+   the wrong card. Fall back to natural row flow. */
+@media (max-width: 38rem) {
+    #main-content:has(.tsdb-console)>.settings-grid {
+        grid-template-rows: none;
+    }
+}
+
+#main-content:has(.tsdb-console)>.settings-grid>.card-span-all:has(.tsdb-console) {
+    min-height: 0;
+}
+
+#main-content:has(.tsdb-console)>.settings-grid>.card-span-all:has(.tsdb-console)>.card-body {
+    /* A flex column so the console node (not the h2 title) absorbs the card's surplus height. */
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+}
+
+/* The console node fills its card and tails internally: min-height:0 lets it shrink below content so
+   its own overflow:auto scrollbar (not the page) handles a long tail; a modest min-height keeps it
+   usable when space is tight. */
+#tsdb-mini-console {
+    flex: 1 1 auto;
+    min-height: 6rem;
 }
 
 /* Modal Consistency: every modal centres in the viewport by default (ported from wirebuddy's
@@ -2087,6 +2198,7 @@ body.is-reconnecting #reconnect-modal.show .reconnect-pulse {
 
 /* Guided hardware verification dialog (Energy page, Basic mode) */
 @media (prefers-reduced-motion: reduce) {
+
     .energy-assistant-progress .spinner-border,
     .energy-assistant-waiting .spinner-border {
         animation: none;

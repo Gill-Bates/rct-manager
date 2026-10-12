@@ -25,7 +25,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, fields
 from datetime import datetime
 from enum import StrEnum
-from typing import Literal
+from typing import ClassVar, Literal
 
 from app.dispatch.models import NOTE_MAX_LENGTH, DispatchMode, check_printable_ascii
 
@@ -125,13 +125,32 @@ class CapabilityRecord:
         data["verified_at"] = self.verified_at.isoformat() if self.verified_at is not None else None
         return data
 
+    # Evidence keys that must be PRESENT in a persisted VERIFIED record, mirroring the admin API's
+    # model_fields_set check (app.admin.dispatch_api). These fields have a non-None default that
+    # looks like a value (True / "ratio"), so __post_init__ cannot tell a default assumption from
+    # real evidence; from_dict() enforces explicit presence instead, so an older VERIFIED row that
+    # predates a mandatory field (soc_target_unit was made mandatory later) is rejected, not
+    # silently taken as confirmed hardware. The other write-path/export evidence is a real None
+    # until set and is already enforced in __post_init__.
+    _EXPLICIT_EVIDENCE: ClassVar[dict[CapabilityName, tuple[str, ...]]] = {
+        CapabilityName.BATTERY_POWER_SIGN: ("battery_discharge_positive",),
+        CapabilityName.GRID_POWER_SIGN: ("grid_import_positive",),
+        CapabilityName.WRITE_PATH: ("soc_target_unit", "note"),
+    }
+
     @classmethod
     def from_dict(cls, data: dict) -> "CapabilityRecord":
         verified_at = data.get("verified_at")
+        name = CapabilityName(data["name"])
+        status = CapabilityStatus(data["status"])
+        if status is CapabilityStatus.VERIFIED:
+            missing = [key for key in cls._EXPLICIT_EVIDENCE.get(name, ()) if key not in data]
+            if missing:
+                raise ValueError(f"verified capability missing evidence: {missing}")
         return cls(
             device_id=data["device_id"],
-            name=CapabilityName(data["name"]),
-            status=CapabilityStatus(data["status"]),
+            name=name,
+            status=status,
             battery_discharge_positive=_strict_bool(data, "battery_discharge_positive", True),
             grid_import_positive=_strict_bool(data, "grid_import_positive", True),
             soc_strategy_external_code=_strict_optional_int(data.get("soc_strategy_external_code")),
@@ -247,6 +266,15 @@ class CapabilityRegistry:
     def replace(self, record: CapabilityRecord) -> None:
         """Take a record over — only after it has durably committed (4.4)."""
         self._records[(record.device_id, record.name)] = record
+
+    def reset(self, device_id: str) -> None:
+        """Drop every stored capability of ``device_id`` so it reads as the unverified default.
+
+        For the identity-bound reset on a device-list reconfiguration — only after the store rows
+        have been deleted, so the published state matches the persisted one.
+        """
+        for name in CapabilityName:
+            self._records.pop((device_id, name), None)
 
     def unverified_for(
         self, device_id: str, mode: DispatchMode, *, limit_export: bool

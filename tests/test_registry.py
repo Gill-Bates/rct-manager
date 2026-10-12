@@ -198,3 +198,33 @@ def test_registry_version_other_than_one_aborts_the_start(tmp_path, version) -> 
     with pytest.raises(ConfigError) as info:
         ObjectRegistry.load(path)
     assert "version" in str(info.value.context["detail"])
+
+
+def test_expected_payload_falls_back_to_the_default_width_for_a_fixed_size_type() -> None:
+    """P3-02: a fixed-size int/float entry usually omits byte_width in the shipped catalog, so
+    expected_payload must honour its "payload size for fixed-size types" contract by falling back
+    to DEFAULT_WIDTHS instead of returning None."""
+    from app.catalog.registry import RegistryEntry
+    from app.protocol.types import DataType
+    from app.protocol.values import DEFAULT_WIDTHS
+
+    def entry(data_type: DataType, value_type: str, **extra) -> RegistryEntry:
+        return RegistryEntry(
+            name="probe",
+            object_id="0x00000001",
+            data_type=data_type,
+            unit="",
+            value_type=value_type,
+            idempotent_write=True,
+            **extra,
+        )
+
+    # No explicit byte_width: the property returns the type's default width, not None.
+    assert entry(DataType.UINT16, "integer").expected_payload == DEFAULT_WIDTHS[DataType.UINT16] == 2
+    assert entry(DataType.FLOAT, "number").expected_payload == DEFAULT_WIDTHS[DataType.FLOAT] == 4
+    assert entry(DataType.BOOL, "boolean").expected_payload == DEFAULT_WIDTHS[DataType.BOOL] == 1
+    assert entry(DataType.ENUM, "enum").expected_payload == DEFAULT_WIDTHS[DataType.ENUM] == 4
+    # An explicit width still wins.
+    assert entry(DataType.UINT8, "integer", byte_width=1).expected_payload == 1
+    # A string without a configured width is genuinely unknown and stays None.
+    assert entry(DataType.STRING, "string").expected_payload is None

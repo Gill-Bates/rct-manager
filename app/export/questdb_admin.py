@@ -142,6 +142,7 @@ class QuestDbProvisioner:
         self.total_days = total_days
         self.raw_days = effective_raw_days(downsampling, raw_days, total_days)
         self._not_refreshed = 0
+        self._warned_superseded: set[str] = set()
 
     def ensure_tables(self) -> None:
         self._exec(create_table_sql(self.table))
@@ -203,12 +204,20 @@ class QuestDbProvisioner:
             f"SELECT view_name FROM materialized_views() WHERE base_table_name = {literal(self.table)};"
         ).get("dataset") or []
         prefix = f"{self.table}_rollup_"
-        for (name, *_) in rows:
-            if str(name).startswith(prefix) and name != current:
-                log.warning(
-                    "QuestDB rollup view '%s' is superseded by '%s' and is kept, not dropped, to avoid"
-                    " losing historical rollup data the raw table may no longer hold", name, current
-                )
+        superseded = {str(name) for (name, *_) in rows if str(name).startswith(prefix) and str(name) != current}
+        # Provisioning reruns every recheck cycle over an unchanged schema, so warn once per view
+        # name for the process; a name only seen later (another schema change) still warns fresh.
+        self._warned_superseded &= superseded  # forget names an admin has since dropped
+        for name in sorted(superseded):
+            message = (
+                "QuestDB rollup view '%s' is superseded by '%s' and is kept, not dropped, to avoid"
+                " losing historical rollup data the raw table may no longer hold"
+            )
+            if name in self._warned_superseded:
+                log.debug(message, name, current)
+            else:
+                log.warning(message, name, current)
+                self._warned_superseded.add(name)
 
     def _view_current(self, view: str) -> bool:
         rows = self._exec(
@@ -243,21 +252,26 @@ class QuestDbProvisioner:
         value, unit = rows[0][:2]
         existing = ttl_days(value, unit)
         recorded = self._recorded_days(name)
-        if value and existing == days:
-            # The TTL is already what we want. ALTER and the ownership INSERT are two separate SQL
-            # calls, so a drop between them earlier could have applied the TTL without recording it.
-            # Reconcile the missing marker here instead of returning blindly: otherwise this same
-            # early return keeps the gap invisible, and a later retention change would mistake our
-            # own unrecorded TTL for a foreign administrator TTL and refuse to adjust it.
-            if recorded != days:
-                self._record_ownership(name)
-                log.info("Reconciled missing TTL ownership marker for QuestDB object '%s' (%d days)", name, days)
-            return True
-        if value and existing != recorded:
-            log.warning(
-                "QuestDB object '%s' keeps its administrator TTL of %s %s instead of %d day(s)", name, value, unit, days
-            )
-            return True
+        if value:
+            # Fail-closed ownership (module contract): a TTL this service did not record belongs to
+            # the administrator and is never replaced. A missing marker is treated as foreign even
+            # though a crash between ALTER and the ownership INSERT could in theory have left our
+            # own TTL unrecorded — that rare case keeps its TTL and is simply not auto-adjusted
+            # later, which is strictly safer than adopting a genuinely foreign TTL that happens to
+            # match the desired value and then shortening it against the administrator's decision.
+            if recorded is None:
+                log.warning("QuestDB object '%s' already has an unowned TTL; keeping it", name)
+                return True
+            # An unknown TTL unit makes existing None: without this it would fall through to ALTER
+            # and overwrite a TTL whose real length the service cannot even read.
+            if existing is None or existing != recorded:
+                log.warning(
+                    "QuestDB object '%s' keeps its administrator TTL of %s %s instead of %d day(s)",
+                    name, value, unit, days,
+                )
+                return True
+            if existing == days:
+                return True
         kind = "MATERIALIZED VIEW" if view else "TABLE"
         self._exec(f"ALTER {kind} {ident(name)} SET TTL {int(days)} DAYS;")
         self._record_ownership(name, days)

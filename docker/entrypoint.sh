@@ -84,6 +84,21 @@ bootstrap_as_root() {
         || log "WARNING: cannot set mode 0700 on ${DATA_DIR}"
     gosu "${APP_USER}" test -d "${DATA_DIR}" -a -w "${DATA_DIR}" || fail_not_writable
 
+    # The root ownership scan above runs without DAC_OVERRIDE/DAC_READ_SEARCH,
+    # so it cannot enter a 0700 DATA_DIR owned by the app user: a foreign-owned
+    # file restored below it is then silently skipped by the repair. Re-scan as
+    # the app user (which can enter its own directory) and fail closed if any
+    # foreign owner remains - a readable-but-not-owned file still breaks the
+    # stores, which open their DB O_RDWR and fchmod it to 0600.
+    local foreign_owner
+    if ! foreign_owner="$(gosu "${APP_USER}" find -P "${DATA_DIR}" -xdev \! -user "${app_uid}" -print -quit 2>/dev/null)"; then
+        fail "cannot verify ownership below ${DATA_DIR}"
+    fi
+    if [[ -n "${foreign_owner}" ]]; then
+        ls -ld -- "${foreign_owner}" 2>/dev/null || true
+        fail "${foreign_owner} is not owned by ${APP_USER} after the ownership repair; fix the volume ownership on the host: chown -R 10001:10001 ${DATA_DIR}"
+    fi
+
     # Ownership alone does not guarantee access: a restored file can carry
     # permission bits (not just an owner) that lock the app user out even
     # though the top-level directory is fine. This probe is read-only (no

@@ -110,17 +110,26 @@ def test_own_ttl_is_updated_but_unlimited_never_alters() -> None:
     assert db.altered() == []
 
 
-def test_a_correct_ttl_without_an_ownership_marker_is_reconciled_not_ignored() -> None:
-    """P2 atomicity: ALTER and the ownership INSERT are two SQL calls. If a crash applied the TTL
-    but never recorded it, the next run sees the right TTL with no marker. The early return must
-    not leave that gap permanent — otherwise a later retention change mistakes our own TTL for a
-    foreign administrator TTL. The marker is written (reconciled) instead.
+def test_a_ttl_without_an_ownership_marker_is_kept_as_foreign_even_when_it_matches() -> None:
+    """P2 fail-closed ownership: a TTL this service did not record belongs to the administrator and
+    is never adopted — not even when its length happens to equal the desired one. Adopting it would
+    let a later retention change shorten a genuinely foreign TTL against the administrator's
+    decision. No ALTER and no ownership INSERT is written; the TTL is left untouched.
     """
     db = FakeQuestDb(ttl=(90, "DAY"), recorded=None)
     assert QuestDbProvisioner(db, "rct", "off", None, 90).run()
-    assert db.altered() == []  # the TTL is already correct; no destructive re-ALTER
-    inserts = [s for s in db.sql if s.startswith("INSERT INTO") and "_rct_export_state" in s]
-    assert len(inserts) == 1 and "90" in inserts[0]
+    assert db.altered() == []  # the TTL is correct and foreign; it is kept, never re-ALTERed
+    assert not any(s.startswith("INSERT INTO") and "_rct_export_state" in s for s in db.sql)
+
+
+def test_an_unreadable_ttl_unit_without_a_marker_is_kept_not_overwritten() -> None:
+    """A TTL whose unit the service cannot decode (ttl_days() -> None) and that carries no ownership
+    marker must be kept, not overwritten: the service cannot even read its real length, so treating
+    it as foreign is the only safe choice.
+    """
+    db = FakeQuestDb(ttl=(3, "FORTNIGHT"), recorded=None)
+    assert QuestDbProvisioner(db, "rct", "off", None, 90).run()
+    assert db.altered() == []
 
 
 def test_an_own_recorded_ttl_that_already_matches_needs_no_reconcile() -> None:
@@ -166,6 +175,49 @@ def test_superseded_rollup_views_are_kept_not_dropped() -> None:
     assert QuestDbProvisioner(db, "rct", "medium", 3, 90).run()
     assert not any(s.startswith("DROP MATERIALIZED VIEW") for s in db.sql)
     assert not any(s.startswith("UPDATE") and "ttl_days = NULL" in s for s in db.sql)
+
+
+class SupersededQuestDb(FakeQuestDb):
+    """Fake whose set of superseded sibling views can grow between provisioning runs, to exercise
+    the once-per-view WARNING de-duplication across the periodic recheck cycles.
+    """
+
+    def __init__(self, superseded: list[str]) -> None:
+        super().__init__()
+        self.superseded = superseded
+
+    def __call__(self, sql: str) -> dict:
+        if "materialized_views()" in sql and "WHERE base_table_name" in sql:
+            self.sql.append(sql)
+            current = rollup_view_name("rct", PRESETS["medium"], schema_signature(self.columns))
+            rows = [[current, "rct", "valid", 5, 5]]
+            rows += [[name, "rct", "valid", 5, 5] for name in self.superseded]
+            return {"dataset": rows}
+        return super().__call__(sql)
+
+
+def test_superseded_view_warning_is_logged_once_per_process(caplog: pytest.LogCaptureFixture) -> None:
+    """The provisioner reruns every recheck cycle over an unchanged schema, so a static set of
+    superseded views must warn only once per process; a view first seen on a later run still warns.
+    """
+    caplog.set_level("DEBUG", logger="app.export.questdb_admin")
+    db = SupersededQuestDb(["rct_rollup_1m_vold"])
+    provisioner = QuestDbProvisioner(db, "rct", "medium", 3, 90)
+
+    assert provisioner.run()
+    first = [r for r in caplog.records if r.levelname == "WARNING" and "is superseded by" in r.getMessage()]
+    assert len(first) == 1 and "rct_rollup_1m_vold" in first[0].getMessage()
+
+    caplog.clear()
+    assert provisioner.run()  # same superseded set: no fresh WARNING, downgraded to DEBUG
+    assert not [r for r in caplog.records if r.levelname == "WARNING" and "is superseded by" in r.getMessage()]
+    assert [r for r in caplog.records if r.levelname == "DEBUG" and "is superseded by" in r.getMessage()]
+
+    caplog.clear()
+    db.superseded.append("rct_rollup_1m_vnew")  # a later schema change leaves a new superseded view
+    assert provisioner.run()
+    fresh = [r for r in caplog.records if r.levelname == "WARNING" and "is superseded by" in r.getMessage()]
+    assert len(fresh) == 1 and "rct_rollup_1m_vnew" in fresh[0].getMessage()
 
 
 def test_raw_ttl_waits_for_a_current_view_and_for_data() -> None:

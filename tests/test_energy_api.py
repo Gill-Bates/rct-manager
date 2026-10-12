@@ -31,6 +31,7 @@ from app.api.app_factory import (
 from app.api.problems import _is_write_path
 from app.catalog.base import is_numeric
 from app.catalog.registry import RegistryCatalog
+from app.energy.models import EnergyMode
 from app.protocol.values import encode_value
 from app.scheduling.shutdown import ShutdownPlan
 from tests.api_helpers import (
@@ -328,6 +329,35 @@ async def test_without_write_support_the_public_router_is_absent_and_the_admin_s
         assert commanding.json()["code"] == "dispatch_store_unavailable"
 
 
+@pytest.mark.parametrize(
+    ("payload", "expected_code", "expected_label"),
+    # label stays null while the strategy-code meaning is unverified (V-06): the shared catalog
+    # carries no enum_labels for power_mng_soc_strategy, so the endpoint returns the numeric code
+    # alone. Once V-06 is proven the label can be populated again without a contract change.
+    [(b"\x01", 1, None), (b"\x7f", 127, None), (None, None, None)],
+)
+async def test_hardware_soc_strategy_is_read_only_and_available_without_dispatch(
+    tmp_path: Path, payload: bytes | None, expected_code: int | None, expected_label: str | None
+) -> None:
+    async with running_app(energy_settings(tmp_path, enable_write_support=False)) as harness:
+        seed_payloads(harness)
+        headers = await admin_session(harness)
+        strategy_id = RegistryCatalog.from_file(
+            harness.runtime.settings.object_registry_path
+        ).object_entry("power_mng_soc_strategy").object_id
+        if payload is None:
+            harness.net.behavior = lambda frame: "drop" if frame.object_id == strategy_id else "respond"
+        else:
+            harness.net.payloads[strategy_id] = payload
+        response = await harness.client.get("/admin/api/energy/hardware-strategies", headers=headers)
+        assert response.status_code == 200, response.text
+        main = next(item for item in response.json() if item["device_id"] == "main")
+        assert main["code"] == expected_code
+        assert main["label"] == expected_label
+        assert harness.runtime.dispatch is None
+        assert harness.runtime.energy.mode("main") is EnergyMode.OFF
+
+
 async def test_revoking_the_register_approvals_disables_the_actions(tmp_path: Path) -> None:
     async with running_app(energy_settings(tmp_path)) as harness:
         seed_payloads(harness)
@@ -576,6 +606,7 @@ async def test_the_admin_surface_requires_a_session_and_the_csrf_header(tmp_path
 
 async def test_admin_arming_adds_the_register_approvals_add_only(tmp_path: Path) -> None:
     async with running_app(energy_settings(tmp_path)) as harness:
+        seed_payloads(harness)
         headers = await admin_session(harness)
         assert harness.app.state.admin_store.get("write_names") == list(PRE_APPROVED)
         armed = await harness.client.put(
@@ -1093,6 +1124,44 @@ async def test_the_mode_decides_which_surface_may_command(tmp_path: Path) -> Non
         await arm(harness, mode="off")
         assert (await command(harness, body)).json()["code"] == "energy_manager_off"
         assert (await harness.client.get("/api/v1/devices/main/energy", headers=WRITER)).json()["armed"] is False
+
+
+async def test_off_confirms_internal_strategy_and_records_initial_choice(tmp_path: Path) -> None:
+    async with running_app(energy_settings(tmp_path)) as harness:
+        seed_payloads(harness)
+        headers = await admin_session(harness)
+        strategy_id = RegistryCatalog.from_file(
+            harness.runtime.settings.object_registry_path
+        ).object_entry("power_mng_soc_strategy").object_id
+        harness.net.payloads[strategy_id] = b"\x01"
+        initial = (await harness.client.get("/admin/api/energy/devices", headers=headers)).json()[0]
+        assert initial["mode"] == "off" and initial["mode_recorded"] is False
+
+        response = await harness.client.put(
+            "/admin/api/energy/devices/main/mode", headers=headers, json={"mode": "off"}
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["mode_recorded"] is True
+        assert harness.net.payloads[strategy_id] == b"\x04"
+
+
+async def test_off_write_failure_does_not_record_an_initial_choice(tmp_path: Path) -> None:
+    async with running_app(energy_settings(tmp_path)) as harness:
+        seed_payloads(harness)
+        headers = await admin_session(harness)
+        strategy_id = RegistryCatalog.from_file(
+            harness.runtime.settings.object_registry_path
+        ).object_entry("power_mng_soc_strategy").object_id
+        harness.net.payloads[strategy_id] = b"\x01"
+        harness.net.freeze_writes = True
+        response = await harness.client.put(
+            "/admin/api/energy/devices/main/mode", headers=headers, json={"mode": "off"}
+        )
+        assert response.status_code != 200
+        assert harness.net.payloads[strategy_id] == b"\x01"
+        status = (await harness.client.get("/admin/api/energy/devices", headers=headers)).json()[0]
+        assert status["mode_recorded"] is False
+        assert "power_mng_soc_strategy" not in status["approved_write_names"]
 
 
 # --- guided hardware verification (Basic mode assistant) -------------------------------------------

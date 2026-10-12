@@ -400,7 +400,9 @@ class Settings(BaseSettings):
     periodic_interval_seconds: int = Field(30, ge=1, le=3600)
 
     # Metrics endpoint
-    enable_metrics_endpoint: bool = True
+    # Factory default off: a fresh install persists this on first bootstrap, so /metrics answers 404
+    # and the GUI toggle shows off until an operator opts in. An existing persisted value is kept.
+    enable_metrics_endpoint: bool = False
     metrics_require_token: bool = True
     metrics_trusted_sources: list[IPvAnyNetwork] = Field(default_factory=list, max_length=32)
     metrics_exposed_names: list[str] = Field(default_factory=list, max_length=256)
@@ -409,7 +411,7 @@ class Settings(BaseSettings):
 
     # Push export (InfluxDB 2 / QuestDB OSS); disabled while DB_TYPE is unset, or while this is False
     db_type: DbType | None = None
-    metrics_export_enabled: bool = True
+    metrics_export_enabled: bool = False
     metrics_export_interval_seconds: int = Field(30, ge=5, le=3600)
     influxdb_hostname: str | None = None  # host name or http(s) URL
     influxdb_port: int | None = Field(None, ge=1, le=65535)  # None: URL port or 8086

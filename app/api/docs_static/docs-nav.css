@@ -1,0 +1,39 @@
+/*
+ * app/api/docs_static/docs-nav.css
+ * Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
+ *
+ * Sidebar and light/dark theme toggle for the Swagger UI page. Served self-hosted under
+ * /docs-static so the page keeps its default-src 'self' CSP without an inline-style exception.
+ * Dark mode inverts the whole page (Swagger UI ships no dark theme); a filter on the root element
+ * keeps position:fixed working for the Authorize dialog.
+ */
+html{background:#fff}
+html.dark{filter:invert(.9) hue-rotate(180deg)}
+#theme-toggle{position:fixed;top:12px;right:16px;z-index:20;display:flex;padding:6px;border:1px solid #d0d0d0;
+ border-radius:50%;background:#fff;color:#3b4151;cursor:pointer}
+#theme-toggle:hover{background:#f0f0f0}
+#theme-toggle svg{width:22px;height:22px;fill:currentColor}
+html.dark .swagger-ui .dialog-ux .backdrop-ux{background:rgba(255,255,255,.75)}
+body.nav-on #theme-toggle{left:272px;right:auto;top:9px;padding:4px}
+#nav-side{position:fixed;top:0;left:0;bottom:0;width:320px;overflow-y:auto;box-sizing:border-box;
+ background:#fafafa;border-right:1px solid #e3e3e3;font:14px/1.35 system-ui,sans-serif;color:#3b4151;z-index:10}
+#nav-side .hd{position:sticky;top:0;background:#fafafa;padding:14px 14px 10px;border-bottom:1px solid #e3e3e3}
+#nav-side .ti{font-weight:700;font-size:16px;margin-bottom:8px}
+#nav-side input{width:100%;box-sizing:border-box;padding:6px 8px;border:1px solid #d0d0d0;
+ border-radius:4px;font:inherit}
+#nav-side details{border-bottom:1px solid #eee}
+#nav-side summary{cursor:pointer;padding:8px 14px;font-weight:700;text-transform:capitalize}
+#nav-side summary:hover{background:#f0f0f0}
+#nav-side a{display:flex;flex-wrap:wrap;align-items:baseline;padding:5px 14px 5px 22px;color:inherit;
+ text-decoration:none}
+#nav-side a:hover,#nav-side a.on{background:#e9eef6}
+#nav-side .m{flex:none;min-width:3.4em;margin-right:6px;padding:1px 4px;border-radius:3px;
+ color:#fff;font-size:11px;font-weight:700;text-align:center}
+#nav-side .p{flex:1;min-width:0;font-family:ui-monospace,monospace;font-size:12.5px}
+#nav-side .s{flex-basis:100%;margin-left:calc(3.4em + 14px);color:#777;font-size:12px}
+#nav-side .get{background:#61affe}#nav-side .post{background:#49cc90}#nav-side .put{background:#fca130}
+#nav-side .delete{background:#f93e3e}#nav-side .patch{background:#50e3c2}
+body.nav-on{margin:0 0 0 320px}
+body.nav-on .swagger-ui .wrapper{max-width:1600px;margin:0;padding:0 32px}
+@media(max-width:900px){#nav-side{display:none}body.nav-on{margin-left:0}
+ body.nav-on #theme-toggle{left:auto;right:16px;top:12px}}

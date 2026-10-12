@@ -60,11 +60,53 @@ async def test_export_settings_round_trip(tmp_path):
     assert restarted.state.runtime.settings.db_type is DbType.QUESTDB
 
 
-async def test_metrics_export_enabled_toggle_is_orthogonal_to_db_type(tmp_path):
-    """`metrics_export_enabled` defaults to True (existing db_type configs keep exporting) and,
-    once set to False, withholds the export regardless of db_type; the connection fields stay
-    saved and visible, unlike resetting db_type back to "" (Disabled)."""
+async def test_fresh_install_persists_and_exposes_export_off(tmp_path):
+    """A brand-new install (no persisted operator_settings) must bootstrap with export off: the
+    config default is persisted verbatim and the value the GUI reads back is False, so the
+    'Enable export' toggle shows off on a fresh install."""
     settings = Settings(_env_file=None, hmac_secret="s" * 48, admin_db_path=tmp_path / "rct.db")
+    app = create_app(settings)
+    # First bootstrap persisted the factory default, which is now off.
+    assert app.state.admin_store.get("operator_settings")["metrics_export_enabled"] is False
+    assert app.state.admin_desired_settings.metrics_export_enabled is False
+    password = app.state.first_start_password
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver", headers={"Origin": "http://testserver"}) as client:
+        csrf = (await client.get("/admin/api/session")).json()["csrf_token"]
+        login = await client.post("/admin/api/login", headers={"X-CSRF-Token": csrf},
+                                  json={"username": "admin", "password": password})
+        changed = await client.post("/admin/api/change-password", headers={"X-CSRF-Token": login.json()["csrf_token"]},
+                                    json={"current_password": password, "new_password": "a much stronger password"})
+        headers = {"X-CSRF-Token": changed.json()["csrf_token"]}
+        # The value the admin JS seeds settingsDraft from, which drives the toggle's checked state.
+        shown = (await client.get("/admin/api/settings", headers=headers)).json()["settings"]
+        assert shown["metrics_export_enabled"] is False
+
+
+async def test_existing_install_keeps_persisted_export_enabled(tmp_path):
+    """An existing install that already persisted metrics_export_enabled=True must keep it after
+    the factory-default flip: bootstrap only persists the config default when operator_settings is
+    absent, so an existing row is read back unchanged."""
+    from app.admin.store import AdminStore
+
+    store = AdminStore(tmp_path / "rct.db", "s" * 48)
+    store.initialize()
+    store.put("operator_settings", {"metrics_export_enabled": True})
+    store.close()
+    settings = Settings(_env_file=None, hmac_secret="s" * 48, admin_db_path=tmp_path / "rct.db")
+    assert settings.metrics_export_enabled is False  # the new factory default
+    app = create_app(settings)
+    # The persisted operator value wins; the default flip did not clobber the existing install.
+    assert app.state.admin_store.get("operator_settings")["metrics_export_enabled"] is True
+    assert app.state.admin_desired_settings.metrics_export_enabled is True
+
+
+async def test_metrics_export_enabled_toggle_is_orthogonal_to_db_type(tmp_path):
+    """Once an operator has turned export on, setting `metrics_export_enabled` to False withholds
+    the export regardless of db_type; the connection fields stay saved and visible, unlike
+    resetting db_type back to "" (Disabled). Export is enabled explicitly here because the factory
+    default is now off."""
+    settings = Settings(_env_file=None, hmac_secret="s" * 48, admin_db_path=tmp_path / "rct.db",
+                        metrics_export_enabled=True)
     assert settings.metrics_export_enabled is True
     app = create_app(settings)
     password = app.state.first_start_password
@@ -128,7 +170,10 @@ async def test_dashboard_tsdb_tile_distinguishes_paused_from_unconfigured_and_fa
 
 
 async def test_resaving_an_unchanged_enabled_value_does_not_restart_the_exporter(tmp_path):
-    settings = Settings(_env_file=None, hmac_secret="s" * 48, admin_db_path=tmp_path / "rct.db")
+    # Export enabled explicitly: the factory default is off, so the committed value must already
+    # be True for resending True to be a genuine no-op.
+    settings = Settings(_env_file=None, hmac_secret="s" * 48, admin_db_path=tmp_path / "rct.db",
+                        metrics_export_enabled=True)
     app = create_app(settings)
     password = app.state.first_start_password
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver", headers={"Origin": "http://testserver"}) as client:
@@ -197,6 +242,7 @@ async def test_export_target_change_takes_effect_without_a_restart(tmp_path):
         settings = make_settings(
             hmac_secret="s" * 48, admin_db_path=tmp_path / "rct.db", db_type="questdb",
             questdb_hostname=first.url, metrics_export_interval_seconds=5,
+            metrics_export_enabled=True,  # factory default is now off; this test starts with export running
         )
         async with running_app(settings, settle=False) as h:
             assert h.app.state.admin_store.change_password(
@@ -287,6 +333,7 @@ async def test_disabling_export_stops_the_running_task_without_a_restart(tmp_pat
         settings = make_settings(
             hmac_secret="s" * 48, admin_db_path=tmp_path / "rct.db", db_type="questdb",
             questdb_hostname=server.url, metrics_export_interval_seconds=5,
+            metrics_export_enabled=True,  # factory default is now off; this test starts with export running
         )
         from app.admin.store import AdminStore
         from app.security.tokens import TokenStore
@@ -366,6 +413,7 @@ async def test_app_starts_with_export_and_contains_failures(tmp_path):
     settings = make_settings(
         hmac_secret="s" * 48, admin_db_path=tmp_path / "rct.db", db_type="questdb",
         questdb_hostname=closed_url, metrics_export_interval_seconds=5,
+        metrics_export_enabled=True,  # factory default is now off; this test needs export running
     )
     from app.admin.store import AdminStore
 

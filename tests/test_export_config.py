@@ -39,9 +39,9 @@ def test_disabled_by_default() -> None:
     assert s.db_type is None and s.export_endpoint() is None
     assert s.metrics_export_interval_seconds == 30
     assert s.questdb_downsampling is QuestDbDownsampling.OFF
-    # Defaults to True: an already-configured db_type keeps exporting for anyone upgrading from
-    # before this field existed, without having to flip a new toggle to restore prior behavior.
-    assert s.metrics_export_enabled is True
+    # Factory default is False: a fresh install starts with metrics export off and the operator
+    # opts in explicitly. An existing install keeps its persisted operator_settings value.
+    assert s.metrics_export_enabled is False
 
 
 def test_env_names_and_blank_values(monkeypatch: pytest.MonkeyPatch) -> None:

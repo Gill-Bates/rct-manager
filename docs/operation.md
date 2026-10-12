@@ -27,12 +27,11 @@ read succeeds.
 - The access log level depends on the request: GUI pages, assets, session polls and successful
   `/metrics` requests are `DEBUG`; mutating admin actions (login, password, settings, tokens),
   `/api/` and `/health` requests are `INFO`; any 4xx is `WARNING` and any 5xx is `ERROR`.
-- The generated admin password is never logged. The boxed block printed to stdout after the
-  server has started shows it in clear text (a deliberate operator choice, so it can be copied
-  straight from the console on first start), and it is also saved to `initial-admin-password`
-  next to the admin database (`data/initial-admin-password` by default, mode `0600`) as a
-  fallback for runs without a visible console. Change the password at first login, then delete
-  the file.
+- The boxed block printed to stdout after the server has started shows the generated admin
+  password in clear text (a deliberate operator choice, so it can be copied straight from the
+  console on first start). It appears only on the initial bootstrap. Console output is persisted
+  and centrally collected in systemd/Docker/Kubernetes, so the password may remain in log history
+  — a deliberately accepted tradeoff. Change the password at first login.
 - `GET /health` is token-free and turns 503 once the shutdown has begun. The
   container health check queries it on the container's own address.
 

@@ -1,3 +1,8 @@
+<p align="center">
+  <img src="assets/rct-logo-black.svg" width="400" alt="rct-manager Logo" class="rct-logo-light">
+  <img src="assets/rct-logo-white.svg" width="400" alt="rct-manager Logo" class="rct-logo-dark">
+</p>
+
 # rct-manager
 
 Vendor-neutral REST gateway for RCT Power inverters.

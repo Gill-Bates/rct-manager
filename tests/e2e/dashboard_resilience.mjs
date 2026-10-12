@@ -24,9 +24,8 @@ for (let i = 0; i < 100; i++) {
   try { if ((await fetch(`${base}/health`)).ok) break; } catch { /* not up yet */ }
   await sleep(200);
 }
-const announced = /Password file:\s+(\S+)\s+\(0600\)/.exec(server.output())?.[1];
-if (!announced || !path.resolve(announced).startsWith(dbDir + path.sep)) throw new Error('first-start password file was not announced inside the test database');
-const initial = fs.readFileSync(path.resolve(announced), 'utf8').trim();
+const initial = /One-time password:\s+(\S+)/.exec(server.output())?.[1];
+if (!initial) throw new Error('first-start password was not printed in the banner inside the test database');
 
 const browser = await engine.launch();
 const context = await browser.newContext({

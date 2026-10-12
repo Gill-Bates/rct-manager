@@ -9,15 +9,14 @@
 import asyncio
 import ipaddress
 import logging
-import os
 import signal
 import socket
-from pathlib import Path
 from types import FrameType
 
 import uvicorn
 from fastapi import FastAPI
 
+from app.api.restart import container_ip as _container_ip
 from app.api.restart import in_container as _in_container
 from app.api.restart import reexec as _reexec
 from app.api.runtime import Runtime
@@ -83,9 +82,7 @@ class GracefulServer(uvicorn.Server):
         app = self.config.app
         password = getattr(getattr(app, "state", None), "first_start_password", None)
         if password and self.started:  # after uvicorn's own log lines so the notice stays visible
-            settings = app.state.runtime.settings
-            path = write_first_start_password(settings, password)
-            print(first_start_banner(settings, path), flush=True)
+            print(first_start_banner(app.state.runtime.settings, password), flush=True)
 
     async def serve(self, sockets=None) -> None:
         self._loop = asyncio.get_running_loop()
@@ -96,55 +93,40 @@ class GracefulServer(uvicorn.Server):
         await super().serve(sockets)
 
 
-FIRST_START_PASSWORD_FILE = "initial-admin-password"  # noqa: S105 - a file name, not a password
+def _banner_host(settings: Settings) -> str:
+    """Host for the banner's ``Open:`` URL; never raises so the banner always builds.
 
-
-def write_first_start_password(settings: Settings, password: str) -> Path:
-    """Hand the bootstrap credential over through a 0600 file next to the admin DB.
-
-    Stdout is persisted and centrally collected in systemd/Docker/Kubernetes, so it must not carry it.
-
-    The secret filename is never ``resolve()``d: a pre-planted ``initial-admin-password`` symlink
-    must not let an attacker redirect the unlink/create onto its target. The file is created with
-    ``O_NOFOLLOW`` through a directory fd so the final path component cannot be a symlink either.
+    Outside a container the bind address is kept. Inside one, a bind address bound to the whole
+    container (loopback or 0.0.0.0/::) is useless from outside, so the detected container IP is
+    preferred; a specific non-loopback bind address the operator chose, or a failed detection,
+    falls back to the bind address.
     """
-    directory = settings.admin_db_path.parent
-    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-    path = directory / FIRST_START_PASSWORD_FILE
-    dir_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
     try:
-        if os.fstat(dir_fd).st_mode & 0o077:
-            os.fchmod(dir_fd, 0o700)  # tighten a parent directory created with a looser umask
-        # Relative to the trusted directory fd and never following a symlink: unlink the plain name,
-        # then create it exclusively. The mode is owner-only from creation, never tightened afterwards.
-        try:
-            os.unlink(FIRST_START_PASSWORD_FILE, dir_fd=dir_fd)
-        except FileNotFoundError:
-            pass
-        descriptor = os.open(
-            FIRST_START_PASSWORD_FILE, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=dir_fd
+        bind_is_wildcard_or_loopback = ipaddress.ip_address(str(settings.bind_address)).is_loopback or (
+            ipaddress.ip_address(str(settings.bind_address)).is_unspecified
         )
-    finally:
-        os.close(dir_fd)
-    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-        handle.write(password + "\n")
-    return path
+        if _in_container() and bind_is_wildcard_or_loopback:
+            detected = _container_ip()
+            if detected:
+                return url_host(detected)
+    except (ValueError, OSError):
+        pass
+    return url_host(settings.bind_address)
 
 
-def first_start_banner(settings: Settings, password_file: Path) -> str:
-    """Boxed first-login notice naming where the one-time password was saved.
+def first_start_banner(settings: Settings, password: str) -> str:
+    """Boxed first-login notice that prints the one-time admin password to the console.
 
-    The password itself is never printed: stdout is persisted and centrally collected in
-    systemd/Docker/Kubernetes, where it would remain as a permanent secret history. The password
-    file (0600, next to the admin DB) is the only place the operator reads it from.
+    The password is shown on stdout by deliberate operator choice; systemd/Docker/Kubernetes may
+    persist it in log history, an accepted tradeoff. It appears only on the initial bootstrap.
     """
-    host = url_host(settings.bind_address)
+    host = _banner_host(settings)
     rule = "=" * 61
     return "\n".join((
-        "", rule, " FIRST START - admin login", " User:          admin",
-        f" Password file: {password_file} (0600)",
-        "                (one-time; change it at first login)",
-        f" Open:          http://{host}:{settings.bind_port}/", rule, "",
+        "", rule, " FIRST START", " Admin user:         admin",
+        f" One-time password:  {password}",
+        " Please change this password after login.",
+        f" Open:               http://{host}:{settings.bind_port}/", rule, "",
     ))
 
 

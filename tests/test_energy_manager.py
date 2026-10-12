@@ -237,6 +237,11 @@ class SpyPort:
             raise self._cancel_raises
         return self._status
 
+    async def switch_to_internal(self, device_id: str, *, idle_only: bool = False) -> None:
+        self.calls.append("switch_to_internal")
+        if self._cancel_raises is not None:
+            raise self._cancel_raises
+
     async def status(self, device_id: str) -> DispatchStatus:
         self.calls.append("status")
         return self._status
@@ -324,6 +329,7 @@ def manager(
         approved_writes=spy.read if approved_writes else None,
         allowlist_candidates=lambda: frozenset(offered),
         required_writes=REQUIRED_WRITES,
+        internal_strategy_write=REQUIRED_WRITES[0],
         revoke_writes=spy.revoke,
         modes={"main": ModeRecord("main", mode=mode)},
     )
@@ -722,6 +728,7 @@ def live_manager(port, store: DispatchStore, clock: ManualClock, mode: EnergyMod
         approved_writes=spy.read,
         allowlist_candidates=lambda: frozenset(REQUIRED_WRITES),
         required_writes=REQUIRED_WRITES,
+        internal_strategy_write=REQUIRED_WRITES[0],
         modes={"main": ModeRecord("main", mode=mode)},
     )
 
@@ -798,7 +805,9 @@ async def test_switching_off_a_device_that_is_off_leaves_an_expert_dispatch_alon
     )
     calls = list(gateway.calls)
     off_manager = live_manager(port, port._store, clock, mode=EnergyMode.OFF)
-    await off_manager.set_mode("main", EnergyMode.OFF, actor="tester")
+    with pytest.raises(DispatchRejected) as info:
+        await off_manager.set_mode("main", EnergyMode.OFF, actor="tester")
+    assert info.value.code == "dispatch_operation_conflict"
     assert port._store.get("main").state is not DispatchState.IDLE
     assert gateway.calls == calls  # no cancel, no restore write
 
@@ -957,6 +966,27 @@ async def test_switching_off_hands_back_an_operation_of_either_mode(tmp_path: Pa
     await service.command("main", EnergyCommand(EnergyAction.CHARGE, 80.0), actor=PAT_ACTOR)
     status = await service.set_mode("main", EnergyMode.OFF, actor=ADMIN_ACTOR)
     assert status.mode is EnergyMode.OFF and status.state is EnergyState.AUTOMATIC
+    assert [call[0] for call in gateway.calls].index("internal") > max(
+        index for index, call in enumerate(gateway.calls) if call[0] == "restore"
+    )
+
+
+async def test_switching_off_idle_sets_internal_before_committing_mode(tmp_path: Path) -> None:
+    clock = ManualClock()
+    gateway = FakeDispatchGateway(clock)
+    port = controller(tmp_path, clock, gateway)
+    service = live_manager(port, port._store, clock, mode=EnergyMode.MANUAL)
+    gateway.fail_internal = True
+    with pytest.raises(DeviceApiError):
+        await service.set_mode("main", EnergyMode.OFF, actor=ADMIN_ACTOR)
+    assert service.mode("main") is EnergyMode.MANUAL
+    assert port._store.get_energy_states().get("main") is None
+
+    gateway.fail_internal = False
+    status = await service.set_mode("main", EnergyMode.OFF, actor=ADMIN_ACTOR)
+    assert status.mode is EnergyMode.OFF
+    assert gateway.calls[-1] == ("internal", "main")
+    assert port._store.get_energy_states()["main"].mode is EnergyMode.OFF
 
 
 async def test_selecting_the_current_mode_again_changes_nothing() -> None:

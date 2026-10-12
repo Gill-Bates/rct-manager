@@ -4,3 +4,16 @@
     border-radius: 8px;
     margin: 1em 0;
 }
+
+/* Light/Dark mode logo switching (slate = dark scheme, default = light). */
+.rct-logo-dark {
+    display: none;
+}
+
+[data-md-color-scheme="slate"] .rct-logo-light {
+    display: none;
+}
+
+[data-md-color-scheme="slate"] .rct-logo-dark {
+    display: inline;
+}

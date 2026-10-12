@@ -41,7 +41,8 @@ _VERSION_RE = re.compile(
 
 
 def _version_parts(value: str) -> tuple[int, ...]:
-    match = _VERSION_RE.match(value)
+    # fullmatch: a trailing junk suffix (e.g. "1.2.3-invalid-junk") must fail, not be read as 1.2.3.
+    match = _VERSION_RE.fullmatch(value)
     if match is None:
         return (0,)
     parts = tuple(int(part) for part in match.group(1).split("."))
@@ -50,7 +51,7 @@ def _version_parts(value: str) -> tuple[int, ...]:
 
 def _version_key(value: str) -> tuple[tuple[int, ...], int, int]:
     """Sort key where ``2.0.0rc1`` < ``2.0.0``; a final release outranks every pre-release."""
-    match = _VERSION_RE.match(value)
+    match = _VERSION_RE.fullmatch(value)
     if match is None or match.group(2) is None:
         return _version_parts(value), 3, 0
     return _version_parts(value), _PRERELEASE_RANK[match.group(2).lower()], int(match.group(3) or 0)
@@ -104,7 +105,8 @@ def _fetch() -> dict:
         if not isinstance(data, dict) or not isinstance(data.get("tag_name"), str):
             raise TypeError("GitHub returned an invalid release")
         latest = data["tag_name"].removeprefix("v")
-        if not latest or _version_parts(latest) == (0, 0, 0):
+        # A tag that does not parse (e.g. "garbage") must be rejected, not stored as latest_version.
+        if not latest or _VERSION_RE.fullmatch(latest) is None:
             raise ValueError("GitHub returned an invalid release version")
         result["latest_version"] = latest
         result["release_url"] = _release_url(data.get("html_url"))

@@ -7,6 +7,31 @@
   'use strict';
 
   const $ = (id) => document.getElementById(id);
+
+  function initChangelogDetailsScroll() {
+    document.querySelectorAll('.changelog-content details').forEach((details) => {
+      const summary = details.querySelector('summary');
+      if (!summary) return;
+      let body = details.querySelector('.changelog-details-body');
+      if (!body) {
+        body = document.createElement('div');
+        body.className = 'changelog-details-body';
+        let node = summary.nextSibling;
+        while (node) {
+          const next = node.nextSibling;
+          body.appendChild(node);
+          node = next;
+        }
+        if (body.childNodes.length) details.appendChild(body);
+      }
+      details.addEventListener('toggle', () => {
+        if (details.open && body) body.scrollTop = 0;
+      });
+    });
+  }
+
+  initChangelogDetailsScroll();
+
   const button = $('btn-check-updates');
   if (!button) return;
 
@@ -81,7 +106,7 @@
         $('update-error').textContent = data.error;
         $('update-error').classList.remove('d-none');
       } else if (currentIsNewer(data.current_version, data.latest_version)) {
-        showStatus('warning', 'warning_amber', 'You are currently using a pre-release. This is not recommended for production!');
+        showStatus('warning', 'warning_amber', 'You are currently using a pre-release.');
       } else if (data.update_available) {
         showStatus('success', 'new_releases', `Update available! Version ${data.latest_version} is ready.`);
         const url = releaseUrl(data.release_url);

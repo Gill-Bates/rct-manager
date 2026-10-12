@@ -130,10 +130,17 @@ class DeviceControlSnapshot:
     grid_charge_enabled: bool
     read_at: datetime
     all_fresh: bool = True
+    # Raw wire value of power_mng_battery_power_extern captured at snapshot time. The restore path
+    # writes this back verbatim so the original register sign is reproduced regardless of the
+    # current BATTERY_POWER_SIGN projection (P2-02). None marks a legacy snapshot that predates the
+    # field: such a snapshot is restored through the current convention and is not sign-safe.
+    battery_power_raw: float | None = None
 
     def __post_init__(self) -> None:
         if not math.isfinite(self.soc_target_ratio):
             raise ValueError("soc_target_ratio must be finite")
+        if self.battery_power_raw is not None and not math.isfinite(self.battery_power_raw):
+            raise ValueError("battery_power_raw must be finite when present")
 
 
 @dataclass(frozen=True, slots=True)
@@ -229,12 +236,17 @@ class DispatchConfig:
         # check below, so they are excluded here.
         non_negative_fields = (
             "grid_import_reserve_w", "grid_control_deadband_w", "power_write_deadband_w",
-            "min_write_interval_seconds", "cycle_interval_seconds", "telemetry_timeout_seconds",
+            "min_write_interval_seconds", "telemetry_timeout_seconds",
             "control_telemetry_max_age_seconds", "soc_telemetry_max_age_seconds",
         )  # fmt: skip
         for name in non_negative_fields:
             if getattr(self, name) < 0:
                 raise ValueError(f"{name} must not be negative")
+        # cycle_interval_seconds drives `run()`'s `while True: sleep(interval)` loop, so 0 turns it
+        # into an unthrottled tick/telemetry loop. Strictly positive here as defense-in-depth for a
+        # directly constructed config; Settings already pins the operator value to >= 1.
+        if self.cycle_interval_seconds <= 0:
+            raise ValueError("cycle_interval_seconds must be positive")
         # The operation-duration caps must be strictly positive: a zero or negative cap makes
         # submit() derive an effective deadline at or before "now", so it writes hardware and the
         # very next tick() immediately expires it (the TTL safety bound never actually holds).
@@ -316,7 +328,27 @@ def _snapshot_from_dict(snapshot_data: dict) -> DeviceControlSnapshot:
         # Fail-closed (D5): a snapshot with no freshness information on record is not assumed
         # fresh. The real adapter (app/gateway/rct_dispatch.py) can and does return False.
         all_fresh=_strict_bool(snapshot_data.get("all_fresh", False), "all_fresh"),
+        # Legacy snapshots (P2-02) carry no raw wire value: absent/null stays None and the restore
+        # path falls back to the current convention; a present value must still be a real number.
+        battery_power_raw=_optional_number(snapshot_data.get("battery_power_raw"), "battery_power_raw"),
     )
+
+
+# States in which a persisted record must carry a snapshot: the state machine has already (or may
+# have) written the device, so a restore has to read the captured pre-dispatch values back. IDLE
+# and PRECHECK are deliberately absent — neither has written hardware that needs restoring.
+_SNAPSHOT_REQUIRED: frozenset[DispatchState] = frozenset(
+    {
+        DispatchState.APPLYING,
+        DispatchState.REPLACING,
+        DispatchState.CHARGING,
+        DispatchState.DISCHARGING,
+        DispatchState.HOLDING,
+        DispatchState.TARGET_REACHED,
+        DispatchState.RESTORING,
+        DispatchState.FAULT_RESTORE_PENDING,
+    }
+)
 
 
 def validate_record_invariants(record: "DispatchRecord") -> None:
@@ -335,6 +367,13 @@ def validate_record_invariants(record: "DispatchRecord") -> None:
         raise DispatchRecordCorrupt(f"state is {record.state.value} but intent is missing")
     if record.state in (DispatchState.RESTORING, DispatchState.FAULT_RESTORE_PENDING) and not record.restore_required:
         raise DispatchRecordCorrupt(f"state is {record.state.value} but restore_required is not set")
+    # A state in which the state machine may already have written hardware must carry the snapshot
+    # that the restore path reads back: without it, _restore_guarded() treats snapshot=None as
+    # "nothing was written" and resets to IDLE without touching the device — a fail-open pretend
+    # restore. PRECHECK+None is the one legitimate crash window (durable intent before the snapshot
+    # read) and stays exempt; recover() resets exactly that case to IDLE.
+    if record.state in _SNAPSHOT_REQUIRED and record.snapshot is None:
+        raise DispatchRecordCorrupt(f"state is {record.state.value} but snapshot is missing")
 
 
 @dataclass(slots=True)

@@ -24,6 +24,7 @@ from app.config import (
 )
 from app.errors import BudgetExhausted, DeviceApiError, QueueFullError, QueueTimeout
 from app.gateway.rct import DeviceBinding, RctGateway
+from app.gateway.vendor import SlaveDiscovery
 from app.protocol.frames import Frame
 from app.protocol.types import Command
 from app.scheduling.budget import WorkBudget
@@ -335,6 +336,41 @@ async def _gateway(limit: int, fail_connects: int = 0):
     binding = DeviceBinding(device, endpoint, serializer)
     gateway.add_device(binding)
     return gateway, binding, budget, net, catalog
+
+
+def test_replace_devices_clears_device_keyed_state_but_keeps_the_locks() -> None:
+    """A live device-list reload may keep a logical device_id while re-addressing the hardware.
+    replace_devices() must drop the caches keyed by that id — slave discovery and refresh history —
+    so the new device cannot inherit the old one's topology or failure counters. The per-object
+    write locks and per-device slave locks are kept: an in-flight write or discovery may still hold
+    one, and dropping it would remove the serialization that protects the device during the swap.
+    """
+
+    async def scenario() -> tuple[bool, bool, bool, bool, bool, str]:
+        gateway, binding, _budget, _net, _catalog = await _gateway(5)
+        gateway._slave_cache["inv1"] = (1e18, SlaveDiscovery((), True, None))
+        gateway._refresh_attempts[("inv1", "battery_power")] = 123.0
+        gateway._refresh_failures[("inv1", "battery_power")] = 3
+        gateway._write_locks[("inv1", 0x1234)] = asyncio.Lock()
+        async with gateway._slave_locks.setdefault("inv1", asyncio.Lock()):
+            pass
+        rebuilt = DeviceBinding(binding.entry, binding.endpoint, binding.serializer)
+        gateway.replace_devices([rebuilt])
+        resolved = gateway._by_address[(binding.entry.key.endpoint, binding.entry.network_id)]
+        await binding.serializer.stop()
+        return (
+            bool(gateway._slave_cache),
+            bool(gateway._refresh_attempts),
+            bool(gateway._refresh_failures),
+            ("inv1", 0x1234) in gateway._write_locks,
+            "inv1" in gateway._slave_locks,
+            resolved,
+        )
+
+    slave_cache, attempts, failures, write_lock, slave_lock, resolved = asyncio.run(scenario())
+    assert (slave_cache, attempts, failures) == (False, False, False)  # device-keyed state is dropped
+    assert write_lock and slave_lock  # the locks survive the swap
+    assert resolved == "inv1"  # the rebuilt binding is addressable again
 
 
 def test_invalidated_cache_after_skip_costs_exactly_one_unit() -> None:

@@ -17,7 +17,7 @@ import uvicorn
 
 from app.admin.store import AdminStore
 from app.api import server
-from app.api.restart import BackgroundRestart, in_container, probe_listener
+from app.api.restart import BackgroundRestart, _current_listener_holds, in_container, probe_listener
 from app.errors import ReconfigurationBuildError
 from tests.api_helpers import admin_session_headers, make_settings, running_app
 
@@ -199,9 +199,24 @@ def test_probe_tolerates_the_own_port_and_refuses_a_foreign_address():
         own.bind(("127.0.0.1", 0))
         own.listen()
         port = own.getsockname()[1]
-        assert probe_listener("127.0.0.1", port, port_unchanged=True) is None
-        assert probe_listener("127.0.0.1", port, port_unchanged=False) is not None
-    assert "cannot listen" in probe_listener("203.0.113.77", 40000, port_unchanged=True)
+        # Same address, unchanged port: the busy port is the service's own listener.
+        assert probe_listener("127.0.0.1", port, port_unchanged=True, current_address="127.0.0.1") is None
+        assert probe_listener("127.0.0.1", port, port_unchanged=False, current_address="127.0.0.1") is not None
+        # A wildcard current listener covers the whole port, so EADDRINUSE there is still our own.
+        assert probe_listener("127.0.0.1", port, port_unchanged=True, current_address="0.0.0.0") is None
+    assert "cannot listen" in probe_listener("203.0.113.77", 40000, port_unchanged=True, current_address="203.0.113.77")
+
+
+def test_current_listener_holds_only_a_covering_bind():
+    # Same specific address or a wildcard current listener covers an EADDRINUSE on the unchanged port.
+    assert _current_listener_holds("127.0.0.1", "127.0.0.1", port_unchanged=True) is True
+    assert _current_listener_holds("192.168.1.5", "0.0.0.0", port_unchanged=True) is True
+    assert _current_listener_holds("::1", "::", port_unchanged=True) is True
+    # Two different specific addresses on the same port: the busy address belongs to another
+    # process, not the current listener — this is the P2-3 case that must stay an error.
+    assert _current_listener_holds("192.168.1.5", "127.0.0.1", port_unchanged=True) is False
+    # A changed port is never covered by the current listener.
+    assert _current_listener_holds("127.0.0.1", "127.0.0.1", port_unchanged=False) is False
 
 
 async def test_background_restart_keeps_a_minimum_distance_after_a_restart():

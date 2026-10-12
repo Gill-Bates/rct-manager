@@ -11,7 +11,7 @@ Three independent things decide whether a battery command is possible:
 | Switch | Where | What it does |
 | --- | --- | --- |
 | **Write access** | Inverters page (global) | Allows the service to write to inverters at all. It also opens the generic `PUT /api/v1/devices/{id}/metrics` routes, so it stays a deliberate, separate switch: choosing a mode never turns it on. |
-| **Mode** per inverter | Energy Manager page | **Off**, **Manual** or **External**: who may command this inverter. |
+| **Mode** per inverter | Energy Manager page | **Off**, **Manual** or **External**: who may command this inverter. Selecting Off hands back an active Manager command and verifies the inverter's Internal SoC strategy before disabling Manager control. |
 | **Expert mode** | Energy Manager page | A display switch only: it shows hardware verification, limits and diagnostics. It changes no behaviour. |
 
 Who may call what, per mode:
@@ -19,13 +19,16 @@ Who may call what, per mode:
 | Mode | Admin GUI (signed-in session, CSRF, no token) | REST API with a read/write token (`POST …/energy/command`) |
 | --- | --- | --- |
 | Off | refused, 409 `energy_manager_off` | refused, 409 `energy_manager_off` |
-| Manual | allowed: charge, keep idle, discharge, return to automatic | refused, 409 `energy_manager_not_external` (an operator must switch the inverter to External) |
+| Manual | allowed: charge, keep idle, discharge | refused, 409 `energy_manager_not_external` (an operator must switch the inverter to External) |
 | External | refused, 409 `energy_manager_external` ("Controlled by an external app") | allowed |
 
 Reading the status (`GET …/energy`) works in every mode, with a session or a token. The mode itself
 can only be changed in the admin GUI (`PUT /admin/api/energy/devices/{id}/mode`, session and CSRF; a
 token gets 403). Changing the mode to Off, or between Manual and External, first hands the inverter
-back to automatic operation, so an operation started under one mode never outlives it.
+back to the inverter's previous settings, so an operation started under one mode never outlives it.
+Selecting Off also sets and verifies the inverter's Internal SoC strategy. If that cannot be
+confirmed, the mode stays Manual or External and the UI reports the error.
+Internal lets the inverter choose its own charge power; Off does not request maximum charging power.
 
 The expert endpoint `POST /api/v1/devices/{id}/battery/dispatch` is independent of the mode: it needs
 no mode and is not limited by it. External is therefore **not** the only way to control the battery
@@ -39,7 +42,9 @@ Both endpoints need a read/write token and write support, like
 [battery dispatch](api/endpoints.md#battery-dispatch). A command is accepted only while the
 inverter is in mode **External** (see [How it works](#how-it-works)). The status carries `mode`
 (`off`, `manual`, `external`), `accepts_commands_from` (`none`, `admin`, `api`) and the derived
-`armed` flag (`true` unless the mode is `off`), kept for compatibility.
+`armed` flag (`true` unless the mode is `off`), kept for compatibility. `mode=off` on the public
+API describes command authorization only; it does not prove the inverter's physical strategy.
+The admin page combines the saved mode with a current strategy reading for that indication.
 
 | Method | Path | Purpose |
 | --- | --- | --- |
@@ -57,7 +62,7 @@ curl -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/jso
 | `charge` | required | optional | Charges until the target SoC is reached |
 | `discharge` | required | optional | Discharges following the house load until the target SoC; cuts discharge immediately on grid export, bypassing deadband and write interval |
 | `hold` | omit | omit | Holds the battery at 0 W, grid charging off |
-| `auto` | omit | omit | Hands control back to the inverter |
+| `auto` | omit | omit | Stops the current Manager command and restores the pre-command inverter settings; it does not switch the Manager Off or select the Internal strategy |
 
 - A body that violates the table is rejected with 422 `invalid_request`.
 - `max_power_w` defaults to the limit configured for the inverter and is clamped to it
@@ -74,15 +79,17 @@ curl -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/jso
 
 ### Switching on
 
-The Energy Manager is **Off** per inverter until an operator selects **Manual** or **External** in the
-admin GUI. The public API cannot change the mode. A command while it is off answers **409
-`energy_manager_off`**. Selecting Manual or External needs Write access to be on (otherwise 409
+The Energy Manager initially has no confirmed operating mode for a newly added inverter. The admin
+page shows **Not yet managed** and the observed inverter SOC strategy; it does not label a new
+inverter on Constant or External as Off or Automatic. The public API cannot change the mode. A
+command while no mode has been selected answers **409 `energy_manager_off`**. Selecting Manual or
+External needs Write access to be on (otherwise 409
 `energy_write_support_required`; the GUI points to the Inverters page), power limits, and the
 hardware-verification gate as before.
 
 Selecting Manual or External adds the four dispatch register approvals to the write allowlist if missing (never
 removes any), which also opens them to the generic `PUT /api/v1/devices/{id}/metrics`. Selecting Off
-hands control back first and removes no approval. If the approvals are revoked on the **Inverters**
+hands control back and verifies Internal strategy before changing the mode; it removes no approval. If the approvals are revoked on the **Inverters**
 page, the actions report `write_not_permitted` and commands answer 409 `energy_action_unavailable`.
 A custom write allowlist file must contain `power_mng_soc_strategy`, `power_mng_soc_target_set`,
 `power_mng_battery_power_extern` and `power_mng_use_grid_power_enable`.
@@ -111,10 +118,12 @@ Two orthogonal facts are kept separate on the page:
 
 - **Mode (Off / Manual / External)** — who may command the inverter, a three-state radio group in the
   card header (`PUT …/mode`). Choosing a mode does not by itself charge or discharge the battery. The
-  charge, keep idle, discharge and return-to-automatic buttons are enabled in Manual only; in External
+  charge, keep idle and discharge buttons are enabled in Manual only; in External
   they are disabled and the card says "This inverter is controlled by an external app through the API
-  (PAT required)." With Write access off, a hint links to the Inverters page.
-- **Current mode** — what the battery is actually doing: Automatic / Charging to X % / Keeping battery
+  (PAT required)." Off is shown as selected only after an explicit Off transition and a fresh
+  readback of Internal strategy. If the strategy later changes or cannot be read, the page marks
+  Off as unconfirmed. With Write access off, a hint links to the Inverters page.
+- **Manager status** — whether a Manager command is active: Idle (no Manager command) / Charging to X % / Keeping battery
   idle / Discharging to X %, shown as one plain-language sentence (with the measured rate in kW while
   running).
 
@@ -122,8 +131,8 @@ The page is layered by in-page progressive disclosure:
 
 - **Operate** (always shown) — device name and connection, the mode control, the current
   mode sentence, SoC, the actions **Charge battery / Keep battery idle / Discharge battery** with a
-  contextual target-SoC slider and a primary button (e.g. "Charge battery to 80 %"), and **Return to
-  automatic**. Normal cache age is not shown in the operating controls; a transient polling failure
+  contextual target-SoC slider and a primary button (e.g. "Charge battery to 80 %"). Select **Off**
+  to return the inverter to its Internal strategy. Normal cache age is not shown in the operating controls; a transient polling failure
   shows "Live data unavailable."
 - **Setup** (shown only when a prerequisite is missing) — a state-independent readiness checklist
   (Inverter connected / Write access / Power limits / Hardware verification) that opens the editor

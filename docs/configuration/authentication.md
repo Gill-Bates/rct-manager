@@ -9,16 +9,16 @@ business API access stays denied until the admin creates one in the GUI.
 
 The root page redirects to login. The first server startup generates a one-time password
 (8 characters with exactly one special character) for the user `admin` and prints it in clear text
-in the boxed `FIRST START - admin login` block on stdout, so it can be copy-pasted straight from
-the console. As a fallback for operation without a visible console (a background service, a
-container log that is not watched live), it is also saved to a file, `initial-admin-password` next
-to the admin database, created with mode `0600` (owner read and write only) from the moment it
-exists. The credential is one-time: the first login permits only password change and logout until
-a new password has been set. Administrative sessions use HttpOnly cookies, CSRF protection, expiry
-and login throttling. Disabling API authentication never disables GUI authentication.
+in the boxed `FIRST START` block on stdout, so it can be copy-pasted straight from the console. It
+is shown only on this initial bootstrap, not on later restarts. Console output is persisted and
+centrally collected in systemd/Docker/Kubernetes, so the password may remain in log history — a
+deliberately accepted tradeoff. The credential is one-time: the first login permits only password
+change and logout until a new password has been set. Administrative sessions use HttpOnly cookies,
+CSRF protection, expiry and login throttling. Disabling API authentication never disables GUI
+authentication.
 
-The new admin password needs at least 8 characters; delete the file once it is set. No token is
-issued automatically; PATs are created only by the admin in the GUI.
+The new admin password needs at least 8 characters. No token is issued automatically; PATs are
+created only by the admin in the GUI.
 
 ## Personal access tokens
 

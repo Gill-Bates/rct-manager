@@ -65,10 +65,9 @@ python -m app validate
 python -m app
 ```
 
-Open `http://127.0.0.1:8000/`. The one-time `admin` password appears in a
-`FIRST START - admin login` block on first startup and is also saved to
-`data/initial-admin-password`. You must change this password when you first log
-in.
+Open `http://127.0.0.1:8000/`. The one-time `admin` password is printed in clear
+text in a `FIRST START` block on the console on first startup. You must change
+this password when you first log in.
 
 Settings are stored in `data/rct.db`, encrypted and authenticated with
 `HMAC_SECRET` from `settings.env` (generated on a local start, required for

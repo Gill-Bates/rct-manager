@@ -16,7 +16,9 @@ from tests.api_helpers import admin_session_headers
 
 @pytest.mark.asyncio
 async def test_prometheus_settings_apply_live_and_persist(tmp_path):
-    settings = Settings(_env_file=None, hmac_secret="s" * 48, admin_db_path=tmp_path / "rct.db")
+    # The factory default is off; this test exercises a running scrape endpoint, so enable it.
+    settings = Settings(_env_file=None, hmac_secret="s" * 48, admin_db_path=tmp_path / "rct.db",
+                        enable_metrics_endpoint=True)
     app = create_app(settings)
     assert app.state.admin_store.change_password(app.state.first_start_password, "a much stronger password")
     updates = {
@@ -89,6 +91,48 @@ async def test_prometheus_settings_apply_live_and_persist(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_fresh_install_disables_the_scrape_endpoint(tmp_path):
+    """A brand-new install (no persisted operator_settings) must bootstrap with the scrape endpoint
+    off: the config factory default is persisted verbatim, the value the GUI reads back is False, so
+    the 'Enable Metrics Endpoint' toggle shows off, and GET /metrics answers 404 until an operator
+    enables it."""
+    settings = Settings(_env_file=None, hmac_secret="s" * 48, admin_db_path=tmp_path / "rct.db")
+    app = create_app(settings)
+    # First bootstrap persisted the factory default, which is now off.
+    assert app.state.admin_store.get("operator_settings")["enable_metrics_endpoint"] is False
+    assert app.state.admin_desired_settings.enable_metrics_endpoint is False
+    assert app.state.runtime.settings.enable_metrics_endpoint is False
+    app.state.admin_store.change_password(app.state.first_start_password, "a much stronger password")
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver", headers={"Origin": "http://testserver"}) as client:
+        headers = await admin_session_headers(client, "a much stronger password")
+        # The value the admin JS seeds settingsDraft from, which drives the toggle's checked state.
+        shown = (await client.get("/admin/api/settings", headers=headers)).json()["settings"]
+        assert shown["enable_metrics_endpoint"] is False
+        # Runtime effect: the scrape endpoint is not served on a fresh install.
+        assert (await client.get("/metrics")).status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_existing_install_keeps_the_persisted_scrape_endpoint_enabled(tmp_path):
+    """An existing install that already persisted enable_metrics_endpoint=True must keep it after
+    the factory-default flip: bootstrap only persists the config default when operator_settings is
+    absent, so an existing row is read back unchanged."""
+    from app.admin.store import AdminStore
+
+    store = AdminStore(tmp_path / "rct.db", "s" * 48)
+    store.initialize()
+    store.put("operator_settings", {"enable_metrics_endpoint": True})
+    store.close()
+    settings = Settings(_env_file=None, hmac_secret="s" * 48, admin_db_path=tmp_path / "rct.db")
+    assert settings.enable_metrics_endpoint is False  # the new factory default
+    app = create_app(settings)
+    # The persisted operator value wins; the default flip did not clobber the existing install.
+    assert app.state.admin_store.get("operator_settings")["enable_metrics_endpoint"] is True
+    assert app.state.admin_desired_settings.enable_metrics_endpoint is True
+    assert app.state.runtime.settings.enable_metrics_endpoint is True
+
+
+@pytest.mark.asyncio
 async def test_device_heading_prefers_display_name_then_reported_name_then_id(tmp_path):
     from app.config import DeviceEntry
 
@@ -130,33 +174,39 @@ async def test_device_heading_prefers_display_name_then_reported_name_then_id(tm
 
 
 @pytest.mark.asyncio
-async def test_stored_address_display_name_is_repaired_once_and_a_chosen_name_survives(tmp_path):
+async def test_a_device_without_a_display_name_uses_the_reported_name(tmp_path):
+    """Fresh install: with no legacy display-name repair, a device left without a display_name
+    shows the inverter-reported name, and an operator-set name is kept across a restart."""
     from app.config import DeviceEntry
 
     settings = Settings(_env_file=None, hmac_secret="s" * 48, admin_db_path=tmp_path / "rct.db",
-                        devices=[DeviceEntry(device_id="main", host="10.40.0.188", port=8899,
-                                             display_name="10.40.0.188:8899")])
+                        devices=[DeviceEntry(device_id="main", host="10.40.0.188", port=8899)])
     app = create_app(settings)
     app.state.admin_store.change_password(app.state.first_start_password, "a much stronger password")
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver", headers={"Origin": "http://testserver"}) as client:
         headers = await admin_session_headers(client, "a much stronger password")  # devices are session-only
         app.state.runtime.gateway.set_reported_name("main", "Garage Inverter")
         listed = (await client.get("/admin/api/devices", headers=headers)).json()["devices"]
-        assert listed[0]["name"] == "Garage Inverter"  # the address-shaped name no longer wins
+        assert listed[0]["name"] == "Garage Inverter"
         stored = (await client.get("/admin/api/settings", headers=headers)).json()["settings"]["devices"]
         assert stored[0]["display_name"] is None
-        assert app.state.admin_store.get("operator_settings")["devices"][0]["display_name"] is None
 
-        # The repair ran once; a name the operator sets afterwards is kept.
+        # An operator-chosen name is persisted and kept; nothing repairs or rewrites it.
         saved = await client.put("/admin/api/settings", headers=headers,
-                                 json={"devices": [{**stored[0], "display_name": "10.40.0.188:8899"}]})
+                                 json={"devices": [{**stored[0], "display_name": "Roof Inverter"}]})
         assert saved.status_code == 200
-        assert saved.json()["settings"]["devices"][0]["display_name"] == "10.40.0.188:8899"
-        again = (await client.get("/admin/api/settings", headers=headers)).json()["settings"]["devices"]
-        assert again[0]["display_name"] == "10.40.0.188:8899"
+        assert saved.json()["settings"]["devices"][0]["display_name"] == "Roof Inverter"
 
     restarted = create_app(settings)
-    assert restarted.state.admin_desired_settings.devices[0].display_name == "10.40.0.188:8899"
+    assert restarted.state.admin_desired_settings.devices[0].display_name == "Roof Inverter"
+
+
+def test_the_name_repair_migration_is_gone():
+    """The one-time legacy device-display-name repair and its persisted flag were removed."""
+    import app.admin.api as admin_api
+
+    assert not hasattr(admin_api, "repair_device_names")
+    assert not hasattr(admin_api, "_NAME_MIGRATION")
 
 
 @pytest.mark.asyncio

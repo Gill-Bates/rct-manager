@@ -576,12 +576,22 @@ async def _run_hold_test(
         raise _Blocked(f"The inverter stopped answering during the test ({exc.code}).") from exc
     finally:
         restored = False
-        if started:
-            try:
-                await dispatch.cancel(device_id)
-                restored = await _restore_matches(request, device_id, before)
-            except Exception:  # the restore outcome is reported below either way
-                log.exception("Verification test restore failed: device=%s", device_id)
+        try:
+            if started:
+                try:
+                    await dispatch.cancel(device_id)
+                    restored = await _restore_matches(request, device_id, before)
+                except Exception:  # the restore outcome is reported below either way
+                    log.exception("Verification test restore failed: device=%s", device_id)
+        finally:
+            # The candidate record this test wrote must ALWAYS be undone, including on a successful
+            # hold: nothing is stored until commit, and the proven code belongs only in session.code.
+            # Nested so a restore-failure raise below cannot skip it.
+            if code_set_here:
+                try:
+                    await dispatch.set_capabilities(device_id, [write_record])
+                except Exception:  # noqa: BLE001 - logged; the hand-back retry re-reads the live state
+                    log.warning("Could not reset the candidate strategy code: device=%s", device_id)
         if started and not restored:
             log.error("Verification test did not confirm the restore: device=%s", device_id)
             # Raised from the finally block on purpose: it replaces a success with a failure.
@@ -589,11 +599,6 @@ async def _run_hold_test(
                 "The inverter could not be confirmed back in its previous state. Open the inverter app and check "
                 "that automatic operation is active. The gateway keeps retrying the hand-back."
             )
-        if code_set_here and not settled >= 2:
-            try:
-                await dispatch.set_capabilities(device_id, [write_record])
-            except Exception:  # noqa: BLE001 - an unverified candidate left behind is harmless
-                log.warning("Could not reset the candidate strategy code: device=%s", device_id)
     evidence = f"control test: battery {baseline:.0f} -> {last:.0f} W under a 0 W hold, read back, restored"
     return code, evidence, grid_result
 

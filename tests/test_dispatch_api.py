@@ -14,6 +14,7 @@ from unittest.mock import patch
 from app.admin.store import AdminStore
 from app.catalog.registry import RegistryCatalog
 from app.config import DeviceEntry
+from app.dispatch.soc_policy import SocTargetMode, SocTargetPolicy
 from app.errors import DeviceApiError
 from tests.api_helpers import (
     DISPATCH_WRITE_NAMES,
@@ -432,6 +433,14 @@ async def test_readdressing_clears_unverified_evidence_and_engineering_mode_too(
         assert put_limits.status_code == 200, put_limits.text
         assert harness.runtime.dispatch.device_limits("main").engineering_mode is True
 
+        # A non-default SoC-target policy is identity-bound in the same way the capability evidence
+        # is (per-device/firmware), so a readdressing must reset it to the shipped default too.
+        await harness.runtime.dispatch.set_soc_target_policy(
+            "main",
+            SocTargetPolicy(device_id="main", mode=SocTargetMode.BELOW_CURRENT_SOC, note="old device policy"),
+        )
+        assert harness.runtime.dispatch.soc_target_policy("main").mode is SocTargetMode.BELOW_CURRENT_SOC
+
         response = await harness.client.put(
             "/admin/api/settings", headers=ADMIN_WRITER,
             json={"devices": [{"host": "192.0.2.91", "port": 48998}]},
@@ -446,6 +455,9 @@ async def test_readdressing_clears_unverified_evidence_and_engineering_mode_too(
         assert write_path["soc_strategy_external_code"] is None
         assert write_path["note"] is None
         assert harness.runtime.dispatch.device_limits("main").engineering_mode is False
+        reset_policy = harness.runtime.dispatch.soc_target_policy("main")
+        assert reset_policy.mode is SocTargetMode.BUSINESS_TARGET
+        assert reset_policy.note is None
 
 
 async def test_failed_graph_build_leaves_identity_bound_state_untouched(tmp_path: Path) -> None:

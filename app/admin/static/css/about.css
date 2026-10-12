@@ -1,20 +1,107 @@
-.about-page .card-header .material-icons { color: var(--rct-brand); }
-.about-page .card { min-width: 0; }
-.about-updates-column { gap: var(--rct-card-gap); }
-.about-dependencies { max-height: 18.75rem; overflow-y: auto; }
+.about-page .card-header .material-icons {
+  color: var(--rct-brand);
+}
+
+.about-page .card {
+  min-width: 0;
+}
+
+.about-updates-column {
+  gap: var(--rct-card-gap);
+}
+
+.about-dependencies {
+  max-height: 18.75rem;
+  overflow-y: auto;
+}
+
 /* Desktop: deps card stretches to the row height set by the other columns (wirebuddy layout). */
 @media (min-width: 992px) {
-  .about-top-row > .col-lg-4 > .card { display: flex; flex-direction: column; }
-  .about-updates-column > .about-doc-card { flex: 1 1 auto; }
-  .about-deps-col .about-dependencies { flex: 1 1 0; min-height: 0; max-height: none; overflow: hidden; display: flex; flex-direction: column; }
-  .about-deps-col .about-dependencies-scroll { flex: 1 1 0; min-height: 0; overflow-y: auto; }
+  .about-top-row>.col-lg-4>.card {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .about-updates-column>.about-doc-card {
+    flex: 1 1 auto;
+  }
+
+  .about-deps-col .about-dependencies {
+    flex: 1 1 0;
+    min-height: 0;
+    max-height: none;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .about-deps-col .about-dependencies-scroll {
+    flex: 1 1 0;
+    min-height: 0;
+    overflow-y: auto;
+  }
 }
-.about-dependencies th, .about-dependencies td { padding: .55rem .75rem; }
-.about-dependencies thead th { position: sticky; top: 0; z-index: 1; background: var(--bs-tertiary-bg); }
-.about-update-card .card-header .material-icons { font-size: 1.25rem; }
-.about-update-card .card-body { padding-bottom: .5rem; }
-.about-update-card table th, .about-update-card table td { width: 50%; }
-.about-update-card table td { overflow-wrap: anywhere; }
-.about-doc-card .card-body { padding-top: .5rem; padding-bottom: .5rem; }
-.about-changelog { max-height: min(34rem, 60vh); overflow-y: auto; }
-.about-changelog ul { padding-left: 1.2rem; }
+
+.about-dependencies th,
+.about-dependencies td {
+  padding: .55rem .75rem;
+}
+
+.about-dependencies thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--bs-tertiary-bg);
+}
+
+.about-update-card .card-header .material-icons {
+  font-size: 1.25rem;
+}
+
+.about-update-card .card-body {
+  padding-bottom: .5rem;
+}
+
+.about-update-card table th,
+.about-update-card table td {
+  width: 50%;
+}
+
+.about-update-card table td {
+  overflow-wrap: anywhere;
+}
+
+.about-doc-card .card-body {
+  padding-top: .5rem;
+  padding-bottom: .5rem;
+}
+
+.about-changelog {
+  max-height: min(34rem, 60vh);
+  overflow-y: auto;
+}
+
+.about-changelog ul {
+  padding-left: 1.2rem;
+}
+
+/* The rendered Markdown emits document-level headings; scale them down to the card's h6 look. */
+.changelog-content :is(h1, h2, h3, h4, h5, h6) {
+  font-size: 1rem;
+  font-weight: 600;
+  margin-top: 1rem;
+}
+
+.changelog-content> :first-child {
+  margin-top: 0;
+}
+
+.changelog-content summary {
+  cursor: pointer;
+}
+
+/* Keeps a long collapsed history from pushing the card; about.js moves the body here on toggle. */
+.changelog-details-body {
+  max-height: 20rem;
+  overflow-y: auto;
+}

@@ -27,87 +27,112 @@ from app.energy.models import EnergyMode, ModeRecord
 
 log = logging.getLogger(__name__)
 
-# user_version 2 adds the per-device capability and device-configuration tables. `status` and
-# `engineering_mode` stay in cleartext for the same reason dispatch_operations keeps `state` and
-# `restore_required` there: the two safety-deciding facts — is this device released, and does it
-# run in engineering mode — must remain readable when the service is down or HMAC_SECRET was
-# rotated. They are state names, not secrets.
-# The base schema (user_version 0 -> 1). Its own atomic migration like every later one, so a crash
-# between the CREATE TABLE and the version bump cannot leave the table present with the version
-# still at 0, which would fail the next start's CREATE TABLE with "already exists".
-_SCHEMA_V1 = """
-    BEGIN IMMEDIATE;
-    CREATE TABLE dispatch_operations (
-        device_id TEXT PRIMARY KEY,
-        state TEXT NOT NULL,
-        restore_required INTEGER NOT NULL CHECK(restore_required IN (0,1)),
-        updated_at TEXT NOT NULL,
-        record_version INTEGER NOT NULL,
-        encrypted BLOB NOT NULL
-    ) STRICT;
-    PRAGMA user_version = 1;
-    COMMIT;
-"""
+# The baseline dispatch schema. The application is unreleased: there is no deployed database to
+# migrate, so each table is created directly in its current shape, with no version stepping. The
+# safety-deciding facts (`status`, `engineering_mode`, energy `mode`, SoC-target `mode`) stay in
+# cleartext columns so they remain readable when the service is down or HMAC_SECRET was rotated.
+# Each is a diagnostic mirror only: the same fact is ALSO carried in the authenticated blob, which
+# the read trusts and cross-checks, so a cleartext edit cannot forge it without the Fernet key.
+#
+# Each table is created in its own BEGIN IMMEDIATE ... COMMIT unit, so a crash between two of them
+# leaves each table either fully created or absent, never half-built; the next start creates the
+# ones still missing. ``initialize()`` creates a table only when it does not exist and otherwise
+# checks the on-disk columns against ``_TABLE_COLUMNS``: a database whose shape does not match the
+# current baseline fails clearly instead of being silently upgraded (there is no migration path).
+_SCHEMA: tuple[tuple[str, str], ...] = (
+    (
+        "dispatch_operations",
+        """
+        CREATE TABLE dispatch_operations (
+            device_id TEXT PRIMARY KEY,
+            state TEXT NOT NULL,
+            restore_required INTEGER NOT NULL CHECK(restore_required IN (0,1)),
+            updated_at TEXT NOT NULL,
+            record_version INTEGER NOT NULL,
+            encrypted BLOB NOT NULL
+        ) STRICT;
+        """,
+    ),
+    (
+        "dispatch_capabilities",
+        """
+        CREATE TABLE dispatch_capabilities (
+            device_id TEXT NOT NULL,
+            name      TEXT NOT NULL,
+            status    TEXT NOT NULL,
+            encrypted BLOB NOT NULL,
+            PRIMARY KEY (device_id, name)
+        ) STRICT;
+        """,
+    ),
+    (
+        "dispatch_device_config",
+        """
+        CREATE TABLE dispatch_device_config (
+            device_id        TEXT PRIMARY KEY,
+            engineering_mode INTEGER NOT NULL CHECK(engineering_mode IN (0,1)),
+            encrypted        BLOB NOT NULL
+        ) STRICT;
+        """,
+    ),
+    (
+        "energy_manager_state",
+        """
+        CREATE TABLE energy_manager_state (
+            device_id TEXT PRIMARY KEY,
+            mode      TEXT NOT NULL CHECK(mode IN ('off','manual','external')),
+            encrypted BLOB NOT NULL
+        ) STRICT;
+        """,
+    ),
+    (
+        "dispatch_soc_target_policy",
+        """
+        CREATE TABLE dispatch_soc_target_policy (
+            device_id TEXT PRIMARY KEY,
+            mode      TEXT NOT NULL,
+            encrypted BLOB NOT NULL
+        ) STRICT;
+        """,
+    ),
+)
 
-# Each migration is one transaction (BEGIN IMMEDIATE ... PRAGMA user_version=N ... COMMIT), so a
-# crash either leaves the whole step applied (tables created and version bumped together) or none
-# of it. executescript() commits any pending transaction before running the script, so the
-# explicit BEGIN here is the migration's own unit. user_version is part of the transaction and
-# rolls back with it. Without the transaction, a CREATE TABLE could commit in autocommit mode while
-# a crash before the version bump left the version stale, breaking the next start.
-_SCHEMA_V2 = """
-    BEGIN IMMEDIATE;
-    CREATE TABLE dispatch_capabilities (
-        device_id TEXT NOT NULL,
-        name      TEXT NOT NULL,
-        status    TEXT NOT NULL,
-        encrypted BLOB NOT NULL,
-        PRIMARY KEY (device_id, name)
-    ) STRICT;
+# The column set each baseline table must have on disk. An existing table that differs (an old,
+# incompatible dev database) is rejected rather than migrated.
+_TABLE_COLUMNS: dict[str, frozenset[str]] = {
+    "dispatch_operations": frozenset(
+        {"device_id", "state", "restore_required", "updated_at", "record_version", "encrypted"}
+    ),
+    "dispatch_capabilities": frozenset({"device_id", "name", "status", "encrypted"}),
+    "dispatch_device_config": frozenset({"device_id", "engineering_mode", "encrypted"}),
+    "energy_manager_state": frozenset({"device_id", "mode", "encrypted"}),
+    "dispatch_soc_target_policy": frozenset({"device_id", "mode", "encrypted"}),
+}
 
-    CREATE TABLE dispatch_device_config (
-        device_id        TEXT PRIMARY KEY,
-        engineering_mode INTEGER NOT NULL CHECK(engineering_mode IN (0,1)),
-        encrypted        BLOB NOT NULL
-    ) STRICT;
-    PRAGMA user_version = 2;
-    COMMIT;
-"""
 
-# user_version 3 is strictly additive as well: it adds the Energy Manager's armed flag (superseded by `mode` in version 4) and the
-# per-device SoC-target derivation policy. `armed` and `mode` stay in cleartext for the same
-# documented reason `state`, `status` and `engineering_mode` do — an operator must be able to see
-# whether a device is switched on, and how its target is derived, while the service is down or after an
-# HMAC_SECRET rotation. They are state names, not secrets.
-_SCHEMA_V3 = """
-    BEGIN IMMEDIATE;
-    CREATE TABLE energy_manager_state (
-        device_id TEXT PRIMARY KEY,
-        armed     INTEGER NOT NULL CHECK(armed IN (0,1)),
-        encrypted BLOB NOT NULL
-    ) STRICT;
+def _authenticated_bool(data: dict, key: str) -> bool:
+    """Read a safety-deciding bool from the authenticated blob, fail closed.
 
-    CREATE TABLE dispatch_soc_target_policy (
-        device_id TEXT PRIMARY KEY,
-        mode      TEXT NOT NULL,
-        encrypted BLOB NOT NULL
-    ) STRICT;
-    PRAGMA user_version = 3;
-    COMMIT;
-"""
+    A missing key raises KeyError and a present-but-non-bool value raises TypeError rather than
+    being coerced, so a tampered or malformed blob is treated as unreadable (the caller skips the
+    row to its safe default) instead of being silently trusted.
+    """
+    value = data[key]
+    if not isinstance(value, bool):
+        raise TypeError(f"authenticated {key} must be a bool, got {type(value).__name__}")
+    return value
 
-# user_version 4 adds the Energy Manager's operating mode. The old `armed` column stays (SQLite
-# cannot drop its CHECK) and is kept as the derived flag `mode != 'off'`; the upgrade maps an armed
-# device to `manual`, which is what arming meant before the mode existed. One transaction, so a
-# crash cannot leave the column without its version bump.
-_SCHEMA_V4 = """
-    BEGIN;
-    ALTER TABLE energy_manager_state
-        ADD COLUMN mode TEXT NOT NULL DEFAULT 'off' CHECK(mode IN ('off','manual','external'));
-    UPDATE energy_manager_state SET mode = CASE WHEN armed = 1 THEN 'manual' ELSE 'off' END;
-    PRAGMA user_version = 4;
-    COMMIT;
-"""
+
+def _authenticated_str(data: dict, key: str) -> str:
+    """Read a safety-deciding string (an enum value) from the authenticated blob, fail closed.
+
+    Same contract as ``_authenticated_bool``: a missing key is a row to skip, a non-string is
+    corruption, not a value to coerce.
+    """
+    value = data[key]
+    if not isinstance(value, str):
+        raise TypeError(f"authenticated {key} must be a str, got {type(value).__name__}")
+    return value
 
 
 class DispatchStore:
@@ -146,24 +171,23 @@ class DispatchStore:
     def initialize(self) -> None:
         with self.connect() as db:
             db.execute("PRAGMA journal_mode = WAL")
-            version = int(db.execute("PRAGMA user_version").fetchone()[0])
-            if version not in (0, 1, 2, 3, 4):
-                raise ValueError("unsupported dispatch database version")
-            if version == 0:
-                db.executescript(_SCHEMA_V1)
-            if version in (0, 1):
-                # Upgrade 1 -> 2 adds the two capability tables and nothing else: the schema of
-                # dispatch_operations and every row in it stay exactly as they are, so an update
-                # cannot lose the restore duty a persisted operation carries.
-                db.executescript(_SCHEMA_V2)
-            if version in (0, 1, 2):
-                # Upgrade 2 -> 3: two new tables and the version bump, nothing else. A code
-                # downgrade afterwards is not supported — the older initialize() rejects the newer version,
-                # so a rollback means restoring the dispatch database from a backup.
-                db.executescript(_SCHEMA_V3)
-            if version in (0, 1, 2, 3):
-                # Upgrade 3 -> 4: the mode column, filled from `armed`. No downgrade, as above.
-                db.executescript(_SCHEMA_V4)
+            # Create the current baseline schema directly; there is no migration from an older
+            # layout. A table that already exists with the expected columns is left as is, so a
+            # normal restart is a no-op; one that exists with a different shape (an incompatible
+            # old dev database) fails clearly here — the developer must delete it before start.
+            for table, create in _SCHEMA:
+                existing = {
+                    row["name"] for row in db.execute(f"PRAGMA table_info({table})").fetchall()
+                }
+                if not existing:
+                    # executescript() commits any pending transaction first, so the BEGIN/COMMIT
+                    # has to live inside the script to make this one CREATE its own atomic unit.
+                    db.executescript(f"BEGIN IMMEDIATE;{create}COMMIT;")
+                elif existing != set(_TABLE_COLUMNS[table]):
+                    raise ValueError(
+                        f"dispatch database table {table!r} does not match the current schema; "
+                        "this build does not migrate an older database — delete it and restart"
+                    )
 
     def _encode(self, device_id: str, record: DispatchRecord, *, version: int | None = None) -> bytes:
         # `version` lets `put()` encode the pending next version without first writing it onto the
@@ -309,10 +333,18 @@ class DispatchStore:
         for row in rows:
             try:
                 data = self._decrypt(row["device_id"], row["encrypted"])
+                # engineering_mode is authoritative from the authenticated blob, never from the
+                # cleartext column. A missing key raises KeyError and the row is skipped —
+                # engineering mode then reads as off, fail closed. A cleartext column tampered out
+                # of step with the blob fails the equality check below, so a forged release of
+                # dispatch onto unverified hardware reads as off instead.
+                engineering_mode = _authenticated_bool(data, "engineering_mode")
+                if engineering_mode != bool(row["engineering_mode"]):
+                    raise ValueError("engineering_mode integrity mismatch")
                 configs[row["device_id"]] = DeviceLimits(
                     max_charge_power_w=float(data["max_charge_power_w"]),
                     max_discharge_power_w=float(data["max_discharge_power_w"]),
-                    engineering_mode=bool(row["engineering_mode"]),
+                    engineering_mode=engineering_mode,
                 )
             except (ValueError, TypeError, KeyError):
                 log.error(
@@ -323,11 +355,17 @@ class DispatchStore:
         return configs
 
     def put_device_config(self, device_id: str, limits: DeviceLimits) -> None:
+        # engineering_mode is mirrored into the authenticated blob as well as its cleartext column:
+        # the cleartext stays for offline diagnostics, but the blob copy is what the read trusts.
+        # Flipping only the cleartext 0->1 (no Fernet key) then fails the cross-check in
+        # get_device_configs(), so the switch that releases dispatch onto unverified hardware cannot
+        # be forged by editing the SQLite row.
         encrypted = self._encrypt(
             device_id,
             {
                 "max_charge_power_w": limits.max_charge_power_w,
                 "max_discharge_power_w": limits.max_discharge_power_w,
+                "engineering_mode": limits.engineering_mode,
             },
         )
         with self.connect() as db:
@@ -352,16 +390,22 @@ class DispatchStore:
             device_id = row["device_id"]
             try:
                 data = self._decrypt(device_id, row["encrypted"])
-                # `armed_at`/`armed_by` are the keys the pre-mode code wrote.
-                changed_at = data.get("changed_at") or data.get("armed_at")
+                changed_at = data.get("changed_at")
+                # `mode` is authoritative from the authenticated blob, never from the cleartext
+                # column. A missing `mode` key raises KeyError and the row is skipped, so it reads
+                # as mode off (fail closed). A cleartext column edited out of step with the blob
+                # fails the equality check, so a device cannot be switched on by editing the row.
+                mode = EnergyMode(_authenticated_str(data, "mode"))
+                if mode is not EnergyMode(row["mode"]):
+                    raise ValueError("energy mode integrity mismatch")
                 states[device_id] = ModeRecord(
                     device_id=device_id,
-                    mode=EnergyMode(row["mode"]),
+                    mode=mode,
                     added_write_names=tuple(data.get("added_write_names") or ()),
                     changed_at=datetime.fromisoformat(changed_at) if changed_at else None,
-                    changed_by=data.get("changed_by") or data.get("armed_by"),
+                    changed_by=data.get("changed_by"),
                 )
-            except (ValueError, TypeError):
+            except (ValueError, TypeError, KeyError):
                 log.error(
                     "Energy manager state for device %s is unreadable and was skipped; the device "
                     "reads as mode off",
@@ -370,9 +414,14 @@ class DispatchStore:
         return states
 
     def put_energy_state(self, record: ModeRecord) -> None:
+        # `mode` is mirrored into the authenticated blob as well as its cleartext column: the
+        # cleartext stays readable while the service is down, but get_energy_states() trusts the
+        # blob copy and cross-checks it. Editing only the cleartext column (e.g. 'off' -> 'manual'
+        # to make a device accept commands) then fails the check and the row reads as mode off.
         encrypted = self._encrypt(
             record.device_id,
             {
+                "mode": record.mode.value,
                 "added_write_names": list(record.added_write_names),
                 "changed_at": record.changed_at.isoformat() if record.changed_at is not None else None,
                 "changed_by": record.changed_by,
@@ -381,11 +430,11 @@ class DispatchStore:
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             db.execute(
-                """INSERT INTO energy_manager_state(device_id,armed,mode,encrypted)
-                   VALUES(?,?,?,?)
-                   ON CONFLICT(device_id) DO UPDATE SET armed=excluded.armed, mode=excluded.mode,
+                """INSERT INTO energy_manager_state(device_id,mode,encrypted)
+                   VALUES(?,?,?)
+                   ON CONFLICT(device_id) DO UPDATE SET mode=excluded.mode,
                        encrypted=excluded.encrypted""",
-                (record.device_id, int(record.armed), record.mode.value, encrypted),
+                (record.device_id, record.mode.value, encrypted),
             )
 
     def get_soc_target_policies(self) -> dict[str, SocTargetPolicy]:
@@ -399,9 +448,16 @@ class DispatchStore:
             device_id = row["device_id"]
             try:
                 data = self._decrypt(device_id, row["encrypted"])
+                # `mode` is authoritative from the authenticated blob, never from the cleartext
+                # column. A missing `mode` key raises KeyError and the row is skipped, so it reads
+                # as the business-target default (fail closed). A cleartext column edited out of
+                # step with the blob fails the equality check.
+                mode = SocTargetMode(_authenticated_str(data, "mode"))
+                if mode is not SocTargetMode(row["mode"]):
+                    raise ValueError("soc target mode integrity mismatch")
                 policies[device_id] = SocTargetPolicy(
                     device_id=device_id,
-                    mode=SocTargetMode(row["mode"]),
+                    mode=mode,
                     below_margin_percent=float(data["below_margin_percent"]),
                     note=data.get("note"),
                 )
@@ -414,9 +470,17 @@ class DispatchStore:
         return policies
 
     def put_soc_target_policy(self, policy: SocTargetPolicy) -> None:
+        # `mode` is mirrored into the authenticated blob as well as its cleartext column: the
+        # cleartext stays readable offline, but get_soc_target_policies() trusts and cross-checks
+        # the blob copy, so the derivation policy that steers the device-level SoC target cannot be
+        # changed by editing the SQLite row without the Fernet key.
         encrypted = self._encrypt(
             policy.device_id,
-            {"below_margin_percent": policy.below_margin_percent, "note": policy.note},
+            {
+                "mode": policy.mode.value,
+                "below_margin_percent": policy.below_margin_percent,
+                "note": policy.note,
+            },
         )
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
@@ -427,6 +491,35 @@ class DispatchStore:
                        encrypted=excluded.encrypted""",
                 (policy.device_id, policy.mode.value, encrypted),
             )
+
+    def reset_identity_bound_state(self, device_ids: list[str]) -> None:
+        """Clear every identity-bound persistent fact of each device in ONE transaction.
+
+        A device-list reconfiguration that frees or re-addresses a device_id must not let the old
+        physical device's capability evidence, engineering-mode switch or SoC-target policy survive
+        onto whatever device now answers at that id. Done row-by-row across the three tables, a
+        failure partway leaves a persisted mix (e.g. capabilities wiped but the policy kept) while
+        the old graph still runs — the reconfiguration cannot roll that back. One transaction makes
+        it all-or-nothing, so the in-memory registries can be updated after the commit returns.
+
+        Capabilities and the SoC-target policy are deleted: an absent row is exactly what the
+        in-memory registries read as the shipped default (unverified capability, business-target
+        policy), so the persisted and the published state agree. The device-configuration row is
+        kept but its engineering-mode switch is cleared, because the power limits in it are a
+        site/installation property the operator set, not a hardware-identity claim — only the
+        engineering switch is identity-bound. The limits travel in the encrypted blob, which stays
+        untouched; only the cleartext ``engineering_mode`` column is reset.
+        """
+        if not device_ids:
+            return
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            for device_id in device_ids:
+                db.execute("DELETE FROM dispatch_capabilities WHERE device_id=?", (device_id,))
+                db.execute("DELETE FROM dispatch_soc_target_policy WHERE device_id=?", (device_id,))
+                db.execute(
+                    "UPDATE dispatch_device_config SET engineering_mode=0 WHERE device_id=?", (device_id,)
+                )
 
     def delete(self, device_id: str) -> None:
         with self.connect() as db:

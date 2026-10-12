@@ -255,6 +255,15 @@ class RctGateway:
         """Swap the whole device/address map for a freshly built graph (live device-list reload)."""
         self._devices.clear()
         self._by_address.clear()
+        # These caches are keyed by the logical device_id, which an operator may keep while changing
+        # host/port/network_id. Without clearing them a re-addressed device would inherit the old
+        # hardware's discovery topology (up to the slave-cache TTL) and its refresh-failure history.
+        # The per-object write locks and the per-device slave locks are deliberately NOT cleared: an
+        # in-flight write or discovery coroutine may still hold one, and dropping it would remove the
+        # serialization that protects the device during the swap.
+        self._slave_cache.clear()
+        self._refresh_attempts.clear()
+        self._refresh_failures.clear()
         for binding in bindings:
             self.add_device(binding)
 

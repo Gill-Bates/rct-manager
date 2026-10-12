@@ -74,3 +74,11 @@ class SocTargetPolicyRegistry:
     def replace(self, policy: SocTargetPolicy) -> None:
         """Take a policy over — only after it has durably committed."""
         self._policies[policy.device_id] = policy
+
+    def reset(self, device_id: str) -> None:
+        """Drop ``device_id``'s policy so it reads as the shipped ``BUSINESS_TARGET`` default.
+
+        For the identity-bound reset on a device-list reconfiguration — only after the store row
+        has been deleted, so the published state matches the persisted one.
+        """
+        self._policies.pop(device_id, None)

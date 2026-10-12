@@ -10,8 +10,13 @@
   const $ = (id) => document.getElementById(id);
   let csrfToken = '';
 
-  // 'en-GB' matches the e2e harness locale, so "Saved HH:MM" / "Updated HH:MM" stay assertable.
-  const hhmm = (date) => date.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+  // Browser locale; the e2e harness pins the context locale, so "Saved/Updated HH:MM" stay assertable.
+  const hhmm = (date) => date.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+
+  // A docker-logs-style full UTC stamp down to seconds (YYYY-MM-DDTHH:MM:SSZ) for the log console.
+  // Deterministic (always UTC, never locale time) so the tail reads like `docker logs` and the e2e
+  // assertions stay stable regardless of the browser's timezone.
+  const fullTimestamp = (date) => `${date.toISOString().slice(0, 19)}Z`;
 
   function element(tag, className, value) {
     const node = document.createElement(tag);
@@ -119,7 +124,8 @@
     textarea.style.top = '0';
     textarea.style.left = '0';
     textarea.style.opacity = '0';
-    document.body.append(textarea);
+    // Keep the fallback inside an open Bootstrap modal so its focus trap permits selection.
+    (document.querySelector('.modal.show') || document.body).append(textarea);
     textarea.select();
     textarea.setSelectionRange(0, text.length);
     let copied = false;
@@ -189,6 +195,49 @@
     }
     return sessionPromise;
   }
+
+  // Central SSE dispatcher. Owns the single EventSource to GET /admin/api/events, its reconnect
+  // (handled natively by EventSource) and the connection lifecycle ONCE, so a feature only registers
+  // a typed handler (events.on('tsdb.log', fn)) and never touches the connection. The stream opens
+  // lazily on the first registration and closes when the last handler is removed or the page is left;
+  // Phase 2 event types register the same way without changing anything here.
+  const events = (() => {
+    const handlers = new Map(); // event type -> Set<handler>
+    let source = null;
+    const open = () => {
+      if (source) return;
+      // Same-origin request; the browser attaches the rct_admin_session cookie automatically, which
+      // require_admin accepts. EventSource reconnects on its own after a transient drop.
+      source = new EventSource('/admin/api/events');
+      for (const type of handlers.keys()) bind(type);
+    };
+    const bind = (type) => {
+      source.addEventListener(type, (event) => {
+        let payload;
+        try { payload = JSON.parse(event.data); } catch { return; } // ignore a malformed frame
+        for (const handler of handlers.get(type) || []) handler(payload);
+      });
+    };
+    const close = () => { if (source) { source.close(); source = null; } };
+    return {
+      on(type, handler) {
+        if (!handlers.has(type)) handlers.set(type, new Set());
+        handlers.get(type).add(handler);
+        if (source) bind(type);
+        else open();
+        return () => this.off(type, handler);
+      },
+      off(type, handler) {
+        handlers.get(type)?.delete(handler);
+        if ([...handlers.values()].every((set) => set.size === 0)) close();
+      },
+      close,
+    };
+  })();
+  // Each admin page is a full page load, so leaving the page unloads the connection; closing the
+  // EventSource on pagehide releases the server-side subscriber at once. pagehide (not the native
+  // leave-page event, which design rule R4 bars) is also the reliable close hook on mobile Safari.
+  window.addEventListener('pagehide', () => events.close());
 
   function submitState(form, busy) {
     form.querySelector('button[type="submit"]').disabled = busy;
@@ -921,8 +970,16 @@
     const icon = element('span', 'material-icons', 'expand_more');
     icon.setAttribute('aria-hidden', 'true');
     toggle.append(icon);
+    // Same trash action as the inverters modal, surfaced on the card: delete this inverter from the
+    // dashboard without opening the dialog. The device identity to delete is set in patchDeviceCard.
+    const remove = element('button', 'device-remove icon-button btn btn-outline-danger');
+    remove.type = 'button';
+    const removeIcon = element('span', 'material-icons', 'delete_outline');
+    removeIcon.setAttribute('aria-hidden', 'true');
+    remove.append(removeIcon);
     const ref = {
       toggle,
+      remove,
       card: element('article', 'device-item'),
       head: element('div', 'device-head'),
       statusBadge: element('span', 'status-badge status-badge-success'),
@@ -945,6 +1002,7 @@
       rememberCollapsed(key, collapsedNow);
       setCardCollapsed(ref, collapsedNow);
     });
+    remove.addEventListener('click', () => { removeDashboardDevice(ref, remove).catch((error) => toast(messageFrom(error), 'danger')); });
     return ref;
   }
 
@@ -954,11 +1012,17 @@
     setClass(ref.card, 'has-status-badge', connected);
     setText(ref.statusBadge, status);
     ref.dot.className = `status-dot ${statusClass}`;
-    setText(ref.title, device.name || device.id || 'Inverter');
+    setText(ref.title, !connected && device.name_is_fallback ? NOT_AVAILABLE : (device.name || device.id || NOT_AVAILABLE));
     ref.toggle.setAttribute('aria-label', `Show or hide details of ${ref.title.textContent}`);
     setText(ref.statusText, status);
+    // The trash button deletes by the server-assigned device id (same identity the draft carries as
+    // device_id), so a dashboard card can be removed without the sensitive settings read on first paint.
+    ref.removeId = device.id;
+    const removeLabel = `Remove inverter ${device.name || device.id || device.host || NOT_AVAILABLE}`;
+    ref.remove.title = removeLabel;
+    ref.remove.setAttribute('aria-label', removeLabel);
     // Name, address, last connection and the connection state share two compact header lines.
-    syncChildren(ref.top, connected ? [ref.toggle, ref.title, ref.statusBadge] : [ref.toggle, ref.dot, ref.title, ref.statusText]);
+    syncChildren(ref.top, connected ? [ref.toggle, ref.title, ref.statusBadge, ref.remove] : [ref.toggle, ref.dot, ref.title, ref.statusText, ref.remove]);
     setText(ref.address, `${device.host || NOT_AVAILABLE}${device.port ? `:${device.port}` : ''}`);
     if (device.last_success_at) setText(ref.last, `Last connection: ${formatDate(device.last_success_at, { time: true })}`);
     const serial = typeof device.serial_number === 'string' ? device.serial_number.trim() : '';
@@ -1274,7 +1338,7 @@
   function tokenEmptyRow() {
     const row = element('tr');
     const cell = element('td', 'text-secondary', 'No API tokens created yet.');
-    cell.colSpan = 6;
+    cell.colSpan = 7;
     row.append(cell);
     return row;
   }
@@ -1298,6 +1362,12 @@
     for (const token of data.tokens) {
       const row = element('tr');
       const nowrap = (text, extra = '') => element('td', `token-nowrap${extra}`, text);
+      const suffixCell = () => {
+        const cell = element('td', 'token-nowrap');
+        if (token.suffix) cell.append(element('code', 'token-suffix', `…${token.suffix}`));
+        else cell.append('—');
+        return cell;
+      };
       const actions = element('td', 'text-end token-nowrap');
       const revoke = element('button', 'btn btn-outline-danger btn-sm d-inline-flex align-items-center gap-1');
       const icon = element('span', 'material-icons', 'delete');
@@ -1320,6 +1390,7 @@
       row.append(
         element('td', '', token.name),
         tokenRoleCell(token.role),
+        suffixCell(),
         nowrap(formatDate(token.created_at, { time: true })),
         nowrap(formatDate(token.last_used_at, { time: true, empty: 'Never' })),
         nowrap(formatDate(token.expires_at, { time: true })),
@@ -1375,12 +1446,14 @@
     modal.addEventListener('hide.bs.modal', (event) => {
       if ($('new-token-result').hidden || explicitClose) return;
       event.preventDefault();
-      toast('Copy the token first, then choose Done. It will not be shown again.', 'warning');
+      // The token must be copied before closing: highlight the warning in the modal instead of a toast.
+      $('token-copy-warning').hidden = false;
     });
     // Closing by any path wipes the plaintext secret from the DOM and restores the form state.
     modal.addEventListener('hidden.bs.modal', () => {
       explicitClose = false;
       setCopied(false);
+      $('token-copy-warning').hidden = true;
       $('new-token-value').textContent = '';
       showResult(false);
       form.reset();
@@ -1406,6 +1479,7 @@
     $('copy-token').addEventListener('click', async () => {
       if (await copyToClipboard($('new-token-value').textContent)) {
         setCopied(true);
+        $('token-copy-warning').hidden = true;
         toast('Token copied.');
       } else toast('Copying is not available here. Please select and copy the token.', 'warning');
     });
@@ -1413,13 +1487,12 @@
 
   // Business labels for the Energy Manager's own enums (app/energy/models.py); the admin API never
   // sends a register name or a raw dispatch mode, except in the Diagnostics section. These are
-  // presentation-only — the REST action names (charge/discharge/hold/auto) are unchanged on the wire.
+  // presentation-only — the REST action names are unchanged on the wire.
   const ENERGY_ACTION_LABELS = {
     charge: 'Charge battery', discharge: 'Discharge battery', hold: 'Keep battery idle',
-    auto: 'Return to automatic',
   };
   const ENERGY_STATE_LABELS = {
-    automatic: 'Automatic', starting: 'Starting', charging: 'Charging', discharging: 'Discharging',
+    automatic: 'Idle', starting: 'Starting', charging: 'Charging', discharging: 'Discharging',
     holding: 'Holding', stopping: 'Stopping', fault: 'Fault',
   };
   const ENERGY_REASON_LABELS = {
@@ -1435,7 +1508,7 @@
     ['external', 'External', 'api', 'an external app controls it through the API'],
   ];
   const ENERGY_MODE_TOASTS = {
-    off: 'Switched off; the inverter is back in automatic operation.',
+    off: 'Energy Manager off',
     manual: 'Manual mode: you can operate this inverter from this page.',
     external: 'External mode: an app can now control this inverter through the API.',
   };
@@ -1454,6 +1527,7 @@
   const ENERGY_IDLE_WATTS = 20; // below this a flow counts as standing still
   const SVG_NS = 'http://www.w3.org/2000/svg';
   const energyPanels = new Map();
+  const energyHardwareStrategies = new Map();
   let energyPolling = false;
   // Logical clock ordering poll requests against finished panel actions, so a poll requested before
   // an action completed never overwrites its result.
@@ -1670,7 +1744,7 @@
 
   // The one human-readable Operate status (design §9). No raw register/capability text or
   // reject_detail — those live only in Diagnostics. `poll503` renders the config empty-state.
-  function energyControlState(device, poll503) {
+  function energyControlState(device, poll503, internalConfirmed) {
     if (poll503) {
       return { ready: false, kind: 'config', text: 'Manual battery control requires write support to be enabled.', detail: '' };
     }
@@ -1685,6 +1759,12 @@
       return { ready: false, kind: 'setup', text: 'Manual control needs setup.', detail: '', firstUnmet: energyFirstUnmet(checklist) };
     }
     if (device.mode === 'off') {
+      if (!device.mode_recorded) {
+        return { ready: false, kind: 'disabled', text: 'No Energy Manager mode has been confirmed for this inverter. Select Off to enable independent operation.', detail: '' };
+      }
+      if (!internalConfirmed) {
+        return { ready: false, kind: 'disabled', text: 'The inverter\'s Internal strategy is not confirmed. Select Off to restore independent operation.', detail: '' };
+      }
       return { ready: false, kind: 'disabled', text: 'Manual control is off for this inverter. Choose Manual to operate it here.', detail: '' };
     }
     if (device.mode === 'external') {
@@ -1703,7 +1783,7 @@
     const rate = live !== null && Math.abs(live) >= ENERGY_IDLE_WATTS ? ` ${formatPowerKw(live)}` : '';
     switch (device.state) {
       case 'automatic':
-        return { mode: 'Automatic', sentence: 'Automatic — the inverter decides.' };
+        return { mode: 'Idle', sentence: 'No Energy Manager command is active; the inverter uses its own settings.' };
       case 'charging':
         return {
           mode: hasTarget ? `Charging to ${Math.round(target)} %` : 'Charging',
@@ -1749,6 +1829,7 @@
     let actionFinishedAt = 0;  // energyClock tick of the last finished action
     let lastPoll503 = false;   // the Operate poll returned 503 (write support disabled) — §9.2
     let lastPollFailed = false; // a non-503 transient poll failure — §13 freshness note
+    let hardwareStrategy = null;
     const touched = { charge: false, discharge: false };
 
     const card = element('section', 'card energy-panel');
@@ -1772,6 +1853,8 @@
     // passing over a mode never switches the inverter.
     const modeGroup = element('div', 'energy-mode-switch');
     modeGroup.setAttribute('role', 'radiogroup');
+    const modeEvidence = element('p', 'small text-secondary energy-mode-evidence mb-0 w-100');
+    modeEvidence.setAttribute('role', 'status');
     const modeButtons = {};
     for (const [value, label, icon, hint] of ENERGY_MODES) {
       const button = element('button', 'energy-mode-option');
@@ -1785,7 +1868,7 @@
       modeButtons[value] = button;
       modeGroup.append(button);
     }
-    head.append(title, modeGroup);
+    head.append(title, modeGroup, modeEvidence);
     body.append(head);
 
     const layout = element('div', 'energy-body');
@@ -1853,10 +1936,9 @@
 
     const actions = element('div', 'energy-actions');
     const buttons = {};
-    for (const action of ['charge', 'hold', 'discharge', 'auto']) {
+    for (const action of ['charge', 'hold', 'discharge']) {
       const button = element('button', 'btn btn-primary', ENERGY_ACTION_LABELS[action]);
       button.type = 'button';
-      if (action === 'auto') button.classList.add('energy-action-auto');
       buttons[action] = button;
       actions.append(button);
     }
@@ -1915,18 +1997,23 @@
       setBusy(true);
       try {
         const result = await api(`${path}/command`, { method: 'POST', body: JSON.stringify(payload) });
-        toast('Command sent.');
         selected = null;
         touched.charge = false;
         touched.discharge = false;
         await applyActionResult(result);
+        toast('Command sent.');
       } catch (error) { toast(messageFrom(error), 'danger'); }
       finally { setBusy(false); }
     }
 
+    function offConfirmed() {
+      return device.mode === 'off' && device.mode_recorded === true
+        && hardwareStrategy?.code === 4 && hardwareStrategy.stale === false;
+    }
+
     async function chooseMode(wanted) {
       // aria-disabled instead of disabled keeps the keyboard focus on the group while a PUT runs.
-      if (busy || lastPoll503 || wanted === (pendingMode ?? device.mode)) return;
+      if (busy || lastPoll503 || (wanted === device.mode && (wanted !== 'off' || offConfirmed()))) return;
       pendingMode = wanted;
       setBusy(true);
       try {
@@ -1936,7 +2023,9 @@
         const locked = wanted === 'manual' && energyNeedsSetup(energyChecklist(device));
         toast(locked ? ENERGY_MODE_TOAST_MANUAL_LOCKED : ENERGY_MODE_TOASTS[wanted]);
         selected = null;
+        if (wanted === 'off') hardwareStrategy = { code: 4, label: 'Internal', stale: false };
         await applyActionResult(result);
+        if (wanted === 'off') pollHardwareStrategies();
       } catch (error) { toast(messageFrom(error), 'danger'); }
       finally { pendingMode = null; setBusy(false); }
     }
@@ -1956,7 +2045,6 @@
     }
 
     buttons.hold.addEventListener('click', () => send({ action: 'hold' }));
-    buttons.auto.addEventListener('click', () => send({ action: 'auto' }));
     for (const action of ['charge', 'discharge']) {
       buttons[action].addEventListener('click', () => { selected = selected === action ? null : action; render(); });
     }
@@ -2032,26 +2120,39 @@
     }
 
     function render() {
-      const readyState = energyControlState(device, lastPoll503);
+      const readyState = energyControlState(device, lastPoll503, offConfirmed());
       nameNode.textContent = device.device_name;
       collapseToggle.setAttribute('aria-label', `Show or hide details of ${device.device_name}`);
       dot.className = `status-dot ${device.connected ? 'online' : 'offline'}`;
       connection.textContent = `${device.connected ? 'Connected' : 'Not connected'} · ${device.host}`;
-      const shownMode = pendingMode ?? device.mode ?? 'off';
+      const shownMode = pendingMode === 'off' ? null
+        : pendingMode ?? (device.mode === 'off' && !offConfirmed() ? null : device.mode);
       modeGroup.setAttribute('aria-label', `Operating mode of ${device.device_name}`);
       for (const value of modeValues) {
         const button = modeButtons[value];
         const checked = value === shownMode;
         button.setAttribute('aria-checked', String(checked));
         button.setAttribute('aria-disabled', String(busy || lastPoll503));
-        button.tabIndex = checked ? 0 : -1;
+        button.tabIndex = checked || (shownMode === null && value === 'off') ? 0 : -1;
         setClass(button, 'is-selected', checked);
       }
-      modeNote.hidden = !(device.write_support_enabled === false && shownMode === 'off');
+      const strategyName = hardwareStrategy?.label || (Number.isInteger(hardwareStrategy?.code)
+        ? `Unknown (code ${hardwareStrategy.code})` : null);
+      if (device.mode === 'off' && !offConfirmed()) {
+        modeEvidence.textContent = device.mode_recorded
+          ? `Off is unconfirmed. Inverter SOC strategy: ${strategyName || 'unavailable'}.`
+          : `Not yet managed. Inverter SOC strategy: ${strategyName || 'unavailable'}.`;
+        if (hardwareStrategy?.stale) modeEvidence.textContent += ' Reading is stale.';
+      } else {
+        modeEvidence.textContent = '';
+      }
+      modeEvidence.hidden = !modeEvidence.textContent;
+      modeNote.hidden = !(device.write_support_enabled === false && device.mode === 'off');
 
       renderSetup(energyChecklist(device));
       // Selected but blocked by an unfinished setup: show it as pending, not as effective.
-      const pendingSetup = shownMode !== 'off' && device.connected && !lastPoll503 && energyNeedsSetup(energyChecklist(device));
+      const pendingSetup = (shownMode === 'manual' || shownMode === 'external')
+        && device.connected && !lastPoll503 && energyNeedsSetup(energyChecklist(device));
       for (const value of modeValues) setClass(modeButtons[value], 'is-pending', pendingSetup && value === shownMode);
       setupLead.hidden = !pendingSetup;
       if (pendingSetup) {
@@ -2074,7 +2175,7 @@
       modeBox.hidden = !(operable || external);
       if (operable || external) {
         const mode = energyModeSentence(device);
-        modeLine.textContent = `Current mode: ${mode.mode}`;
+        modeLine.textContent = `Manager status: ${mode.mode}`;
         modeSentence.textContent = mode.sentence;
         const soc = readingValue(device.readings.battery_soc_percent);
         socLine.textContent = soc === null ? '' : `Battery ${formatPercent(soc)}`;
@@ -2089,7 +2190,7 @@
       operate.hidden = actions.hidden;
       liteBox.hidden = actions.hidden;
       if (!liteBox.hidden) liteFlow.update(device.readings);
-      for (const action of ['charge', 'hold', 'discharge', 'auto']) {
+      for (const action of ['charge', 'hold', 'discharge']) {
         const item = energyAvailability(device, action);
         const enabled = operable && item.available && !busy && device.connected;
         buttons[action].disabled = !enabled;
@@ -2117,6 +2218,7 @@
       // Lets pollEnergy signal a 503/transient failure without a fresh device payload.
       setPollState(flags) { lastPoll503 = Boolean(flags.poll503); lastPollFailed = Boolean(flags.pollFailed); render(); },
       setTimestamp(text) { advanced.setTimestamp(text); },
+      setHardwareStrategy(value) { hardwareStrategy = value; render(); },
       // False while an action runs or when the poll was requested before the last action finished.
       acceptsPoll(requestedAt) { return !busy && requestedAt > actionFinishedAt; },
       // Display only: no request, no stored value.
@@ -2147,7 +2249,7 @@
     const assistantError = (error) => error?.status === 404
       ? 'The verification service is unavailable. Reload this page and start the check again. The inverter may still be online.'
       : messageFrom(error);
-    const power = (value) => (Number.isFinite(value) ? `${Math.round(Math.abs(value)).toLocaleString('en-GB')} W` : 'unknown');
+    const power = (value) => (Number.isFinite(value) ? `${Math.round(Math.abs(value)).toLocaleString(undefined)} W` : 'unknown');
 
     const modalEl = element('div', 'modal fade energy-assistant');
     modalEl.tabIndex = -1;
@@ -2831,6 +2933,9 @@
           const created = createEnergyPanel(device, devices.length);
           energyPanels.set(device.device_id, created);
           host.append(created.root);
+          if (energyHardwareStrategies.has(device.device_id)) {
+            created.setHardwareStrategy(energyHardwareStrategies.get(device.device_id));
+          }
         } else if (panel.acceptsPoll(requestedAt)) {
           panel.update(device, { poll503: false, pollFailed: false });
         }
@@ -2842,7 +2947,7 @@
       }
       setEnergyNote(host, devices.length ? null : 'No inverters configured yet.');
       // The absolute timestamp lives in Diagnostics now (design §13), not a top-of-page line.
-      const stamp = `Updated ${new Date().toLocaleTimeString('en-GB')}`;
+      const stamp = `Updated ${new Date().toLocaleTimeString(undefined)}`;
       for (const device of devices) {
         const ages = Object.values(device.readings || {}).map((item) => item && item.age_seconds).filter(Number.isFinite);
         const oldest = ages.length ? ` · oldest measurement ${Math.round(Math.max(...ages))} s` : '';
@@ -2858,7 +2963,41 @@
     } finally { clearTimeout(timer); energyPolling = false; }
   }
 
-  // Reads the cache only (server side), so the poll rate does not load the inverter.
+  let hardwareStrategyPolling = false;
+  async function pollHardwareStrategies() {
+    if (hardwareStrategyPolling) return;
+    hardwareStrategyPolling = true;
+    const host = $('energy-hardware-strategies');
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), ENERGY_POLL_TIMEOUT_MS);
+    try {
+      const devices = await api('energy/hardware-strategies', { signal: controller.signal });
+      energyHardwareStrategies.clear();
+      const rows = devices.map((device) => {
+        energyHardwareStrategies.set(device.device_id, device);
+        energyPanels.get(device.device_id)?.setHardwareStrategy(device);
+        const row = element('div');
+        const code = Number.isInteger(device.code) ? device.code : null;
+        const strategy = code === null ? NOT_AVAILABLE
+          : device.label ? `${device.label} (code ${code})` : `Unknown (code ${code})`;
+        row.textContent = `${device.device_name} · Inverter SOC strategy: ${strategy}${device.stale ? ' · stale' : ''}`;
+        return row;
+      });
+      for (const [id, panel] of energyPanels) {
+        if (!energyHardwareStrategies.has(id)) panel.setHardwareStrategy(null);
+      }
+      host.replaceChildren(...rows);
+    } catch (error) {
+      host.textContent = 'Inverter SOC strategy: n/a (unavailable).';
+      energyHardwareStrategies.clear();
+      for (const panel of energyPanels.values()) panel.setHardwareStrategy(null);
+    } finally {
+      clearTimeout(timer);
+      hardwareStrategyPolling = false;
+    }
+  }
+
+  // The hardware strategy read has its own slower cadence; the main panel stays cache-only.
   function initEnergy() {
     const expertSwitch = $('energy-expert-mode');
     if (expertSwitch) {
@@ -2870,8 +3009,11 @@
       });
     }
     pollEnergy();
+    pollHardwareStrategies();
     setInterval(() => { if (!document.hidden) pollEnergy(); }, ENERGY_POLL_MS);
+    setInterval(() => { if (!document.hidden) pollHardwareStrategies(); }, 30000);
     document.addEventListener('visibilitychange', () => { if (!document.hidden) pollEnergy(); });
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) pollHardwareStrategies(); });
   }
 
   const settingFields = [
@@ -3387,7 +3529,6 @@
     exportEnabledSaving = true;
     settingsDraft.metrics_export_enabled = next;
     onChange(); // rebuild dependants and replace the switch with its disabled in-flight state
-    syncTsdbStatusSurfaces();
     pendingExportGroup = false;
     pendingKeys.add('metrics_export_enabled');
     setSectionState('export', 'unsaved');
@@ -3397,7 +3538,6 @@
     } finally {
       exportEnabledSaving = false;
       onChange();
-      syncTsdbStatusSurfaces();
       queueExportSettings(); // any other edited export fields still belong to Apply changes
     }
   }
@@ -3428,7 +3568,6 @@
         settingsDraft[field.key] = control.checked;
       } else settingsDraft[field.key] = control.value;
       if (['db_type', 'metrics_export_enabled', 'questdb_downsampling'].includes(field.key)) onChange();
-      syncTsdbStatusSurfaces();
       control.dataset.touched = '1';
       queueExportSettings();
     });
@@ -3573,50 +3712,38 @@
     refreshExportBar();
   }
 
-  function tsdbStatusView() {
-    const type = settingsDraft.db_type || '';
-    const lastSuccess = tsdbRuntimeStatus?.last_success_at ? hhmm(new Date(tsdbRuntimeStatus.last_success_at)) : '';
-    if (!settingsDraft.metrics_export_enabled) return { label: 'Export paused', detail: 'Database settings retained', tone: 'muted' };
-    if (!type) return { label: 'Configuration incomplete', detail: 'Choose a target database', tone: 'warning' };
-    if (!exportReady(type)) return { label: 'Configuration incomplete', detail: 'Complete the required fields', tone: 'warning' };
-    if (!tsdbRuntimeStatus?.export_enabled) return { label: 'Exporter not running', detail: 'Waiting for the exporter service', tone: 'danger' };
-    if (!tsdbRuntimeStatus.healthy) {
-      return { label: 'Waiting for successful export', detail: lastSuccess ? `Last export ${lastSuccess}` : 'No successful export yet', tone: 'warning' };
-    }
-    return { label: 'Export running', detail: lastSuccess ? `Last export ${lastSuccess}` : 'Exporter active', tone: 'success' };
+  // Keep at most this many lines in the console DOM so a long-running tail never grows without
+  // bound; the oldest lines are dropped, matching the server-side ring buffer behaviour.
+  const TSDB_CONSOLE_MAX_LINES = 500;
+
+  function appendTsdbConsoleLine(consoleNode, entry) {
+    const line = element('div', 'tsdb-console-line');
+    // The log level is a colour hook only (no new class, so the TSDB CSS stays console-scoped):
+    // `.tsdb-console-line[data-level="ERROR"]` colours the line red, WARNING amber, DEBUG dim.
+    line.dataset.level = entry.level || 'INFO';
+    const when = entry.timestamp ? new Date(entry.timestamp) : new Date();
+    const timestamp = element('time', 'tsdb-console-time', fullTimestamp(when));
+    // The logger name is the dimmed/accent column; data-role keeps it stylable without a new class.
+    const logger = element('span', '', entry.logger || '');
+    logger.dataset.role = 'logger';
+    line.append(timestamp, logger, element('span', '', entry.message || ''));
+    consoleNode.append(line);
+    while (consoleNode.childElementCount > TSDB_CONSOLE_MAX_LINES) consoleNode.firstElementChild.remove();
+    consoleNode.scrollTop = consoleNode.scrollHeight; // auto-scroll to the newest line
   }
 
-  function tsdbConsoleLines() {
-    const type = settingsDraft.db_type || '';
-    const now = hhmm(new Date());
-    const status = tsdbStatusView();
-    const lines = [[now, type ? `Target: ${backendLabel(type)}` : 'No target database selected'], [now, status.label]];
-    if (status.detail) lines.push([now, status.detail]);
-    if (tsdbRuntimeStatus?.last_success_at) {
-      lines.push([hhmm(new Date(tsdbRuntimeStatus.last_success_at)), 'Last successful export']);
-    }
-    return lines;
-  }
-
-  function fillTsdbConsole(consoleNode) {
-    consoleNode.replaceChildren();
-    for (const [time, message] of tsdbConsoleLines()) {
-      const line = element('div', 'tsdb-console-line');
-      const timestamp = element('time', 'tsdb-console-time', time);
-      line.append(timestamp, element('span', '', message));
-      consoleNode.append(line);
-    }
-  }
-
-  function syncTsdbStatusSurfaces() {
-    const consoleNode = $('tsdb-mini-console');
-    if (consoleNode) fillTsdbConsole(consoleNode);
+  // Wire a freshly rendered console node to the live tsdb.log stream. The node fills from real
+  // backend log records (replayed backlog first, then live) instead of browser-fabricated status
+  // text; registering on the central dispatcher means reconnect and connection state are not our
+  // concern. The returned unsubscribe is called before the next render so a replaced node stops
+  // receiving (and the stream closes once no console is listening).
+  function startTsdbConsoleStream(consoleNode) {
+    return events.on('tsdb.log', (entry) => appendTsdbConsoleLine(consoleNode, entry));
   }
 
   async function refreshTsdbRuntimeStatus() {
     const data = await api('devices');
     tsdbRuntimeStatus = data.tsdb || null;
-    syncTsdbStatusSurfaces();
   }
 
   // Export fields autosave through the shared queueSettings/flushSettings path. The cards are plain
@@ -3640,7 +3767,12 @@
     const groupCard = (group, title, type) => card(group.toLowerCase(), title,
       exportFields.filter((field) => exportGroup(field.key) === group && exportFieldKnown(field) && fieldVisible(field, type))
         .map((field) => exportControl(field, rerender)));
+    // The live log stream is tied to the console node currently on screen. Each render replaces that
+    // node, so the previous node's subscription is torn down first; when the console is not shown
+    // (export off or unconfigured) nothing stays subscribed and the EventSource closes.
+    let consoleUnsubscribe = null;
     const render = () => {
+      if (consoleUnsubscribe) { consoleUnsubscribe(); consoleUnsubscribe = null; }
       const type = settingsDraft.db_type || '';
       const enabled = Boolean(settingsDraft.metrics_export_enabled);
       const cards = [card('control', 'Export to time-series database',
@@ -3651,7 +3783,7 @@
         consoleNode.id = 'tsdb-mini-console';
         consoleNode.setAttribute('role', 'log');
         consoleNode.setAttribute('aria-live', 'polite');
-        fillTsdbConsole(consoleNode);
+        consoleUnsubscribe = startTsdbConsoleStream(consoleNode);
         cards.push(
           groupCard('Database', 'Target database settings', type),
           groupCard('Connection', 'Connection', type),
@@ -3660,7 +3792,6 @@
         );
       }
       host.replaceChildren(...cards);
-      syncTsdbStatusSurfaces();
       refreshExportBar();
     };
     $('export-actions')?.replaceChildren(buildApplyBar('export', {
@@ -3727,6 +3858,9 @@
   }
 
   const deviceUi = { busy: false };
+  // Set on a successful add, read when the inverters modal closes: the on-close success toast the
+  // operator asked for. Reset on open ('shown.bs.modal') so a later open starts clean.
+  let inverterAddedSinceOpen = false;
   const deviceLabel = (entry) => `${String(entry.host).trim()}:${entry.port}`;
   const RESET_NOTE = 'its verification evidence, Engineering Mode and operating mode are reset and its connection is closed';
 
@@ -3812,6 +3946,28 @@
     return row;
   }
 
+  // The dashboard never does the sensitive settings read on first paint (SEC-06), so the draft can
+  // be empty when a card's trash icon is used. Load it once on demand before resolving the device.
+  async function ensureDeviceDraft() {
+    if (Array.isArray(settingsDraft.devices)) return;
+    const result = await api('settings');
+    settingsCommitted = structuredClone(result.settings || {});
+    settingsDraft = structuredClone(settingsCommitted);
+    runningInContainer = result.in_container === true;
+    if (Object.hasOwn(settingsDraft, 'devices')) adoptDevices(settingsDraft.devices);
+  }
+
+  // The dashboard card's trash icon reuses the modal's delete flow. It maps the GET /devices card to
+  // the draft inverter by its server-assigned id (device.id === draft.device_id) and then hands off
+  // to removeDevice, so the confirm dialog, busy-guard, PUT /settings and refresh cannot drift.
+  async function removeDashboardDevice(ref, button) {
+    if (deviceUi.busy) return;
+    await ensureDeviceDraft();
+    const device = (settingsDraft.devices || []).find((entry) => entry.device_id === ref.removeId);
+    if (!device) return;
+    await removeDevice(device._uid, button);
+  }
+
   // Deleting reconfigures the live connections and resets the inverter's evidence and modes, so it
   // asks first (the shared confirm dialog) and then saves at once.
   async function removeDevice(uid, button) {
@@ -3872,6 +4028,7 @@
       input('host').value = '';
       input('port').value = '8899';
       input('network_id').value = '';
+      inverterAddedSinceOpen = true;
       setDeviceMessage('status', `Inverter ${deviceLabel(candidate)} added.`);
     } catch (error) {
       failed = true;
@@ -4065,6 +4222,14 @@
       if (loaded) return;
       loaded = true;
       initSettings().catch((error) => { loaded = false; toast(messageFrom(error), 'danger'); });
+    });
+    // Each open starts without a pending add; the on-close toast fires only for an add made in
+    // this interaction. A remove or an open/close with no add leaves the flag false and toasts nothing.
+    modal.addEventListener('shown.bs.modal', () => { inverterAddedSinceOpen = false; });
+    modal.addEventListener('hidden.bs.modal', () => {
+      if (!inverterAddedSinceOpen) return;
+      inverterAddedSinceOpen = false;
+      toast('Inverter added.', 'success');
     });
   }
 
@@ -4323,8 +4488,9 @@
 
   function renderParameters() {
     const names = new Map(parameterData.available.map((item) => [item.name, item]));
-    const normalise = (id) => ($(id)?.value || '').trim().toLocaleLowerCase('en-GB');
-    const matches = (item, term) => `${item.name} ${item.description || ''} ${item.help_text || ''}`.toLocaleLowerCase('en-GB').includes(term);
+    // Deliberately locale-independent fold: internal search comparison, not user-visible output.
+    const normalise = (id) => ($(id)?.value || '').trim().toLowerCase();
+    const matches = (item, term) => `${item.name} ${item.description || ''} ${item.help_text || ''}`.toLowerCase().includes(term);
     const exposedSearch = normalise('exposed-search');
     const availableSearch = normalise('parameter-search');
     const writeSearch = normalise('writable-search');

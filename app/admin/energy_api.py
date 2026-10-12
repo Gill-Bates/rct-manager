@@ -40,6 +40,7 @@ from app.dispatch.controller import CapabilityConflict
 from app.dispatch.soc_policy import NOTE_MAX_LENGTH, SocTargetMode, SocTargetPolicy
 from app.energy.base import EnergyAdminPort
 from app.energy.models import ADMIN_ACTOR, EnergyAction, EnergyCommand, EnergyMode
+from app.errors import DeviceApiError
 from app.gateway.base import DeviceState
 
 router = APIRouter(prefix="/admin/api/energy", include_in_schema=False)
@@ -157,6 +158,7 @@ class AdminEnergyDeviceStatus(EnergyStatusResponse):
     """The public status plus the admin-only blocks the GUI needs (design 2.8)."""
 
     device_name: str
+    mode_recorded: bool
     write_support_enabled: bool  # the global write switch; the checklist's write access needs it
     host: str
     connected: bool  # the inverter answers (state ok or degraded)
@@ -174,6 +176,45 @@ class AdminEnergyDeviceStatus(EnergyStatusResponse):
     next_restore_at: datetime | None = None
 
 
+class HardwareStrategyView(BaseModel):
+    device_id: str
+    device_name: str
+    code: int | None
+    label: str | None
+    stale: bool = False
+
+
+@router.get("/hardware-strategies")
+async def hardware_strategies(
+    request: Request, admin: Annotated[dict | None, Depends(_require_admin_read)]
+) -> list[HardwareStrategyView]:
+    del admin
+    runtime = request.app.state.runtime
+    result = []
+    for device_id, device in sorted(runtime.devices.items()):
+        code = None
+        label = None
+        stale = False
+        if runtime.catalog.exists("power_mng_soc_strategy"):
+            try:
+                # The gateway serves fresh cache entries and coalesces concurrent misses.
+                reading = await runtime.gateway.read_metric(device_id, "power_mng_soc_strategy", fresh=False)
+                if isinstance(reading.value, int) and not isinstance(reading.value, bool):
+                    code = reading.value
+                    label = reading.enum_label
+                    stale = reading.stale
+            except DeviceApiError:
+                pass
+        result.append(HardwareStrategyView(
+            device_id=device_id,
+            device_name=device.display_name or runtime.gateway.reported_name(device_id) or device_id,
+            code=code,
+            label=label,
+            stale=stale,
+        ))
+    return result
+
+
 async def _admin_status(request: Request, device_id: str) -> AdminEnergyDeviceStatus:
     energy = _energy_or_503(request)
     dispatch = _dispatch_or_503(request)
@@ -188,6 +229,7 @@ async def _admin_status(request: Request, device_id: str) -> AdminEnergyDeviceSt
     state = runtime.gateway.device_status(device_id).state
     return AdminEnergyDeviceStatus(
         **public.model_dump(),
+        mode_recorded=energy.mode_recorded(device_id),
         write_support_enabled=runtime.settings.enable_write_support,
         device_name=device.display_name or runtime.gateway.reported_name(device_id) or device_id,
         host=device.host,

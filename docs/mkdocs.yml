@@ -28,6 +28,8 @@ validation:
 theme:
   name: material
   language: en
+  logo: assets/rct-logo-white.svg
+  favicon: assets/rct-logo-white.svg
   palette:
     - media: "(prefers-color-scheme)"
       toggle:

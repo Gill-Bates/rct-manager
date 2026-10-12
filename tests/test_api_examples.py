@@ -181,7 +181,9 @@ async def test_documentation_when_enabled_declares_the_bearer_scheme() -> None:
         assert docs.status_code == 200
         assert '"tryItOutEnabled": true' in docs.text
         assert '"docExpansion": "list"' in docs.text
-        assert "nav-side" in docs.text and "theme-toggle" in docs.text
+        # The nav/theme-toggle markup is served as self-hosted assets (CSP default-src 'self'),
+        # not inline, so /docs references them by URL instead of embedding nav-side/theme-toggle.
+        assert '/docs-assets/docs-nav.css' in docs.text and '/docs-assets/docs-nav.js' in docs.text
         spec = (await h.client.get("/openapi.json")).json()
         assert spec["components"]["securitySchemes"]["HTTPBearer"]["scheme"] == "bearer"
         for path in ("/api/v1/devices", "/api/v1/readiness", "/api/v1/devices/{device_id}/metrics"):

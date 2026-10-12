@@ -13,7 +13,6 @@ import logging
 import os
 import signal
 import socket
-import stat
 import struct
 import subprocess
 import sys
@@ -27,14 +26,14 @@ from types import SimpleNamespace
 import pytest
 import uvicorn
 
+import app.__main__ as entry
 from app.admin.store import AdminStore
 from app.api import server
 from app.api.app_factory import create_app
 from app.api.middleware import access_log_level
 from app.api.server import (
-    FIRST_START_PASSWORD_FILE,
     GracefulServer,
-    write_first_start_password,
+    first_start_banner,
 )
 from app.catalog.registry import RegistryCatalog
 from app.gateway.base import DeviceState
@@ -278,6 +277,34 @@ def test_marker_variable_marks_container(monkeypatch) -> None:
     assert server._in_container()
 
 
+def _container_ip_lines(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [r.getMessage() for r in caplog.records if r.getMessage().startswith("Container IP")]
+
+
+def test_startup_log_shows_container_ip_in_a_container(monkeypatch, caplog) -> None:
+    monkeypatch.setattr(entry, "_in_container", lambda: True)
+    monkeypatch.setattr(entry, "_container_ip", lambda: "172.17.0.5")
+    with caplog.at_level(logging.INFO, logger=entry.log.name):
+        entry._log_container_ip()
+    assert _container_ip_lines(caplog) == ["Container IP: 172.17.0.5"]
+
+
+def test_startup_log_reports_unknown_when_container_ip_detection_fails(monkeypatch, caplog) -> None:
+    monkeypatch.setattr(entry, "_in_container", lambda: True)
+    monkeypatch.setattr(entry, "_container_ip", lambda: None)
+    with caplog.at_level(logging.INFO, logger=entry.log.name):
+        entry._log_container_ip()
+    assert _container_ip_lines(caplog) == ["Container IP: unknown"]
+
+
+def test_startup_log_omits_container_ip_outside_a_container(monkeypatch, caplog) -> None:
+    monkeypatch.setattr(entry, "_in_container", lambda: False)
+    monkeypatch.setattr(entry, "_container_ip", lambda: "172.17.0.5")
+    with caplog.at_level(logging.INFO, logger=entry.log.name):
+        entry._log_container_ip()
+    assert _container_ip_lines(caplog) == []
+
+
 def _docs_lines(caplog: pytest.LogCaptureFixture) -> list[str]:
     return [r.getMessage() for r in caplog.records if r.getMessage().startswith("API documentation")]
 
@@ -362,12 +389,10 @@ async def test_later_start_with_changed_password_runs_jobs_immediately(tmp_path,
 BOOTSTRAP_PASSWORD = "Xk7-pw29"
 
 
-async def test_first_start_password_is_never_printed_but_is_saved_to_a_0600_file(
-    tmp_path, capsys, monkeypatch
-) -> None:
-    """stdout is persisted and centrally collected in systemd/Docker/Kubernetes, so the one-time
-    password must never appear there; only the 0600 file path is printed, the password itself is
-    read from that file."""
+async def test_first_start_password_is_printed_to_the_console(tmp_path, capsys, monkeypatch) -> None:
+    """The one-time bootstrap password is shown directly in the startup banner on stdout; no
+    password file is created anymore. Console persistence (systemd/Docker/Kubernetes) is an
+    accepted operator tradeoff."""
     settings = make_settings(admin_db_path=tmp_path / "data" / "rct.db")
     app = SimpleNamespace(
         state=SimpleNamespace(first_start_password=BOOTSTRAP_PASSWORD, runtime=SimpleNamespace(settings=settings))
@@ -381,16 +406,46 @@ async def test_first_start_password_is_never_printed_but_is_saved_to_a_0600_file
     server.started = True
     await server.startup()
 
-    path = settings.admin_db_path.parent / FIRST_START_PASSWORD_FILE
     printed = capsys.readouterr().out
-    assert BOOTSTRAP_PASSWORD not in printed and str(path.resolve()) in printed
-    assert path.read_text(encoding="utf-8").strip() == BOOTSTRAP_PASSWORD
-    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert BOOTSTRAP_PASSWORD in printed and "FIRST START" in printed
+    assert not (settings.admin_db_path.parent / "initial-admin-password").exists()
 
 
-def test_rewriting_the_password_file_cannot_leave_a_readable_mode(tmp_path) -> None:
-    settings = make_settings(admin_db_path=tmp_path / "data" / "rct.db")
-    first = write_first_start_password(settings, BOOTSTRAP_PASSWORD)
-    first.chmod(0o644)  # a previous run or an operator widened it
-    again = write_first_start_password(settings, BOOTSTRAP_PASSWORD)
-    assert again == first and stat.S_IMODE(again.stat().st_mode) == 0o600
+def test_first_start_banner_prints_the_password_and_the_url() -> None:
+    text = first_start_banner(make_settings(bind_port=8123), BOOTSTRAP_PASSWORD)
+    assert BOOTSTRAP_PASSWORD in text  # the password itself is now shown on the console
+    assert "FIRST START" in text and "Admin user:" in text
+    assert "change this password" in text and "http://127.0.0.1:8123/" in text
+    assert text.startswith("\n=") and text.endswith("=\n")
+
+
+def test_first_start_banner_shows_container_ip_in_a_container(monkeypatch) -> None:
+    monkeypatch.setattr(server, "_in_container", lambda: True)
+    monkeypatch.setattr(server, "_container_ip", lambda: "172.17.0.5")
+    settings = make_settings(bind_address="0.0.0.0", bind_port=8123, allow_non_loopback_bind=True)
+    text = first_start_banner(settings, BOOTSTRAP_PASSWORD)
+    assert "http://172.17.0.5:8123/" in text and "127.0.0.1" not in text
+    assert BOOTSTRAP_PASSWORD in text and "FIRST START" in text
+
+
+def test_first_start_banner_keeps_bind_host_outside_a_container(monkeypatch) -> None:
+    monkeypatch.setattr(server, "_in_container", lambda: False)
+    monkeypatch.setattr(server, "_container_ip", lambda: "172.17.0.5")
+    settings = make_settings(bind_address="0.0.0.0", bind_port=8123, allow_non_loopback_bind=True)
+    text = first_start_banner(settings, BOOTSTRAP_PASSWORD)
+    assert "http://0.0.0.0:8123/" in text and "172.17.0.5" not in text
+
+
+def test_first_start_banner_falls_back_when_container_ip_detection_fails(monkeypatch) -> None:
+    monkeypatch.setattr(server, "_in_container", lambda: True)
+    monkeypatch.setattr(server, "_container_ip", lambda: None)
+    text = first_start_banner(make_settings(bind_address="127.0.0.1", bind_port=8123), BOOTSTRAP_PASSWORD)
+    assert "http://127.0.0.1:8123/" in text  # falls back to the bind host, never raises
+
+
+def test_first_start_banner_keeps_specific_bind_address_in_a_container(monkeypatch) -> None:
+    monkeypatch.setattr(server, "_in_container", lambda: True)
+    monkeypatch.setattr(server, "_container_ip", lambda: "172.17.0.5")
+    settings = make_settings(bind_address="10.1.2.3", bind_port=8123, allow_non_loopback_bind=True)
+    text = first_start_banner(settings, BOOTSTRAP_PASSWORD)
+    assert "http://10.1.2.3:8123/" in text and "172.17.0.5" not in text

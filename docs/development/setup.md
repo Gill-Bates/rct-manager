@@ -32,7 +32,7 @@ PLAYWRIGHT_DIR=<dir with node_modules/playwright> PYTHON=.venv/bin/python \
   node tests/e2e/admin_flow.mjs <artifact-dir>
 ```
 
-The driver reads the one-time admin password from the `Password file:` line of the first-start
+The driver reads the one-time admin password from the `One-time password:` line of the first-start
 banner of its own test server. `BROWSER` (`chromium`, `webkit`, `firefox`), `VIEWPORT_WIDTH` and
 `COLOR_SCHEME` (`light`, `dark`) select the matrix cell.
 

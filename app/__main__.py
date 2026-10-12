@@ -16,6 +16,8 @@ import sys
 from pathlib import Path
 
 from app.allowlist import Allowlist
+from app.api.restart import container_ip as _container_ip
+from app.api.restart import in_container as _in_container
 from app.banner import environment, print_banner, resolve_version
 from app.catalog.registry import RegistryCatalog
 from app.config import Settings, load_settings, parse_env_file
@@ -107,6 +109,13 @@ def _validate(env_file: Path | None) -> int:
     return 0
 
 
+def _log_container_ip() -> None:
+    """Log this container's own IPv4 next to the startup line, so an operator running it in Docker
+    sees where to reach it. Only inside a container; ``unknown`` when detection fails, never raises."""
+    if _in_container():
+        log.info("Container IP: %s", _container_ip() or "unknown")
+
+
 def _serve(env_file: Path | None) -> int:
     print_banner()
     try:
@@ -118,6 +127,7 @@ def _serve(env_file: Path | None) -> int:
     if settings is None:
         return 1
     log.info("rct-api %s starting (%s), pid=%d", resolve_version(), environment(), os.getpid())
+    _log_container_ip()
     from app.api.app_factory import create_app
     from app.api.server import run_server
 

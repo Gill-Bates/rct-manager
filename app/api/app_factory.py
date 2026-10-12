@@ -25,7 +25,6 @@ from app.admin.api import (
     DEVICE_CARD_METRIC_NAMES,
     RCT_MODULE_SN_SLOTS,
     _settings_persisted,
-    repair_device_names,
 )
 from app.admin.api import router as admin_router
 from app.admin.dispatch_api import router as admin_dispatch_router
@@ -35,7 +34,7 @@ from app.admin.store import AdminStore
 from app.admin.ui import install_ui
 from app.allowlist import Allowlist
 from app.api.body_limit import BodyLimitMiddleware
-from app.api.docs_nav import SIDEBAR_HTML
+from app.api.docs_nav import DOCS_STATIC_ROOT, SIDEBAR_HTML
 from app.api.middleware import RequestContextMiddleware
 from app.api.problems import ErrorCode, ProblemError, register_handlers
 from app.api.restart import BackgroundRestart
@@ -61,7 +60,9 @@ from app.errors import ConfigError, DeviceApiError, ReconfigurationBuildError
 from app.gateway.energy_readings import RctEnergyReadings
 from app.gateway.rct import DeviceBinding, RctGateway
 from app.gateway.rct_dispatch import RctDispatchGateway
+from app.observability.event_hub import EventHub
 from app.observability.exporter import DeviceView, EndpointView, MetricsExporter
+from app.observability.log_stream import TsdbLogHandler, register_tsdb_log_type
 from app.observability.names import build_metric_names, metric_help
 from app.observability.stats import ServiceCounters
 from app.protocol.types import StructKind
@@ -154,12 +155,97 @@ _GRAPH_FIELDS = (
 
 
 def load_allowlist(settings: Settings, catalog: RegistryCatalog, selected: list[str] | None = None) -> Allowlist:
-    if settings.enable_write_support or settings.write_allowlist_path.exists():
-        available = Allowlist.load(settings.write_allowlist_path, catalog)
-        if selected is None:
-            return available
-        return Allowlist({name: entry for name in selected if (entry := available.entry(name)) is not None}, catalog)
-    return Allowlist({}, catalog)
+    # With write support off the allowlist is "none" regardless of the file: a disabled feature
+    # must not be able to fail the whole service start on a broken/garbage allowlist file. The
+    # file is read only when writes are enabled (including _load_default_write_entries, which
+    # passes a copy with enable_write_support=True so its candidate load keeps reading).
+    if not settings.enable_write_support:
+        return Allowlist({}, catalog)
+    available = Allowlist.load(settings.write_allowlist_path, catalog)
+    if selected is None:
+        return available
+    return Allowlist({name: entry for name in selected if (entry := available.entry(name)) is not None}, catalog)
+
+
+@dataclass(slots=True)
+class _IdentityReset:
+    """The identity-bound state a reconfiguration must clear off one device_id before the swap.
+
+    Built by ``_plan_identity_resets`` (read only) and applied by ``_apply_identity_reset``, so the
+    whole affected set is planned before any device is mutated: see the atomicity note at the call
+    site. ``None`` fields mean "already in the safe state, nothing to apply".
+    """
+
+    device_id: str
+    capabilities: list[CapabilityRecord]
+    limits: DeviceLimits | None
+    switch_energy_off: bool
+    soc_target_policy: SocTargetPolicy
+
+
+def _plan_identity_resets(runtime: Runtime, reset_ids: Iterable[str]) -> list[_IdentityReset]:
+    """Read the current identity-bound state of every affected device and build its reset target.
+
+    Pure reads: nothing is mutated here, so the plan for the whole set is computed before any single
+    device is touched. Evidence and the operating mode were given for the OLD physical device, so a
+    device_id freed or re-addressed by this reconfiguration must not carry them onto whatever device
+    now answers at that id. ``reset_ids`` is only populated when dispatch is live, so an empty set
+    (dispatch disabled) plans nothing.
+    """
+    if runtime.dispatch is None:
+        return []
+    plans: list[_IdentityReset] = []
+    for device_id in reset_ids:
+        # Every capability is reset, not only the VERIFIED ones: a revoke keeps its evidence
+        # (strategy code, byte widths, sign assumptions, ...) on an UNVERIFIED record, and that
+        # evidence must not survive onto the new device — only a VERIFIED->default reset here would.
+        capabilities = [
+            CapabilityRecord(device_id=device_id, name=capability.name)
+            for capability in runtime.dispatch.capabilities(device_id)
+        ]
+        # Engineering mode is the per-device switch that lets dispatch run on unverified hardware; it
+        # is a decision about the old physical device and must not carry over either. The power
+        # limits themselves (max_charge/discharge_power_w) are a site/installation property, not a
+        # hardware-identity claim, so they are left as the operator configured them.
+        old_limits = runtime.dispatch.device_limits(device_id)
+        limits = (
+            replace(old_limits, engineering_mode=False)
+            if old_limits is not None and old_limits.engineering_mode
+            else None
+        )
+        switch_energy_off = runtime.energy is not None and runtime.energy.mode(device_id) is not EnergyMode.OFF
+        # SocTargetPolicy is per-device/firmware (design doc), so it is an identity-bound claim
+        # exactly like the capability evidence above and must not survive onto the new device.
+        plans.append(
+            _IdentityReset(
+                device_id=device_id,
+                capabilities=capabilities,
+                limits=limits,
+                switch_energy_off=switch_energy_off,
+                soc_target_policy=SocTargetPolicy(device_id=device_id),
+            )
+        )
+    return plans
+
+
+async def _apply_identity_reset(runtime: Runtime, reset: _IdentityReset) -> None:
+    """Apply one device's identity reset in fail-closed order: each step moves toward safe/off.
+
+    The order matters: capabilities first (revoking them closes the dispatch gate), then engineering
+    mode off, then energy mode OFF, then the SoC policy default. Every write is a single store
+    transaction and idempotent, so a store that fails part-way leaves the device MORE restricted,
+    never with a residual permissive setting, and the operator's retry re-applies the same target.
+    The capability revokes go through the controller's batched ``set_capabilities`` so all of a
+    device's rows commit in one transaction instead of one per capability.
+    """
+    assert runtime.dispatch is not None
+    if reset.capabilities:
+        await runtime.dispatch.set_capabilities(reset.device_id, reset.capabilities)
+    if reset.limits is not None:
+        await runtime.dispatch.set_device_limits(reset.device_id, reset.limits)
+    if reset.switch_energy_off and runtime.energy is not None:
+        await runtime.energy.set_mode(reset.device_id, EnergyMode.OFF, actor=None)
+    await runtime.dispatch.set_soc_target_policy(reset.device_id, reset.soc_target_policy)
 
 
 class _LiveDevices(Mapping[str, DeviceEntry]):
@@ -759,39 +845,35 @@ def _lifespan(
                 gateway.replace_devices(old_bindings)
 
             # Identity-bound resets run only after the new graph built, so a failed build leaves state untouched.
-            # Not one atomic store transaction yet (follow-up); a partial failure counts as rollback-capable.
+            #
+            # Atomicity: the dispatch store commits each table (capabilities, device config, energy
+            # mode, SoC policy) in its own SQLite transaction; there is no cross-table transaction
+            # in the store API, so a single all-or-nothing commit across the four is not available.
+            # Instead the sequence is made abort-safe by two properties the loop below guarantees:
+            #   1) a validate phase that can raise runs FIRST, for EVERY affected device, before any
+            #      mutation of any device — so an active-operation conflict (CapabilityConflict) or
+            #      an unknown-device error cannot abort the run half-applied; and
+            #   2) the apply phase only moves state toward the safe/off posture (capabilities ->
+            #      unverified, engineering mode off, energy mode OFF, SoC policy -> default), each
+            #      via an idempotent single-row (or single-device batched) store write. A store that
+            #      fails mid-apply therefore leaves the still-running old device MORE restricted, in
+            #      the fail-closed direction, never with a residual permissive setting — and because
+            #      every write is idempotent, the operator's retry re-applies the same safe target.
+            # This is the tightest guarantee the current store API allows; it is NOT a transactional
+            # rollback (see the fix report), but it removes the hazard the review named: an aborted
+            # switch can no longer leave a permissive half-reset behind for the old inverter.
             try:
-                for device_id in reset_ids:
-                    # Evidence and the operating mode were given for the old physical device, not the new one.
-                    # Every capability is reset, not only the VERIFIED ones: a revoke keeps its
-                    # evidence (strategy code, byte widths, sign assumptions, ...) on an UNVERIFIED
-                    # record, and that evidence must not survive onto whatever device now answers
-                    # at this device_id — only a VERIFIED->default reset here would let it.
-                    for capability in runtime.dispatch.capabilities(device_id):
-                        await runtime.dispatch.set_capability(
-                            device_id, CapabilityRecord(device_id=device_id, name=capability.name)
-                        )
-                    # Engineering mode is the per-device switch that lets dispatch run on unverified
-                    # hardware; it is a decision about the old physical device and must not carry
-                    # over either. The power limits themselves (max_charge/discharge_power_w) are
-                    # a site/installation property, not a hardware-identity claim, so they are left
-                    # as the operator configured them.
-                    old_limits = runtime.dispatch.device_limits(device_id)
-                    if old_limits is not None and old_limits.engineering_mode:
-                        await runtime.dispatch.set_device_limits(
-                            device_id, replace(old_limits, engineering_mode=False)
-                        )
-                    if runtime.energy is not None and runtime.energy.mode(device_id) is not EnergyMode.OFF:
-                        await runtime.energy.set_mode(device_id, EnergyMode.OFF, actor=None)
-                    # SocTargetPolicy is per-device/firmware (design doc), so it is an identity-bound
-                    # claim exactly like the capability evidence above and must not survive onto
-                    # whatever device now answers at this device_id.
-                    await runtime.dispatch.set_soc_target_policy(
-                        device_id, SocTargetPolicy(device_id=device_id)
-                    )
+                resets = _plan_identity_resets(runtime, reset_ids)
             except Exception as exc:
-                # The old graph is still running untouched (teardown has not started yet), so this
-                # is rollback-capable the same way a failed graph build is.
+                # Validation only reads state; the old graph is still running untouched.
+                raise ReconfigurationBuildError(str(exc)) from exc
+            try:
+                for reset in resets:
+                    await _apply_identity_reset(runtime, reset)
+            except Exception as exc:
+                # The old graph is still running untouched (teardown has not started yet), and every
+                # applied write already moved its device toward the safe/off posture, so this stays
+                # rollback-capable in the same sense a failed graph build is.
                 raise ReconfigurationBuildError(str(exc)) from exc
 
             try:
@@ -897,15 +979,25 @@ def _lifespan(
                 if runtime.dispatch is None:
                     # _create_dispatch() does several synchronous DB inits/reads (DispatchStore.initialize(),
                     # get_capabilities(), get_soc_target_policies(), get_energy_states(), get_device_configs());
-                    # called directly here it would block the event loop on a live write-support enable.
-                    dispatch_store_new, modes = await asyncio.to_thread(
-                        _create_dispatch, runtime, app.state.dispatch_config
-                    )
-                    app.state.dispatch_store = dispatch_store_new
+                    # called directly here it would block the event loop on a live write-support enable. It
+                    # builds an UNpublished bundle in the worker and touches no shared runtime state there.
+                    bundle = await asyncio.to_thread(_create_dispatch, runtime, app.state.dispatch_config)
+                    # Back on the event loop: a concurrent settings save may have turned write support
+                    # off during the build. Publish nothing in that case — close the unpublished store
+                    # and drop the bundle — so runtime.dispatch stays None rather than being set with a
+                    # store other callers would then see without an attached Energy Manager.
+                    if not _write_support_live():
+                        await asyncio.to_thread(bundle.store.close)
+                        return
+                    # One on-loop step, no await between the publishes: runtime.dispatch, its store,
+                    # readings, shutdown hook, app.state.dispatch_store and the Energy Manager attach
+                    # all become visible together, never a half-published dispatch state.
+                    _publish_dispatch(runtime, bundle)
+                    app.state.dispatch_store = bundle.store
                     if runtime.energy is not None:
                         runtime.energy.attach_dispatch(
-                            port=runtime.dispatch, store=dispatch_store_new,
-                            readings=runtime.energy_readings, modes=modes,
+                            port=runtime.dispatch, store=bundle.store,
+                            readings=runtime.energy_readings, modes=bundle.energy_modes,
                         )
                 # Re-checked after the slow build/await: a concurrent settings save may have turned
                 # write support off meanwhile. The controller object is harmless on its own (only the
@@ -953,6 +1045,16 @@ def _lifespan(
         app.state.reconfigure_devices = reconfigure_devices
         app.state.loop = asyncio.get_running_loop()  # lets a sync admin route schedule restart_export
 
+        # Capture this app's own TSDB-relevant log records as ``tsdb.log`` events on the hub. Additive:
+        # the stdout handler from setup_logging stays untouched. Bind the running loop so a record
+        # emitted on any thread reaches subscriber queues on the loop thread, then attach the handler
+        # to the root logger. Removed again in the finally below so no handler leaks between the many
+        # app instances a test process builds (a leak would bleed records across tests).
+        hub: EventHub = app.state.event_hub
+        hub.bind_loop(asyncio.get_running_loop())
+        tsdb_log_handler = TsdbLogHandler(hub)
+        logging.getLogger().addHandler(tsdb_log_handler)
+
         if store is not None and await asyncio.to_thread(store.password_change_pending):
             log.warning(
                 "Initial admin password not changed yet: periodic reads, heartbeat polling, "
@@ -966,6 +1068,10 @@ def _lifespan(
             yield
         finally:
             closing = True  # an in-flight reconfiguration stops starting work from here on
+            # Detach the log tap first so nothing in teardown can leak a root handler or feed a hub
+            # that is about to be closed; mirrors the addHandler on startup.
+            logging.getLogger().removeHandler(tsdb_log_handler)
+            hub.close()
             if runtime.shutdown is not None and runtime.shutdown.plan is None:
                 await runtime.shutdown.run()  # no signal drove the shutdown: run the same phases now
             try:
@@ -1006,6 +1112,11 @@ def _add_docs(app: FastAPI, settings: Settings) -> None:
     app.mount(
         "/docs-static", StaticFiles(directory=str(_SWAGGER_UI_ROOT)), name="docs-static"
     )
+    # Self-hosted sidebar/theme CSS and JS: injected into /docs as same-origin assets so the page's
+    # default-src 'self' CSP needs no inline-style/script exception (see docs_nav.SIDEBAR_HTML).
+    app.mount(
+        "/docs-assets", StaticFiles(directory=str(DOCS_STATIC_ROOT)), name="docs-assets"
+    )
 
     @app.get("/openapi.json", include_in_schema=False, dependencies=[Depends(guard)])
     async def openapi_document() -> JSONResponse:
@@ -1040,10 +1151,25 @@ def _add_docs(app: FastAPI, settings: Settings) -> None:
         log.info("API documentation disabled (DOCS_PUBLIC=false)")
 
 
-def _create_dispatch(runtime: Runtime, config: DispatchConfig) -> tuple[DispatchStore, dict[str, ModeRecord]]:
-    """Build the dispatch controller and its store onto ``runtime``; used at boot and on a live enable.
+@dataclass(slots=True)
+class _DispatchBundle:
+    """A built-but-unpublished dispatch backing: see ``_create_dispatch``/``_publish_dispatch``."""
 
-    Returns the store and the persisted energy modes. The caller starts the controller's tasks.
+    store: DispatchStore
+    controller: DispatchController
+    energy_readings: RctEnergyReadings
+    energy_modes: dict[str, ModeRecord]
+
+
+def _create_dispatch(runtime: Runtime, config: DispatchConfig) -> "_DispatchBundle":
+    """Build an unpublished dispatch bundle; used at boot and on a live enable.
+
+    Does the synchronous DB inits/reads and constructs the controller, store, readings and shutdown
+    hook WITHOUT touching shared ``runtime`` state or the ShutdownCoordinator: on a live enable this
+    runs in a worker thread (``asyncio.to_thread``), and a worker must not publish state other
+    requests or a concurrent shutdown can observe half-built. ``_publish_dispatch`` installs the
+    bundle in one on-loop step. Returns the bundle for that caller to publish (and the persisted
+    energy modes it carries).
     """
     settings = runtime.settings
     gateway = runtime.gateway
@@ -1061,13 +1187,13 @@ def _create_dispatch(runtime: Runtime, config: DispatchConfig) -> tuple[Dispatch
     )
     # The live capability registry, so a verification reaches the published grid sign without a
     # restart. The readings are cache-only and never queue a device transaction.
-    runtime.energy_readings = RctEnergyReadings(gateway, capabilities=dispatch_capabilities)
+    energy_readings = RctEnergyReadings(gateway, capabilities=dispatch_capabilities)
     energy_modes = dispatch_store.get_energy_states()
     # The store is the truth for the per-device limits and the engineering switch: they are an
     # operator setting, made through the admin dispatch API, and must survive a restart. The
     # environment values are only a bootstrap seed for a device that has no record yet.
     limits = _seed_limits(settings, dispatch_store.get_device_configs())
-    runtime.dispatch = DispatchController(
+    controller = DispatchController(
         dispatch_gateway,
         dispatch_store,
         runtime.clock,
@@ -1076,13 +1202,28 @@ def _create_dispatch(runtime: Runtime, config: DispatchConfig) -> tuple[Dispatch
         capabilities=dispatch_capabilities,
         soc_target_policies=soc_target_policies,
     )
+    return _DispatchBundle(
+        store=dispatch_store, controller=controller, energy_readings=energy_readings, energy_modes=energy_modes
+    )
+
+
+def _publish_dispatch(runtime: Runtime, bundle: "_DispatchBundle") -> None:
+    """Install a built ``_DispatchBundle`` into the shared ``runtime`` and the ShutdownCoordinator.
+
+    All assignments run together, on the event loop (or on the main thread at boot, before the loop
+    starts), with no ``await`` between them, so no caller can observe a ``runtime.dispatch`` that is
+    set while its store, readings or shutdown hook are not. ``enable_dispatch`` must only call this
+    once a post-build ``_write_support_live()`` check still holds.
+    """
+    gateway = runtime.gateway
 
     async def restore_for_shutdown() -> None:
         gateway.begin_shutdown_restore()  # bounded readbacks: the restore runs against the work deadline
-        await runtime.dispatch.shutdown_restore()
+        await bundle.controller.shutdown_restore()
 
+    runtime.energy_readings = bundle.energy_readings
+    runtime.dispatch = bundle.controller
     runtime.shutdown.set_dispatch_restore(restore_for_shutdown)
-    return dispatch_store, energy_modes
 
 
 def _load_default_write_entries(settings: Settings, catalog: RegistryCatalog) -> dict:
@@ -1101,16 +1242,9 @@ def create_app(settings: Settings, *, clock: Clock | None = None, connector: Con
     selected_writes = selected_exposed = bootstrap_password = None
     if admin_store is not None:
         bootstrap_password = admin_store.initialize()
-        if bootstrap_password is not None:
-            # Durable in the same bootstrap step as account creation: initialize() has committed
-            # the admin row with the generated password, so the password file must be written
-            # before anything below (graph build, lifespan startup) can fail. Otherwise a failure
-            # after this point would lose the only copy of the one-time password, and the next boot
-            # would find the existing admin and generate no replacement — a locked-out install.
-            # The server still prints the banner once it is listening.
-            from app.api.server import write_first_start_password
-
-            write_first_start_password(settings, bootstrap_password)
+        # initialize() returns the generated password only on the first bootstrap, where it has just
+        # committed the admin row. The server prints it to the console once it is listening; on a
+        # normal restart initialize() returns None and no password is shown.
         overrides = admin_store.get("operator_settings")
         if overrides is None:
             overrides = _settings_persisted(settings)
@@ -1120,7 +1254,6 @@ def create_app(settings: Settings, *, clock: Clock | None = None, connector: Con
         selected_exposed = admin_store.get("exposed_names")
         if selected_exposed is not None:
             settings = settings.model_copy(update={"metrics_exposed_names": selected_exposed})
-        settings = repair_device_names(admin_store, settings)
         selected_writes = admin_store.get("write_names")
         if selected_writes is None:
             selected_writes = []  # deny by default: the shipped catalog lists what may be enabled, nothing is on
@@ -1166,7 +1299,11 @@ def create_app(settings: Settings, *, clock: Clock | None = None, connector: Con
     # dispatch-enabled branch below replaces this with the live capability registry.
     runtime.energy_readings = RctEnergyReadings(gateway, capabilities=CapabilityRegistry())
     if _dispatch_enabled(settings):
-        dispatch_store, energy_modes = _create_dispatch(runtime, dispatch_config)
+        # Boot runs on the main thread before the event loop starts, so building and publishing in
+        # two steps here is still atomic with respect to any request handler.
+        bundle = _create_dispatch(runtime, dispatch_config)
+        _publish_dispatch(runtime, bundle)
+        dispatch_store, energy_modes = bundle.store, bundle.energy_modes
     app = FastAPI(
         title="RCT Manager",
         version=__version__,
@@ -1179,6 +1316,13 @@ def create_app(settings: Settings, *, clock: Clock | None = None, connector: Con
     app.state.runtime = runtime
     app.state.admin_desired_settings = settings
     app.state.admin_store = admin_store
+    # Domain-agnostic in-process pub/sub hub behind the admin SSE endpoint (GET /admin/api/events).
+    # Phase 1 wires exactly one producer/type through it: ``tsdb.log`` (fed by the filtering logging
+    # handler attached to the root logger in _lifespan, torn down with the app instance). Adding a
+    # type later is just register_type + publish; the endpoint and hub carry no domain logic.
+    event_hub = EventHub()
+    register_tsdb_log_type(event_hub)
+    app.state.event_hub = event_hub
 
     def _restart_listener() -> None:
         hook = getattr(app.state, "server_restart", None)  # set by run_server
@@ -1269,6 +1413,7 @@ def create_app(settings: Settings, *, clock: Clock | None = None, connector: Con
             approved_writes=_approved_writes,
             allowlist_candidates=lambda: frozenset(app.state.default_write_entries),
             required_writes=RctDispatchGateway.REQUIRED_WRITES,
+            internal_strategy_write="power_mng_soc_strategy",
             revoke_writes=_revoke_writes,
             modes=energy_modes,
         )

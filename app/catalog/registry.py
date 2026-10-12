@@ -140,7 +140,12 @@ class RegistryEntry(BaseModel):
         """Payload size for fixed-size types; None for strings without a configured width."""
         if self.data_type is DataType.STRUCT:
             return SLAVE_DATA_SIZE
-        return self.byte_width
+        if self.data_type is DataType.STRING:
+            return self.byte_width
+        # A fixed-size int/float entry usually omits byte_width in the shipped catalog; fall back to
+        # the type's default width (matching _check_enum_label_codes) so the property keeps its
+        # "fixed-size types" contract instead of returning None.
+        return self.byte_width or DEFAULT_WIDTHS.get(self.data_type)
 
 
 class ObjectRegistry(BaseModel):

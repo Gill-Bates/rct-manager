@@ -6,9 +6,13 @@
 
 """Release-check helpers: the server-side allowlist for the GitHub release link (SEC-05)."""
 
+import io
+import json
+
 import pytest
 
-from app.admin.updates import _release_url, _version_key
+from app.admin import updates
+from app.admin.updates import _fetch, _release_url, _version_key, _version_parts
 
 _VALID = "https://github.com/Gill-Bates/rct-manager/releases/tag/v1.1.0"
 
@@ -46,3 +50,31 @@ def test_a_pre_release_sorts_below_its_final_release(older: str, newer: str) -> 
 
 def test_equal_versions_are_not_an_update() -> None:
     assert _version_key("v1.1.0") == _version_key("1.1.0")
+
+
+@pytest.mark.parametrize("tag", ["garbage", "1.2.3-invalid-junk", "v", ""])
+def test_fetch_rejects_an_unparseable_release_tag(tag: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A tag GitHub returns that does not parse must not be stored as latest_version (SEC/correctness)."""
+
+    class _Response(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def _fake_urlopen(request, timeout):
+        del request, timeout
+        payload = {"tag_name": tag, "html_url": _VALID, "published_at": "2026-10-01T12:00:00Z"}
+        return _Response(json.dumps(payload).encode())
+
+    monkeypatch.setattr(updates, "urlopen", _fake_urlopen)
+    result = _fetch()
+    assert result["latest_version"] is None
+    assert result["update_available"] is False
+    assert result["error"] is not None
+
+
+def test_a_junk_tag_does_not_parse_as_a_version() -> None:
+    assert _version_parts("1.2.3-invalid-junk") == (0,)  # not read as (1, 2, 3)
+    assert _version_parts("garbage") == (0,)

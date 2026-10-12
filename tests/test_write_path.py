@@ -479,3 +479,30 @@ def test_allowlist_rejects_restrictions_for_bool_and_string(kind, extra) -> None
     with pytest.raises(ValidationError):
         AllowlistEntry(name="x", data_type=kind, **extra)
     AllowlistEntry(name="x", data_type=kind)
+
+
+def test_load_allowlist_ignores_a_broken_file_when_write_support_is_off(tmp_path) -> None:
+    """A disabled feature must not fail the service start on its own broken config file.
+
+    Regression for the read-only startup finding: load_allowlist() used to read the allowlist file
+    whenever it merely existed, so a garbage file turned a read-only (writes-off) boot into a hard
+    ConfigError. With writes off the result is now an empty allowlist and the file is never read.
+    """
+    from app.api.app_factory import load_allowlist
+    from app.catalog.registry import RegistryCatalog
+    from app.errors import ConfigError
+    from tests.api_helpers import REGISTRY_FIXTURE
+
+    catalog = RegistryCatalog.from_file(REGISTRY_FIXTURE)
+    broken = tmp_path / "objects_write_allowed.json"
+    broken.write_text("{ this is not valid json", encoding="utf-8")
+
+    settings = make_settings(enable_write_support=False, write_allowlist_path=broken)
+    allowlist = load_allowlist(settings, catalog)
+    assert len(allowlist) == 0
+
+    # The same broken file still aborts when writes are enabled: the guard only skips the read, it
+    # does not swallow a real misconfiguration an operator who turned writes on must see.
+    enabled = make_settings(enable_write_support=True, write_allowlist_path=broken)
+    with pytest.raises(ConfigError):
+        load_allowlist(enabled, catalog)

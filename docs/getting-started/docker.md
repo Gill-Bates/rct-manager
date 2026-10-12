@@ -48,19 +48,17 @@ without it) and `TZ` (default `Etc/UTC`) are read by `docker/compose.yaml` itsel
 ## Tokens
 
 Set `HMAC_SECRET` before starting the container. The first start prints the one-time `admin`
-password in clear text in the `FIRST START - admin login` block in the container logs, so it can
-be copy-pasted directly from there. It is also saved to `initial-admin-password` next to the
-admin database as a fallback — with the volume layout above, at
-`/app/data/initial-admin-password` in the `rct-data` volume. Read it from the running container
-if needed:
+password in clear text in the `FIRST START` block in the container logs, so it can be copy-pasted
+directly from there; it appears only on the initial bootstrap. Container logs are persisted and
+centrally collected, so the password may remain in log history — a deliberately accepted tradeoff.
+Read it from the container logs if needed:
 
 ```sh
-docker compose -f docker/compose.yaml exec rct-api cat /app/data/initial-admin-password
+docker compose -f docker/compose.yaml logs rct-api
 ```
 
-Open the root page, log in as `admin` with that password, change it, delete the file
-(`docker compose -f docker/compose.yaml exec rct-api rm /app/data/initial-admin-password`), and
-create a PAT on **API tokens**. The container runs as uid 10001 and its database
+Open the root page, log in as `admin` with that password, change it, and create a PAT on
+**API tokens**. The container runs as uid 10001 and its database
 volume is writable by that user. Keep the volume and secret across upgrades.
 Devices, tokens, authentication and write support are configured in the GUI; the
 former environment variables are ignored. Tokens, authentication and write

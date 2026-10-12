@@ -15,7 +15,7 @@ import pytest
 
 from app.config import Settings
 from app.export.lineprotocol import batches, build_lines, escape_key, escape_measurement
-from app.export.pusher import MAX_BACKOFF_SECONDS, PushError, PushExporter
+from app.export.pusher import MAX_BACKOFF_SECONDS, PushError, PushExporter, Target
 from app.observability.exporter import MetricsExporter, _labels
 from app.observability.stats import ServiceCounters
 
@@ -245,6 +245,18 @@ def test_groups_fields_by_tag_set_and_writes_floats() -> None:
         "rct,device=main rct_battery_soc=0.5,rct_grid_power=5.0 42",
         "rct,device=main,state=on\\ x rct_state=1.0 42",
     ]
+
+
+def test_wire_timestamp_is_the_supplied_utc_epoch_ns_at_declared_precision() -> None:
+    """FR-7: the metric timestamp on the wire is the caller-supplied epoch-ns integer (never
+    server-assigned), and the InfluxDB v2 write path declares ``precision=ns`` so that integer is
+    read as nanoseconds. ``pusher.cycle`` supplies ``time.time_ns()`` (UTC epoch, TZ-independent)."""
+    stamp = 1234567890123456789  # full-width epoch nanoseconds
+    lines = build_lines([("rct_grid_power", {"device": "main"}, 5.0)], "rct", stamp)
+    assert lines and all(line.endswith(f" {stamp}") for line in lines)
+
+    target = Target.from_settings(Settings(_env_file=None, **BASE, **INFLUX, influxdb_hostname="http://127.0.0.1:8086"))
+    assert "precision=ns" in target.write_path
 
 
 def test_empty_tag_values_are_dropped_and_batches_split() -> None:

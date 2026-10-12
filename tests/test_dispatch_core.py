@@ -150,6 +150,9 @@ def test_dispatch_store_rejected_put_does_not_mutate_the_caller_record_or_clobbe
         valid_until_requested=datetime(2026, 10, 6, 13, 0, tzinfo=UTC),
         created_at=datetime(2026, 10, 6, 12, 0, tzinfo=UTC),
     )
+    # CHARGING is a hardware-touching state, so the record must carry a snapshot to round-trip
+    # through get()/from_dict() (the P2-04 snapshot invariant); this test exercises the CAS check.
+    newer.snapshot = DeviceControlSnapshot(PowerSetpoint(), 0.5, 0, False, datetime(2026, 10, 6, 12, 0, tzinfo=UTC))
     store.put(newer)
     assert newer.record_version == 2
 
@@ -169,19 +172,10 @@ def test_dispatch_store_rejected_put_does_not_mutate_the_caller_record_or_clobbe
     assert current.record_version == 2
 
 
-_V1_SCHEMA = """
-    CREATE TABLE dispatch_operations (
-        device_id TEXT PRIMARY KEY,
-        state TEXT NOT NULL,
-        restore_required INTEGER NOT NULL CHECK(restore_required IN (0,1)),
-        updated_at TEXT NOT NULL,
-        record_version INTEGER NOT NULL,
-        encrypted BLOB NOT NULL
-    ) STRICT;
-    PRAGMA user_version = 1;
-"""
-
-# A row written verbatim by the user_version 1 code: it knows none of the keys later packages add.
+# A dispatch_operations blob whose payload carries only the keys the earliest writer emitted: it
+# knows none of the keys later packages added. This is a persisted-blob-shape tolerance case (like
+# the snapshot field tolerance), not a schema version — the row lives in the current table and
+# recover()/from_dict() must still read it rather than raise on a key it does not find.
 _V1_ROW = {
     "device_id": "main",
     "state": "charging",
@@ -213,12 +207,13 @@ _V1_ROW = {
 }
 
 
-def version_1_database(path: Path, secret: str, row: dict | None = None) -> DispatchStore:
-    """A dispatch database exactly as the user_version 1 code left it, optionally with one row."""
+def database_with_legacy_shaped_row(path: Path, secret: str, row: dict | None = None) -> DispatchStore:
+    """A current dispatch database, optionally holding one row whose blob has the minimal legacy
+    key set written directly (not through ``put()``), so a read must tolerate the missing keys."""
     store = DispatchStore(path, secret)
-    with store.connect() as db:
-        db.executescript(_V1_SCHEMA)
-        if row is not None:
+    store.initialize()
+    if row is not None:
+        with store.connect() as db:
             db.execute(
                 """INSERT INTO dispatch_operations(device_id,state,restore_required,updated_at,
                        record_version,encrypted)
@@ -235,25 +230,37 @@ def version_1_database(path: Path, secret: str, row: dict | None = None) -> Disp
     return store
 
 
-def test_dispatch_store_upgrade_adds_only_the_new_tables_and_keeps_the_old_row(tmp_path: Path) -> None:
-    """The migration must not rewrite dispatch_operations: a persisted restore duty is safety state."""
-    store = version_1_database(tmp_path / "dispatch.db", "s" * 48, _V1_ROW)
+def test_fresh_dispatch_store_creates_the_current_baseline_schema(tmp_path: Path) -> None:
+    """A freshly initialized database has exactly the current tables and columns, with no migration
+    version marker and no legacy `armed` column; initialize() is idempotent across restarts."""
+    store = DispatchStore(tmp_path / "dispatch.db", "s" * 48)
     store.initialize()
     with store.connect() as db:
-        # A version 1 file now lands on the current schema version in one go (see
-        # tests/test_energy_store.py for the 2 -> 3 step on its own).
-        assert int(db.execute("PRAGMA user_version").fetchone()[0]) == 4
         tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-        assert {"dispatch_operations", "dispatch_capabilities", "dispatch_device_config"} <= tables
-        assert db.execute("PRAGMA synchronous").fetchone()[0] == 2
-        assert db.execute("SELECT record_version FROM dispatch_operations").fetchone()[0] == 7
-    loaded = store.get("main")
-    assert loaded is not None
-    assert loaded.state is DispatchState.CHARGING
-    assert loaded.intent is not None and loaded.intent.operation_id == "1f2e3d4c"
-    assert loaded.snapshot is not None and loaded.snapshot.soc_strategy_code == 4
-    assert loaded.record_version == 7
+        assert {
+            "dispatch_operations", "dispatch_capabilities", "dispatch_device_config",
+            "energy_manager_state", "dispatch_soc_target_policy",
+        } <= tables
+        energy_columns = {row["name"] for row in db.execute("PRAGMA table_info(energy_manager_state)")}
+        assert "mode" in energy_columns
+        assert "armed" not in energy_columns
+        # The migration version marker is gone: nothing bumps user_version, so it stays 0.
+        assert int(db.execute("PRAGMA user_version").fetchone()[0]) == 0
     store.initialize()  # idempotent: a second start must not fail on the existing tables
+
+
+def test_an_incompatible_old_dispatch_table_fails_instead_of_migrating(tmp_path: Path) -> None:
+    """An on-disk table that is not the current baseline (an old dev database) must fail clearly at
+    schema setup rather than being silently upgraded."""
+    path = tmp_path / "dispatch.db"
+    store = DispatchStore(path, "s" * 48)
+    with store.connect() as db:
+        db.executescript(
+            "CREATE TABLE energy_manager_state (device_id TEXT PRIMARY KEY,"
+            " armed INTEGER NOT NULL CHECK(armed IN (0,1)), encrypted BLOB NOT NULL) STRICT;"
+        )
+    with pytest.raises(ValueError, match="does not match the current schema"):
+        store.initialize()
 
 
 def test_dispatch_store_round_trips_capabilities_and_device_configs(tmp_path: Path) -> None:
@@ -281,6 +288,41 @@ def test_dispatch_store_round_trips_capabilities_and_device_configs(tmp_path: Pa
     store.put_device_config("main", DeviceLimits(3000, 5000, engineering_mode=True))
     store.put_device_config("main", DeviceLimits(2000, 4000))  # upsert, not a second row
     assert store.get_device_configs() == {"main": DeviceLimits(2000, 4000, engineering_mode=False)}
+
+
+def test_engineering_mode_cleartext_flipped_against_the_blob_reads_as_off(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """P2-01: engineering_mode is authoritative from the authenticated blob. Flipping only the
+    cleartext column 0->1 (no Fernet key) must not release dispatch onto unverified hardware — the
+    integrity cross-check skips the row, so it reads as engineering mode off."""
+    path = tmp_path / "dispatch.db"
+    store = DispatchStore(path, "s" * 48)
+    store.initialize()
+    store.put_device_config("main", DeviceLimits(2000, 4000, engineering_mode=False))
+    with store.connect() as db:
+        db.execute("UPDATE dispatch_device_config SET engineering_mode=1 WHERE device_id='main'")
+    with caplog.at_level("ERROR"):
+        assert store.get_device_configs() == {}
+    assert "engineering mode stays off" in caplog.text
+
+
+def test_a_pre_mirror_device_config_row_reads_as_engineering_off_then_reauthenticates(tmp_path: Path) -> None:
+    """P2-01 migration: a device-config blob written before engineering_mode was mirrored carries
+    no authenticated flag, so the row reads fail closed (engineering mode off) until the next
+    trusted put_device_config() re-writes the blob with the mirror."""
+    path = tmp_path / "dispatch.db"
+    store = DispatchStore(path, "s" * 48)
+    store.initialize()
+    legacy_blob = store._encrypt("main", {"max_charge_power_w": 2000.0, "max_discharge_power_w": 4000.0})
+    with store.connect() as db:
+        db.execute(
+            "INSERT INTO dispatch_device_config(device_id,engineering_mode,encrypted) VALUES(?,?,?)",
+            ("main", 1, legacy_blob),  # cleartext claims engineering mode, blob has no mirror
+        )
+    assert store.get_device_configs() == {}  # fail closed: the unauthenticated claim is not trusted
+    store.put_device_config("main", DeviceLimits(2000, 4000, engineering_mode=True))
+    assert store.get_device_configs() == {"main": DeviceLimits(2000, 4000, engineering_mode=True)}
 
 
 def test_dispatch_store_status_and_engineering_mode_stay_readable_without_the_secret(tmp_path: Path) -> None:
@@ -358,6 +400,7 @@ class FakeDispatchGateway:
         self.clock = clock
         self.calls: list[tuple] = []
         self.fail_restore = False
+        self.fail_internal = False
         # The same registry instance the controller writes to, exactly as in production.
         self.soc_target_policies = soc_target_policies or SocTargetPolicyRegistry()
 
@@ -400,6 +443,11 @@ class FakeDispatchGateway:
     async def apply_control_mode(self, device_id: str, *, external: bool) -> WriteOutcome:
         self.calls.append(("control", external))
         return self.outcome("control", external)
+
+    async def apply_internal_strategy(self, device_id: str) -> None:
+        self.calls.append(("internal", device_id))
+        if self.fail_internal:
+            raise DeviceApiError("device_unreachable")
 
     async def apply_grid_charge(self, device_id: str, *, enabled: bool) -> WriteOutcome:
         self.calls.append(("grid_charge", enabled))
@@ -474,8 +522,7 @@ async def test_a_version_1_row_without_the_new_keys_recovers_through_the_old_res
     """AK-22/E-10: the first recover() after the update must restore, not raise on a missing key."""
     clock = ManualClock()
     gateway = FakeDispatchGateway(clock)
-    store = version_1_database(tmp_path / "dispatch.db", "s" * 48, _V1_ROW)
-    store.initialize()
+    store = database_with_legacy_shaped_row(tmp_path / "dispatch.db", "s" * 48, _V1_ROW)
     dispatch = controller_with_store(store, clock, gateway)
     await dispatch.recover()
     assert [call for call in gateway.calls if call[0] == "restore"] == [
@@ -742,6 +789,40 @@ async def test_status_never_triggers_a_restore_retry_as_a_side_effect(tmp_path: 
     gateway.calls.clear()
     status = await dispatch.status("main")
     assert status.state is DispatchState.FAULT_RESTORE_PENDING
+    assert gateway.calls == []
+
+
+# --- P2-03: a stuck PRECHECK must be recovered by tick(), not left hanging forever --------------
+
+
+async def test_tick_recovers_a_stuck_precheck_without_a_snapshot(tmp_path: Path) -> None:
+    """P2-03: submit() persists the intent as PRECHECK before read_snapshot(); if that read raises
+    there is no cleanup path, so the record stays PRECHECK and its TTL is never processed. tick()
+    must now include PRECHECK in its recovery branch. For PRECHECK+snapshot=None _restore_guarded()
+    resets to IDLE without a hardware restore (nothing was written yet)."""
+    clock = ManualClock()
+    gateway = FakeDispatchGateway(clock)
+    store = DispatchStore(tmp_path / "dispatch.db", "s" * 48)
+    store.initialize()
+    stuck = DispatchRecord(
+        "main",
+        state=DispatchState.PRECHECK,
+        intent=DispatchIntent(
+            operation_id="op-1",
+            mode=DispatchMode.CHARGE_FROM_GRID,
+            target_soc_percent=80.0,
+            max_power_w=2000.0,
+            max_power_w_requested=2000.0,
+            valid_until=clock.now() + timedelta(hours=1),
+            valid_until_requested=clock.now() + timedelta(hours=1),
+            created_at=clock.now(),
+        ),
+    )  # snapshot=None: the crash window right after the first durable-intent write
+    store.put(stuck)
+    dispatch = controller_with_store(store, clock, gateway)
+    status = await dispatch.tick("main")
+    assert status.state is DispatchState.IDLE
+    # Nothing was written before the stall, so recovery must not drive any hardware restore.
     assert gateway.calls == []
 
 

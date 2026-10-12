@@ -139,16 +139,9 @@
       <h2 id="about-changelog-heading" class="h6 mb-0">Changelog</h2>
     </div>
     <div class="card-body about-changelog" tabindex="0" role="region" aria-label="Release history">
-      {% for release in changelog %}
-      <h3 class="h6">{{ release.title }}</h3>
-      {% for group in release.groups %}
-      <h4 class="small text-secondary text-uppercase mt-3">{{ group.title }}</h4>
-      <ul>{% for item in group["items"] %}<li>{% for text, code in item %}{% if code %}<code>{{ text }}</code>{% else
-          %}{{ text }}{% endif %}{% endfor %}</li>{% endfor %}</ul>
-      {% endfor %}
-      {% else %}
-      <p class="text-secondary mb-0">No changelog available.</p>
-      {% endfor %}
+      {# Safe: ui.py's _render_changelog() renders Markdown and sanitizes it through nh3 against a
+      fixed tag/attribute allowlist, so no unescaped user input reaches the DOM here. #}
+      <div class="changelog-content">{{ changelog_html | safe }}</div>
     </div>
   </section>
 </div>

@@ -27,6 +27,7 @@ from app.gateway.rct import RctGateway
 
 
 class RctDispatchGateway:
+    INTERNAL_STRATEGY_CODE = 4
     REQUIRED_WRITES = (
         "power_mng_soc_strategy",
         "power_mng_soc_target_set",
@@ -128,15 +129,17 @@ class RctDispatchGateway:
             raise DeviceApiError("protocol_error", name=strategy.name)
         if not isinstance(grid_charge.value, bool):
             raise DeviceApiError("protocol_error", name=grid_charge.name)
+        # Keep the raw wire value verbatim next to the semantic setpoint: restore() reproduces the
+        # original register sign from it without re-projecting through the current convention (P2-02).
+        battery_power_raw = self._number(power.value, power.name)
         return DeviceControlSnapshot(
-            battery_setpoint=self._battery_convention(device_id).setpoint(
-                self._number(power.value, power.name)
-            ),
+            battery_setpoint=self._battery_convention(device_id).setpoint(battery_power_raw),
             soc_target_ratio=self._number(target.value, target.name),
             soc_strategy_code=strategy.value,
             grid_charge_enabled=grid_charge.value,
             read_at=strategy.measured_at,
             all_fresh=all(r.source == "device" for r in (strategy, target, power, grid_charge)),
+            battery_power_raw=battery_power_raw,
         )
 
     def restore_barrier(self, device_id: str):
@@ -179,12 +182,32 @@ class RctDispatchGateway:
             raise DeviceApiError("dispatch_unverified")
         return await self._rct.write_metric(device_id, "power_mng_soc_strategy", code, system=True)
 
+    async def apply_internal_strategy(self, device_id: str) -> None:
+        name = "power_mng_soc_strategy"
+        current = await self._rct.read_system(device_id, name)
+        if not isinstance(current.value, int) or isinstance(current.value, bool):
+            raise DeviceApiError("protocol_error", name=name)
+        if current.value != self.INTERNAL_STRATEGY_CODE:
+            await self._rct.write_metric(device_id, name, self.INTERNAL_STRATEGY_CODE, system=True)
+            confirmed = await self._rct.read_system(device_id, name)
+            if confirmed.value != self.INTERNAL_STRATEGY_CODE:
+                raise DeviceApiError("write_outcome_unknown", name=name)
+
     async def apply_grid_charge(self, device_id: str, *, enabled: bool):
         return await self._rct.write_metric(device_id, "power_mng_use_grid_power_enable", enabled, system=True)
 
     async def restore(self, device_id: str, snapshot: DeviceControlSnapshot, step: int):
         if step == 0:
-            return await self.apply_setpoint(device_id, snapshot.battery_setpoint)
+            # Write the captured raw wire value back directly: this reproduces the original register
+            # sign even if the BATTERY_POWER_SIGN projection changed (e.g. reverted to the default)
+            # between snapshot and restore (P2-02). A legacy snapshot without the raw value falls
+            # back to re-projecting the semantic setpoint through the current convention, which is
+            # the pre-fix behaviour and is sign-safe only while that projection is unchanged.
+            if snapshot.battery_power_raw is None:
+                return await self.apply_setpoint(device_id, snapshot.battery_setpoint)
+            return await self._rct.write_metric(
+                device_id, "power_mng_battery_power_extern", snapshot.battery_power_raw, system=True
+            )
         if step == 1:
             return await self.apply_grid_charge(device_id, enabled=snapshot.grid_charge_enabled)
         if step == 2:

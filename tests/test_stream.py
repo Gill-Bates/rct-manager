@@ -399,6 +399,58 @@ def test_underdeclared_long_frame_ending_in_an_escape_pair_is_delivered_without_
         assert parser.stats.crc_errors == 0
 
 
+def _overdeclared_long_frame(payload: bytes, object_id: int = 0x5293B668, declared: int = 488) -> bytes:
+    """A long response declaring far more than it carries (like fixtures (c)/(d)): the declared
+    length overshoots the buffer, so the frame end can only come from the framing recovery."""
+    body = bytes([Command.LONG_RESPONSE]) + declared.to_bytes(2, "big") + object_id.to_bytes(4, "big") + payload
+    crc = crc16_ccitt(body).to_bytes(2, "big")
+    return b"\x2b" + escape_body(body) + escape_body(crc)
+
+
+def _long_payload_with_crc(low_byte: int, high_byte: int) -> bytes:
+    """Smallest 12-byte over-declared payload (last byte non-zero) whose CRC equals the wanted two
+    bytes, so the frame ends in exactly that CRC after the recovery strips the trailing zero run."""
+    want = (high_byte << 8) | low_byte
+    for counter in range(1 << 20):
+        payload = counter.to_bytes(3, "big") + bytes([0xA5]) * 9
+        body = bytes([Command.LONG_RESPONSE]) + (488).to_bytes(2, "big") + (0x5293B668).to_bytes(4, "big") + payload
+        if crc16_ccitt(body) == want:
+            return payload
+    raise AssertionError("no payload found")
+
+
+def test_long_frame_with_a_zero_crc_is_recovered_in_full() -> None:
+    """A long frame whose valid CRC is exactly 0x0000 ends in two genuine zero bytes. The recovery
+    must keep both of them: trying only the frame end minus one zero verifies for about half of
+    these frames (crc16(body[:-1]) == body[-1] << 8) and would silently drop the last payload byte.
+    """
+    payload = _long_payload_with_crc(0x00, 0x00)
+    wire = _overdeclared_long_frame(payload)
+    assert wire[-2:] == b"\x00\x00", "the frame must end in the two zero CRC bytes"
+    for tail in (NULL + TRAILER, NULL, b""):
+        parser = StreamParser()
+        frames = parser.feed(wire + tail)
+        longs = [f for f in frames if int(f.command) == int(Command.LONG_RESPONSE)]
+        assert [f.payload for f in longs] == [payload], tail
+        assert parser.stats.length_field_corrected == 1, tail
+        assert parser.stats.crc_errors == 0, tail
+
+
+def test_long_frame_with_a_zero_low_crc_byte_still_wins_over_the_longer_boundary() -> None:
+    """The reverse guard: a CRC whose low byte is 0x00 but whose high byte is not ends in one zero,
+    followed by the separator null. The true (shorter) end must still win; the longer boundary that
+    would absorb the separator may only collide at 2**-16, not systematically."""
+    payload = _long_payload_with_crc(0x00, 0x3A)
+    wire = _overdeclared_long_frame(payload)
+    assert wire[-2:] == b"\x3a\x00", "the frame must end in a 0x00 low CRC byte"
+    parser = StreamParser()
+    frames = parser.feed(wire + NULL + TRAILER)
+    longs = [f for f in frames if int(f.command) == int(Command.LONG_RESPONSE)]
+    assert [f.payload for f in longs] == [payload]
+    assert parser.stats.length_field_corrected == 1
+    assert parser.stats.crc_errors == 0
+
+
 # Under-declared long response (declared 22, carried 38) whose first 12 payload bytes are followed
 # by two bytes that happen to be the CRC of that prefix: header+prefix verifies at offset PREFIX_CUT.
 PREFIX_COLLISION = bytes.fromhex("2b0600165293b6681001303132333435363738393ef6404142434445464748494a4b4c4d4e4f50515253547f")

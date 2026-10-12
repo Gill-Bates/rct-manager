@@ -23,7 +23,7 @@ from app.dispatch.capabilities import (
     CapabilityRegistry,
     CapabilityStatus,
 )
-from app.dispatch.models import DeviceControlSnapshot, DispatchMode, PowerSetpoint
+from app.dispatch.models import DeviceControlSnapshot, DispatchMode, PowerDirection, PowerSetpoint
 from app.dispatch.soc_policy import (
     NOTE_MAX_LENGTH,
     SocTargetMode,
@@ -32,7 +32,7 @@ from app.dispatch.soc_policy import (
 )
 from app.errors import DeviceApiError
 from app.gateway.base import WriteOutcome
-from app.gateway.conventions import RctSocTargetConvention
+from app.gateway.conventions import RctBatteryPowerConvention, RctSocTargetConvention
 from app.gateway.rct_dispatch import RctDispatchGateway
 
 # --- the registry ------------------------------------------------------------------------------
@@ -251,3 +251,74 @@ async def test_the_restore_path_replays_the_measured_ratio_verbatim_under_every_
     assert rct.writes == [("main", "power_mng_soc_target_set", 0.42)]
 
 
+
+
+# --- the restore path must not invert the battery sign (P2-02) ---------------------------------
+
+
+def _battery_sign_registry(discharge_positive: bool) -> CapabilityRegistry:
+    return CapabilityRegistry(
+        [
+            CapabilityRecord(
+                device_id="main",
+                name=CapabilityName.BATTERY_POWER_SIGN,
+                status=CapabilityStatus.VERIFIED,
+                battery_discharge_positive=discharge_positive,
+            )
+        ]
+    )
+
+
+async def test_restore_step0_reproduces_the_raw_wire_value_despite_a_reverted_sign() -> None:
+    """P2-02: a snapshot captured under discharge_positive=False, restored after the capability has
+    reverted to the default (True), must write the ORIGINAL wire value, not the sign-inverted one.
+
+    The raw wire value -1500 (a charge under the False convention) is captured at snapshot time.
+    If restore re-projected the semantic setpoint through the now-default convention it would write
+    +1500 and command the opposite battery direction on real hardware. The fix writes -1500 back.
+    """
+    snapshot_convention = RctBatteryPowerConvention(discharge_positive=False)
+    raw_wire = -1500.0
+    snapshot = DeviceControlSnapshot(
+        battery_setpoint=snapshot_convention.setpoint(raw_wire),
+        soc_target_ratio=0.5,
+        soc_strategy_code=4,
+        grid_charge_enabled=False,
+        read_at=datetime(2026, 1, 1, tzinfo=UTC),
+        all_fresh=True,
+        battery_power_raw=raw_wire,
+    )
+
+    rct = FakeRctGateway()
+    dispatch = RctDispatchGateway(
+        rct,  # type: ignore[arg-type]
+        capabilities=_battery_sign_registry(discharge_positive=True),  # reverted to the default
+        soc_target_policies=SocTargetPolicyRegistry(),
+    )
+    await dispatch.restore("main", snapshot, 0)
+    assert rct.writes == [("main", "power_mng_battery_power_extern", raw_wire)]
+
+
+async def test_legacy_snapshot_restore_step0_still_writes_without_crashing() -> None:
+    """A legacy snapshot (battery_power_raw=None) must still restore: it falls back to re-projecting
+    the semantic setpoint through the current convention (pre-fix behaviour, sign-safe only while
+    that projection is unchanged). It must not raise."""
+    snapshot = DeviceControlSnapshot(
+        battery_setpoint=PowerSetpoint(PowerDirection.CHARGE, 1500.0),
+        soc_target_ratio=0.5,
+        soc_strategy_code=4,
+        grid_charge_enabled=False,
+        read_at=datetime(2026, 1, 1, tzinfo=UTC),
+        all_fresh=True,
+    )
+    assert snapshot.battery_power_raw is None
+
+    rct = FakeRctGateway()
+    dispatch = RctDispatchGateway(
+        rct,  # type: ignore[arg-type]
+        capabilities=_battery_sign_registry(discharge_positive=True),
+        soc_target_policies=SocTargetPolicyRegistry(),
+    )
+    await dispatch.restore("main", snapshot, 0)
+    # Default convention: CHARGE -> negative wire value. The point is that it restores at all.
+    assert rct.writes == [("main", "power_mng_battery_power_extern", -1500.0)]

@@ -55,6 +55,9 @@ def make_settings(**overrides) -> Settings:
             DeviceEntry(device_id="main", host=HOST, port=PORT),
             DeviceEntry(device_id="slave1", host=HOST, port=PORT, network_id=SLAVE_NETWORK_ID),
         ],
+        # The production factory default is off; keep the scrape endpoint on for the many tests that
+        # exercise /metrics content and behavior. The endpoint-default tests set this explicitly.
+        "enable_metrics_endpoint": True,
         "min_request_interval_ms": 0,
         "heartbeat_interval_seconds": 3600,
         "read_retries": 0,
@@ -249,7 +252,7 @@ def dispatch_fixtures(directory: Path) -> dict[str, Path]:
     for name in DISPATCH_WRITE_NAMES:
         item = {"name": name, "data_type": by_name[name]["data_type"]}
         if name == "power_mng_soc_strategy":
-            item["allowed_values"] = [0, 1]
+            item["allowed_values"] = [0, 1, 4]
         elif name == "power_mng_soc_target_set":
             item.update(minimum=0.0, maximum=1.0)
         elif name == "power_mng_battery_power_extern":

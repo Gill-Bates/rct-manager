@@ -6,7 +6,6 @@
 
 """Admin bootstrap, browser session, PAT and encrypted persistence behavior."""
 
-import re
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
@@ -112,6 +111,48 @@ def test_database_pat_revocation_persists_across_restart(tmp_path):
     assert restarted.authenticate_token(token) is None
 
 
+def test_create_token_persists_and_lists_last_four_characters(tmp_path):
+    store = AdminStore(tmp_path / "rct.db", "x" * 48)
+    store.initialize()
+    record, token = store.create_token("test", "read", None)
+    assert record["suffix"] == token[-4:] and len(record["suffix"]) == 4
+    listed = store.list_tokens()
+    assert listed[0]["suffix"] == token[-4:]
+
+
+def test_record_without_suffix_field_lists_without_breaking(tmp_path):
+    store = AdminStore(tmp_path / "rct.db", "x" * 48)
+    store.initialize()
+    record, _token = store.create_token("old", "read", None)
+    record.pop("suffix")  # an old record predates the suffix field
+    with store.connect() as db:
+        db.execute("UPDATE pats SET encrypted=? WHERE id=?", (store._encode(record["id"], record), record["id"]))
+    assert store.list_tokens()[0]["suffix"] is None
+
+
+@pytest.mark.asyncio
+async def test_get_tokens_returns_suffix(tmp_path):
+    settings = Settings(_env_file=None, hmac_secret="s" * 48, admin_db_path=tmp_path / "rct.db")
+    app = create_app(settings)
+    password = app.state.first_start_password
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver", headers={"Origin": "http://testserver"}) as client:
+        before = await client.get("/admin/api/session")
+        csrf = before.json()["csrf_token"]
+        login = await client.post("/admin/api/login", headers={"X-CSRF-Token": csrf},
+                                  json={"username": "admin", "password": password})
+        csrf = login.json()["csrf_token"]
+        changed = await client.post("/admin/api/change-password", headers={"X-CSRF-Token": csrf},
+                                    json={"current_password": password, "new_password": "a much stronger password"})
+        csrf = changed.json()["csrf_token"]
+        made = await client.post("/admin/api/tokens", headers={"X-CSRF-Token": csrf},
+                                 json={"name": "test", "role": "read"})
+        assert made.status_code == 201
+        suffix = made.json()["token"][-4:]
+        assert made.json()["suffix"] == suffix
+        listed = await client.get("/admin/api/tokens")
+        assert listed.json()["tokens"][0]["suffix"] == suffix
+
+
 @pytest.mark.parametrize("writer_has_transaction", [False, True])
 def test_pat_revocation_with_pending_last_used_writer(tmp_path, monkeypatch, writer_has_transaction):
     store = AdminStore(tmp_path / "rct.db", "x" * 48)
@@ -175,9 +216,9 @@ async def test_first_start_issues_no_token(tmp_path, capsys):
     settings = Settings(_env_file=None, hmac_secret="s" * 48, admin_db_path=tmp_path / "rct.db")
     app = create_app(settings)
     assert capsys.readouterr().out == ""  # the banner is printed by the server after startup
-    banner = first_start_banner(app.state.runtime.settings, tmp_path / "initial-admin-password")
+    banner = first_start_banner(app.state.runtime.settings, app.state.first_start_password)
     assert app.state.first_start_password and "token" not in banner.lower()
-    assert app.state.first_start_password not in banner  # the password itself must never reach stdout
+    assert app.state.first_start_password in banner  # the one-time password is now shown on the console
     assert app.state.admin_store.list_tokens() == []
 
 
@@ -259,16 +300,15 @@ def test_admin_password_minimum_is_eight_characters():
         PasswordChange(current_password="x", new_password="1234567")
 
 
-def test_first_start_banner_names_the_password_file_and_never_the_password(tmp_path):
+def test_first_start_banner_prints_the_one_time_password():
     from app.api.server import first_start_banner
     from app.config import Settings
 
-    password_file = tmp_path / "initial-admin-password"
-    text = first_start_banner(Settings(_env_file=None, bind_port=8123), password_file)
-    assert "XnQ3!4wk" not in text  # the password itself must never be printed to stdout
-    assert str(password_file) in text and "http://127.0.0.1:8123/" in text
+    text = first_start_banner(Settings(_env_file=None, bind_port=8123), "XnQ3!4wk")
+    assert "XnQ3!4wk" in text  # the one-time password is shown directly on the console now
+    assert "FIRST START" in text and "Admin user:" in text and "change this password" in text
+    assert "http://127.0.0.1:8123/" in text
     assert text.startswith("\n=") and text.endswith("=\n")
-    assert re.search(r"Password file:\s+(\S+)", text).group(1) == str(password_file)
 
 
 @pytest.mark.asyncio
@@ -303,7 +343,7 @@ async def test_server_prints_the_banner_after_startup_only_on_first_start(tmp_pa
         return capsys.readouterr().out
 
     first = await run_once(sock)
-    assert "FIRST START - admin login" in first and f"http://127.0.0.1:{port}/" in first
+    assert "FIRST START" in first and f"http://127.0.0.1:{port}/" in first
     second_sock = socket.socket()
     second_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     second_sock.bind(("127.0.0.1", port))

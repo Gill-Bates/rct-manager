@@ -6,6 +6,7 @@
 
 """Server-rendered administration pages."""
 
+import logging
 import re
 import sys
 from datetime import UTC, datetime
@@ -13,6 +14,8 @@ from importlib.metadata import PackageNotFoundError, version
 from ipaddress import ip_address
 from pathlib import Path
 
+import markdown as _markdown
+import nh3
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
@@ -21,11 +24,19 @@ from fastapi.templating import Jinja2Templates
 from app import __build__, __version__
 from app.admin.api import admin_session
 
+_log = logging.getLogger(__name__)
 _ROOT = Path(__file__).resolve().parent
 _TEMPLATES = Jinja2Templates(directory=str(_ROOT / "templates"))
 _PAGES = {"dashboard", "inverters", "tsdb", "prometheus", "tokens", "settings", "energy", "about"}
 _CHANGELOG = _ROOT.parent.parent / "CHANGELOG.md"
 _DEPENDENCIES = ("argon2-cffi", "cryptography", "fastapi", "jinja2", "pydantic", "pydantic-settings", "starlette", "uvicorn")
+# Allowed HTML tags/attrs for sanitizing the Markdown-rendered changelog.
+_CHANGELOG_ALLOWED_TAGS = {
+    "h1", "h2", "h3", "h4", "h5", "h6", "p", "br", "hr", "ul", "ol", "li", "a", "strong", "em", "b",
+    "i", "code", "pre", "blockquote", "table", "thead", "tbody", "tr", "th", "td", "dl", "dt", "dd",
+    "abbr", "sup", "sub", "details", "summary",
+}
+_CHANGELOG_ALLOWED_ATTRS = {"a": {"href", "title"}, "abbr": {"title"}, "details": {"open"}}
 _HEADERS = {
     "Content-Security-Policy": (
         "default-src 'self'; script-src 'self'; style-src 'self'; font-src 'self'; "
@@ -95,25 +106,30 @@ def _destination(request: Request) -> str:
     return "/ui/dashboard"
 
 
-def _changelog_sections() -> list[dict]:
-    """Parse the Markdown changelog into releases of titled item lists; templates escape all text."""
+def _render_changelog() -> str:
+    """Render CHANGELOG.md to sanitized HTML.
+
+    nh3 enforces the tag/attribute allowlists above, so the result is safe to insert with |safe.
+    """
     try:
-        text = _CHANGELOG.read_text(encoding="utf-8")
-    except OSError:
-        return []
-    releases: list[dict] = []
-    group: dict | None = None
-    for line in text.splitlines():
-        line = line.rstrip()
-        if line.startswith("## "):
-            group = None
-            releases.append({"title": line[3:].replace("[", "").replace("]", ""), "groups": []})
-        elif line.startswith("### ") and releases:
-            group = {"title": line[4:], "items": []}
-            releases[-1]["groups"].append(group)
-        elif line.startswith("- ") and group is not None:
-            group["items"].append([(part, index % 2 == 1) for index, part in enumerate(line[2:].split("`")) if part])
-    return releases
+        raw = _CHANGELOG.read_text(encoding="utf-8")
+        rendered = _markdown.markdown(raw, extensions=["extra", "sane_lists"])
+        return nh3.clean(
+            rendered,
+            tags=_CHANGELOG_ALLOWED_TAGS,
+            attributes=_CHANGELOG_ALLOWED_ATTRS,
+            url_schemes={"http", "https", "mailto"},
+            strip_comments=True,
+        )
+    except (OSError, UnicodeDecodeError) as exc:
+        _log.warning("Failed to read changelog: %s", exc)
+        return "<p>Failed to read changelog.</p>"
+    except RecursionError:
+        _log.warning("Changelog markdown is too deeply nested to render safely")
+        return "<p>Changelog could not be rendered.</p>"
+    except (ValueError, TypeError) as exc:
+        _log.warning("Failed to render changelog: %s", exc)
+        return "<p>Failed to render changelog.</p>"
 
 
 def _about_context() -> dict:
@@ -128,7 +144,7 @@ def _about_context() -> dict:
         "app_version": __version__,
         "python_version": f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
         "dependencies": dependencies,
-        "changelog": _changelog_sections(),
+        "changelog_html": _render_changelog(),
     }
 
 

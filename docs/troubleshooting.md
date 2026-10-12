@@ -20,14 +20,12 @@ Typical causes:
 
 ## First admin login
 
-The generated `admin` password is never logged. The first start prints it in clear text in the
-boxed `FIRST START - admin login` block on stdout and also saves it to `initial-admin-password`
-next to the admin database (`data/initial-admin-password` by default, mode `0600`) as a fallback
-for runs without a visible console. Log in, change the password, then delete the file — an absent
-file is the intended end state. So a missing file means either the password has already been
-changed, or this is not a first start: the administrator exists already and no new password was
-generated. A restart does not replace the password. The first login requires a password change.
-Keep the database and `HMAC_SECRET` together when restoring a backup.
+The generated `admin` password is printed in clear text in the boxed `FIRST START` block on stdout
+on the first start only. It is shown once, when the admin account is created: on later restarts
+the administrator exists already and no new password is generated, so the block does not reappear.
+If you missed it, there is no file to read it from; recover by resetting the admin account. A
+restart does not replace the password. The first login requires a password change. Keep the
+database and `HMAC_SECRET` together when restoring a backup.
 
 ## `/docs` answers 404
 

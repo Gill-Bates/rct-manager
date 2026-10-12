@@ -50,6 +50,27 @@ _UPSERT_SETTING = (
 _BOOTSTRAP_SPECIALS = "!#%+-=?@_"
 _BOOTSTRAP_ALPHABET = string.ascii_letters + string.digits
 
+# The current baseline admin schema, created directly (the application is unreleased: no deployed
+# database to migrate). Keyed by table name so initialize() can create a table only when absent and
+# otherwise verify its on-disk columns against the current shape.
+_SCHEMA: dict[str, str] = {
+    "settings": "CREATE TABLE settings (key TEXT PRIMARY KEY, encrypted BLOB NOT NULL) STRICT;",
+    "admin_user": "CREATE TABLE admin_user (username TEXT PRIMARY KEY, encrypted BLOB NOT NULL) STRICT;",
+    "sessions": "CREATE TABLE sessions (digest TEXT PRIMARY KEY, encrypted BLOB NOT NULL) STRICT;",
+    "pats": (
+        "CREATE TABLE pats (id TEXT PRIMARY KEY, digest TEXT NOT NULL UNIQUE, "
+        "encrypted BLOB NOT NULL) STRICT;"
+    ),
+}
+
+# The columns each baseline table must have on disk; an existing table that differs is rejected.
+_TABLE_COLUMNS: dict[str, frozenset[str]] = {
+    "settings": frozenset({"key", "encrypted"}),
+    "admin_user": frozenset({"username", "encrypted"}),
+    "sessions": frozenset({"digest", "encrypted"}),
+    "pats": frozenset({"id", "digest", "encrypted"}),
+}
+
 
 def _bootstrap_password(length: int = 8) -> str:
     """Short one-time password with one special character; it must be replaced at first login."""
@@ -106,40 +127,36 @@ class AdminStore:
         except sqlite3.Error:
             log.debug("WAL checkpoint at shutdown failed", exc_info=True)
 
+    @staticmethod
+    def _create_baseline_schema(db: sqlite3.Connection) -> None:
+        """Create any missing baseline table; reject one whose on-disk shape is not the current one.
+
+        A fresh file gets every table created; a normal restart finds them already present with the
+        expected columns and does nothing; an incompatible old database fails clearly rather than
+        being migrated.
+        """
+        for table, create in _SCHEMA.items():
+            existing = {row["name"] for row in db.execute(f"PRAGMA table_info({table})").fetchall()}
+            if not existing:
+                db.executescript(f"BEGIN IMMEDIATE;{create}COMMIT;")
+            elif existing != set(_TABLE_COLUMNS[table]):
+                raise ValueError(
+                    f"admin database table {table!r} does not match the current schema; this build "
+                    "does not migrate an older database — delete it and restart"
+                )
+
     def initialize(self) -> str | None:
         """Create schema and return a one-time bootstrap password, if needed."""
         with self.connect() as db:
             # Persistent; readers no longer block the writer, so autosaves and last-used updates can overlap.
             if db.execute("PRAGMA journal_mode = WAL").fetchone()[0].lower() != "wal":
                 log.warning("SQLite WAL mode is unavailable (network file system?); using the default journal")
-            version = db.execute("PRAGMA user_version").fetchone()[0]
-            if version not in (0, 1, 2):
-                raise ValueError("unsupported admin database version")
-            if version == 0:
-                db.executescript("""
-                    CREATE TABLE settings (key TEXT PRIMARY KEY, encrypted BLOB NOT NULL) STRICT;
-                    CREATE TABLE admin_user (username TEXT PRIMARY KEY, encrypted BLOB NOT NULL) STRICT;
-                    CREATE TABLE sessions (
-                        digest TEXT PRIMARY KEY,
-                        encrypted BLOB NOT NULL
-                    ) STRICT;
-                    CREATE TABLE pats (
-                        id TEXT PRIMARY KEY,
-                        digest TEXT NOT NULL UNIQUE,
-                        encrypted BLOB NOT NULL
-                    ) STRICT;
-                    PRAGMA user_version = 2;
-                """)
-            if version == 1:
-                # Version 1 persisted the whole shipped write allowlist as its default; drop that
-                # selection once so the deny-by-default now applied to new databases also holds here.
-                db.execute("DELETE FROM settings WHERE key='write_names'")
-                db.execute("PRAGMA user_version = 2")
-                db.commit()  # the implicit DELETE transaction must end before BEGIN IMMEDIATE below
-                log.warning(
-                    "Admin database upgraded: the write allowlist was reset to deny-by-default; "
-                    "re-enable the required writes in the admin UI."
-                )
+            # The application is unreleased: there is no deployed database to migrate. Create the
+            # current baseline schema directly. A normal restart finds the tables already present
+            # with the expected columns and does nothing; an incompatible old dev database (a table
+            # with a different shape) fails clearly instead of being silently upgraded, so the
+            # developer must delete it before start — there is no migration path.
+            self._create_baseline_schema(db)
             db.execute("BEGIN IMMEDIATE")
             check = db.execute("SELECT encrypted FROM settings WHERE key='__key_check__'").fetchone()
             if check:
@@ -171,6 +188,7 @@ class AdminStore:
         token = generate_pat()
         record = {
             "id": secrets.token_hex(16), "name": name, "role": role,
+            "suffix": token[-4:],
             "created_at": datetime.now(UTC).isoformat(),
             "expires_at": expires_at.isoformat() if expires_at else None,
         }
@@ -324,7 +342,7 @@ class AdminStore:
     def list_tokens(self) -> list[dict]:
         with self.connect() as db:
             rows = db.execute("SELECT id,encrypted FROM pats").fetchall()
-        records = [{"last_used_at": None, **self._decode(row["id"], row["encrypted"])} for row in rows]
+        records = [{"last_used_at": None, "suffix": None, **self._decode(row["id"], row["encrypted"])} for row in rows]
         return sorted(records, key=lambda row: row["created_at"], reverse=True)
 
     def create_token(self, name: str, role: str, expires_at: datetime | None) -> tuple[dict, str]:

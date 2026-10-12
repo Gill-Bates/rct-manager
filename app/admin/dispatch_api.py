@@ -429,6 +429,8 @@ async def copy_from(
         raise HTTPException(status_code=400, detail="dispatch_copy_source_equals_target")
 
     source_records = {record.name: record for record in dispatch.capabilities(body.source_device_id)}
+    # Server-side provenance: the copy is verified now, not when the source device was.
+    now = request.app.state.runtime.clock.now()
     new_records: list[CapabilityRecord] = []
     for name, source in source_records.items():
         if source.status is not CapabilityStatus.VERIFIED:
@@ -441,7 +443,12 @@ async def copy_from(
             continue
         new_records.append(
             CapabilityRecord.from_dict(
-                {**source.to_dict(), "device_id": device_id, "verified_by": f"copy:{body.source_device_id}:{actor}"}
+                {
+                    **source.to_dict(),
+                    "device_id": device_id,
+                    "verified_at": now.isoformat(),
+                    "verified_by": f"copy:{body.source_device_id}:{actor}",
+                }
             )
         )
     if not new_records:

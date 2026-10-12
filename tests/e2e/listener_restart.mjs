@@ -45,9 +45,9 @@ async function startService(tag, extraEnv = {}) {
   proc.stdout.on('data', (d) => { out += d; fs.appendFileSync(log, d); });
   proc.stderr.on('data', (d) => fs.appendFileSync(log, d));
   await until(() => answers(port), 'the service to start');
-  const announced = /Password file:\s+(\S+)\s+\(0600\)/.exec(out)?.[1];
-  if (!announced || !path.resolve(announced).startsWith(dir + path.sep)) throw new Error('first-start password file was not announced');
-  return { proc, port, dir, output: () => out, password: fs.readFileSync(path.resolve(announced), 'utf8').trim() };
+  const password = /One-time password:\s+(\S+)/.exec(out)?.[1];
+  if (!password) throw new Error('first-start password was not printed in the banner');
+  return { proc, port, dir, output: () => out, password };
 }
 async function stop(service) {
   const { proc } = service;
@@ -101,7 +101,7 @@ try {
   const occupied = holder.address().port;
   await typePort(page, occupied);
   await page.click('#confirm-accept');
-  await until(async () => (await savedPort(page)) !== occupied || (await page.locator('.is-reconnecting').count()) > 0, 'the refused save to settle', 5000).catch(() => {});
+  await until(async () => (await savedPort(page)) !== occupied || (await page.locator('.is-reconnecting').count()) > 0, 'the refused save to settle', 5000).catch(() => { });
   await sleep(2500); // longer than the 1.5 s debounce
   check('an occupied port is refused: nothing persisted, no reconnect, old port still serves',
     (await savedPort(page)) === plain.port && (await page.locator('body.is-reconnecting').count()) === 0 && await answers(plain.port));

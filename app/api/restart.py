@@ -38,6 +38,27 @@ def in_container() -> bool:
     )
 
 
+def container_ip() -> str | None:
+    """Primary IPv4 of this container, or None when it cannot be determined.
+
+    A UDP socket is given a non-routable test-net destination (RFC 5737): ``connect`` on a
+    datagram socket only sets the kernel's source selection and sends nothing, so ``getsockname``
+    yields the IP of the interface that would carry outbound traffic without any DNS or packets.
+    """
+    sock = None
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.connect(("192.0.2.1", 9))
+        ip = sock.getsockname()[0]
+        return ip if ip and not ip_address(ip).is_loopback else None
+    except OSError:
+        return None
+    finally:
+        if sock is not None:
+            with contextlib.suppress(OSError):
+                sock.close()
+
+
 def last_restart_at() -> float:
     """Wall-clock time of the previous re-exec (0 when this process was started normally)."""
     try:
@@ -115,12 +136,36 @@ class BackgroundRestart:
             self._task.cancel()
 
 
-def probe_listener(address: str, port: int, *, port_unchanged: bool) -> str | None:
+def _current_listener_holds(address: str, current_address: str | None, *, port_unchanged: bool) -> bool:
+    """True only when EADDRINUSE on ``address`` must come from the service's own listener.
+
+    ``port_unchanged=True`` is necessary but not sufficient: on an unchanged port a busy new
+    address is the current listener only when that listener actually covers the address, i.e. it
+    is bound to the very same address, or it is a wildcard bind that holds every address on the
+    port. Two different specific addresses on the same port are a genuine conflict with another
+    process and must not be waved through.
+    """
+    if not port_unchanged or current_address is None:
+        return False
+    try:
+        new_ip = ip_address(address)
+        current_ip = ip_address(current_address)
+    except ValueError:
+        return False
+    return new_ip == current_ip or current_ip.is_unspecified  # 0.0.0.0 / :: covers the whole port
+
+
+def probe_listener(
+    address: str, port: int, *, port_unchanged: bool, current_address: str | None = None
+) -> str | None:
     """Return a user-facing reason when the new listener could not be bound, else None.
 
     Checked before anything is saved: re-exec onto an unbindable address would take the service
-    down. When only the address changes the old listener still holds the port, so a busy port is
-    expected there and only an address that does not exist on this host is refused.
+    down. On an unchanged port the service's own listener still holds it, so an EADDRINUSE is
+    expected only where that listener actually covers the new address (``current_address``: the
+    same address, or a wildcard bind). An EADDRINUSE from any other process — a different specific
+    address on the same port whose binder we cannot identify — stays an error, so a re-exec that
+    could not bind is never scheduled.
     """
     try:
         family = socket.AF_INET6 if ip_address(address).version == 6 else socket.AF_INET
@@ -131,7 +176,9 @@ def probe_listener(address: str, port: int, *, port_unchanged: bool) -> str | No
         probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         probe.bind((address, port))
     except OSError as exc:
-        if port_unchanged and exc.errno == 98:  # EADDRINUSE: our own listener
+        if exc.errno == 98 and _current_listener_holds(  # EADDRINUSE
+            address, current_address, port_unchanged=port_unchanged
+        ):
             return None
         return f"The service cannot listen on {address}:{port} ({exc.strerror or exc})."
     finally:

@@ -30,7 +30,8 @@ done
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-IMAGE="${IMAGE:-giiibates/rct-manager}"
+#IMAGE="${IMAGE:-giiibates/rct-manager}"
+IMAGE="${IMAGE:-docker.cirrio.de/rct-manager}"
 
 if ! APP_VERSION="$(python3 -c '
 import sys, tomllib

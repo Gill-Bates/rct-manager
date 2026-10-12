@@ -260,6 +260,16 @@ def test_dispatch_config_rejects_a_negative_duration_or_power(field: str) -> Non
         DispatchConfig(**{field: -1.0})
 
 
+def test_dispatch_config_rejects_a_zero_cycle_interval() -> None:
+    """P3-01: cycle_interval_seconds=0 would turn run()'s `while True: sleep(interval)` into an
+    unthrottled tick/telemetry loop; the domain must reject it (Settings already pins the operator
+    value to >= 1, so this is the defense-in-depth guard for a directly constructed config)."""
+    with pytest.raises(ValueError, match="cycle_interval_seconds must be positive"):
+        DispatchConfig(cycle_interval_seconds=0)
+    with pytest.raises(ValueError, match="cycle_interval_seconds must be positive"):
+        DispatchConfig(cycle_interval_seconds=-1.0)
+
+
 def test_from_dict_rejects_a_truthy_string_instead_of_a_real_bool() -> None:
     with pytest.raises(DispatchRecordCorrupt):
         DispatchRecord.from_dict({"device_id": "x", "state": "idle", "restore_required": "yes"})
@@ -279,6 +289,9 @@ def test_a_holding_record_round_trips_and_reports_the_controlling_phase() -> Non
         "state": "holding",
         "restore_required": False,
         "intent": _intent_dict(mode="hold", target_soc_percent=None, max_power_w=0.0),
+        # HOLDING is a hardware-touching state, so a persisted record must carry the snapshot the
+        # restore path reads back (the P2-04 snapshot invariant).
+        "snapshot": _snapshot_dict(),
     }
     record = DispatchRecord.from_dict(data)
     assert record.state is DispatchState.HOLDING
@@ -294,7 +307,13 @@ def test_a_persisted_intent_without_a_target_soc_percent_key_loads_as_none() -> 
     data = _intent_dict()
     del data["target_soc_percent"]
     record = DispatchRecord.from_dict(
-        {"device_id": "main", "state": "holding", "restore_required": False, "intent": data}
+        {
+            "device_id": "main",
+            "state": "holding",
+            "restore_required": False,
+            "intent": data,
+            "snapshot": _snapshot_dict(),  # HOLDING requires a snapshot (P2-04)
+        }
     )
     assert record.intent is not None and record.intent.target_soc_percent is None
 
@@ -312,6 +331,53 @@ def test_a_non_numeric_target_soc_percent_is_still_corruption_not_none() -> None
         )
 
 
+@pytest.mark.parametrize(
+    "state",
+    ["applying", "replacing", "charging", "discharging", "holding", "target_reached", "restoring", "fault_restore_pending"],
+)
+def test_an_active_record_without_a_snapshot_is_corrupt(state: str) -> None:
+    """P2-04: a state in which the state machine may already have written hardware must carry a
+    snapshot. Without it, _restore_guarded() would treat snapshot=None as "nothing written" and
+    reset to IDLE without touching the device — a fail-open pretend restore. from_dict() rejects it
+    as DispatchRecordCorrupt instead."""
+    restore_required = state in ("restoring", "fault_restore_pending")
+    with pytest.raises(DispatchRecordCorrupt, match="snapshot is missing"):
+        DispatchRecord.from_dict(
+            {
+                "device_id": "main",
+                "state": state,
+                "restore_required": restore_required,
+                "intent": _intent_dict(),
+            }
+        )
+
+
+def test_precheck_without_a_snapshot_is_the_legitimate_crash_window() -> None:
+    """P2-04 exemption: PRECHECK+snapshot=None is the narrow crash window after the durable-intent
+    write but before read_snapshot(); nothing was written, so it stays valid (recover() resets it
+    to IDLE). The invariant must not reject it."""
+    record = DispatchRecord.from_dict(
+        {"device_id": "main", "state": "precheck", "restore_required": False}
+    )
+    assert record.state is DispatchState.PRECHECK
+    assert record.snapshot is None
+
+
+def test_an_active_record_with_a_snapshot_still_loads() -> None:
+    """The invariant is snapshot-presence only: a legitimate active record round-trips unchanged."""
+    record = DispatchRecord.from_dict(
+        {
+            "device_id": "main",
+            "state": "charging",
+            "restore_required": False,
+            "intent": _intent_dict(),
+            "snapshot": _snapshot_dict(),
+        }
+    )
+    assert record.state is DispatchState.CHARGING
+    assert record.snapshot is not None
+
+
 def test_default_battery_convention() -> None:
     convention = RctBatteryPowerConvention()
     assert convention.target(PowerSetpoint(PowerDirection.CHARGE, 3000)) == -3000
@@ -324,3 +390,44 @@ def test_sign_conventions_can_be_inverted_after_hardware_verification() -> None:
     grid = RctGridPowerConvention(import_positive=False)
     assert battery.target(PowerSetpoint(PowerDirection.DISCHARGE, 500)) == -500
     assert grid.import_watts(-700) == 700
+
+
+def test_legacy_snapshot_without_battery_power_raw_deserializes_as_none() -> None:
+    """P2-02 backward-compat: a snapshot persisted before battery_power_raw existed carries no such
+    key. It must still deserialize and round-trip; battery_power_raw stays None, which marks the
+    restore path to fall back to the current convention (not sign-safe, documented as legacy)."""
+    data = _snapshot_dict()
+    assert "battery_power_raw" not in data
+    record = DispatchRecord.from_dict(
+        {
+            "device_id": "main",
+            "state": "charging",
+            "restore_required": True,
+            "intent": _intent_dict(),
+            "snapshot": data,
+        }
+    )
+    assert record.snapshot is not None
+    assert record.snapshot.battery_power_raw is None
+    assert DispatchRecord.from_dict(record.to_dict()).to_dict() == record.to_dict()
+
+
+def test_snapshot_carrying_battery_power_raw_round_trips() -> None:
+    """A new snapshot persists the raw wire value and restores it unchanged through from_dict()."""
+    record = DispatchRecord.from_dict(
+        {
+            "device_id": "main",
+            "state": "charging",
+            "restore_required": True,
+            "intent": _intent_dict(),
+            "snapshot": _snapshot_dict(battery_power_raw=-1500.0),
+        }
+    )
+    assert record.snapshot is not None
+    assert record.snapshot.battery_power_raw == -1500.0
+    assert DispatchRecord.from_dict(record.to_dict()).to_dict() == record.to_dict()
+
+
+def test_device_control_snapshot_rejects_non_finite_battery_power_raw() -> None:
+    with pytest.raises(ValueError, match="battery_power_raw"):
+        DeviceControlSnapshot(PowerSetpoint(), 0.5, 1, False, AWARE_NOW, battery_power_raw=float("nan"))
