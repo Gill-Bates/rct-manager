@@ -154,7 +154,7 @@ body {
    gets the same top margin, collapsible <details> cards included. Never add mt-* to these.
    The Prometheus dependent-settings wrapper counts only while it holds its card: #main-content
    can be a flex column (no margin collapsing), so an empty wrapper must not add a second gap. */
-#main-content .page-heading~:is(.card, .settings-grid, .energy-grid, #export-actions, .prometheus-dependent-settings:not(:empty)),
+#main-content .page-heading~:is(.card, .settings-grid, .energy-grid, .energy-tabs, #export-actions, .prometheus-dependent-settings:not(:empty)),
 #main-content .about-top-row~.card {
     margin-top: var(--rct-card-gap);
 }
@@ -1370,6 +1370,159 @@ body {
 
 .energy-expert-switch {
     padding-top: .3rem;
+}
+
+/* Energy Manager tabs: the Inverter head keeps the expert switch to the right of its intro text,
+   as it sat in the page heading before the tabs were introduced. */
+.energy-inverter-head {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    gap: 1rem;
+    align-items: flex-start;
+}
+
+.spot-market-form .setting-row {
+    padding: .55rem 0;
+}
+
+.spot-market-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: .5rem;
+    margin-top: 1rem;
+}
+
+/* Read-only provider metadata: a compact info line with a lock icon, not an input-looking field. */
+.spot-market-meta-line {
+    display: flex;
+    align-items: center;
+    gap: .5rem;
+}
+
+.spot-market-meta-icon {
+    font-size: 1rem;
+    line-height: 1;
+    color: var(--bs-secondary-color);
+}
+
+.spot-market-meta-label {
+    font-weight: 600;
+}
+
+.spot-market-meta-value {
+    margin-left: auto;
+    color: var(--bs-secondary-color);
+    font-variant-numeric: tabular-nums;
+}
+
+/* The day-ahead preview: a status line, a context line, then the min/max highlights. */
+.spot-market-preview-card-body {
+    display: flex;
+    flex-direction: column;
+}
+
+.spot-market-preview {
+    --spot-market-yesterday-line: #6c757d;
+    --spot-market-today-line: #198754;
+    --spot-market-tomorrow-line: #0d6efd;
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 auto;
+    gap: .75rem;
+    margin-bottom: 0;
+}
+
+.spot-market-loading {
+    display: flex;
+    flex: 1 1 auto;
+    min-height: 18rem;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: .75rem;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .spot-market-loading .spinner-border {
+        animation: none;
+    }
+}
+
+.spot-market-chart-box {
+    position: relative;
+    min-height: 18rem;
+}
+
+.spot-market-chart-box canvas {
+    position: absolute;
+}
+
+.spot-market-preview-header {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: .5rem;
+}
+
+.spot-market-preview-updated {
+    color: var(--bs-secondary-color);
+    font-size: .8rem;
+}
+
+.spot-market-preview-context {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: .5rem;
+    margin: -.4rem 0 0;
+    color: var(--bs-secondary-color);
+    font-size: .85rem;
+}
+
+/* Two side-by-side highlight blocks that fill the right card instead of leaving whitespace. */
+.spot-market-highlights {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: .75rem;
+}
+
+.spot-market-highlight {
+    display: flex;
+    flex-direction: column;
+    gap: .15rem;
+    padding: .75rem .9rem;
+    border: 1px solid var(--rct-line);
+    border-radius: .6rem;
+    background: var(--bs-tertiary-bg);
+}
+
+.spot-market-highlight-caption {
+    text-transform: uppercase;
+    letter-spacing: .04em;
+    font-size: .7rem;
+    font-weight: 600;
+    color: var(--bs-secondary-color);
+}
+
+.spot-market-highlight-value {
+    font-size: 1.35rem;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+}
+
+.spot-market-highlight-when {
+    font-size: .8rem;
+    color: var(--bs-secondary-color);
+}
+
+.spot-market-preview-meta {
+    margin: -.4rem 0 0;
+    color: var(--bs-secondary-color);
+    font-size: .8rem;
 }
 
 .energy-actions {

@@ -239,7 +239,6 @@ class RegistryCatalog:
         entry = self._by_name.get(name)
         return entry is not None and entry.data_type is not DataType.STRUCT
 
-    # ---- adapter side (RctGateway, diagnostics router, exporter) ----
     def object_entry(self, name: str) -> RegistryEntry:
         entry = self._by_name.get(name)
         if entry is None:

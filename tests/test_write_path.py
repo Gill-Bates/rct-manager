@@ -9,7 +9,6 @@
 import asyncio
 import json
 import logging
-import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -60,14 +59,18 @@ async def test_unanswered_write_keeps_the_connection() -> None:
     net = FakeNetwork(clock)
     net.behavior = lambda frame: "ignore"
     endpoint = _endpoint(net, clock)
-    started = time.monotonic()
+    started = clock.monotonic()
     result = await endpoint.execute(_request(Command.WRITE))
-    elapsed = time.monotonic() - started
+    advanced = clock.monotonic() - started
     # No answer to a WRITE is normal device behavior, so it is not a transport failure (Finding
     # P3-1): error stays None and the endpoint/device failure counters are not touched.
     assert not result.ok and result.committed and result.error is None
     assert endpoint.counters.failures == 0
-    assert elapsed < 0.5  # the write window, not RESPONSE_TIMEOUT_SECONDS
+    # Deterministic on the virtual clock: after an unanswered WRITE the endpoint sleeps exactly the
+    # write quiet window via clock.sleep (not real wall-clock). The read/response-timeout path would
+    # instead drop the connection, so a kept connection plus this advance proves the write window
+    # was taken, independent of how fast the CI runner is.
+    assert advanced == pytest.approx(EndpointConfig().write_quiet_window_seconds)
     assert endpoint.connection_epoch == 1 and net.connects == 1 and net.open_now == 1
     await endpoint.close()
 
@@ -78,11 +81,20 @@ async def test_late_write_echo_cannot_answer_the_readback_read() -> None:
 
     class EchoDuringQuietWindow(AutoClock):
         net: FakeNetwork | None = None
+        counters: EndpointCounters | None = None
 
         async def sleep(self, seconds: float) -> None:
-            if self.net is not None and seconds == 0.05:  # the write quiet window
+            if self.net is not None and self.counters is not None and seconds == 0.05:  # the write quiet window
                 self.net.push(echo)
-                await asyncio.sleep(0.01)  # let the receiver classify the echo
+                # Deterministic hand-off: yield to the event loop until the receiver has actually
+                # classified the pushed echo as an unexpected frame, instead of racing a fixed
+                # asyncio.sleep(0.01) and hoping the receiver task ran first.
+                for _ in range(1000):
+                    if self.counters.unexpected_frames >= 1:
+                        break
+                    await asyncio.sleep(0)
+                else:  # pragma: no cover - the receiver always classifies the echo well before this
+                    raise AssertionError("receiver never classified the late echo")
             await super().sleep(seconds)
 
     clock = EchoDuringQuietWindow()
@@ -95,6 +107,7 @@ async def test_late_write_echo_cannot_answer_the_readback_read() -> None:
         min_interval=timedelta(0),
     )
     endpoint = TransportEndpoint("e", KEY, cfg, clock, connector=net.connect)
+    clock.counters = endpoint.counters
     written = await endpoint.execute(_request(Command.WRITE))
     assert not written.ok and written.committed
     read = await endpoint.execute(_request(Command.READ))

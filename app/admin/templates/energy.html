@@ -4,15 +4,111 @@
 <div class="page-heading">
     <div>
         <h1>Energy Manager</h1>
-        <p class="text-secondary mb-0">Battery control per inverter. <strong>Manual</strong> lets you charge, keep the
-            battery idle or discharge it from this page; <strong>External</strong> hands control to a third-party app
-            that uses the REST API with a token. The live energy flow is on the dashboard.</p>
-    </div>
-    <div class="form-check form-switch energy-expert-switch">
-        <input class="form-check-input" type="checkbox" role="switch" id="energy-expert-mode" autocomplete="off">
-        <label class="form-check-label" for="energy-expert-mode">Expert mode: <span id="energy-expert-state">Off</span></label>
+        <p class="text-secondary mb-0">Battery control per inverter, plus the spot-market and weather data sources that
+            will feed later energy optimisation. Spot-market and weather settings are inputs only; they never control
+            the inverter directly.</p>
     </div>
 </div>
-<div id="energy-hardware-strategies" class="small text-secondary mb-3" aria-live="polite"></div>
-<div id="energy-list" class="energy-grid"></div>
+
+{# Bootstrap tabs: no full-page reload, keyboard operable (arrow keys move between tabs), and the
+active tab is reflected in the URL fragment by admin.js so a reload or a shared link reopens it.
+Default tab is Inverter. #}
+<ul class="nav nav-tabs energy-tabs mb-3" id="energy-tabs" role="tablist">
+    <li class="nav-item" role="presentation">
+        <button type="button" class="nav-link active" id="energy-tab-inverter" data-bs-toggle="tab"
+            data-bs-target="#energy-pane-inverter" data-tab="inverter" role="tab" aria-controls="energy-pane-inverter"
+            aria-selected="true">Inverter</button>
+    </li>
+    <li class="nav-item" role="presentation">
+        <button type="button" class="nav-link" id="energy-tab-spot-market" data-bs-toggle="tab"
+            data-bs-target="#energy-pane-spot-market" data-tab="spot-market" role="tab"
+            aria-controls="energy-pane-spot-market" aria-selected="false">Spot Market</button>
+    </li>
+    <li class="nav-item" role="presentation">
+        <button type="button" class="nav-link" id="energy-tab-weather" data-bs-toggle="tab"
+            data-bs-target="#energy-pane-weather" data-tab="weather" role="tab" aria-controls="energy-pane-weather"
+            aria-selected="false">Weather</button>
+    </li>
+</ul>
+
+<div class="tab-content" id="energy-tab-content">
+    {# Inverter: the complete existing Energy Manager UI, unchanged. Same element ids as before, so
+    the existing JS (initEnergy / pollEnergy) drives it exactly as it did without tabs. #}
+    <div class="tab-pane fade show active" id="energy-pane-inverter" role="tabpanel"
+        aria-labelledby="energy-tab-inverter" tabindex="0">
+        <div class="energy-inverter-head mb-3">
+            <p class="text-secondary mb-0"><strong>Manual</strong> lets you charge, keep the battery idle or discharge
+                it
+                from this page; <strong>External</strong> hands control to a third-party app that uses the REST API with
+                a token. The live energy flow is on the dashboard.</p>
+            <div class="form-check form-switch energy-expert-switch">
+                <input class="form-check-input" type="checkbox" role="switch" id="energy-expert-mode"
+                    autocomplete="off">
+                <label class="form-check-label" for="energy-expert-mode">Expert mode: <span
+                        id="energy-expert-state">Off</span></label>
+            </div>
+        </div>
+        <div id="energy-hardware-strategies" class="small text-secondary mb-3" aria-live="polite"></div>
+        <div id="energy-list" class="energy-grid"></div>
+    </div>
+
+    {# Spot Market: configuration of an external day-ahead price source plus a connection/preview
+    area. The form is rendered and submitted by admin.js against /admin/api/energy/spot-market. #}
+    <div class="tab-pane fade" id="energy-pane-spot-market" role="tabpanel" aria-labelledby="energy-tab-spot-market"
+        tabindex="0">
+        {# Settings and preview sit side by side from the lg breakpoint and stack on narrow/mobile
+        viewports, using the admin grid's existing row/col and equal-height card pattern. #}
+        <div class="row g-3">
+            <div class="col-12 col-lg-6 d-lg-flex">
+                <section class="card flex-grow-1">
+                    <div class="card-body">
+                        <h2 class="h5 card-title">Spot market price source</h2>
+                        <p class="text-secondary small">Configure an external day-ahead price provider. These prices are
+                            input data for later optimisation; they do not charge or discharge the battery on their
+                            own.</p>
+                        <form id="spot-market-form" class="spot-market-form" novalidate>
+                            <div id="spot-market-fields"></div>
+                            <div class="spot-market-actions">
+                                <button type="submit" class="btn btn-primary" id="spot-market-save">Save</button>
+                                <span id="spot-market-save-state" class="save-state text-secondary small"
+                                    aria-live="polite"></span>
+                            </div>
+                        </form>
+                    </div>
+                </section>
+            </div>
+            <div class="col-12 col-lg-6 d-lg-flex">
+                <section class="card flex-grow-1">
+                    <div class="card-body spot-market-preview-card-body">
+                        <h2 class="h5 card-title">Day-ahead preview</h2>
+                        <p class="text-secondary small">Day-ahead prices for yesterday, today, and tomorrow in the selected bidding zone.
+                            A one-off read; nothing is stored and no battery action is taken.</p>
+                        <div id="spot-market-preview" class="spot-market-preview" aria-live="polite">
+                            <div class="spot-market-loading" role="status">
+                                <span class="spinner-border text-secondary" aria-hidden="true"></span>
+                                <span class="badge rounded-pill text-bg-secondary">Loading day-ahead preview …</span>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+            </div>
+        </div>
+    </div>
+
+    {# Weather: prepared placeholder only. No weather API is chosen or implemented in this step; the
+    Spot Market structure is the template a later weather provider will follow. #}
+    <div class="tab-pane fade" id="energy-pane-weather" role="tabpanel" aria-labelledby="energy-tab-weather"
+        tabindex="0">
+        <section class="card">
+            <div class="card-body">
+                <h2 class="h5 card-title">Weather / Solar Forecast</h2>
+                <p class="mb-0">Solar forecast integration is not configured yet.</p>
+                <p class="text-secondary mb-0">This section will later provide PV production forecasts for Energy
+                    Manager
+                    planning.</p>
+            </div>
+        </section>
+    </div>
+</div>
 {% endblock %}
+{% block extra_js %}<script src="/admin/static/vendor/chart.umd.min.js" defer></script>{% endblock %}

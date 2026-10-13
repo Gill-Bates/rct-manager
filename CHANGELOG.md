@@ -1,3 +1,18 @@
+
+## [1.2.0] - 2026-10-13
+
+- ``New`` Configure a Fraunhofer Energy-Charts bidding zone in Energy Manager and preview quarter-hour spot prices for today and tomorrow; the preview updates when settings change and does not control the battery.
+- ``New`` Add optional dashboard widgets for the current spot price, next-day availability, and the day-ahead price curve.
+- ``New`` Dashboard layout changes are saved with "Done"; pressing Escape discards the edit session and restores the last database-backed layout, while "Reset layout" applies defaults without a confirmation dialog.
+- ``New`` An animated dashboard hint points new users to "Add inverter" until their first inverter is configured, with a reduced-motion fallback.
+- ``Fix`` The spot-market preview still shows today's prices when tomorrow's prices are unavailable, along with the reason the next-day data is missing.
+- ``Fix`` Inverters connect more reliably at startup, with fewer dropped connections and less log noise, so your devices become fully available sooner after the service starts.
+- ``Security`` Spot-market requests use fixed provider-owned HTTPS endpoints and reject redirects to other origins, preventing a saved configuration from directing requests to an arbitrary host.
+
+
+<details markdown="1">
+<summary>Previous versions...</summary>
+
 ## [1.1.0] - 2026-10-12
 
 - ``New`` The admin interface now formats times and numbers using your browser's locale instead of a fixed British format.
@@ -18,10 +33,6 @@
 - ``Security`` Battery dispatch can no longer be released onto unverified hardware by tampering with the local database; the released state is now cross-checked against a signed copy.
 - ``Security`` Re-addressing a device now clears the previous hardware's verification evidence, engineering-mode switch, and target policy, so they cannot be inherited by a different device.
 - ``Security`` A persisted control record that is missing the data needed to restore the inverter is now rejected instead of silently skipping the restore.
-
-
-<details markdown="1">
-<summary>Previous versions...</summary>
 
 ## [1.0.0] - 2026-10-11
 

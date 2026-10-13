@@ -1534,6 +1534,7 @@ def delete_token(token_id: str, request: Request) -> dict:
 _DASHBOARD_WIDGETS = frozenset({
     "device-count", "connected-count", "metric-count", "pv-power", "house-power",
     "grid-power", "battery-soc", "days-to-calibration", "tsdb-status", "devices",
+    "spot-price-current", "spot-market-status", "spot-price-curve",
 })
 _DASHBOARD_LAYOUT_KEY = "dashboard_layout"
 

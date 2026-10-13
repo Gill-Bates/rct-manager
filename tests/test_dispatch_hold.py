@@ -89,7 +89,6 @@ def plan_names(store: DispatchStore, device_id: str = "main") -> list[str]:
     return [step["name"] for step in record.plan]
 
 
-# --- test plan item 1: target_reached is total and is a stop threshold only ----------------------
 
 
 @given(soc=SOC)
@@ -114,7 +113,6 @@ def test_the_soc_equals_target_boundary_counts_as_reached(boundary: float) -> No
     assert target_reached(DispatchMode.DISCHARGE_TO_LOAD, boundary, boundary) is True
 
 
-# --- test plan item 2: calculate_setpoint(HOLD, ...) is 0 W, whatever the telemetry says ---------
 
 
 @given(
@@ -148,7 +146,6 @@ def test_a_hold_ignores_a_target_that_should_not_be_there_at_all() -> None:
     ) == PowerSetpoint()
 
 
-# --- test plan item 5 / 15: the capability gate ---------------------------------------------------
 
 
 def test_hold_requires_the_write_path_and_the_battery_sign_convention() -> None:
@@ -220,7 +217,6 @@ async def test_hold_in_engineering_mode_without_a_strategy_code_is_still_refused
     assert gateway.calls == []
 
 
-# --- test plan items 8b and 9: the apply sequence of a hold --------------------------------------
 
 
 async def test_a_hold_applies_control_mode_grid_charge_and_a_zero_setpoint(tmp_path: Path) -> None:
@@ -271,7 +267,6 @@ async def test_the_omitted_step_does_not_shift_the_confirmed_plan_indices(tmp_pa
     ]
 
 
-# --- test plan item 10: validation ---------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -323,7 +318,6 @@ async def test_a_repeated_identical_hold_is_idempotent(tmp_path: Path) -> None:
     assert gateway.calls == []
 
 
-# --- test plan item 11: the control loop ---------------------------------------------------------
 
 
 async def test_a_steady_hold_costs_no_write_per_tick(tmp_path: Path) -> None:
@@ -371,7 +365,6 @@ async def test_a_hold_with_dark_telemetry_is_restored_not_left_pinned(tmp_path: 
     assert status.stop_reason is StopReason.TELEMETRY_STALE
 
 
-# --- test plan item 12: the handback -------------------------------------------------------------
 
 
 async def test_hold_to_auto_restores_all_four_registers_and_ends_idle(tmp_path: Path) -> None:
@@ -395,7 +388,6 @@ async def test_hold_to_auto_restores_all_four_registers_and_ends_idle(tmp_path: 
     ]
 
 
-# --- test plan item 13: a charge above the measured SoC is expressible again ---------------------
 
 
 @pytest.mark.parametrize(
@@ -424,7 +416,6 @@ async def test_a_charge_above_the_measured_soc_runs_and_carries_the_derived_rati
     assert ("setpoint", PowerDirection.CHARGE, 2000.0) in gateway.calls
 
 
-# --- test plan item 13b: the mirror case (AC-25) --------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -453,7 +444,6 @@ async def test_an_already_reached_command_is_accepted_and_writes_nothing(
     assert gateway.calls == [("read_soc", "main")]  # not one write, not even a snapshot read
 
 
-# --- test plan item 14: mode replacement ---------------------------------------------------------
 
 
 async def test_charge_to_hold_keeps_the_original_snapshot(tmp_path: Path) -> None:
@@ -500,7 +490,6 @@ async def test_hold_to_charge_keeps_the_original_snapshot_and_restores_the_soc_t
     assert ("grid_charge", True) in gateway.calls
 
 
-# --- test plan item 18: the policy write is a dispatch-table write -------------------------------
 
 
 async def test_a_policy_write_is_refused_while_an_operation_of_that_device_is_active(
@@ -551,7 +540,6 @@ async def test_a_policy_change_reaches_the_adapter_without_a_restart(tmp_path: P
     assert ("soc_target", pytest.approx(0.4)) in gateway.calls
 
 
-# --- the gate is per device, for HOLD as for every other mode ------------------------------------
 
 
 async def test_a_hold_on_an_unreleased_device_stays_blocked(tmp_path: Path) -> None:

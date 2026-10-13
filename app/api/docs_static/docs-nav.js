@@ -2,6 +2,7 @@
 // app/api/docs_static/docs-nav.js
 // Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
 //
+
 // Sidebar and light/dark theme toggle for the Swagger UI page. Served self-hosted under
 // /docs-static so the page keeps its default-src 'self' CSP without an inline-script exception.
 // The navigation is built from the loaded OpenAPI document (the page's global `ui`), not from the

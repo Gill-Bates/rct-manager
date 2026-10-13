@@ -91,3 +91,89 @@ class StreamNoiseMonitor:
             self._bursts.popleft()
         while self._frames and self._frames[0][0] < horizon:
             self._frame_total -= self._frames.popleft()[1]
+
+
+# A single invalid frame never warns; only a sustained CRC-error RATE does. The thresholds mirror
+# StreamNoiseMonitor's intent (a few events against the received traffic) but count CRC-dropped
+# frames instead of unknown-command bursts.
+CRC_MIN_ERRORS = 3  # never warn below this many CRC errors in a window, however the ratio looks
+CRC_WARN_RATIO = 0.02  # CRC-dropped frames per received frame that opens a disturbed phase
+CRC_CLEAR_RATIO = 0.01  # ratio below which the disturbed phase ends (hysteresis)
+CRC_REMIND_SECONDS = 900.0  # while disturbed, repeat the WARNING at most this often
+
+
+class CrcLogRateLimiter:
+    """Decides when CRC-mismatch drops are worth a WARNING, over the ENDPOINT's lifetime.
+
+    One instance is created per transport endpoint and reused across every reconnect, so the
+    escalation state is NOT reset when a new per-connection StreamParser (and Receiver) is built.
+    That is the whole point: without it a reconnect storm rebuilds the parser's own counter again
+    and again and re-logs the same WARNING. The parser keeps counting and DEBUG-logging every
+    invalid frame; this limiter rate-limits the WARNING against the received traffic, with the same
+    hysteresis-and-remind shape as StreamNoiseMonitor. It never changes what counts as a valid
+    frame - a real CRC failure is still rejected by the parser regardless of logging.
+    """
+
+    def __init__(self, window_seconds: float) -> None:
+        self._window = window_seconds
+        self._errors: deque[list[float]] = deque()  # [bucket_start, count]
+        self._error_total = 0
+        self._frames: deque[list[float]] = deque()  # [bucket_start, count]
+        self._frame_total = 0
+        self._warned_at: float | None = None  # set while a disturbed phase lasts
+
+    @property
+    def disturbed(self) -> bool:
+        return self._warned_at is not None
+
+    def frames(self, now: float, count: int) -> None:
+        if count <= 0:
+            return
+        _append_bucket(self._frames, now, count)
+        self._frame_total += count
+
+    def crc_errors(self, now: float, count: int) -> None:
+        """Record ``count`` newly observed CRC-mismatch drops (already counted on the endpoint)."""
+        if count <= 0:
+            return
+        _append_bucket(self._errors, now, count)
+        self._error_total += count
+
+    def evaluate(self, now: float) -> None:
+        self._trim(now)
+        errors = self._error_total
+        ratio = errors / max(self._frame_total + errors, 1)  # CRC drops are not in _frame_total
+        if self._warned_at is None:
+            if errors >= CRC_MIN_ERRORS and ratio >= CRC_WARN_RATIO:
+                self._warned_at = now
+                self._warn(errors, ratio)
+        elif ratio < CRC_CLEAR_RATIO or errors < CRC_MIN_ERRORS:
+            self._warned_at = None
+            log.info("CRC error rate back to normal: %d error(s) in %.0f s", errors, self._window)
+        elif now - self._warned_at >= CRC_REMIND_SECONDS:
+            self._warned_at = now
+            self._warn(errors, ratio)
+
+    def _warn(self, errors: int, ratio: float) -> None:
+        log.warning(
+            "Frequent CRC errors: %d frame(s) dropped for a CRC mismatch in %.0f s (%.1f%% of received frames); "
+            "individual frames are logged at DEBUG",
+            errors,
+            self._window,
+            100 * ratio,
+        )
+
+    def _trim(self, now: float) -> None:
+        horizon = now - self._window
+        while self._errors and self._errors[0][0] < horizon:
+            self._error_total -= self._errors.popleft()[1]
+        while self._frames and self._frames[0][0] < horizon:
+            self._frame_total -= self._frames.popleft()[1]
+
+
+def _append_bucket(window: deque[list[float]], now: float, count: int) -> None:
+    bucket = math.floor(now / _BUCKET_SECONDS) * _BUCKET_SECONDS
+    if window and window[-1][0] == bucket:
+        window[-1][1] += count
+    else:
+        window.append([bucket, count])

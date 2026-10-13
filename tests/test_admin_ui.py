@@ -13,6 +13,7 @@ from pathlib import Path
 
 import httpx
 import pytest
+from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 from app import __version__, resolve_build
 from app.admin import updates
@@ -298,7 +299,7 @@ def test_admin_card_spacing_uses_one_token_and_sibling_rule():
     assert len(re.findall(r"--rct-card-gap\s*:", css)) == 1
     assert re.search(
         r"#main-content\s+\.page-heading\s*~\s*:is\(\.card,\s*\.settings-grid,\s*"
-        r"\.energy-grid,\s*#export-actions,\s*\.prometheus-dependent-settings:not\(:empty\)\),\s*#main-content\s+\.about-top-row\s*~\s*"
+        r"\.energy-grid,\s*\.energy-tabs,\s*#export-actions,\s*\.prometheus-dependent-settings:not\(:empty\)\),\s*#main-content\s+\.about-top-row\s*~\s*"
         r"\.card\s*\{\s*margin-top:\s*var\(--rct-card-gap\);\s*\}", css,
     )
     for selector in ("settings-grid", "energy-grid"):
@@ -953,20 +954,29 @@ def test_dashboard_grid_has_the_gridstack_structure_and_stable_widget_ids():
 
 
 def test_dashboard_template_positions_equal_the_factory_default_layout():
-    # First paint without a saved layout shows the template, so it must equal DEFAULT_LAYOUT.
-    js = (ADMIN_DIR / "static/js/dashboard.js").read_text(encoding="utf-8")
-    html = (TEMPLATES / "dashboard.html").read_text(encoding="utf-8")
+    # First paint without a saved layout shows the template, so it must equal the factory default.
+    # DEFAULT_LAYOUT is now a derived view of the widget registry (the single source of truth,
+    # dashboard-widgets.js), so the factory values are parsed from the registry entries. The
+    # derivation keeps the same {x,y,w,h,visible} values, so this cross-check is unchanged.
+    js = (ADMIN_DIR / "static/js/dashboard-widgets.js").read_text(encoding="utf-8")
+    html = Environment(loader=FileSystemLoader(TEMPLATES), autoescape=select_autoescape()).get_template(
+        "dashboard.html"
+    ).render(page="dashboard")
+    # Captured groups are reordered to (x, y, w, h, visible) to match the template tuple below.
     default = {
-        m[0]: (*map(int, m[1:5]), m[5] == "true")
+        m[0]: (int(m[4]), int(m[5]), int(m[1]), int(m[2]), m[3] == "true")
         for m in re.findall(
-            r"\{ id: '([\w-]+)', x: (\d+), y: (\d+), w: (\d+), h: (\d+), visible: (true|false)", js)
+            r"id: '([\w-]+)', label: '[^']*', kind: '[\w]+',"
+            r" defaultSize: Object\.freeze\(\{ w: (\d+), h: (\d+) \}\),"
+            r" defaultVisible: (true|false), defaultX: (\d+), defaultY: (\d+)",
+            js)
     }
     template = {}
     for m in re.finditer(
             r'<div class="grid-stack-item( d-none)?" gs-id="([\w-]+)"\s+gs-x="(\d+)" gs-y="(\d+)" gs-w="(\d+)" gs-h="(\d+)"',
             html):
         template[m[2]] = (*map(int, m.group(3, 4, 5, 6)), not m[1])
-    assert template == default and len(default) == 10
+    assert template == default and len(default) == 13
     # Off-by-default (visible:false) but still addable through the "Add widget" library.
     assert not default["days-to-calibration"][4]
     # Factory default: one row of six 2-column tiles, the inverter overview directly below it.
@@ -1008,7 +1018,7 @@ def test_gridstack_assets_load_only_on_the_dashboard_page():
 def test_dashboard_js_reuses_the_shared_api_helper_and_does_not_touch_polling():
     js = (ADMIN_DIR / "static/js/dashboard.js").read_text(encoding="utf-8")
     admin_js = JS.read_text(encoding="utf-8")
-    assert "const { api, toast, messageFrom, confirmAction } = window.RCTAdmin;" in js
+    assert "const { api, toast, messageFrom } = window.RCTAdmin;" in js
     # Tiles are moved by mouse drag on the header strip; the old Move/Resize context menu is gone.
     assert "handle: '.dashboard-widget-header'" in js
     assert "Move up" not in js and "dashboard-layout-menu" not in js
@@ -1360,3 +1370,53 @@ def test_device_header_serial_number_is_text_only_and_omitted_when_unknown():
     assert "if (serial) setText(ref.serial, `S/N: ${serial}`);" in js
     assert "ref.serial.innerHTML" not in js
     assert "...(serial ? [ref.serial] : [])" in js
+
+
+@pytest.mark.asyncio
+async def test_energy_page_renders_three_tabs_with_inverter_default_and_keeps_the_existing_ui(tmp_path):
+    """The Energy Manager page is a three-tab layout: Inverter (default, carrying the existing
+    energy UI unchanged), Spot Market and Weather. The tabs are keyboard-operable Bootstrap tabs."""
+    async with _logged_in(tmp_path) as client:
+        html = (await client.get("/ui/energy")).text
+    for tab in ("Inverter", "Spot Market", "Weather"):
+        assert f">{tab}</button>" in html, tab
+    # Standard Bootstrap tabs: toggle attribute, panes, and an active default on Inverter.
+    assert html.count('data-bs-toggle="tab"') == 3
+    assert 'id="energy-pane-inverter"' in html and 'id="energy-pane-spot-market"' in html and 'id="energy-pane-weather"' in html
+    inverter_tab = re.search(r'<button[^>]*id="energy-tab-inverter"[^>]*>', html, re.DOTALL).group(0)
+    assert 'class="nav-link active"' in inverter_tab and 'aria-selected="true"' in inverter_tab
+    # The existing energy UI still lives on the page (Inverter tab), so initEnergy/pollEnergy drive it.
+    assert 'id="energy-expert-mode"' in html and 'id="energy-hardware-strategies"' in html and 'id="energy-list"' in html
+    # Spot Market carries the config form and the preview area; Weather is a prepared placeholder.
+    assert 'id="spot-market-form"' in html and 'id="spot-market-preview"' in html
+    assert "Solar forecast integration is not configured yet." in html
+
+
+def test_energy_tabs_sync_with_the_url_fragment_without_a_full_reload():
+    js = (ADMIN_DIR / "static/js/admin.js").read_text(encoding="utf-8")
+    assert "function initEnergyTabs()" in js
+    # The active tab is written back to the fragment via replaceState (no history entry, no reload).
+    assert "history.replaceState(null, ''" in js
+    assert "shown.bs.tab" in js
+    assert "const ENERGY_TABS = ['inverter', 'spot-market', 'weather'];" in js
+
+
+def test_spot_market_keeps_bidding_zone_and_fee_region_as_separate_fields():
+    js = (ADMIN_DIR / "static/js/admin.js").read_text(encoding="utf-8")
+    # The posted body nests fee_region separately from bidding_zone; the two are never one field.
+    body = js[js.index("function spotMarketBody()"):js.index("function renderSpotMarket(")]
+    assert "bidding_zone:" in body and "fee_region:" in body
+    # The fee region is no longer an operator-editable form field; it is carried through from the
+    # loaded config so the model concept and any stored value survive, still separate from the zone.
+    assert "spotMarketFeeRegion.code" in body and "spotMarketFeeRegion.label" in body
+
+
+def test_spot_market_preview_uses_a_readable_time_axis_without_interval_counts():
+    js = (ADMIN_DIR / "static/js/admin.js").read_text(encoding="utf-8")
+    chart = js[js.index("function drawSpotMarketChart("):js.index("function renderSpotMarketPreview(")]
+    assert "autoSkip: true" in chart and "maxTicksLimit: 7" in chart
+    assert "minRotation: 0" in chart and "maxRotation: 0" in chart
+    preview = js[js.index("function renderSpotMarketPreview("):js.index("async function previewSpotMarket(")]
+    assert "quarter-hour intervals" not in preview
+    assert "spot-market-preview-intervals" not in preview
+    assert "Source unit EUR/MWh · Bidding zone ${result.bidding_zone}" in preview

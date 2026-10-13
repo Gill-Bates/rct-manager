@@ -80,6 +80,10 @@ from app.security.dependencies import (
 )
 from app.security.ratelimit import RateLimiter
 from app.security.tokens import TokenStore
+from app.spotmarket.energy_charts import EnergyChartsProvider
+from app.spotmarket.metadata import BiddingZoneMetadataCache
+from app.spotmarket.models import SpotMarketConfig
+from app.spotmarket.snapshot_cache import SpotSnapshotCache
 from app.transport.endpoint import (
     Connector,
     EndpointConfig,
@@ -94,6 +98,7 @@ _SERIAL_MAX_ATTEMPTS = 3  # tries to read the serial number once the name is kno
 _PASSWORD_POLL_SECONDS = 1.0
 _RECONFIGURE_DRAIN_SECONDS = 10.0  # shutdown waits this long for an in-flight reconfiguration
 _REFRESH_CYCLE_SECONDS = 10.0  # 8 reads per cycle cover 40 values within the 2 x pas.period threshold
+_INVENTORY_CHECK_SECONDS = 15.0  # loop cadence; read_module_inventory itself gates the slow device reads
 _bearer = HTTPBearer(auto_error=False, description="Bearer token")
 _FAVICON_BYTES = (Path(__file__).resolve().parent.parent / "admin" / "static" / "img" / "favicon.ico").read_bytes()
 _DOCS_HEADERS = {
@@ -436,12 +441,21 @@ def _build(
     return gateway, catalog, parts, coordinator
 
 
+# The module_sn_0..6 slots per tower (t_string, static inventory data) are DELIBERATELY NOT here.
+# They used to be appended to the periodic set so devices() could derive each tower's module count,
+# but an unpopulated slot often goes unanswered, and a missing response on the periodic path drops
+# the TCP connection and restarts the whole registration round (the startup warning storm). Serials
+# are static, so they are read instead by a separate, bounded, long-cached inventory read
+# (RctGateway.read_module_inventory, driven from _inventory_loop) that feeds the SAME cache
+# devices() reads via cached_reading()/read_failed(). This keeps the periodic default at ~46 reads.
 _DASHBOARD_METRIC_NAMES = (
     *DEVICE_CARD_METRIC_NAMES,
-    # module_sn_0..6 per tower (t_string, non-numeric so the usual periodic-selection filter would
-    # skip them): read so app/admin/api.py's devices() can derive each tower's module count from
-    # the populated slots. Seven slots is the size of the catalog array, not a module limit - the
-    # documented hardware takes at most 6 modules per tower (see RCT_MAX_MODULES_PER_TOWER).
+)
+
+# The module_sn slots read out-of-band by the inventory loop. Seven slots is the catalog array size
+# (RCT_MODULE_SN_SLOTS), not a module limit; both tower prefixes are read so devices() can classify
+# the primary and the placeholder tower exactly as before.
+_MODULE_INVENTORY_NAMES = (
     *(f"battery_module_sn_{i}" for i in range(RCT_MODULE_SN_SLOTS)),
     *(f"battery_placeholder_0_module_sn_{i}" for i in range(RCT_MODULE_SN_SLOTS)),
 )
@@ -623,6 +637,25 @@ async def _refresh_loop(gateway: RctGateway, device_id: str, clock: Clock) -> No
             log.exception("Periodic value refresh failed")
 
 
+async def _inventory_loop(gateway: RctGateway, device_id: str, clock: Clock) -> None:
+    """Drive the bounded initial discovery of the static module-serial inventory, then idle.
+
+    Module serials are static, so read_module_inventory() settles each slot exactly once (answered
+    or confirmed empty) and never re-reads a settled slot on a timer; a settled slot is only
+    re-discovered when replace_devices() drops the inventory cache. The loop keeps ticking so the
+    discovered serials stay warm in the cache (an in-process re-put, no device I/O) and so a
+    replace_devices() re-arms discovery, but once every slot is settled each tick does only that
+    cheap refresh - there is deliberately no recurring device re-probe. (A very-slow explicit
+    rediscovery for hardware-change-without-reconfiguration could be added here later.)
+    """
+    while True:
+        try:
+            await gateway.read_module_inventory(device_id, _MODULE_INVENTORY_NAMES)
+        except Exception:
+            log.exception("Module inventory read failed")
+        await clock.sleep(_INVENTORY_CHECK_SECONDS)
+
+
 async def _export_loop(runtime: Runtime, parts: _Parts) -> None:
     """Push export; a configuration or runtime fault here must never stop the API."""
     from app.export.pusher import PushExporter
@@ -722,6 +755,9 @@ def _lifespan(
                 task = asyncio.create_task(_refresh_loop(gateway, device_id, runtime.clock))
                 refresh_tasks.append(task)
                 tasks.append(task)
+                inv_task = asyncio.create_task(_inventory_loop(gateway, device_id, runtime.clock))
+                refresh_tasks.append(inv_task)  # same per-device lifecycle as the refresh loop
+                tasks.append(inv_task)
 
         async def _recover_dispatch() -> None:
             """Await the startup recovery sweep before any dispatch loop starts, and fold its
@@ -1236,6 +1272,30 @@ def _load_default_write_entries(settings: Settings, catalog: RegistryCatalog) ->
     return {name: entry for name in catalog.names() if (entry := allowlist.entry(name)) is not None}
 
 
+def _load_spotmarket_config(admin_store: AdminStore | None) -> SpotMarketConfig:
+    """The persisted spot-market configuration, or the defaults when none is stored or it is
+    unreadable. Spot-market settings live in their own admin-store key, like ``write_names`` — a
+    user-editable domain that is deliberately not an environment/operator setting.
+
+    A stored value that no longer validates (an older or tampered record) falls back to defaults
+    with a warning rather than failing boot: the spot-market domain must never be able to stop the
+    service, which also controls the inverter.
+    """
+    if admin_store is None:
+        return SpotMarketConfig()
+    try:
+        # AdminStore.get() decodes the record and can raise ValueError on a corrupt/undecryptable
+        # row, so it has to be inside the try as well: a damaged spot-market record must fall back
+        # to defaults, never stop the service that also controls the inverter.
+        stored = admin_store.get("spotmarket_config")
+        if stored is None:
+            return SpotMarketConfig()
+        return SpotMarketConfig.model_validate(stored)
+    except ValueError:
+        log.warning("Stored spot-market configuration is invalid; using defaults", exc_info=True)
+        return SpotMarketConfig()
+
+
 def create_app(settings: Settings, *, clock: Clock | None = None, connector: Connector | None = None) -> FastAPI:
     clock = clock or SystemClock()
     admin_store = AdminStore(settings.admin_db_path, settings.hmac_secret.get_secret_value()) if settings.hmac_secret else None
@@ -1259,6 +1319,7 @@ def create_app(settings: Settings, *, clock: Clock | None = None, connector: Con
             selected_writes = []  # deny by default: the shipped catalog lists what may be enabled, nothing is on
             admin_store.put("write_names", selected_writes)
     gateway, catalog, parts, coordinator = _build(settings, clock, connector, selected_writes, selected_exposed)
+    spotmarket_config = _load_spotmarket_config(admin_store)
     if admin_store is not None and selected_exposed is None:
         admin_store.put("exposed_names", settings.metrics_exposed_names or catalog.preselected())
     runtime = Runtime(
@@ -1316,6 +1377,18 @@ def create_app(settings: Settings, *, clock: Clock | None = None, connector: Con
     app.state.runtime = runtime
     app.state.admin_desired_settings = settings
     app.state.admin_store = admin_store
+    # Spot-market configuration is a separate domain from inverter dispatch: a provider is only a
+    # data source for a later tariff engine and never touches the gateway, so the config lives on
+    # app.state next to the admin store, not in the dispatch/runtime graph.
+    app.state.spotmarket_config = spotmarket_config
+    spotmarket_provider = EnergyChartsProvider()
+    app.state.spotmarket_provider = spotmarket_provider
+    app.state.spotmarket_snapshot_cache = SpotSnapshotCache(spotmarket_provider.fetch_day_ahead)
+    app.state.spotmarket_current_cache = SpotSnapshotCache(spotmarket_provider.fetch_current, refresh_seconds=5 * 60)
+    # Cache-first bidding-zone metadata: the form reads the zone list from here, so opening it does
+    # not hit the rate-limited Energy-Charts API on every open. A failed refresh keeps serving the
+    # last good list as stale; it never touches dispatch or inverter control.
+    app.state.spotmarket_zone_cache = BiddingZoneMetadataCache(spotmarket_provider.fetch_bidding_zones)
     # Domain-agnostic in-process pub/sub hub behind the admin SSE endpoint (GET /admin/api/events).
     # Phase 1 wires exactly one producer/type through it: ``tsdb.log`` (fed by the filtering logging
     # handler attached to the root logger in _lifespan, torn down with the app instance). Adding a

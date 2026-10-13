@@ -40,6 +40,13 @@ def test_at_most_one_write_frame_after_commit(
         clock = AutoClock()
         net = FakeNetwork(clock, fail_connects=connect_failures if fault in ("connect", "none") else 0)
         net.behavior = lambda frame: {"no_response": "ignore", "drop": "drop"}.get(fault, "respond")
+        # Without this, FakeWriter rewrites a WRITE "respond" into "ignore" (the real device never
+        # answers WRITE), so fault="none" and fault="no_response" would both be a silent, unanswered
+        # WRITE and Hypothesis would explore one state under two names. Opting the fake into
+        # answering WRITE makes "none" a genuinely answered write, distinct from the silent
+        # "no_response" case.
+        if fault == "none":
+            net.answer_writes = True
         if fault == "write_raises":
             net.write_error_at = 1
         if fault == "drain_raises":

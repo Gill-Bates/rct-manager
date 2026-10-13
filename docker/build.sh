@@ -4,20 +4,10 @@
 # Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
 #
 
-# =============================================================================
-# rct-manager - image build
-# =============================================================================
-# Manual local-build path: this script's only job is to build and push the
-# :dev tag of giiibates/rct-manager on Docker Hub, feeding the OCI metadata
-# (version, git sha, build date) into the Dockerfile ARGs. The version comes
-# from pyproject.toml. Everything else — multi-arch (linux/amd64 +
-# linux/arm64) builds and the :latest/:<version> tags — is handled by the
-# release pipeline (.github/workflows/release.yml), not this script.
-#
-# Usage (from anywhere):
-#   docker/build.sh [extra buildx args...]   # build + push :dev
-#   IMAGE=my.reg/repo docker/build.sh        # another repository
-# =============================================================================
+# Build and push the :dev image to docker.cirrio.de/rct-manager by default.
+# Release tags and multi-architecture images are built by the release workflow.
+# Usage: docker/build.sh [extra buildx args...]
+# Set IMAGE=my.reg/repo to select another repository.
 
 set -euo pipefail
 
@@ -30,7 +20,6 @@ done
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-#IMAGE="${IMAGE:-giiibates/rct-manager}"
 IMAGE="${IMAGE:-docker.cirrio.de/rct-manager}"
 
 if ! APP_VERSION="$(python3 -c '

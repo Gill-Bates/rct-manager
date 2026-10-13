@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rct-manager"
-version = "1.1.0"
+version = "1.2.0"
 description = "Your REST gateway for RCT Power inverters"
 requires-python = ">=3.13"
 authors = [{ name = "Gill-Bates" }]
@@ -43,7 +43,7 @@ include = ["app*"]
 
 [tool.setuptools.package-data]
 "app.catalog" = ["*.json"]
-"app.admin" = ["templates/*.html", "static/*", "static/**/*"]
+"app.admin" = ["templates/*.html", "static/*", "static/**/*", "*.json"]
 "app.api" = ["docs_static/*"]
 
 [tool.pytest.ini_options]
@@ -69,6 +69,13 @@ extend-ignore = ["EXE001", "S101"]
 [tool.ruff.lint.per-file-ignores]
 # Tests use fixture credentials, loopback/any-address binds and local subprocesses.
 "tests/**" = ["S104", "S105", "S106", "S310", "S603", "S607", "S608"]
+# The SpotPriceInterval/SpotPriceSnapshot invariants are a ValueError-based domain contract (the
+# optimizer-facing types raise one error type for every violation, type or value); the parser maps
+# them to SpotMarketResponseError. TRY004 would force TypeError and break that single-error contract.
+"app/spotmarket/models.py" = ["TRY004"]
+# The optimizer domain follows the same single-error contract: invalid values and runtime-passed
+# wrong types both surface as ValueError from its self-validating public dataclasses.
+"app/optimizer/models.py" = ["TRY004"]
 # Every interpolated value goes through literal()/ident() or int() (defined in this module), so
 # S608 is a reviewed false positive here.
 "app/export/questdb_admin.py" = ["S608"]

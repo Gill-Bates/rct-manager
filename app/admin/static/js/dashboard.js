@@ -11,32 +11,29 @@
 
   if (document.body.dataset.page !== 'dashboard') return;
 
-  const { api, toast, messageFrom, confirmAction } = window.RCTAdmin;
+  const { api, toast, messageFrom } = window.RCTAdmin;
   const $ = (id) => document.getElementById(id);
 
   // Factory default: six KPI tiles in one row, the inverter overview directly below. Mirrors
   // app/admin/api.py's _DASHBOARD_WIDGETS allowlist and the template's gs-* attributes; array order
   // is the "Add widget" list order. A widget with visible:false is off by default but stays
   // available through "Add widget" (it is also what an upgrade adds for a widget missing from a saved layout).
-  const DEFAULT_LAYOUT = [
-    { id: 'pv-power', x: 0, y: 0, w: 2, h: 2, visible: true, label: 'PV power' },
-    { id: 'grid-power', x: 2, y: 0, w: 2, h: 2, visible: true, label: 'Grid power' },
-    { id: 'house-power', x: 4, y: 0, w: 2, h: 2, visible: true, label: 'House consumption' },
-    { id: 'battery-soc', x: 6, y: 0, w: 2, h: 2, visible: true, label: 'Battery level' },
-    { id: 'tsdb-status', x: 8, y: 0, w: 2, h: 2, visible: true, label: 'TSDB export' },
-    { id: 'metric-count', x: 10, y: 0, w: 2, h: 2, visible: true, label: 'Exposed metrics' },
-    { id: 'devices', x: 0, y: 2, w: 12, h: 8, visible: true, label: 'Inverter overview' },
-    { id: 'device-count', x: 0, y: 0, w: 2, h: 2, visible: false, label: 'Inverters' },
-    { id: 'connected-count', x: 2, y: 0, w: 2, h: 2, visible: false, label: 'Connected' },
-    { id: 'days-to-calibration', x: 4, y: 0, w: 2, h: 2, visible: false, label: 'Days to calibration' },
-  ];
+  // Derived from the widget registry (dashboard-widgets.js, loaded before this script and exposed as
+  // window.RCTDashboardRegistry — the single source of truth over the three former hand-synced sites).
+  // The projection reproduces today's seven-key {id,x,y,w,h,visible,label} entries exactly, so the
+  // derived array deep-equals the former literal and the layout migration is a no-op by construction.
+  const { registry } = window.RCTDashboardRegistry;
+  const DEFAULT_LAYOUT = registry.map((def) => ({
+    id: def.id, x: def.defaultX, y: def.defaultY,
+    w: def.defaultSize.w, h: def.defaultSize.h,
+    visible: def.defaultVisible, label: def.label,
+  }));
   const defaultEntry = (def) => ({ id: def.id, x: def.x, y: def.y, w: def.w, h: def.h, visible: def.visible });
-  const SAVE_DEBOUNCE_MS = 400;
   const REVEAL_TIMEOUT_MS = 2500; // below the CSS failsafe (4s) so a slow load still reveals via JS
 
   let grid = null;
   const widgetState = new Map(); // id -> { id, x, y, w, h, visible }
-  let saveTimer = null;
+  let savedLayout = null;
   let savedToastShownThisSession = false;
   const AUTO_HEIGHT_ID = 'devices'; // height follows content, is never a user layout value
   const CELL_HEIGHT = 72;
@@ -48,6 +45,7 @@
   let fitFrame = 0;
   const fitRows = new Map(); // id -> rows the last fit set; such a height is content-driven, not stored
   let fitting = false; // true while fit-driven updates run: they are not user layout changes
+  let applyingLayout = false;
 
   function widgetElement(id) {
     return document.querySelector(`.grid-stack-item[data-widget-id="${id}"]`);
@@ -100,6 +98,7 @@
   const PARK_ROWS = 10000;
 
   function applyLayout(layout) {
+    applyingLayout = true;
     grid.batchUpdate();
     try {
       const shown = [];
@@ -120,7 +119,9 @@
       for (const [el, entry] of shown) grid.update(el, { y: entry.y });
     } finally {
       grid.batchUpdate(false); // commits the batch (GridStack has no separate commit() call)
+      applyingLayout = false;
     }
+    window.RCTDashboardForecast?.sync();
   }
 
   // Content height without the tile's stretch (cards use h-100), so the measure can shrink again.
@@ -186,11 +187,6 @@
     root.querySelectorAll('.grid-stack-item-content > *').forEach((inner) => observer.observe(inner));
   }
 
-  function scheduleSave() {
-    clearTimeout(saveTimer);
-    saveTimer = setTimeout(() => { saveTimer = null; saveLayout(); }, SAVE_DEBOUNCE_MS);
-  }
-
   // Change events can report a position before GridStack's final compaction or miss pushed
   // neighbours, so the saved layout is read from the settled grid, not from the event deltas.
   function syncStateFromGrid() {
@@ -212,6 +208,7 @@
     });
     try {
       await api('dashboard-layout', { method: 'PUT', body: JSON.stringify({ version: 1, widgets }) });
+      savedLayout = widgets.map((widget) => ({ ...widget }));
       if (!savedToastShownThisSession) {
         savedToastShownThisSession = true;
         toast('Dashboard layout saved.');
@@ -222,7 +219,7 @@
   }
 
   function onGridChange(_event, items) {
-    if (fitting) return; // content-driven rows and the pushes they cause are not the user's layout
+    if (fitting || applyingLayout || !editingNow) return;
     for (const item of items || []) {
       const id = item.el?.dataset?.widgetId;
       if (!id) continue;
@@ -230,7 +227,6 @@
       const h = prev && fitRows.get(id) === item.h ? prev.h : item.h;
       widgetState.set(id, { id, x: item.x, y: item.y, w: item.w, h, visible: true });
     }
-    scheduleSave();
   }
 
   let editingNow = false;
@@ -271,9 +267,9 @@
       grid.batchUpdate(false);
     }
     widgetState.set(id, { ...state, visible });
+    window.RCTDashboardForecast?.sync();
     scheduleFit();
     renderAddWidgetList();
-    scheduleSave();
   }
 
   function renderAddWidgetList() {
@@ -297,24 +293,18 @@
     );
   }
 
-  async function resetLayout() {
-    if (!await confirmAction({
-      title: 'Restore default layout?',
-      message: 'All widgets return to their default position and size. Your current arrangement is replaced.',
-      confirmLabel: 'Restore default layout',
-      danger: true,
-    })) return;
-    try {
-      await api('dashboard-layout', { method: 'DELETE' });
-    } catch (error) {
-      toast(messageFrom(error), 'danger');
-      return;
-    }
+  function resetLayout() {
     applyLayout(DEFAULT_LAYOUT.map(defaultEntry));
     scheduleFit();
     renderAddWidgetList();
-    savedToastShownThisSession = true; // explicit action: show exactly this one toast, not a second autosave toast
     toast('Dashboard layout restored.');
+  }
+
+  function cancelEditing() {
+    setEditing(false);
+    applyLayout(savedLayout.map((entry) => ({ ...entry })));
+    renderAddWidgetList();
+    scheduleFit();
   }
 
   // The grid starts hidden (template class) so tiles never visibly travel from their template
@@ -363,7 +353,8 @@
       // A failed GET falls back to the template default like a missing/invalid stored layout.
       toast(messageFrom(error), 'danger');
     }
-    applyLayout(mergeWithDefault(stored));
+    savedLayout = mergeWithDefault(stored);
+    applyLayout(savedLayout);
     renderAddWidgetList();
 
     fitLayout();
@@ -371,10 +362,19 @@
 
     grid.on('change', onGridChange);
     grid.on('dragstop resizestop', scheduleFit);
+    grid.on('resizestop', () => window.RCTDashboardForecast?.resize());
     $('dashboard-edit-toggle').addEventListener('click', () => setEditing(true));
-    $('dashboard-edit-done').addEventListener('click', () => {
+    $('dashboard-edit-done').addEventListener('click', async () => {
       setEditing(false);
-      if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; saveLayout(); } // an immediate reload must not lose the last move
+      $('dashboard-edit-toggle').disabled = true;
+      try { await saveLayout(); } finally { $('dashboard-edit-toggle').disabled = false; }
+    });
+    document.addEventListener('keydown', (event) => {
+      if (!editingNow || event.key !== 'Escape' || event.isComposing ||
+          event.ctrlKey || event.metaKey || event.altKey || event.shiftKey ||
+          (event.target instanceof Element && event.target.closest('input, textarea, [contenteditable]')) ||
+          document.querySelector('.modal.show')) return;
+      cancelEditing();
     });
     // Positions are ignored by the stacked phone layout, so editing ends when the viewport shrinks to it.
     window.matchMedia(MOBILE_QUERY).addEventListener('change', (event) => { if (event.matches && editingNow) setEditing(false); });
@@ -382,7 +382,7 @@
     if (new URLSearchParams(location.search).get('manage') === 'inverters') {
       window.bootstrap.Modal.getOrCreateInstance($('inverters-modal')).show();
     }
-    $('dashboard-reset-layout').addEventListener('click', () => { resetLayout().catch((error) => toast(messageFrom(error), 'danger')); });
+    $('dashboard-reset-layout').addEventListener('click', resetLayout);
   }
 
   window.RCTDashboard = Object.freeze({ initLayout });

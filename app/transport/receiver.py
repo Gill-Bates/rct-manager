@@ -17,7 +17,7 @@ from app.protocol.stream import StreamParser
 from app.protocol.types import FrameKind
 from app.transport.counters import EndpointCounters
 from app.transport.demux import Demultiplexer
-from app.transport.noise import StreamNoiseMonitor
+from app.transport.noise import CrcLogRateLimiter, StreamNoiseMonitor
 
 log = logging.getLogger(__name__)
 
@@ -85,6 +85,7 @@ class Receiver:
         unexpected_limit: int,
         unexpected_window_seconds: float,
         on_bootloader: Callable[[], None],
+        crc_log: CrcLogRateLimiter | None = None,
         chunk_size: int = 4096,
     ) -> None:
         self._parser = parser
@@ -103,6 +104,9 @@ class Receiver:
         self._counted_framing = 0
         self._counted_unknown = 0
         self.noise = StreamNoiseMonitor(unexpected_window_seconds)
+        # Endpoint-lifetime CRC-warning rate limiter; a fallback keeps a stand-alone Receiver (tests)
+        # working. The endpoint passes its own long-lived instance so escalation survives reconnects.
+        self._crc_log = crc_log if crc_log is not None else CrcLogRateLimiter(unexpected_window_seconds)
         self.unexpected_samples: deque[tuple[int, int, int | None]] = deque(maxlen=4)
         # Oldest arrival instant still unresolved in the parser buffer, carried across reads so a
         # frame assembled from an earlier, pre-commit chunk is not credited with a later chunk's
@@ -138,12 +142,18 @@ class Receiver:
             stats = self._parser.stats
             self._counters.discarded_bytes += stats.discarded_bytes - self._counted_discards
             self._counted_discards = stats.discarded_bytes
-            self._counters.crc_errors += stats.crc_errors - self._counted_crc
+            new_crc = stats.crc_errors - self._counted_crc
+            self._counters.crc_errors += new_crc
             self._counters.framing_errors += stats.framing_errors - self._counted_framing
             self._counted_crc, self._counted_framing = stats.crc_errors, stats.framing_errors
             self._report_unknown_commands(now)
             self.noise.frames(now, len(frames))
             self.noise.evaluate(now)
+            # CRC-mismatch frames are counted and DEBUG-logged by the parser; the receiver owns the
+            # WARNING escalation and, via the endpoint's shared limiter, keeps it across reconnects.
+            self._crc_log.frames(now, len(frames))
+            self._crc_log.crc_errors(now, new_crc)
+            self._crc_log.evaluate(now)
             magic = self._parser.bootloader_magic_seen and not self._magic_handled
             if magic:
                 self._magic_handled = True

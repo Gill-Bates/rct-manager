@@ -169,7 +169,6 @@ def test_every_error_response_meets_the_error_contract(specs: list[Spec]) -> Non
             assert body[key]
 
 
-# --- Property 9 ---------------------------------------------------------------------------------
 _ALL = ",".join(KNOWN[:6])
 _LOAD_FREE = ("/health", "/api/v1/readiness", "/api/v1/metrics", "/api/v1/devices", "/docs")
 
@@ -268,7 +267,6 @@ def test_rate_and_budget_rejections_create_no_device_load(scenario: str) -> None
     asyncio.run(run())
 
 
-# --- Property 10 --------------------------------------------------------------------------------
 _WRITER = {"Authorization": f"Bearer {WRITE_TOKEN}"}
 
 

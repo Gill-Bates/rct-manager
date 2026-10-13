@@ -394,16 +394,25 @@ class StreamParser:
                     if recovered is not None:
                         return recovered
                 self._stats.crc_errors += 1
-                if _should_log(self._stats.crc_errors):
-                    log.warning(
-                        "Discarding frame with CRC mismatch: command=0x%02x declared_length=%d "
-                        "object_id=0x%08x expected_crc=0x%04x received_crc=0x%04x",
-                        command,
-                        length,
-                        exc.object_id,
-                        exc.expected,
-                        exc.received,
-                    )
+                # A single invalid frame stays at DEBUG and carries the full detail for a capture.
+                # The WARNING escalation lives on the receiver, which owns the clock and an
+                # endpoint-lifetime counter: a fresh StreamParser is built on every TCP connection,
+                # so escalating here would reset on every reconnect and re-warn through a reconnect
+                # storm (the exact symptom this rate limit removes). The parser only counts and
+                # logs the per-frame detail; the receiver decides when a sustained CRC-error RATE
+                # is worth a WARNING. A real CRC failure is still never accepted as a valid frame.
+                # NOTE: recovery of the remaining mis-declared long-frame variants is still pending
+                # a raw frame captured from a currently-failing production case (new fixture in
+                # tests/fixtures/device_long_frames.hex); the recovery heuristics are unchanged here.
+                log.debug(
+                    "Discarding frame with CRC mismatch: command=0x%02x declared_length=%d "
+                    "object_id=0x%08x expected_crc=0x%04x received_crc=0x%04x",
+                    command,
+                    length,
+                    exc.object_id,
+                    exc.expected,
+                    exc.received,
+                )
             else:
                 self._stats.framing_errors += 1
             self._resync_after_discard(body_start, end)

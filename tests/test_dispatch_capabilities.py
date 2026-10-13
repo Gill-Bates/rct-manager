@@ -384,7 +384,6 @@ def test_unverified_from_dict_does_not_require_evidence_keys() -> None:
     assert CapabilityRecord.from_dict(data).status is CapabilityStatus.UNVERIFIED
 
 
-# --- The port is the only writer (design 4.4) ------------------------------------------------
 
 
 def dispatch_store(tmp_path: Path) -> DispatchStore:
@@ -490,7 +489,6 @@ async def test_a_capability_write_on_one_device_does_not_block_another_device(tm
     await pending
 
 
-# --- Admin API: entering a verification is the only way to lift the gate (4.6) ---------------
 
 
 async def test_admin_api_rejects_verified_without_a_bearer_token(tmp_path: Path) -> None:
@@ -793,7 +791,6 @@ async def test_admin_api_rejects_an_unknown_device(tmp_path: Path) -> None:
         assert resp.status_code == 404
 
 
-# --- B2: VERIFIED->VERIFIED (and any other status) bypass is closed -----------------------------
 
 
 async def test_admin_api_refuses_a_verified_write_while_the_matching_mode_is_active(tmp_path: Path) -> None:
@@ -913,7 +910,6 @@ async def test_admin_api_copy_from_aborts_the_whole_copy_on_an_active_operation_
         )
 
 
-# --- B1: the capability-write/submit() TOCTOU window is closed by the shared per-device lock ----
 
 
 async def test_set_capability_and_submit_of_the_same_device_never_interleave(tmp_path: Path) -> None:
@@ -1057,7 +1053,6 @@ async def _admin_harness(tmp_path: Path):
         yield harness, headers
 
 
-# --- The gate is armed in submit(): unverified hardware is never touched (AK-18) --------------
 
 
 def _charge(clock: ManualClock) -> DispatchCommand:

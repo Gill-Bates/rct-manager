@@ -50,7 +50,6 @@ def seed(cache: MemoryCache, clock: ManualClock, name: str, value, *, device_id:
     )
 
 
-# --- RctGateway.cached_sample ---------------------------------------------------------------------
 
 
 def test_a_fresh_entry_is_returned_with_its_age_and_freshness() -> None:
@@ -94,7 +93,6 @@ def test_cached_reading_keeps_its_own_shape() -> None:
     assert rct.cached_reading("main", "battery_soc") == (0.5, CacheFreshness.FRESH)
 
 
-# --- RctEnergyReadings ---------------------------------------------------------------------------
 
 
 class CountingGateway:

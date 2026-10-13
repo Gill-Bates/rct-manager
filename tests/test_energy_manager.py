@@ -98,7 +98,6 @@ def test_no_internal_stop_reason_name_leaks_into_the_public_vocabulary() -> None
     assert all(_STOP_REASON_PUBLIC[reason] != reason.value for reason in leaking)
 
 
-# --- the command model and the mode record ------------------------------------------------------
 
 
 def test_the_command_model_carries_business_values_only() -> None:
@@ -125,7 +124,6 @@ def test_changed_by_is_bounded_printable_ascii() -> None:
         ModeRecord("main", mode=EnergyMode.MANUAL, changed_by="admin\n")
 
 
-# --- the service: translation, validation, arming, availability -----------------------------------
 #
 # The fixtures below give the manager a *recording* port instead of a device, because every
 # guarantee of design 2.3.1 is about what the manager does before anything reaches hardware. The
@@ -341,7 +339,6 @@ def active_manager(port, **kwargs) -> EnergyManager:
     return manager(port, approvals=spy, **kwargs)
 
 
-# --- item 4: the action translation table ---------------------------------------------------------
 
 
 async def test_charge_translates_to_a_grid_charge_with_the_configured_power_limit() -> None:
@@ -459,7 +456,6 @@ async def test_the_readings_block_is_carried_through_verbatim() -> None:
     assert status.readings is readings
 
 
-# --- item 5: validation, with no port call on refusal ---------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -525,7 +521,6 @@ async def test_a_missing_device_limit_is_refused_before_the_submit() -> None:
     assert port.calls == []
 
 
-# --- item 6: arming -------------------------------------------------------------------------------
 
 
 async def test_switching_on_adds_the_required_names_and_keeps_the_existing_order() -> None:
@@ -628,7 +623,6 @@ async def test_an_actor_without_a_usable_name_is_recorded_as_none() -> None:
     assert store.records[-1].changed_by is None
 
 
-# --- item 6b: a revoked approval ------------------------------------------------------------------
 
 
 async def test_auto_stays_allowed_without_write_approval_but_never_submits_a_new_dispatch() -> None:
@@ -662,7 +656,6 @@ async def test_without_a_reader_the_approval_check_is_skipped() -> None:
     assert status.state is EnergyState.CHARGING
 
 
-# --- item 6c: availability on a disarmed device ----------------------------------------------------
 
 
 async def test_a_device_in_mode_off_reports_all_four_actions_as_mode_off() -> None:
@@ -711,7 +704,6 @@ async def test_a_pending_restore_leaves_auto_as_the_retry() -> None:
     assert offered[EnergyAction.CHARGE].reason is ActionReason.RESTORE_REQUIRED
 
 
-# --- items 17 and 17b: a failing restore, against the real controller -----------------------------
 
 
 def live_manager(port, store: DispatchStore, clock: ManualClock, mode: EnergyMode = EnergyMode.EXTERNAL) -> EnergyManager:
@@ -888,7 +880,6 @@ async def test_a_failed_arming_commit_rolls_back_only_its_own_approvals() -> Non
     assert service.mode("main") is EnergyMode.OFF
 
 
-# --- operating modes: who may command ------------------------------------------------------------
 
 PAT_ACTOR = "0123456789abcdef0123456789abcdef"
 

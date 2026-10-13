@@ -83,6 +83,52 @@ def test_partial_registration_leaves_available_false_until_retried() -> None:
     assert second is True
 
 
+def test_setup_aborts_immediately_when_a_failed_request_dropped_the_connection() -> None:
+    """A registration whose timeout drops the TCP connection must roll the round back and return
+    False at once, without sending the remaining objects' requests or forcing an extra reconnect.
+
+    Before this guard the loop ran on to the next object, whose request reconnected (bumping the
+    epoch) only to have the whole round discarded one request/reconnect later. The abort saves that
+    wasted request and reconnect, while still restarting the next round from scratch on a fresh
+    epoch (registrations are never mixed across TCP epochs)."""
+
+    async def scenario() -> tuple[bool, int, int, int, bool, str | None]:
+        clock = AutoClock()
+        key = EndpointKey("10.0.0.5", 8899)
+
+        def behavior(frame):
+            # The second object is never answered: its request times out and drops the connection.
+            return "ignore" if frame.object_id == FAILING_OBJECT_ID else "respond"
+
+        net = FakeNetwork(clock, behavior=behavior)
+        cfg = EndpointConfig(response_timeout_seconds=0.01, min_interval=timedelta(0))
+        endpoint = TransportEndpoint("endpoint-1", key, cfg, clock, connector=net.connect)
+
+        async def handler(request):
+            return await endpoint.execute(request)
+
+        serializer = AccessSerializer(endpoint, handler, queue_max_length=10, queue_max_wait_seconds=10)
+        serializer.start()
+        device = DeviceKey(key)
+        manager = PeriodicManager(endpoint, serializer, device, [0x1111, FAILING_OBJECT_ID, 0x3333], 30, clock)
+
+        ok = await manager.setup()
+        connects = net.connects
+        reads_last = sum(1 for _, f in net.frames if f.command is Command.READ_PERIODICALLY and f.object_id == 0x3333)
+        return ok, manager.registrations, connects, reads_last, manager.is_registered(0x1111), manager.last_failure
+
+    ok, registrations, connects, reads_last, first_registered, failure = asyncio.run(scenario())
+    assert ok is False
+    assert registrations == 0  # the whole round rolls back; nothing survives on the dead connection
+    assert not first_registered
+    assert failure == "connection lost during registration"
+    # Exactly one connection: the round aborted on the drop instead of letting the next object's
+    # request reconnect.
+    assert connects == 1
+    # The request for the object AFTER the failing one is never sent: the round stopped at the drop.
+    assert reads_last == 0
+
+
 def test_reconnect_during_setup_discards_registrations_from_the_old_connection() -> None:
     """A setup round must not mix registrations made on different connections."""
 

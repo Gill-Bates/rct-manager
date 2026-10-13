@@ -112,11 +112,16 @@
       <section class="dashboard-widget-section">
         <div class="dashboard-widget-header d-none"><span class="dashboard-drag-handle material-icons"
             aria-hidden="true">drag_indicator</span></div>
-        <div class="d-flex align-items-center justify-content-between mb-3">
-          <h2 class="h5 mb-0">Inverters</h2><button id="add-inverter"
-            class="btn btn-primary d-inline-flex align-items-center gap-1" type="button" data-bs-toggle="modal"
-            data-bs-target="#inverters-modal" title="Manage inverters"><span class="material-icons"
-              aria-hidden="true">add</span>Add inverter</button>
+        <div class="d-flex align-items-center justify-content-between flex-wrap gap-2 mb-3">
+          <h2 class="h5 mb-0">Inverters</h2>
+          <div class="inverter-add-actions">
+            <span id="inverter-onboarding-hint" class="inverter-onboarding-hint small text-secondary" hidden>
+              Add your inverter to start … <span class="material-icons" aria-hidden="true">arrow_forward</span>
+            </span>
+            <button id="add-inverter" class="btn btn-primary d-inline-flex align-items-center gap-1" type="button"
+              data-bs-toggle="modal" data-bs-target="#inverters-modal" title="Manage inverters"><span
+                class="material-icons" aria-hidden="true">add</span>Add inverter</button>
+          </div>
         </div>
         <div id="devices-list" class="device-grid">
           <p class="text-secondary mb-0">Loading inverters …</p>
@@ -166,6 +171,40 @@
       </div>
     </div>
   </div>
+  {% for id, x, y, w, h, title, icon in [
+    ('spot-price-current', 0, 10, 2, 2, 'Spot price', 'euro'),
+    ('spot-market-status', 2, 10, 2, 2, 'Day-ahead', 'schedule')
+  ] %}
+  <div class="grid-stack-item d-none" gs-id="{{ id }}" gs-x="{{ x }}" gs-y="{{ y }}" gs-w="{{ w }}" gs-h="{{ h }}" data-widget-id="{{ id }}">
+    <div class="grid-stack-item-content">
+      <div class="card kpi-card h-100">
+        <div class="dashboard-widget-header d-none"><span class="dashboard-drag-handle material-icons" aria-hidden="true">drag_indicator</span></div>
+        <div class="card-body"><span class="material-icons text-primary" aria-hidden="true">{{ icon }}</span>
+          <div><div class="text-secondary small">{{ title }}</div><strong id="{{ id }}-value">Loading …</strong>
+            <div class="text-secondary small" id="{{ id }}-detail"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  {% endfor %}
+  {% for id, x, title, unit in [
+    ('spot-price-curve', 0, 'Day-ahead prices', 'ct/kWh')
+  ] %}
+  <div class="grid-stack-item d-none" gs-id="{{ id }}" gs-x="{{ x }}" gs-y="12" gs-w="6" gs-h="4" data-widget-id="{{ id }}">
+    <div class="grid-stack-item-content">
+      <section class="card dashboard-forecast-card h-100" aria-label="{{ title }}">
+        <div class="dashboard-widget-header d-none"><span class="dashboard-drag-handle material-icons" aria-hidden="true">drag_indicator</span></div>
+        <div class="card-body"><h2 class="h5 mb-1">{{ title }}</h2>
+          <p class="text-secondary small mb-2">{{ unit }}
+            <span class="dashboard-chart-state" id="{{ id }}-state" role="status">Loading …</span>
+          </p>
+          <div class="dashboard-chart-box" id="{{ id }}-box" hidden><canvas id="{{ id }}-canvas" role="img" aria-label="{{ title }}"></canvas></div>
+        </div>
+      </section>
+    </div>
+  </div>
+  {% endfor %}
 </div>
 <div id="add-widget-modal" class="modal fade" tabindex="-1" aria-labelledby="add-widget-title" aria-hidden="true">
   <div class="modal-dialog">
@@ -206,5 +245,7 @@
 {% endblock %}
 {% block extra_js %}
 <script src="/admin/static/vendor/gridstack-all.js" defer></script>
+<script src="/admin/static/js/dashboard-widgets.js" defer></script>
 <script src="/admin/static/js/dashboard.js" defer></script>
+<script src="/admin/static/js/dashboard-forecast.js" defer></script>
 {% endblock %}

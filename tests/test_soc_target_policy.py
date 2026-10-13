@@ -35,8 +35,6 @@ from app.gateway.base import WriteOutcome
 from app.gateway.conventions import RctBatteryPowerConvention, RctSocTargetConvention
 from app.gateway.rct_dispatch import RctDispatchGateway
 
-# --- the registry ------------------------------------------------------------------------------
-
 
 def test_registry_returns_the_shipped_business_target_default_for_an_unknown_device() -> None:
     """Nothing stored means today's behaviour, not an invented accommodation."""
@@ -83,7 +81,6 @@ def test_policy_note_is_bounded_printable_ascii() -> None:
         SocTargetPolicy("main", note="Ladeziel 80 %\u00a0")
 
 
-# --- the derivation (design test plan item 3: AC-14, AC-15) ------------------------------------
 
 
 @given(target=st.floats(min_value=0, max_value=100), soc=st.floats(min_value=0, max_value=100))
@@ -147,7 +144,6 @@ def test_a_target_above_a_hundred_percent_still_clamps_into_the_register_range()
     ) == 1.0
 
 
-# --- the adapter: the same two policies through RctDispatchGateway ------------------------------
 
 
 class FakeRctGateway:
@@ -253,7 +249,6 @@ async def test_the_restore_path_replays_the_measured_ratio_verbatim_under_every_
 
 
 
-# --- the restore path must not invert the battery sign (P2-02) ---------------------------------
 
 
 def _battery_sign_registry(discharge_positive: bool) -> CapabilityRegistry:

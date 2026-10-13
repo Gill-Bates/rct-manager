@@ -146,7 +146,6 @@ class EnergyManager:
         self._readings = readings
         self._mode_states = dict(modes)
 
-    # --- state ------------------------------------------------------------------------------
 
     def _lock(self, device_id: str) -> asyncio.Lock:
         return self._locks.setdefault(device_id, asyncio.Lock())
@@ -230,7 +229,6 @@ class EnergyManager:
             return list(self._required_writes)
         return [name for name in self._required_writes if name not in approved]
 
-    # --- commands ---------------------------------------------------------------------------
 
     async def command(
         self, device_id: str, command: EnergyCommand, *, actor: str | None
@@ -365,7 +363,6 @@ class EnergyManager:
             raise EnergyRejected("dispatch_restore_required", device_id=device_id)
         return status
 
-    # --- mode --------------------------------------------------------------------------------
 
     async def set_mode(
         self, device_id: str, mode: EnergyMode, *, actor: str | None
@@ -515,7 +512,6 @@ class EnergyManager:
         self._mode_states[device_id] = record
         log.warning("Energy Manager switched off: device=%s (write approvals left untouched)", device_id)
 
-    # --- status ------------------------------------------------------------------------------
 
     async def status(self, device_id: str) -> EnergyDeviceStatus:
         self._entry(device_id)

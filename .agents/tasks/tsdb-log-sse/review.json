@@ -1,7 +1,0 @@
-{
-  "verdict": "APPROVED",
-  "findings": [
-    "Non-blocking cleanup: tsdbStatusView() in app/admin/static/js/admin.js is now defined but has no remaining caller (its only base-branch caller, tsdbConsoleLines(), was deleted). Dead code, not a regression; remove it to leave the tree clean."
-  ],
-  "reviewDoc": "/opt/rct-manager/.worktrees/tsdb-log-sse/.agents/tasks/tsdb-log-sse/review.md"
-}

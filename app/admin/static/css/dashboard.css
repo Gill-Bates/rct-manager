@@ -41,6 +41,43 @@
     flex-direction: column;
 }
 
+.inverter-add-actions,
+.inverter-onboarding-hint {
+    display: flex;
+    align-items: center;
+    gap: .5rem;
+}
+
+.inverter-add-actions {
+    min-width: 0;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+}
+
+.inverter-onboarding-hint {
+    min-width: 0;
+    pointer-events: none;
+}
+
+.inverter-onboarding-hint[hidden] {
+    display: none;
+}
+
+.inverter-onboarding-hint .material-icons {
+    font-size: 1.25em;
+    animation: inverter-hint-arrow 2s ease-in-out infinite;
+}
+
+@keyframes inverter-hint-arrow {
+    50% { transform: translateX(.35rem); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .inverter-onboarding-hint .material-icons {
+        animation: none;
+    }
+}
+
 /* View mode: no drag handles, no resize affordance, no hint that this is a grid at all. */
 .dashboard-drag-handle {
     cursor: grab;
@@ -170,4 +207,29 @@
 /* Inverter overview grows with its content (see dashboard.js fitAutoHeight): never scrolls. */
 .dashboard-grid .grid-stack-item[data-widget-id="devices"] > .grid-stack-item-content {
     overflow: visible;
+}
+
+.dashboard-forecast-card .card-body {
+    display: flex;
+    min-height: 0;
+    flex-direction: column;
+}
+
+.dashboard-chart-box {
+    position: relative;
+    flex: 1;
+    min-height: 10rem;
+}
+
+.dashboard-chart-box[hidden] {
+    display: none;
+}
+
+.dashboard-chart-box canvas {
+    position: absolute;
+}
+
+.dashboard-chart-state:not(:empty)::before {
+    content: "·";
+    margin-inline: .35rem;
 }

@@ -2460,7 +2460,7 @@ await shot('prometheus-master-toggle-on');
   }
 }
 
-// 6a. GridStack dashboard layout: edit mode, move+resize a widget, autosave, reload, reset.
+// 6a. GridStack dashboard layout: save on Done, discard on Escape, reload from the server, reset.
 const pvWidgetReady = () => page.waitForFunction(() => document.querySelector('#dashboard-grid .grid-stack-item[data-widget-id="pv-power"]')?.gridstackNode);
 const pvPosition = () => page.evaluate(() => {
   const node = document.querySelector('.grid-stack-item[data-widget-id="pv-power"]').gridstackNode;
@@ -2480,12 +2480,15 @@ check('edit mode shows Add widget, Reset layout and Done',
   && await page.locator('#dashboard-edit-done:visible').count() === 1);
 
 let dashboardLayoutPut = null;
+let dashboardLayoutPutCount = 0;
 await page.route('**/admin/api/dashboard-layout', async (route) => {
-  if (route.request().method() === 'PUT') dashboardLayoutPut = route.request().postDataJSON();
+  if (route.request().method() === 'PUT') {
+    dashboardLayoutPut = route.request().postDataJSON();
+    dashboardLayoutPutCount += 1;
+  }
   await route.continue();
 });
-// GridStack's own API moves/resizes the widget (equivalent to a completed drag/resize) and fires
-// the 'change' event dashboard.js listens on, which triggers the debounced autosave.
+// GridStack's own API moves/resizes the widget (equivalent to a completed drag/resize).
 const movedPosition = await page.evaluate(() => {
   const grid = document.querySelector('#dashboard-grid').gridstack;
   const el = document.querySelector('.grid-stack-item[data-widget-id="pv-power"]');
@@ -2493,14 +2496,18 @@ const movedPosition = await page.evaluate(() => {
   const node = el.gridstackNode;
   return { x: node.x, y: node.y, w: node.w, h: node.h };
 });
-await sleep(700); // past the 300-500ms autosave debounce
-check('moving/resizing a widget autosaves the layout via PUT /admin/api/dashboard-layout',
+await sleep(700);
+check('editing does not write the layout before Done', dashboardLayoutPutCount === 0);
+await Promise.all([
+  page.waitForResponse((response) => response.url().endsWith('/admin/api/dashboard-layout') && response.request().method() === 'PUT'),
+  page.locator('#dashboard-edit-done').click(),
+]);
+check('Done saves the moved/resized layout via PUT /admin/api/dashboard-layout',
   Boolean(dashboardLayoutPut) && dashboardLayoutPut.widgets.some((w) =>
     w.id === 'pv-power' && w.x === movedPosition.x && w.y === movedPosition.y
     && w.w === movedPosition.w && w.h === movedPosition.h),
   JSON.stringify({ movedPosition, dashboardLayoutPut }));
-check('autosave shows the "Dashboard layout saved." toast once', (await toastText()).includes('Dashboard layout saved.'));
-await page.unroute('**/admin/api/dashboard-layout');
+check('Done shows the "Dashboard layout saved." toast once', (await toastText()).includes('Dashboard layout saved.'));
 
 await page.reload();
 await pvWidgetReady();
@@ -2510,16 +2517,58 @@ check('the moved/resized position persists after a browser reload',
   && afterReload.w === movedPosition.w && afterReload.h === movedPosition.h,
   JSON.stringify(afterReload));
 
+// A fresh context has its own empty browser cache and localStorage but shares the logged-in session.
+const freshContext = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+await freshContext.addCookies(await context.cookies());
+const freshPage = await freshContext.newPage();
+await freshPage.goto(base + '/ui/dashboard');
+await freshPage.waitForFunction(() => document.querySelector('.grid-stack-item[data-widget-id="pv-power"]')?.gridstackNode);
+const freshPosition = await freshPage.evaluate(() => {
+  const node = document.querySelector('.grid-stack-item[data-widget-id="pv-power"]').gridstackNode;
+  return { x: node.x, y: node.y, w: node.w, h: node.h };
+});
+check('saved layout loads in a fresh browser context without localStorage or cache',
+  JSON.stringify(freshPosition) === JSON.stringify(movedPosition), JSON.stringify(freshPosition));
+await freshContext.close();
+
+await editToggle.click();
+await page.waitForSelector('.dashboard-editing');
+await page.evaluate(() => {
+  const grid = document.querySelector('#dashboard-grid').gridstack;
+  grid.update(document.querySelector('.grid-stack-item[data-widget-id="pv-power"]'), { x: 0, y: 0, w: 2, h: 2 });
+});
+await page.locator('#dashboard-add-widget').click();
+await page.locator('#add-widget-modal').getByRole('button', { name: 'Remove widget: PV power' }).click();
+await page.locator('#add-widget-modal').getByRole('button', { name: 'Close' }).last().click();
+await page.locator('#add-widget-modal').waitFor({ state: 'hidden' });
+await page.keyboard.press('Escape');
+check('Escape closes edit mode without a confirmation',
+  await editToggle.isVisible() && !(await page.locator('.dashboard-editing').count())
+  && !(await page.locator('#confirm-modal.show').count()));
+check('Escape restores the saved position and widget visibility',
+  JSON.stringify(await pvPosition()) === JSON.stringify(movedPosition)
+  && await page.locator('.grid-stack-item[data-widget-id="pv-power"]').isVisible());
+check('Escape does not write the discarded layout', dashboardLayoutPutCount === 1);
+await page.unroute('**/admin/api/dashboard-layout');
+
 await editToggle.click();
 await page.waitForSelector('.dashboard-editing');
 await page.locator('#dashboard-reset-layout').click();
-await page.waitForSelector('#confirm-modal.show', { timeout: 5000 });
-check('"Restore default layout?" confirmation was shown', (await page.locator('#confirm-title').innerText()) === 'Restore default layout?');
-await page.click('#confirm-accept');
 await sleep(400);
+check('reset layout does not ask for confirmation', (await page.locator('#confirm-modal.show').count()) === 0);
 const afterReset = await pvPosition();
 check('reset layout restores the default pv-power position immediately',
   afterReset.x === 0 && afterReset.y === 0 && afterReset.w === 2 && afterReset.h === 2, JSON.stringify(afterReset));
+await page.keyboard.press('Escape');
+check('Escape after Reset layout restores the prior saved layout',
+  JSON.stringify(await pvPosition()) === JSON.stringify(movedPosition));
+await editToggle.click();
+await page.waitForSelector('.dashboard-editing');
+await page.locator('#dashboard-reset-layout').click();
+await Promise.all([
+  page.waitForResponse((response) => response.url().endsWith('/admin/api/dashboard-layout') && response.request().method() === 'PUT'),
+  page.locator('#dashboard-edit-done').click(),
+]);
 await page.reload();
 await pvWidgetReady();
 const afterResetReload = await pvPosition();

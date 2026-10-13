@@ -10,7 +10,7 @@ import asyncio
 import contextlib
 import logging
 import math
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -79,6 +79,20 @@ _INVERTER_NAME_OBJECT_ID = 0xEBC62737
 _INVERTER_SERIAL_OBJECT_ID = 0x7924ABD9
 REFRESH_MAX_PER_CYCLE = 8  # reads per refresh cycle and device (Requirement 17.28)
 REFRESH_FAILURES_CONFIRMED = 3  # consecutive failed refresh reads after which a value counts as unanswered
+# Module serial numbers are static inventory data (t_string), so they are read on a bounded
+# discovery pass instead of the periodic set - leaving them in the periodic registration
+# destabilises the connection, because an unpopulated slot answers nothing and a missing response
+# drops the TCP link. Because the serials never change, a slot is settled ONCE per device lifetime:
+# a slot that answered is cached (ANSWERED), a slot the device never answers is confirmed empty
+# (EMPTY, via the REFRESH_FAILURES_CONFIRMED channel) and NEITHER is ever read again on a timer.
+# Settled knowledge is invalidated only by replace_devices() (a re-addressed device re-discovers).
+# This is what stops the connection-churn that a recurring 60 s re-probe of a dead slot caused.
+# A very-slow explicit rediscovery for hardware-change-without-reconfiguration could be added later,
+# but there is deliberately no recurring re-probe timer here.
+INVENTORY_MAX_READS = 16  # upper bound per pass: two towers x seven module_sn slots, plus slack
+# Per-slot settled states (see read_module_inventory); a slot in this map is never re-read on a timer.
+_SLOT_ANSWERED = "answered"
+_SLOT_EMPTY_SETTLED = "empty"
 
 _STALE_REASONS: tuple[tuple[type[DeviceApiError], StaleReason], ...] = (
     (DeviceMaintenance, StaleReason.DEVICE_MAINTENANCE),
@@ -157,6 +171,12 @@ class RctGateway:
         cache.extend_ttl_when(self._fresh_window)
         self._refresh_attempts: dict[tuple[str, str], float] = {}
         self._refresh_failures: dict[tuple[str, str], int] = {}  # consecutive failed refresh reads per key
+        # Settle-once module-serial inventory, keyed by device_id. _inventory_state records which
+        # slots are settled (ANSWERED/EMPTY) so they are never re-read on a timer; _inventory_values
+        # keeps the last successfully read serial per settled-ANSWERED slot so it can be re-put into
+        # the cache (TTL exemption) without any device I/O. Cleared only by replace_devices().
+        self._inventory_state: dict[str, dict[str, str]] = {}
+        self._inventory_values: dict[str, dict[str, tuple[ScalarValue, datetime]]] = {}
 
     def read_failed(self, device_id: str, name: str, *, min_failures: int = REFRESH_FAILURES_CONFIRMED) -> bool:
         """True once refresh reads of this value failed repeatedly in a row (each already retried).
@@ -226,7 +246,121 @@ class RctGateway:
             log.debug("Refreshed %d stale periodic value(s) on device %s (%d due)", sent, device_id, len(due))
         return sent
 
-    # ---- wiring ----------------------------------------------------------------------------
+    @staticmethod
+    def _inventory_tower_slots(names: Sequence[str]) -> list[tuple[str, list[tuple[int, str]]]]:
+        """Group inventory metric names by tower prefix, each tower's slots in index order.
+
+        A slot name is ``<tower_prefix>_module_sn_<index>``; anything that does not match is kept
+        under its own key so an unexpected name is still read once rather than silently dropped.
+        Tower order follows first appearance so the primary tower (``battery_*``) is scanned before
+        the placeholder tower (``battery_placeholder_0_*``).
+        """
+        towers: dict[str, list[tuple[int, str]]] = {}
+        order: list[str] = []
+        for name in names:
+            prefix, sep, suffix = name.rpartition("_module_sn_")
+            try:
+                index = int(suffix) if sep else -1
+            except ValueError:
+                index = -1
+            tower = prefix if sep else name
+            if tower not in towers:
+                towers[tower] = []
+                order.append(tower)
+            towers[tower].append((index, name))
+        for slots in towers.values():
+            slots.sort(key=lambda item: item[0])
+        return [(tower, towers[tower]) for tower in order]
+
+    def _inventory_probe_plan(self, device_id: str, names: Sequence[str]) -> list[str]:
+        """Still-unsettled slots to probe this pass, topology-aware.
+
+        Each tower is scanned in index order; probing a tower stops after the first slot that is
+        confirmed empty and ends a previously-contiguous populated run - higher slots of that tower
+        are not re-tried on later passes. The placeholder (second) tower is probed at its first
+        serial slot only until that slot answers; the rest of it is discovered only once a second
+        tower is known to exist. A tower whose state is fully settled contributes nothing.
+        """
+        state = self._inventory_state.get(device_id, {})
+        plan: list[str] = []
+        for position, (_tower, slots) in enumerate(self._inventory_tower_slots(names)):
+            run_broken = False
+            for order, (_index, name) in enumerate(slots):
+                if not self._catalog.exists(name):
+                    continue  # a registry without this slot simply has nothing to read
+                settled = state.get(name)
+                if settled == _SLOT_EMPTY_SETTLED:
+                    # The first confirmed-empty slot ends the tower's contiguous populated run; no
+                    # need to keep probing this tower's higher slots on this or any future pass.
+                    run_broken = True
+                    break
+                if settled == _SLOT_ANSWERED:
+                    continue  # already known, kept warm from _inventory_values (no device read)
+                # A second tower: prove it exists via its first serial slot before probing the rest.
+                if position > 0 and order > 0 and state.get(slots[0][1]) != _SLOT_ANSWERED:
+                    break
+                plan.append(name)
+            if run_broken:
+                continue
+        return plan
+
+    async def read_module_inventory(self, device_id: str, names: Sequence[str]) -> int:
+        """Bounded, budget-exempt settle-once discovery read of static inventory (module serials).
+
+        Static inventory data (battery module serial numbers) used to sit in the periodic read set,
+        where an unpopulated slot answers nothing and the missing response drops the connection,
+        destabilising the whole periodic loop. They are read here instead so admin's devices() can
+        still derive each tower's module count from the populated slots, without ever being part of
+        the connection-destroying periodic registration.
+
+        Serials are static, so a slot is settled exactly ONCE per device lifetime: a slot that
+        answers is cached (ANSWERED) and kept warm in the cache without further device I/O; a slot
+        the device never answers is confirmed empty (EMPTY) through the same ``read_failed`` channel
+        the refresh loop uses, after REFRESH_FAILURES_CONFIRMED failures. A settled slot is NEVER
+        read again on a timer - this is what removes the recurring-re-probe connection churn. The
+        scan is topology-aware (per-tower, index order, stops after the first confirmed-empty slot;
+        the placeholder tower is proved by its first slot before the rest). Settled knowledge is
+        dropped only by replace_devices(). Returns the number of device reads actually sent (0 once
+        every in-scope slot is settled, or while the device is unreachable).
+        """
+        binding = self._device(device_id)
+        values = self._inventory_values.setdefault(device_id, {})
+        # Keep already-discovered serials warm so a settled-ANSWERED slot never ages out of
+        # cached_reading(); this is an in-process cache re-put only and sends no device frame.
+        for name, (value, measured_at) in values.items():
+            self._cache.put(
+                (device_id, name), value, measured_at=measured_at,
+                received_monotonic=self._clock.monotonic(), origin="transaction",
+            )
+        if binding.endpoint.maintenance() and not binding.endpoint.probe_due():
+            return 0
+        plan = self._inventory_probe_plan(device_id, names)
+        if not plan:
+            return 0  # discovery complete; the loop idles (only the warm-value re-put above runs)
+        state = self._inventory_state.setdefault(device_id, {})
+        sent = 0
+        for name in plan[:INVENTORY_MAX_READS]:
+            if binding.serializer.queue_length() > 0:
+                break  # caller reads go first; the next pass continues where this one stopped
+            entry = self._metric(name)
+            key = (device_id, name)
+            self._refresh_attempts[key] = self._clock.monotonic()
+            sent += 1
+            value = await self._read_into_cache(binding, entry, key, TransactionOrigin.SYSTEM_READ)
+            if value is not None:
+                self._refresh_failures.pop(key, None)
+                values[name] = (value[0], self._clock.now())
+                state[name] = _SLOT_ANSWERED  # settled: never read again on a timer
+            elif not binding.endpoint.maintenance():  # an outage says nothing about this register
+                count = self._refresh_failures.get(key, 0) + 1
+                self._refresh_failures[key] = count
+                if count >= REFRESH_FAILURES_CONFIRMED:
+                    state[name] = _SLOT_EMPTY_SETTLED  # confirmed empty: never read again on a timer
+                    log.debug("Device %s does not answer inventory value %s (empty slot, settled)", device_id, name)
+        if sent:
+            log.debug("Read %d inventory value(s) on device %s", sent, device_id)
+        return sent
+
     def add_device(self, binding: DeviceBinding) -> None:
         self._devices[binding.entry.device_id] = binding
         self._by_address[(binding.entry.key.endpoint, binding.entry.network_id)] = binding.entry.device_id
@@ -264,6 +398,11 @@ class RctGateway:
         self._slave_cache.clear()
         self._refresh_attempts.clear()
         self._refresh_failures.clear()
+        # The module-serial inventory settle cache (which slots answered, which are confirmed empty,
+        # and the discovered serials) is device-keyed too, so a re-addressed device re-discovers its
+        # own towers instead of inheriting the old hardware's inventory topology.
+        self._inventory_state.clear()
+        self._inventory_values.clear()
         for binding in bindings:
             self.add_device(binding)
 
@@ -322,7 +461,6 @@ class RctGateway:
 
         return sink
 
-    # ---- lookup ----------------------------------------------------------------------------
     def _device(self, device_id: str) -> DeviceBinding:
         binding = self._devices.get(device_id)
         if binding is None:
@@ -345,7 +483,6 @@ class RctGateway:
             value *= entry.scale
         return value
 
-    # ---- reading ---------------------------------------------------------------------------
     def refund_budget(self, device_id: str, reservation: BudgetHandle | None) -> None:
         """Release every unit a request-local reservation still holds; a no-op once it is spent."""
         self._device(device_id)  # validates device_id the same way reserve_budget does
@@ -564,7 +701,6 @@ class RctGateway:
         )
         return value, result.frame.payload
 
-    # ---- writing ---------------------------------------------------------------------------
     def _encode(self, entry: RegistryEntry, value: ScalarValue) -> bytes:
         try:
             # A JSON body of 80 parses to int, 80.0 to float; both name the same physical value, so
@@ -680,7 +816,6 @@ class RctGateway:
             raise ActionOutcomeUnknown(name=name, readback_value=read_value)
         return ActionOutcome(name, value, read_value, self._clock.now())
 
-    # ---- liveness and status ---------------------------------------------------------------
     async def read_inverter_name(self, device_id: str) -> str:
         """Read the device's own name through its existing serialized connection."""
         return await self._read_string_object(device_id, _INVERTER_NAME_OBJECT_ID)
@@ -796,7 +931,6 @@ class RctGateway:
             0 if binding.periodic is None else binding.periodic.consecutive_failures,
         )
 
-    # ---- vendor diagnostics (Requirement 18, 30) ---------------------------------------------
     def objects(self) -> list[RegistryEntry]:
         return list(self._catalog.entries())
 

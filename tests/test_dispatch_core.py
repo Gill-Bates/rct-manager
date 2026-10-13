@@ -748,7 +748,6 @@ def test_set_limits_replaces_the_live_dict(tmp_path: Path) -> None:
     assert dispatch._limits is new_limits
 
 
-# --- A2: FAULT_RESTORE_PENDING must retry automatically, not stay stuck forever -----------------
 
 
 async def test_fault_restore_pending_retries_automatically_once_eligible(tmp_path: Path) -> None:
@@ -792,7 +791,6 @@ async def test_status_never_triggers_a_restore_retry_as_a_side_effect(tmp_path: 
     assert gateway.calls == []
 
 
-# --- P2-03: a stuck PRECHECK must be recovered by tick(), not left hanging forever --------------
 
 
 async def test_tick_recovers_a_stuck_precheck_without_a_snapshot(tmp_path: Path) -> None:
@@ -826,7 +824,6 @@ async def test_tick_recovers_a_stuck_precheck_without_a_snapshot(tmp_path: Path)
     assert gateway.calls == []
 
 
-# --- A1: defensive PRECHECK-with-snapshot handling in recover() (currently unreachable) ---------
 
 
 async def test_recover_restores_a_defensively_constructed_precheck_with_snapshot_record(
@@ -862,7 +859,6 @@ async def test_recover_restores_a_defensively_constructed_precheck_with_snapshot
     assert (await dispatch.status("main")).state is DispatchState.IDLE
 
 
-# --- D5: submit() must reject a new dispatch on a non-fresh snapshot, not just the model default -
 
 async def test_submit_rejects_a_new_dispatch_when_the_fresh_snapshot_read_is_stale(
     tmp_path: Path,
@@ -923,7 +919,6 @@ async def test_submit_restores_after_a_non_device_error_during_apply(tmp_path: P
     assert (await dispatch.status("main")).state is DispatchState.IDLE
 
 
-# --- recover()/shutdown_restore() must survive stale reads and unreadable rows ------------------
 
 
 async def test_recover_rereads_the_record_under_the_lock_after_a_concurrent_tick(tmp_path: Path) -> None:

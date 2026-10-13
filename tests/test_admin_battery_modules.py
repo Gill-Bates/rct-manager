@@ -20,6 +20,7 @@ The point of these tests is twofold:
    between e.g. 3 and 6 modules while the slots are still being filled in.
 """
 
+from pathlib import Path
 from types import SimpleNamespace
 
 from app.admin.api import (
@@ -238,7 +239,6 @@ def test_metric_names_skip_roles_the_catalog_does_not_carry() -> None:
     assert _battery_metric_names(runtime, "battery", include_device_wide=True) == {"soc": "battery_soc"}
 
 
-# --- Completeness gate -------------------------------------------------------------------------
 #
 # This is the actual root-cause fix: a mid-scan snapshot (some slots UNKNOWN, i.e. never read -
 # not "read as empty") must never be interpreted as a smaller real tower, no matter how clean the
@@ -304,7 +304,6 @@ def test_a_single_complete_but_different_read_is_not_enough_either() -> None:
     assert once["module_count"] == 6, "one complete-but-different read must not override immediately"
 
 
-# --- Stability across polls -------------------------------------------------------------------
 #
 # The underlying periodic loop fills the seven module_sn slots over several read/refresh cycles
 # (see _battery_module_report's docstring), so cached_reading() can answer differently for the same
@@ -431,3 +430,184 @@ def test_a_slot_not_yet_confirmed_unanswered_still_counts_as_unknown() -> None:
     runtime = _runtime(_partial_slots("battery", 3))
     runtime.gateway.read_failed = lambda device_id, name: False
     assert _battery_module_slot_states(runtime, "dev", "battery")[3] == "unknown"
+
+
+# ---------------------------------------------------------------------------
+# FIX 1: static module serials are read by the bounded, cached inventory pass
+# (RctGateway.read_inventory), NOT by the connection-destabilising periodic set.
+# These tests use the PRODUCTION registry, which carries the module_sn slots the
+# tests/fixtures/objects.json fixture does not.
+# ---------------------------------------------------------------------------
+
+_PROD_REGISTRY = Path(__file__).resolve().parent.parent / "app" / "catalog" / "objects.json"
+
+
+def test_module_serials_are_not_in_the_periodic_read_set() -> None:
+    """The whole point of FIX 1: the battery_*module_sn_* slots must no longer be registered for
+    periodic reads, where an unpopulated slot's missing response drops the connection. The periodic
+    default set drops from ~60 to ~46 per device."""
+    from app.api.app_factory import _MODULE_INVENTORY_NAMES, _effective_periodic_names
+    from app.catalog.registry import RegistryCatalog
+    from app.config import Settings
+
+    settings = Settings(object_registry_path=_PROD_REGISTRY)
+    catalog = RegistryCatalog.from_file(_PROD_REGISTRY)
+    periodic = _effective_periodic_names(settings, catalog, None)
+
+    assert not [n for n in periodic if "module_sn" in n], "module serials must be out of the periodic set"
+    assert len(periodic) == 46  # 39 preselected numeric + energy/card pins, minus the 14 serials
+    # The inventory names cover both towers' seven slots, exactly what devices() needs.
+    assert len(_MODULE_INVENTORY_NAMES) == 2 * RCT_MODULE_SN_SLOTS
+    assert set(_MODULE_INVENTORY_NAMES) <= set(catalog.names())
+
+
+async def test_inventory_read_feeds_devices_module_count_without_the_periodic_set() -> None:
+    """End to end for FIX 1: read_module_inventory populates the cache for the slots the device
+    answers and settles the ones it never answers via read_failed(), so admin's devices()
+    derivation (_battery_module_report) reports the correct module count for a populated tower - the
+    feature that would otherwise regress when the serials leave the periodic set. Serials are
+    static, so no clock-advancing re-gate is needed between passes: slots settle once and stay
+    settled."""
+    from datetime import timedelta
+
+    from app.allowlist import Allowlist
+    from app.api.app_factory import _MODULE_INVENTORY_NAMES
+    from app.cache import MemoryCache
+    from app.catalog.registry import RegistryCatalog
+    from app.config import DeviceEntry
+    from app.gateway.rct import DeviceBinding, RctGateway
+    from app.scheduling.retry import RetryConfig
+    from app.scheduling.serializer import AccessSerializer
+    from app.transport.endpoint import EndpointConfig, TransportEndpoint
+    from tests.conftest import AutoClock
+    from tests.fakes import FakeNetwork
+
+    clock = AutoClock()
+    catalog = RegistryCatalog.from_file(_PROD_REGISTRY)
+    # A 3-module primary tower: slots 0..3 populated (3 modules + the base/top part), 4..6 never
+    # answered. The second tower answers nothing at all (no placeholder tower installed).
+    answered = {f"battery_module_sn_{i}": f"SN-{i}" for i in range(3 + RCT_NON_MODULE_SLOTS)}
+    answered_ids = {catalog.object_entry(n).object_id for n in answered}
+
+    def behavior(frame):
+        return "respond" if frame.object_id in answered_ids else "ignore"
+
+    net = FakeNetwork(clock, behavior=behavior)
+    for name, serial in answered.items():
+        net.payloads[catalog.object_entry(name).object_id] = serial.encode("latin-1")
+
+    # A generous TTL+grace: AutoClock advances monotonic time on every internal sleep, so a single
+    # pass alone moves the clock far more than any real pass would. The settle-once lifecycle keeps
+    # answered serials warm by re-putting them each pass, so the cache lifetime is not what this
+    # test asserts; it just has to outlast the AutoClock jumps so the freshly read serials stay
+    # readable.
+    cache = MemoryCache(100_000, 100_000)
+    gateway = RctGateway(
+        catalog, cache, clock, Allowlist({}, catalog), retry=RetryConfig(response_timeout_seconds=0.01)
+    )
+    device = DeviceEntry(device_id="main", host="10.0.0.5")
+    cfg = EndpointConfig(response_timeout_seconds=0.01, min_interval=timedelta(0))
+    endpoint = TransportEndpoint("endpoint-1", device.key.endpoint, cfg, clock, connector=net.connect)
+    serializer = AccessSerializer(endpoint, gateway.handler(endpoint), queue_max_length=10, queue_max_wait_seconds=10)
+    serializer.start()
+    gateway.add_device(DeviceBinding(device, endpoint, serializer))
+    runtime = SimpleNamespace(catalog=catalog, gateway=gateway)
+    try:
+        # Several passes with NO clock advance: the answered slots are cached on the first pass; the
+        # unanswered ones only settle "empty" once read_failed confirms them
+        # (REFRESH_FAILURES_CONFIRMED consecutive failures). Once settled, a slot is never read
+        # again on a timer - the whole point of the lifecycle correction.
+        total_sent = 0
+        for _ in range(4):
+            total_sent += await gateway.read_module_inventory("main", _MODULE_INVENTORY_NAMES)
+            for _ in range(_BATTERY_MODULE_STABILITY_READS):
+                report = _battery_module_report(runtime, "main", "battery")
+
+        # The answered slots reached the cache (not the periodic path) and are kept warm by the
+        # settle-once re-put, so they are still readable after several passes.
+        assert gateway.cached_reading("main", "battery_module_sn_0") is not None
+        # The never-answered slots are confirmed unanswered, so the snapshot is complete.
+        assert gateway.read_failed("main", "battery_module_sn_6")
+        # devices()'s derivation now reports the real module count for the populated tower.
+        assert report["module_count"] == 3
+        assert report["module_count_status"] == "ok"
+        # Bounded: a pass never issues more than the two towers' slots.
+        assert total_sent <= 4 * 2 * RCT_MODULE_SN_SLOTS
+    finally:
+        await serializer.stop()
+
+
+async def test_settled_inventory_slots_are_not_re_read_across_later_loop_ticks() -> None:
+    """Regression for the lifecycle correction: a never-answering slot (a dead tower slot) must NOT
+    be re-read once settled, no matter how many inventory-loop ticks run afterwards. This is what
+    removes the recurring timeout -> _drop_connection exposure in steady state. Positives stay warm
+    and read_failed() stays True for the settled-empty slots; the absent second tower costs at most
+    one probe (its first serial slot only)."""
+    from datetime import timedelta
+
+    from app.allowlist import Allowlist
+    from app.api.app_factory import _MODULE_INVENTORY_NAMES
+    from app.cache import MemoryCache
+    from app.catalog.registry import RegistryCatalog
+    from app.config import DeviceEntry
+    from app.gateway.rct import DeviceBinding, RctGateway
+    from app.scheduling.retry import RetryConfig
+    from app.scheduling.serializer import AccessSerializer
+    from app.transport.endpoint import EndpointConfig, TransportEndpoint
+    from tests.conftest import AutoClock
+    from tests.fakes import FakeNetwork
+
+    clock = AutoClock()
+    catalog = RegistryCatalog.from_file(_PROD_REGISTRY)
+    # Primary tower answers slots 0..3 (3 modules + base part); 4..6 never answer. The whole second
+    # (placeholder) tower never answers.
+    answered = {f"battery_module_sn_{i}": f"SN-{i}" for i in range(3 + RCT_NON_MODULE_SLOTS)}
+    answered_ids = {catalog.object_entry(n).object_id for n in answered}
+
+    def behavior(frame):
+        return "respond" if frame.object_id in answered_ids else "ignore"
+
+    net = FakeNetwork(clock, behavior=behavior)
+    for name, serial in answered.items():
+        net.payloads[catalog.object_entry(name).object_id] = serial.encode("latin-1")
+
+    cache = MemoryCache(100_000, 100_000)
+    gateway = RctGateway(
+        catalog, cache, clock, Allowlist({}, catalog), retry=RetryConfig(response_timeout_seconds=0.01)
+    )
+    device = DeviceEntry(device_id="main", host="10.0.0.5")
+    cfg = EndpointConfig(response_timeout_seconds=0.01, min_interval=timedelta(0))
+    endpoint = TransportEndpoint("endpoint-1", device.key.endpoint, cfg, clock, connector=net.connect)
+    serializer = AccessSerializer(endpoint, gateway.handler(endpoint), queue_max_length=10, queue_max_wait_seconds=10)
+    serializer.start()
+    gateway.add_device(DeviceBinding(device, endpoint, serializer))
+    placeholder_sn_0 = catalog.object_entry("battery_placeholder_0_module_sn_0").object_id
+    higher_placeholder_ids = {
+        catalog.object_entry(f"battery_placeholder_0_module_sn_{i}").object_id for i in range(1, RCT_MODULE_SN_SLOTS)
+    }
+    try:
+        # Drive discovery to the settled state (no clock advance: the lifecycle has no re-gate).
+        for _ in range(6):
+            await gateway.read_module_inventory("main", _MODULE_INVENTORY_NAMES)
+        assert gateway.read_failed("main", "battery_module_sn_6")  # dead slot settled empty
+        assert gateway.cached_reading("main", "battery_module_sn_0") is not None  # positive kept warm
+
+        # Baseline the device frames, then run several MORE inventory-loop-equivalent passes.
+        frames_before = len(net.frames)
+        extra_sent = 0
+        for _ in range(5):
+            extra_sent += await gateway.read_module_inventory("main", _MODULE_INVENTORY_NAMES)
+        # No settled slot is probed again: no new device frame, nothing sent.
+        assert extra_sent == 0
+        assert len(net.frames) == frames_before
+        # The settled-empty slot stays settled and the positive stays warm (re-put, no device read).
+        assert gateway.read_failed("main", "battery_module_sn_6")
+        assert gateway.cached_reading("main", "battery_module_sn_0") is not None
+        # The absent second tower cost at most one probed slot: only its first serial slot was ever
+        # read (bounded by the confirm-before-empty threshold); the higher placeholder slots never
+        # were, so a missing second tower never triggers a full 7-slot scan.
+        probed_ids = [frame.object_id for _ts, frame in net.frames]
+        assert placeholder_sn_0 in probed_ids
+        assert all(oid not in probed_ids for oid in higher_placeholder_ids)
+    finally:
+        await serializer.stop()

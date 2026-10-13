@@ -212,7 +212,6 @@ async def test_documentation_is_hidden_unless_enabled(bind_address: str) -> None
             assert (await h.client.get(path)).status_code == 200
 
 
-# --- write paths (task 12.4) ------------------------------------------------------------------------
 
 
 def _write_settings(tmp_path, **extra):

@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 #
 # tests/test_tsdb_log_stream.py
 # Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
@@ -79,9 +80,6 @@ async def _ready_client(app, password):
     return client
 
 
-# --------------------------------------------------------------------------- filter
-
-
 def test_is_tsdb_logger_matches_by_prefix():
     assert is_tsdb_logger("app.export")
     assert is_tsdb_logger("app.export.pusher")
@@ -92,9 +90,6 @@ def test_is_tsdb_logger_matches_by_prefix():
     assert not is_tsdb_logger("app.api.app_factory_helper")
     assert not is_tsdb_logger("app.transport.receiver")
     assert not is_tsdb_logger("app.admin.api")
-
-
-# --------------------------------------------------------------------------- hub + handler
 
 
 def _record(logger_name: str, message: str) -> logging.LogRecord:
@@ -208,9 +203,6 @@ async def test_unsubscribe_leaves_no_subscriber_and_others_keep_working():
         await asyncio.sleep(0)
         assert queue2.empty()  # the detached subscriber receives nothing
     assert hub.subscriber_count == 0
-
-
-# --------------------------------------------------------------------------- SSE endpoint
 
 
 @pytest.mark.asyncio

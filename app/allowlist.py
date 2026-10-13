@@ -130,7 +130,6 @@ class Allowlist:
             problems.append(f"{where}: an action variable needs an explicit list of allowed_values and no range")
         return problems
 
-    # ---- value check -----------------------------------------------------------------------
     def check(self, name: str, value: ScalarValue, *, action: bool) -> AllowlistEntry:
         """Raise WriteRejected unless ``value`` may be written to ``name``; never touches the device."""
         reg = self._catalog.object_entry(name)

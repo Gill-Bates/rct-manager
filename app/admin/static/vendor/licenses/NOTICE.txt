@@ -16,6 +16,10 @@ GridStack.js 14.0.0 (gridstack-all.js, gridstack.min.css): Copyright (c) 2021-20
 v0.4.0 and older (c) 2014-2018 Pavel Reznikov, Dylan Weiss.
 Licensed under MIT; see gridstack.txt.
 
+Chart.js 4.5.1 and chartjs-plugin-datalabels 2.2.0: Copyright their respective contributors.
+Licensed under MIT; license notices are retained in chart.umd.min.js and
+chartjs-plugin-datalabels.min.js. Copied from the local WireBuddy vendor bundle.
+
 Swagger UI 5.33.1 (swagger-ui/swagger-ui-bundle.js, swagger-ui/swagger-ui.css): Copyright
 SmartBear Software. Licensed under Apache License 2.0; see Apache-2.0 and swagger-ui/LICENSE.
 Self-hosted to serve the public /docs page without a third-party CDN dependency.

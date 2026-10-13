@@ -340,17 +340,24 @@ async def _gateway(limit: int, fail_connects: int = 0):
 
 def test_replace_devices_clears_device_keyed_state_but_keeps_the_locks() -> None:
     """A live device-list reload may keep a logical device_id while re-addressing the hardware.
-    replace_devices() must drop the caches keyed by that id — slave discovery and refresh history —
-    so the new device cannot inherit the old one's topology or failure counters. The per-object
+    replace_devices() must drop the caches keyed by that id — slave discovery, refresh history and
+    the module-serial inventory settle cache — so the new device cannot inherit the old one's
+    topology or failure counters and re-discovers its own towers. The per-object
     write locks and per-device slave locks are kept: an in-flight write or discovery may still hold
     one, and dropping it would remove the serialization that protects the device during the swap.
     """
 
-    async def scenario() -> tuple[bool, bool, bool, bool, bool, str]:
+    async def scenario() -> tuple[bool, bool, bool, bool, bool, bool, str]:
+        from datetime import UTC, datetime
+
+        from app.gateway.rct import _SLOT_EMPTY_SETTLED
+
         gateway, binding, _budget, _net, _catalog = await _gateway(5)
         gateway._slave_cache["inv1"] = (1e18, SlaveDiscovery((), True, None))
         gateway._refresh_attempts[("inv1", "battery_power")] = 123.0
         gateway._refresh_failures[("inv1", "battery_power")] = 3
+        gateway._inventory_state["inv1"] = {"battery_module_sn_6": _SLOT_EMPTY_SETTLED}
+        gateway._inventory_values["inv1"] = {"battery_module_sn_0": ("SN-0", datetime(2026, 1, 1, tzinfo=UTC))}
         gateway._write_locks[("inv1", 0x1234)] = asyncio.Lock()
         async with gateway._slave_locks.setdefault("inv1", asyncio.Lock()):
             pass
@@ -362,13 +369,15 @@ def test_replace_devices_clears_device_keyed_state_but_keeps_the_locks() -> None
             bool(gateway._slave_cache),
             bool(gateway._refresh_attempts),
             bool(gateway._refresh_failures),
+            bool(gateway._inventory_state) or bool(gateway._inventory_values),
             ("inv1", 0x1234) in gateway._write_locks,
             "inv1" in gateway._slave_locks,
             resolved,
         )
 
-    slave_cache, attempts, failures, write_lock, slave_lock, resolved = asyncio.run(scenario())
+    slave_cache, attempts, failures, inventory, write_lock, slave_lock, resolved = asyncio.run(scenario())
     assert (slave_cache, attempts, failures) == (False, False, False)  # device-keyed state is dropped
+    assert inventory is False  # the module-serial inventory settle cache is dropped too
     assert write_lock and slave_lock  # the locks survive the swap
     assert resolved == "inv1"  # the rebuilt binding is addressable again
 
@@ -527,3 +536,110 @@ async def test_cancelled_read_cancels_the_endpoint_call() -> None:
     with pytest.raises(asyncio.CancelledError):
         await runner
     assert cancelled.is_set()
+
+
+# --- FIX 1: static module serials are read by a bounded inventory pass, not the periodic set ---
+
+_SHIPPED_REGISTRY = Path(__file__).resolve().parents[1] / "app" / "catalog" / "objects.json"
+
+
+async def _inventory_gateway(populated: dict[str, bytes], unanswered: set[str]):
+    """Gateway on the SHIPPED catalog (the fixture carries no module_sn slots). ``populated`` maps
+    a module_sn metric name to the serial bytes the fake returns; ``unanswered`` names slots the
+    device never answers, so their read times out (an unpopulated slot on real hardware).
+
+    AutoClock (like the other gateway tests here) advances time on every internal sleep, so the
+    cache TTL is set very high to keep the just-read serials FRESH across the whole pass. Serials
+    are static inventory: a slot settles once (answered or confirmed empty) and is never re-read on
+    a timer, so no re-gate advance is needed between passes."""
+    clock = AutoClock()
+    catalog = RegistryCatalog.from_file(_SHIPPED_REGISTRY)
+    by_name = {name: catalog.object_entry(name).object_id for name in (set(populated) | unanswered)}
+    unanswered_ids = {by_name[name] for name in unanswered}
+
+    def behavior(frame):
+        return "ignore" if frame.object_id in unanswered_ids else "respond"
+
+    net = FakeNetwork(clock, behavior=behavior)
+    for name, raw in populated.items():
+        net.payloads[by_name[name]] = raw
+    cache = MemoryCache(1e9, 1e9)  # serials must stay FRESH despite AutoClock advancing on sleeps
+    gateway = RctGateway(
+        catalog, cache, clock, Allowlist({}, catalog), retry=RetryConfig(response_timeout_seconds=0.01)
+    )
+    device = DeviceEntry(device_id="inv1", host="10.0.0.5")
+    cfg = EndpointConfig(response_timeout_seconds=0.01, min_interval=timedelta(0))
+    endpoint = TransportEndpoint("endpoint-1", device.key.endpoint, cfg, clock, connector=net.connect)
+    serializer = AccessSerializer(
+        endpoint, gateway.handler(endpoint), budget=WorkBudget(10_000, 1000, clock), cache_hit=gateway.cache_hit
+    )
+    serializer.start()
+    gateway.add_device(DeviceBinding(device, endpoint, serializer))
+    return gateway, serializer, net, clock
+
+
+_INVENTORY_NAMES = tuple(f"battery_module_sn_{i}" for i in range(7))
+
+
+def test_inventory_read_feeds_devices_module_count_without_touching_the_periodic_set() -> None:
+    """read_module_inventory() lands the module serials in the cache so admin's devices() can still
+    derive a populated tower's module count from cached_reading(), even though the slots are no
+    longer periodically registered. A five-module tower reports six populated slots (five modules
+    plus the base/top part)."""
+
+    async def scenario():
+        populated = {f"battery_module_sn_{i}": b"SN-%d" % i for i in range(6)}  # slots 0..5 populated
+        gateway, serializer, _net, _clock = await _inventory_gateway(populated, unanswered={"battery_module_sn_6"})
+        sent = await gateway.read_module_inventory("inv1", _INVENTORY_NAMES)
+        readings = [gateway.cached_reading("inv1", n) for n in _INVENTORY_NAMES]
+        await serializer.stop()
+        return sent, readings
+
+    sent, readings = asyncio.run(scenario())
+    assert sent == 7  # all seven slots attempted in the one bounded pass
+    # Slots 0..5 cached with their serials (the data devices() counts); slot 6 is unanswered -> None.
+    assert [r[0] if r else None for r in readings] == ["SN-0", "SN-1", "SN-2", "SN-3", "SN-4", "SN-5", None]
+
+
+def test_settled_inventory_slots_are_not_re_read_on_a_later_pass() -> None:
+    """Serials are static: once every slot is settled (answered or confirmed empty), a further
+    read_module_inventory call sends NO device frames and returns 0, so an inventory loop ticking
+    often is cheap - no re-gate, no re-probe. Here every slot answers, so a single pass settles the
+    whole tower; the next pass must do no device I/O at all."""
+
+    async def scenario():
+        populated = {f"battery_module_sn_{i}": b"SN-%d" % i for i in range(7)}  # all slots answer
+        gateway, serializer, net, _clock = await _inventory_gateway(populated, unanswered=set())
+        first = await gateway.read_module_inventory("inv1", _INVENTORY_NAMES)
+        frames_after_first = len(net.frames)
+        second = await gateway.read_module_inventory("inv1", _INVENTORY_NAMES)  # everything settled
+        frames_after_second = len(net.frames)
+        await serializer.stop()
+        return first, second, frames_after_first, frames_after_second
+
+    first, second, after_first, after_second = asyncio.run(scenario())
+    assert first == 7 and second == 0  # settled slots are not re-read on the next pass
+    assert after_second == after_first  # and no additional device frames are sent
+
+
+def test_inventory_marks_an_unanswered_slot_as_read_failed_for_devices() -> None:
+    """A slot the device never answers must become read_failed() after repeated passes, so
+    devices() can tell an unpopulated slot (EMPTY) from one not read yet (UNKNOWN) and does not
+    hold the tower on 'pending' forever."""
+
+    async def scenario():
+        populated = {f"battery_module_sn_{i}": b"SN-%d" % i for i in range(6)}
+        gateway, serializer, _net, _clock = await _inventory_gateway(populated, unanswered={"battery_module_sn_6"})
+
+        # No re-gate advance: slot 6 is re-probed each pass only until REFRESH_FAILURES_CONFIRMED
+        # confirms it empty, then it settles and is never read again.
+        for _ in range(3):  # REFRESH_FAILURES_CONFIRMED passes to confirm the unanswered slot
+            await gateway.read_module_inventory("inv1", _INVENTORY_NAMES)
+        failed = gateway.read_failed("inv1", "battery_module_sn_6")
+        populated_ok = gateway.read_failed("inv1", "battery_module_sn_0")
+        await serializer.stop()
+        return failed, populated_ok
+
+    failed, populated_ok = asyncio.run(scenario())
+    assert failed is True  # the empty slot is confirmed unanswered
+    assert populated_ok is False  # a populated slot is never marked failed

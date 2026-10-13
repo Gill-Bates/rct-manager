@@ -297,6 +297,7 @@
     document.documentElement.setAttribute('data-bs-theme', next);
     localStorage.setItem('rct-admin-theme', next);
     syncThemeToggle();
+    syncSpotMarketChartTheme();
   }
 
   // Reflect the active theme on #theme-toggle: aria-pressed reports the state to assistive tech,
@@ -1262,6 +1263,7 @@
     showHeroMetrics(devices);
     renderTsdbTile(tsdb);
     $('device-count').textContent = String(devices.length);
+    $('inverter-onboarding-hint').hidden = devices.length !== 0;
     $('connected-count').textContent = String(devices.filter((item) => displayStatus(item.status)[1] === 'online').length);
     const keys = deviceKeys(devices);
     const seen = new Set(keys);
@@ -1601,7 +1603,7 @@
       group.append(svgEl('text', { class: 'flow-node-icon', x: cx, y: cy, 'aria-hidden': 'true' }, icon));
       const top = place === 'top';
       group.append(svgEl('text', { class: 'flow-node-label', x: cx, y: top ? 16 : cy + 50 }, label));
-      const value = svgEl('text', { class: 'flow-node-value', x: cx, y: top ? 34 : cy + 68 }, NOT_AVAILABLE);
+      const value = svgEl('text', { class: 'flow-node-value', x: cx, y: top ? 38 : cy + 74 }, NOT_AVAILABLE);
       group.append(value);
       svg.append(group);
       nodes[key] = { group, label: group.querySelector('.flow-node-label'), baseLabel: label, value };
@@ -2121,7 +2123,9 @@
 
     function render() {
       const readyState = energyControlState(device, lastPoll503, offConfirmed());
-      nameNode.textContent = device.device_name;
+      // When the inverter is not connected its name is shown as n/a (the real name still backs the
+      // aria-labels so assistive tech keeps the device identity; the status is announced separately).
+      nameNode.textContent = device.connected ? device.device_name : NOT_AVAILABLE;
       collapseToggle.setAttribute('aria-label', `Show or hide details of ${device.device_name}`);
       dot.className = `status-dot ${device.connected ? 'online' : 'offline'}`;
       connection.textContent = `${device.connected ? 'Connected' : 'Not connected'} · ${device.host}`;
@@ -2999,6 +3003,7 @@
 
   // The hardware strategy read has its own slower cadence; the main panel stays cache-only.
   function initEnergy() {
+    initEnergyTabs();
     const expertSwitch = $('energy-expert-mode');
     if (expertSwitch) {
       expertSwitch.checked = energyExpertMode;
@@ -3008,12 +3013,444 @@
         for (const panel of energyPanels.values()) panel.setExpert(energyExpertMode);
       });
     }
+    initSpotMarket();
     pollEnergy();
     pollHardwareStrategies();
     setInterval(() => { if (!document.hidden) pollEnergy(); }, ENERGY_POLL_MS);
     setInterval(() => { if (!document.hidden) pollHardwareStrategies(); }, 30000);
     document.addEventListener('visibilitychange', () => { if (!document.hidden) pollEnergy(); });
     document.addEventListener('visibilitychange', () => { if (!document.hidden) pollHardwareStrategies(); });
+  }
+
+  // Tab <-> URL fragment. Bootstrap owns the show/hide and the keyboard roving tabindex; this only
+  // opens the tab named by location.hash on load (defaulting to Inverter) and writes the active
+  // tab back to the fragment, so a reload or a shared /ui/energy#spot-market link reopens it.
+  const ENERGY_TABS = ['inverter', 'spot-market', 'weather'];
+
+  function initEnergyTabs() {
+    const container = $('energy-tabs');
+    if (!container || !window.bootstrap) return;
+    const fromHash = (location.hash || '').replace(/^#/, '');
+    const initial = ENERGY_TABS.includes(fromHash) ? fromHash : 'inverter';
+    for (const button of container.querySelectorAll('[data-bs-toggle="tab"]')) {
+      button.addEventListener('shown.bs.tab', () => {
+        const name = button.dataset.tab;
+        // replaceState, not a navigation: changing the fragment must not add history entries or
+        // trigger the browser's own hashchange scroll.
+        history.replaceState(null, '', `#${name}`);
+      });
+    }
+    if (initial !== 'inverter') {
+      const target = container.querySelector(`[data-tab="${initial}"]`);
+      if (target) window.bootstrap.Tab.getOrCreateInstance(target).show();
+    }
+  }
+
+  const SPOT_MARKET_PROVIDERS = [['energy_charts', 'Fraunhofer Energy-Charts']];
+  // The fee region concept stays in the backend model, but it is no longer operator-editable in the
+  // UI. The last loaded config's fee_region is kept here and sent back unchanged on save, so a save
+  // never wipes a stored value just because the form no longer renders a field for it.
+  let spotMarketFeeRegion = { code: '', label: '' };
+  // The last bidding-zone listing fetched for the form, reused when re-rendering after a save so the
+  // select keeps its options without another metadata fetch.
+  let spotMarketZoneInfo = null;
+  // The preview runs automatically on load and on every parameter change. These supersede an
+  // in-flight fetch so a newer change always wins: the controller aborts the stale request and the
+  // generation guard discards a stale response that still arrives. The debounce timer coalesces a
+  // burst of changes into one request against the rate-limited external provider.
+  let spotMarketPreviewController = null;
+  let spotMarketPreviewGeneration = 0;
+  let spotMarketPreviewTimer = null;
+  const SPOT_MARKET_PREVIEW_DEBOUNCE_MS = 350;
+  let spotMarketPreviewChart = null;
+
+  function spotMarketLoadingState() {
+    const loading = element('div', 'spot-market-loading');
+    loading.setAttribute('role', 'status');
+    const spinner = element('span', 'spinner-border text-secondary');
+    spinner.setAttribute('aria-hidden', 'true');
+    loading.append(spinner, element('span', 'badge rounded-pill text-bg-secondary', 'Loading day-ahead preview …'));
+    return loading;
+  }
+
+  function spotMarketControl(field, value) {
+    // Read-only provider metadata is not an editable field: render it as a compact info row with a
+    // lock icon, so it never reads as something the operator can change.
+    if (field.type === 'static') {
+      const row = element('div', 'setting-row spot-market-meta-row');
+      const lock = element('span', 'material-icons spot-market-meta-icon', 'lock');
+      lock.setAttribute('aria-hidden', 'true');
+      const name = element('span', 'spot-market-meta-label', field.label);
+      const val = element('span', 'spot-market-meta-value', String(value ?? '—'));
+      const help = element('div', 'form-text', field.help);
+      const line = element('div', 'spot-market-meta-line');
+      line.append(lock, name, val);
+      row.append(line, help);
+      return row;
+    }
+    const wrap = element('div', 'setting-row');
+    const label = element('label', field.type === 'toggle' ? 'form-check-label' : 'form-label', field.label);
+    const id = `spot-market-${field.key}`;
+    label.htmlFor = id;
+    let control;
+    if (field.type === 'select') {
+      control = element('select', 'form-select');
+      for (const [optionValue, text] of field.options) {
+        const item = element('option', '', text);
+        item.value = optionValue;
+        control.append(item);
+      }
+      // The saved value may not be in the current option list (a provider dropped a zone, or the
+      // metadata is stale); keep it as an explicit option so the operator never silently loses it.
+      const stored = value == null ? '' : String(value);
+      if (stored && !field.options.some(([v]) => v === stored)) {
+        const kept = element('option', '', `${stored} (saved)`);
+        kept.value = stored;
+        control.append(kept);
+      }
+      control.value = stored || String(field.options[0]?.[0] ?? '');
+    } else {
+      control = element('input', field.type === 'toggle' ? 'form-check-input' : 'form-control');
+      control.type = field.type === 'toggle' ? 'checkbox' : 'text';
+      if (field.type === 'toggle') { control.setAttribute('role', 'switch'); control.checked = Boolean(value); }
+      else control.value = String(value ?? '');
+    }
+    control.id = id;
+    control.dataset.field = field.key;
+    const help = element('div', 'form-text', field.help);
+    help.id = `${id}-help`;
+    control.setAttribute('aria-describedby', help.id);
+    if (field.type === 'toggle') {
+      const check = element('div', 'form-check form-switch d-flex align-items-center gap-2');
+      check.append(control, label);
+      wrap.append(check, help);
+    } else wrap.append(label, control, help);
+    return wrap;
+  }
+
+  // The form fields of the Spot Market tab, built with the bidding zones fetched from the provider
+  // metadata. Currency and price unit are provider-owned and shown read-only; the fee region is not
+  // rendered (kept in the model only). ``staleNote`` is appended when the zone list is stale.
+  function spotMarketFields(config, zoneInfo) {
+    const zoneOptions = (zoneInfo?.zones ?? []).map((zone) => [zone, zone]);
+    const zoneHelp = zoneInfo?.stale
+      ? 'Exchange price zone where the price is formed, e.g. DE-LU. The list could not be refreshed and may be out of date.'
+      : 'Exchange price zone where the price is formed, e.g. DE-LU. This is not the fee region.';
+    return [
+      { key: 'enabled', label: 'Enabled', type: 'toggle', value: config.enabled, help: 'Fetch day-ahead prices from this provider. Prices are input data only and never charge or discharge the battery on their own.' },
+      { key: 'provider', label: 'Provider', type: 'select', options: SPOT_MARKET_PROVIDERS, value: config.provider, help: 'The external day-ahead price source. Each provider has its own fixed, trusted endpoint; there is no editable URL.' },
+      { key: 'bidding_zone', label: 'Bidding Zone / Market Region', type: 'select', options: zoneOptions, value: config.bidding_zone, help: zoneHelp },
+      { key: 'currency', label: 'Currency', type: 'static', value: config.currency, help: 'Currency the provider reports. Determined by the source, not operator-editable.' },
+      { key: 'price_unit', label: 'Source unit', type: 'static', value: config.price_unit, help: 'The unit the provider reports; normalised to EUR/kWh internally. Determined by the source, not operator-editable.' },
+    ];
+  }
+
+  // Build the body a save/preview posts from the current form controls. The fee region is kept out
+  // of the form but carried through unchanged, so the model concept and any stored value survive.
+  function spotMarketBody() {
+    const container = $('spot-market-fields');
+    const read = (key) => container.querySelector(`[data-field="${key}"]`);
+    return {
+      enabled: read('enabled').checked,
+      provider: read('provider').value,
+      bidding_zone: read('bidding_zone').value.trim(),
+      fee_region: { code: spotMarketFeeRegion.code, label: spotMarketFeeRegion.label },
+    };
+  }
+
+  function renderSpotMarket(config, zoneInfo) {
+    const container = $('spot-market-fields');
+    if (!container) return;
+    spotMarketFeeRegion = { code: config.fee_region?.code ?? '', label: config.fee_region?.label ?? '' };
+    if (zoneInfo !== undefined) spotMarketZoneInfo = zoneInfo;
+    container.replaceChildren(
+      ...spotMarketFields(config, spotMarketZoneInfo).map((field) => spotMarketControl(field, field.value)),
+    );
+  }
+
+  async function initSpotMarket() {
+    const form = $('spot-market-form');
+    if (!form) return;
+    try {
+      // Both reads are cache-first on the server; the zone list does not hit the external API on
+      // every form open. The zone fetch is tolerant: a failure still renders the saved zone.
+      const [config, zoneInfo] = await Promise.all([
+        api('energy/spot-market/config'),
+        api('energy/spot-market/bidding-zones').catch(() => null),
+      ]);
+      renderSpotMarket(config, zoneInfo);
+    } catch (error) {
+      $('spot-market-fields').replaceChildren(element('p', 'text-danger', messageFrom(error)));
+      return;
+    }
+    form.addEventListener('submit', (event) => {
+      event.preventDefault();
+      saveSpotMarket().catch((error) => toast(messageFrom(error), 'danger'));
+    });
+    // A changed provider, bidding zone, or enabled toggle re-queries the day-ahead preview. The
+    // listener is delegated on the stable fields container, so it survives the control rebuild in
+    // renderSpotMarket without re-binding. Delegation also covers only the three operator-editable
+    // parameters; the read-only metadata rows carry no form control to emit a change.
+    const fields = $('spot-market-fields');
+    const previewFields = new Set(['enabled', 'provider', 'bidding_zone']);
+    fields.addEventListener('change', (event) => {
+      const field = event.target instanceof Element ? event.target.dataset.field : null;
+      if (field && previewFields.has(field)) scheduleSpotMarketPreview();
+    });
+    // One automatic read once the form and bidding-zone options are present; later reads are driven
+    // only by a parameter change, never by a re-render, to spare the rate-limited provider.
+    scheduleSpotMarketPreview({ immediate: true });
+  }
+
+  // Debounce a burst of parameter changes into one preview request, then run it. ``immediate``
+  // skips the debounce for the single on-load read.
+  function scheduleSpotMarketPreview({ immediate = false } = {}) {
+    clearTimeout(spotMarketPreviewTimer);
+    const run = () => previewSpotMarket().catch((error) => toast(messageFrom(error), 'danger'));
+    if (immediate) { run(); return; }
+    spotMarketPreviewTimer = setTimeout(run, SPOT_MARKET_PREVIEW_DEBOUNCE_MS);
+  }
+
+  async function saveSpotMarket() {
+    const button = $('spot-market-save');
+    const state = $('spot-market-save-state');
+    button.disabled = true;
+    state.textContent = 'Saving …';
+    try {
+      const saved = await api('energy/spot-market/config', { method: 'PUT', body: JSON.stringify(spotMarketBody()) });
+      renderSpotMarket(saved);
+      state.textContent = 'Saved';
+      toast('Spot-market configuration saved.');
+    } catch (error) {
+      state.textContent = '';
+      throw error;
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  // Prices leave the backend in EUR/kWh; the GUI shows the far more legible ct/kWh (×100). The
+  // internal unit is unchanged — this is a display conversion only.
+  function centsPerKwh(eurPerKwh) {
+    if (eurPerKwh == null) return null;
+    return `${(eurPerKwh * 100).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ct/kWh`;
+  }
+
+  // Date/time use the browser locale (no fixed locale argument), so the GUI follows the user's
+  // regional format.
+  function spotMarketShortTime(iso) {
+    return new Date(iso).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+  }
+
+  function spotMarketDateTime(iso, timeZone) {
+    const date = new Date(iso);
+    const zone = timeZone ? { timeZone } : {};
+    return `${date.toLocaleDateString(undefined, { ...zone, day: '2-digit', month: 'short' })} · ${date.toLocaleTimeString(undefined, { ...zone, hour: '2-digit', minute: '2-digit' })}`;
+  }
+
+  // One highlight block of the preview: a caption, the ct/kWh figure, and when it occurs.
+  function spotMarketHighlight(caption, priceEurPerKwh, atIso) {
+    const block = element('div', 'spot-market-highlight');
+    block.append(element('span', 'spot-market-highlight-caption', caption));
+    block.append(element('span', 'spot-market-highlight-value', centsPerKwh(priceEurPerKwh) ?? '—'));
+    block.append(element('span', 'spot-market-highlight-when', atIso ? spotMarketDateTime(atIso) : '—'));
+    return block;
+  }
+
+  function spotMarketChartPoints(intervals, labels, timeZone) {
+    if (!Array.isArray(intervals) || intervals.length > 100) return null;
+    const points = Array(labels.length).fill(null);
+    // The formatted time is an internal bucket key matched against the fixed HH:MM labels, not
+    // display text, so it must stay locale-independent: formatToParts with h23 plus explicit
+    // zero-padding yields 24-hour HH:MM regardless of the browser locale.
+    const timeFormatter = new Intl.DateTimeFormat(undefined, {
+      timeZone: timeZone || 'UTC', hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+    });
+    const hhmmKey = (instant) => {
+      const parts = timeFormatter.formatToParts(instant);
+      const field = (type) => (parts.find((part) => part.type === type)?.value || '').padStart(2, '0');
+      return `${field('hour')}:${field('minute')}`;
+    };
+    for (const interval of intervals) {
+      const start = Date.parse(interval?.start);
+      const end = Date.parse(interval?.end);
+      const price = interval?.price_eur_per_kwh;
+      if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start || !Number.isFinite(price)) return null;
+      const label = hhmmKey(start);
+      const index = labels.indexOf(label);
+      if (index < 0) return null;
+      points[index] = price * 100;
+    }
+    return points;
+  }
+
+  function syncSpotMarketChartTheme() {
+    if (!spotMarketPreviewChart) return;
+    const styles = getComputedStyle($('spot-market-preview'));
+    const labelColor = styles.getPropertyValue('--bs-body-color').trim();
+    const gridColor = styles.getPropertyValue('--rct-line').trim();
+    spotMarketPreviewChart.options.plugins.legend.labels.color = labelColor;
+    for (const axis of Object.values(spotMarketPreviewChart.options.scales)) {
+      axis.ticks.color = labelColor;
+      axis.grid.color = gridColor;
+      if (axis.title) axis.title.color = labelColor;
+    }
+    spotMarketPreviewChart.update('none');
+  }
+
+  function drawSpotMarketChart(result) {
+    spotMarketPreviewChart?.destroy();
+    spotMarketPreviewChart = null;
+    const canvas = $('spot-market-chart');
+    if (!canvas) return;
+    if (!window.Chart) {
+      canvas.parentElement.replaceChildren(element('p', 'text-danger small', 'Chart library could not be loaded.'));
+      return;
+    }
+    const labels = Array.from({ length: 96 }, (_, index) => {
+      const hour = String(Math.floor(index / 4)).padStart(2, '0');
+      const minute = String((index % 4) * 15).padStart(2, '0');
+      return `${hour}:${minute}`;
+    });
+    const yesterday = spotMarketChartPoints(result.yesterday_intervals, labels, result.timezone);
+    const today = spotMarketChartPoints(result.today_intervals, labels, result.timezone);
+    const tomorrow = spotMarketChartPoints(result.next_day_intervals, labels, result.timezone);
+    if (!yesterday || !today || !tomorrow ||
+      ![...yesterday, ...today, ...tomorrow].some((value) => value !== null)) {
+      canvas.parentElement.replaceChildren(element('p', 'text-danger small', 'Price series is invalid or empty.'));
+      return;
+    }
+    const styles = getComputedStyle($('spot-market-preview'));
+    const labelColor = styles.getPropertyValue('--bs-body-color').trim();
+    const gridColor = styles.getPropertyValue('--rct-line').trim();
+    const series = [
+      { label: 'Yesterday', data: yesterday, borderColor: styles.getPropertyValue('--spot-market-yesterday-line').trim() },
+      { label: 'Today', data: today, borderColor: styles.getPropertyValue('--spot-market-today-line').trim(), borderDash: [] },
+      { label: 'Tomorrow', data: tomorrow, borderColor: styles.getPropertyValue('--spot-market-tomorrow-line').trim(), borderDash: [6, 4] },
+    ];
+    spotMarketPreviewChart = new window.Chart(canvas, {
+      type: 'line',
+      data: {
+        labels, datasets: series.map(({ label, data, borderColor, borderDash }) => ({
+          label, data, borderColor, borderDash, backgroundColor: borderColor,
+          stepped: 'after', pointRadius: 0, pointHoverRadius: 4, borderWidth: 2, spanGaps: false,
+        }))
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false, animation: false,
+        plugins: {
+          legend: { display: true, labels: { color: labelColor, usePointStyle: false } },
+          tooltip: {
+            callbacks: {
+              title: (items) => labels[items[0].dataIndex],
+              label: (item) => `${item.dataset.label}: ${item.parsed.y.toLocaleString(undefined, { maximumFractionDigits: 2 })} ct/kWh`,
+            }
+          },
+        },
+        scales: {
+          x: {
+            type: 'category', grid: { color: gridColor }, ticks: {
+              color: labelColor, autoSkip: true, maxTicksLimit: 7, minRotation: 0, maxRotation: 0,
+            }
+          },
+          y: {
+            grid: { color: gridColor }, ticks: { color: labelColor },
+            title: { display: true, text: 'ct/kWh', color: labelColor }
+          },
+        },
+      },
+    });
+  }
+
+  // A compact status line (badge + context) followed by the day-ahead highlights. Replaces the old
+  // debug description list; provider and zone appear only here, not as equal-weight rows.
+  function renderSpotMarketPreview(result) {
+    const nodes = [];
+    const connected = result.status === 'connected';
+
+    const header = element('div', 'spot-market-preview-header');
+    const badge = element('span', `status-badge ${connected ? 'status-badge-success' : 'status-badge-danger'}`,
+      connected ? 'Connected' : 'Error');
+    header.append(badge);
+    nodes.push(header);
+
+    // Provider·zone sits left; the "Updated HH:MM" timestamp is right-aligned on the same line.
+    const contextRow = element('div', 'spot-market-preview-context');
+    contextRow.append(element('span', 'spot-market-preview-context-source',
+      `${providerLabel(result.provider)} · ${result.bidding_zone}`));
+    if (result.last_update) {
+      contextRow.append(element('span', 'spot-market-preview-updated', `Updated ${spotMarketShortTime(result.last_update)}`));
+    }
+    nodes.push(contextRow);
+
+    if (!connected) {
+      nodes.push(element('p', 'text-danger small mb-0', result.message || 'unknown error'));
+      return nodes;
+    }
+
+    if (result.next_day_intervals?.length > 0) {
+      const grid = element('div', 'spot-market-highlights');
+      grid.append(spotMarketHighlight('Lowest', result.min_price_eur_per_kwh, result.min_price_at));
+      grid.append(spotMarketHighlight('Highest', result.max_price_eur_per_kwh, result.max_price_at));
+      nodes.push(grid);
+    }
+
+    const meta = element('p', 'spot-market-preview-meta',
+      `Currency ${result.currency} · Source unit EUR/MWh · Bidding zone ${result.bidding_zone}`);
+    nodes.push(meta);
+
+    if (result.yesterday_message) {
+      nodes.push(element('p', 'text-secondary small mb-0', `Yesterday's prices are unavailable: ${result.yesterday_message}`));
+    }
+    if (result.next_day_message) {
+      nodes.push(element('p', 'text-secondary small mb-0', `Tomorrow's prices are not available yet: ${result.next_day_message}`));
+    }
+
+    const chartBox = element('div', 'spot-market-chart-box');
+    const canvas = element('canvas', '');
+    canvas.id = 'spot-market-chart';
+    canvas.setAttribute('role', 'img');
+    canvas.setAttribute('aria-label', 'Day-ahead prices for yesterday in grey, today in green, and tomorrow in blue. Each line can be toggled in the legend.');
+    chartBox.append(canvas);
+    nodes.push(chartBox);
+
+    return nodes;
+  }
+
+  // Fetch and render the day-ahead preview. Button-independent: the loading, success, and error
+  // states live only in the preview target. A newer call supersedes an in-flight one — it aborts
+  // the stale request and a generation guard discards a stale response that still arrives — so the
+  // rendered preview always reflects the latest parameter values.
+  async function previewSpotMarket() {
+    const target = $('spot-market-preview');
+    if (!target) return;
+    if (spotMarketPreviewController) {
+      spotMarketPreviewController.abort(Object.assign(new Error('Superseded by a newer request.'), { name: 'AbortError' }));
+    }
+    const controller = new AbortController();
+    const generation = ++spotMarketPreviewGeneration;
+    spotMarketPreviewController = controller;
+    spotMarketPreviewChart?.destroy();
+    spotMarketPreviewChart = null;
+    target.replaceChildren(spotMarketLoadingState());
+    try {
+      const result = await api('energy/spot-market/preview', { method: 'POST', body: JSON.stringify(spotMarketBody()), signal: controller.signal });
+      if (generation !== spotMarketPreviewGeneration) return;
+      target.replaceChildren(...renderSpotMarketPreview(result));
+      if (result.status === 'connected') drawSpotMarketChart(result);
+    } catch (error) {
+      // A superseded request's abort is expected; the newer request owns the target, so leave its
+      // loading state in place rather than overwriting it with this stale error.
+      if (generation !== spotMarketPreviewGeneration || error.name === 'AbortError') return;
+      target.replaceChildren(element('p', 'text-danger small mb-0', messageFrom(error)));
+      throw error;
+    } finally {
+      if (generation === spotMarketPreviewGeneration) spotMarketPreviewController = null;
+    }
+  }
+
+  function providerLabel(code) {
+    return (SPOT_MARKET_PROVIDERS.find(([value]) => value === code) || [code, code])[1];
   }
 
   const settingFields = [
@@ -3871,7 +4308,11 @@
     const result = await api('settings', { method: 'PUT', body: JSON.stringify(payload) });
     settingsCommitted = result.settings || { ...settingsCommitted, ...payload };
     adoptDevices(structuredClone(settingsCommitted.devices || payload.devices));
-    if (page === 'dashboard') { loadDashboard().catch((error) => toast(messageFrom(error), 'danger')); loadMetricCount(); }
+    if (page === 'dashboard') {
+      $('inverter-onboarding-hint').hidden = settingsDraft.devices.length !== 0;
+      loadDashboard().catch((error) => toast(messageFrom(error), 'danger'));
+      loadMetricCount();
+    }
   }
 
   function deviceFailureMessage(error, action) {

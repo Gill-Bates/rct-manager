@@ -28,6 +28,7 @@ from app.protocol.stream import StreamParser
 from app.protocol.types import WRITE_COMMANDS, FrameKind
 from app.transport.counters import DeviceCounters, EndpointCounters
 from app.transport.demux import Demultiplexer, PendingTransaction
+from app.transport.noise import CrcLogRateLimiter
 from app.transport.receiver import ArrivalLedger, Receiver, ReceiverExit
 from app.transport.send_gate import SendGate
 from app.transport.types import SendOutcome, TransactionRequest, TransactionResult
@@ -98,6 +99,9 @@ class TransportEndpoint:
         # The only asyncio.open_connection call site in the project.
         self._connector: Connector = connector or asyncio.open_connection
         self.counters = EndpointCounters()
+        # Lives for the whole endpoint, so CRC-warning escalation survives the per-connection
+        # StreamParser/Receiver rebuild instead of resetting on every reconnect.
+        self._crc_log = CrcLogRateLimiter(config.unexpected_frame_window_seconds)
         self._device_counters: dict[DeviceKey, DeviceCounters] = {}
         self._demux = Demultiplexer(self.counters, clock.monotonic, on_value, self._on_periodic)
         self._gate = SendGate(config.min_interval, clock, config.send_timeout_seconds)
@@ -110,7 +114,6 @@ class TransportEndpoint:
         self._lock_reason: LockReason | None = None
         self._closed = False
 
-    # ---- state -----------------------------------------------------------------------------
     @property
     def state(self) -> EndpointState:
         if self._lock_reason is not None:
@@ -164,7 +167,6 @@ class TransportEndpoint:
     def unregister_all_periodic(self, device_key: DeviceKey) -> None:
         self._demux.unregister_all_periodic(device_key)
 
-    # ---- lifecycle -------------------------------------------------------------------------
     async def start(self) -> None:
         """Try an initial connection; failure is logged and retried lazily by execute()."""
         try:
@@ -196,7 +198,6 @@ class TransportEndpoint:
             else:
                 writer.close()
 
-    # ---- connection ------------------------------------------------------------------------
     async def _ensure_connected(self) -> None:
         async with self._connect_lock:
             if self._writer is not None and not self._writer.is_closing():
@@ -237,6 +238,7 @@ class TransportEndpoint:
                 unexpected_limit=self._cfg.unexpected_frame_limit,
                 unexpected_window_seconds=self._cfg.unexpected_frame_window_seconds,
                 on_bootloader=self._on_bootloader,
+                crc_log=self._crc_log,
             )
             self._receiver_task = asyncio.create_task(self._receive(receiver, reader, writer, ledger))
 
@@ -300,7 +302,6 @@ class TransportEndpoint:
             with contextlib.suppress(OSError, TimeoutError, asyncio.CancelledError):
                 await asyncio.wait_for(writer.wait_closed(), 1.0)
 
-    # ---- lock state ------------------------------------------------------------------------
     def _on_bootloader(self) -> None:
         self._lock_reason = LockReason.BOOTLOADER_MAGIC
         self._locked_until = self._clock.monotonic() + self._cfg.bootloader_cooldown_seconds
@@ -313,7 +314,6 @@ class TransportEndpoint:
     def _may_probe(self, request: TransactionRequest) -> bool:
         return self.probe_due() and request.frame.command not in WRITE_COMMANDS
 
-    # ---- transactions ----------------------------------------------------------------------
     def _fail(
         self, request: TransactionRequest, error: DeviceApiError, outcome: SendOutcome | None = None
     ) -> TransactionResult:

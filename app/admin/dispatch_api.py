@@ -307,8 +307,8 @@ class CopyFrom(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     source_device_id: str = Field(min_length=1)
-    # The caller states what the target device is, so the comparison does not depend on the target
-    # already carrying a verified record (design 4.1: "mit den Angaben des Zielgeräts").
+    # The caller supplies the target identity, so comparison needs no existing verified target
+    # record (design 4.1: "with the target device's details").
     target_device_model: str = Field(min_length=1, max_length=128)
     target_firmware: str = Field(min_length=1, max_length=64)
 

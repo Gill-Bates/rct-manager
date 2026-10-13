@@ -17,7 +17,13 @@ from app.protocol.escaping import escape_body, unescape_body
 from app.protocol.frames import Frame, encode_frame
 from app.protocol.stream import StreamParser
 from app.protocol.types import Command
-from app.transport.noise import BURST_GAP_SECONDS, REMIND_SECONDS, StreamNoiseMonitor
+from app.transport.noise import (
+    BURST_GAP_SECONDS,
+    CRC_MIN_ERRORS,
+    REMIND_SECONDS,
+    CrcLogRateLimiter,
+    StreamNoiseMonitor,
+)
 
 FIXTURE = Path(__file__).parent / "fixtures" / "device_long_frames.hex"
 
@@ -367,6 +373,81 @@ def test_lasting_noise_is_reminded_rarely(caplog: pytest.LogCaptureFixture) -> N
         while now < 2 * REMIND_SECONDS + 10:  # first warning after 3 bursts, then +900 s each
             now = _bursts(monitor, now, 1, 10)
     assert _levels(caplog) == ["WARNING"] * 3  # start, plus one reminder per REMIND_SECONDS
+
+
+def _corrupt_crc_frame() -> bytes:
+    """A frame whose CRC does not match its body: the parser must count it and drop it."""
+    good = encode_frame(Frame(Command.RESPONSE, 0x1111, b"\x01\x02\x03\x04"))
+    wire = bytearray(good)
+    wire[-3] ^= 0x01  # flip a CRC byte so the frame fails CRC but still frames correctly
+    return bytes(wire)
+
+
+def test_single_crc_mismatch_is_counted_and_logged_at_debug_not_warning(caplog: pytest.LogCaptureFixture) -> None:
+    """The parser itself never WARNs about CRC errors (that would reset on every reconnect); it
+    counts them and logs the per-frame detail at DEBUG. A real CRC failure is still dropped."""
+    good = Frame(Command.RESPONSE, 0x2222, b"\x05\x06\x07\x08")
+    parser = StreamParser()
+    with caplog.at_level(logging.DEBUG, logger="app.protocol.stream"):
+        frames = parser.feed(_corrupt_crc_frame() + NULL + encode_frame(good))
+    assert frames == [good]  # the corrupt frame is dropped, the valid one still arrives
+    assert parser.stats.crc_errors == 1
+    records = [r for r in caplog.records if r.name == "app.protocol.stream"]
+    assert records and all(r.levelno == logging.DEBUG for r in records)
+    assert not [r for r in records if r.levelno >= logging.WARNING]
+    assert any("CRC mismatch" in r.getMessage() for r in records)
+
+
+def _crc_errors(limiter: CrcLogRateLimiter, now: float, errors: int, frames_each: int) -> float:
+    """Record ``errors`` CRC drops against ``frames_each`` good frames at ``now``, then evaluate."""
+    limiter.frames(now, frames_each)
+    limiter.crc_errors(now, errors)
+    limiter.evaluate(now)
+    return now
+
+
+def test_crc_rate_limiter_single_error_stays_quiet(caplog: pytest.LogCaptureFixture) -> None:
+    limiter = CrcLogRateLimiter(WINDOW)
+    with caplog.at_level(logging.DEBUG, logger="app.transport.receiver"):
+        _crc_errors(limiter, 0.0, 1, 100)
+    assert _levels(caplog) == []  # one invalid frame never escalates
+    assert not limiter.disturbed
+
+
+def test_crc_rate_limiter_tolerates_a_low_error_rate(caplog: pytest.LogCaptureFixture) -> None:
+    limiter = CrcLogRateLimiter(WINDOW)
+    with caplog.at_level(logging.INFO, logger="app.transport.receiver"):
+        # CRC_MIN_ERRORS errors but against a lot of traffic: below CRC_WARN_RATIO, so no warning.
+        _crc_errors(limiter, 0.0, CRC_MIN_ERRORS, 10_000)
+    assert _levels(caplog) == []
+    assert not limiter.disturbed
+
+
+def test_crc_rate_limiter_warns_once_on_a_sustained_rate_and_clears(caplog: pytest.LogCaptureFixture) -> None:
+    limiter = CrcLogRateLimiter(WINDOW)
+    with caplog.at_level(logging.INFO, logger="app.transport.receiver"):
+        _crc_errors(limiter, 0.0, 10, 20)  # 10 CRC errors against 20 frames: well above the ratio
+        assert limiter.disturbed
+        now = WINDOW
+        for _ in range(int(WINDOW) + 5):  # one quiet window of clean traffic
+            now += 1.0
+            limiter.frames(now, 5)
+            limiter.evaluate(now)
+    assert _levels(caplog) == ["WARNING", "INFO"]  # one warning on escalation, one info on clear
+    assert not limiter.disturbed
+
+
+def test_crc_rate_limiter_shared_across_reconnects_does_not_rewarn(caplog: pytest.LogCaptureFixture) -> None:
+    """A reconnect storm rebuilds the per-connection StreamParser, but the endpoint reuses ONE
+    CrcLogRateLimiter, so a lasting CRC-error phase warns at most once per CRC_REMIND_SECONDS
+    instead of once per reconnect."""
+    limiter = CrcLogRateLimiter(WINDOW)
+    with caplog.at_level(logging.WARNING, logger="app.transport.receiver"):
+        now = 0.0
+        for _ in range(10):  # ten short-lived connections, each sees a few CRC errors
+            _crc_errors(limiter, now, 5, 20)
+            now += 1.0  # all within one window and far below CRC_REMIND_SECONDS
+    assert _levels(caplog) == ["WARNING"]  # not one WARNING per reconnect
 
 
 def _underdeclared_long_frame(payload: bytes, object_id: int = 0x22334455, deficit: int = 16) -> bytes:

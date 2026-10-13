@@ -230,6 +230,19 @@ class PeriodicManager:
                 # Success means a value frame for this object id was actually observed: the device
                 # answers the registration with its first periodic value immediately.
                 if not result.ok:
+                    if self._endpoint.state is EndpointState.DISCONNECTED:
+                        # The failed request already dropped the connection (e.g. a response timeout
+                        # on an unanswered register tears the TCP link down). The epoch has not been
+                        # bumped yet - that happens on the NEXT request's reconnect - so the epoch
+                        # guard above would not catch this round until one more wasted request. Roll
+                        # back now: every registration made on this (now dead) connection is gone,
+                        # and the round must restart from scratch on a fresh epoch, never mixing
+                        # registrations across TCP epochs.
+                        self._endpoint.unregister_all_periodic(self._key)
+                        self._registered.clear()
+                        self.registrations = 0
+                        self.last_failure = "connection lost during registration"
+                        return False
                     log.warning("Periodic registration failed: no value frame for object 0x%08x", object_id)
                     self._endpoint.unregister_periodic(self._key, object_id)
                     continue

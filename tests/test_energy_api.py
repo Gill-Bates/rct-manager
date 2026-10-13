@@ -155,7 +155,6 @@ def energy_object_ids(harness) -> set[int]:
     return {catalog.object_entry(name).object_id for name in _ENERGY_METRIC_NAMES}
 
 
-# --- item 19: the happy path per action -----------------------------------------------------------
 
 
 async def test_the_task_body_charges_the_battery_to_the_target(tmp_path: Path) -> None:
@@ -268,7 +267,6 @@ async def test_the_public_api_has_no_mode_endpoint(tmp_path: Path) -> None:
         assert status.json()["armed"] is False
 
 
-# --- item 20: refusals ----------------------------------------------------------------------------
 
 
 async def test_a_device_in_mode_off_refuses_a_command(tmp_path: Path) -> None:
@@ -377,7 +375,6 @@ async def test_revoking_the_register_approvals_disables_the_actions(tmp_path: Pa
         assert refused.json()["code"] == "energy_action_unavailable"
 
 
-# --- item 21: one GET serves the whole card -------------------------------------------------------
 
 
 async def test_the_status_get_serves_the_whole_card_in_one_call(tmp_path: Path) -> None:
@@ -420,7 +417,6 @@ async def test_a_device_without_any_cached_reading_answers_with_five_absent_figu
             assert reading == {"value": None, "age_seconds": None, "stale": True}
 
 
-# --- item 22: _is_write_path ----------------------------------------------------------------------
 
 
 def fake_request(method: str, path: str) -> Request:
@@ -475,7 +471,6 @@ async def test_a_404_on_a_short_path_stays_a_plain_404_without_write_support() -
             assert response.json()["code"] == "not_found"
 
 
-# --- item 22b: the shutdown drain -----------------------------------------------------------------
 
 
 async def test_the_shutdown_drain_refuses_commands_on_both_surfaces_but_still_reports(
@@ -506,7 +501,6 @@ async def test_the_shutdown_drain_refuses_commands_on_both_surfaces_but_still_re
             harness.runtime.shutdown.plan = None
 
 
-# --- item 22c: the periodic wiring ----------------------------------------------------------------
 
 
 async def test_the_energy_metrics_are_pinned_at_startup_and_after_a_device_list_change(
@@ -585,7 +579,6 @@ async def test_with_periodic_reads_disabled_the_list_is_empty(tmp_path: Path) ->
         assert all(item["stale"] for item in status.json()["readings"].values())
 
 
-# --- item 23: the admin surface -------------------------------------------------------------------
 
 
 async def test_the_admin_surface_requires_a_session_and_the_csrf_header(tmp_path: Path) -> None:
@@ -860,7 +853,6 @@ async def test_the_soc_target_policy_round_trips_through_the_admin_surface(tmp_p
         assert refused.status_code == 422, refused.text
 
 
-# --- item 24: OpenAPI purity ----------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("vendor", [True, False])
@@ -894,7 +886,6 @@ def test_the_public_document_names_no_vendor_internal(tmp_path: Path, vendor: bo
     assert "grid_import_positive" not in json.dumps(energy_paths)
 
 
-# --- item 25: source purity -----------------------------------------------------------------------
 
 
 def test_only_the_rct_adapter_layer_names_the_soc_target_register() -> None:
@@ -1068,7 +1059,6 @@ async def test_write_support_switches_on_and_off_live_without_a_restart(tmp_path
         assert (await command(harness, {"action": "auto"})).json()["code"] == "energy_manager_off"
 
 
-# --- operating modes ------------------------------------------------------------------------------
 
 
 async def test_a_pat_cannot_switch_the_mode_and_the_session_can(tmp_path: Path) -> None:
@@ -1164,7 +1154,6 @@ async def test_off_write_failure_does_not_record_an_initial_choice(tmp_path: Pat
         assert "power_mng_soc_strategy" not in status["approved_write_names"]
 
 
-# --- guided hardware verification (Basic mode assistant) -------------------------------------------
 
 ASSIST = "/admin/api/energy/devices/main/verification-assistant"
 
@@ -1330,7 +1319,6 @@ async def test_an_unreadable_target_unit_blocks_the_commit(tmp_path: Path, fast_
         assert any("unit cannot be determined" in blocker for blocker in state["blockers"])
 
 
-# --- sign conventions: proven from the power balance, asked only where the data cannot prove them ---
 
 def sample(battery: float, grid: float, solar: float, load: float) -> BalanceSample:
     return BalanceSample(battery_w=battery, grid_w=grid, solar_w=solar, load_w=load)
@@ -1503,3 +1491,252 @@ async def test_without_a_usable_balance_the_operator_is_asked_and_a_contradictio
             f"{ASSIST}/direction", headers=headers, json={"kind": "battery", "answer": "discharging"}
         )).json()
         assert step_of(agreed, "battery")["method"] == "both"
+
+
+
+from datetime import UTC, datetime
+
+from app.spotmarket.base import SpotMarketConnectionError
+from app.spotmarket.models import (
+    SpotMarketProvider,
+    SpotPriceInterval,
+    SpotPriceSnapshot,
+)
+
+SPOT_CONFIG = "/admin/api/energy/spot-market/config"
+SPOT_PREVIEW = "/admin/api/energy/spot-market/preview"
+
+
+def spot_market_settings(tmp_path: Path):
+    """Settings with an admin store (so the admin energy router is mounted) but no dispatch.
+
+    Spot-market config needs the admin surface, not write support; this mirrors how
+    ``energy_settings`` pre-creates the admin database at the path ``create_app`` will reopen, with
+    the bootstrap password already changed to ``PASSWORD``.
+    """
+    admin_path = tmp_path / "spot-admin.db"
+    store = AdminStore(admin_path, SECRET)
+    password = store.initialize()
+    assert password is not None
+    assert store.change_password(password, PASSWORD)
+    store.close()
+    return make_settings(hmac_secret=SECRET, admin_db_path=admin_path)
+
+
+def _spot_body(**overrides) -> dict:
+    base = {
+        "enabled": True,
+        "provider": "energy_charts",
+        "bidding_zone": "DE-LU",
+        "fee_region": {"code": "netze-bw", "label": "Netze BW"},
+    }
+    return {**base, **overrides}
+
+
+async def test_spot_market_config_defaults_then_saves_and_reloads(tmp_path: Path) -> None:
+    async with running_app(spot_market_settings(tmp_path)) as harness:
+        headers = await admin_session(harness)
+        default = await harness.client.get(SPOT_CONFIG, headers=headers)
+        assert default.status_code == 200, default.text
+        assert default.json()["enabled"] is False
+        assert default.json()["bidding_zone"] == "DE-LU"
+
+        saved = await harness.client.put(SPOT_CONFIG, headers=headers, json=_spot_body())
+        assert saved.status_code == 200, saved.text
+        body = saved.json()
+        assert body["enabled"] is True
+        # Fee region and bidding zone stay separate in the stored and returned shape.
+        assert body["bidding_zone"] == "DE-LU"
+        assert body["fee_region"] == {"code": "netze-bw", "label": "Netze BW"}
+        # Currency and price unit are provider metadata, returned read-only, not operator input.
+        assert body["currency"] == "EUR"
+        assert body["price_unit"] == "EUR/MWh"
+
+        reloaded = await harness.client.get(SPOT_CONFIG, headers=headers)
+        assert reloaded.json() == body
+        # The in-process copy on app.state is updated too, not only the stored record.
+        assert harness.app.state.spotmarket_config.bidding_zone == "DE-LU"
+        assert harness.app.state.spotmarket_config.fee_region.code == "netze-bw"
+
+
+async def test_spot_market_config_persists_in_the_admin_store(tmp_path: Path) -> None:
+    async with running_app(spot_market_settings(tmp_path)) as harness:
+        headers = await admin_session(harness)
+        await harness.client.put(SPOT_CONFIG, headers=headers, json=_spot_body(bidding_zone="AT"))
+        stored = harness.app.state.admin_store.get("spotmarket_config")
+    assert stored["bidding_zone"] == "AT"
+    assert stored["provider"] == "energy_charts"
+
+
+async def test_spot_market_config_rejects_a_bad_provider_or_zone(tmp_path: Path) -> None:
+    async with running_app(spot_market_settings(tmp_path)) as harness:
+        headers = await admin_session(harness)
+        for bad in (
+            _spot_body(provider="made_up"),
+            _spot_body(bidding_zone=""),
+        ):
+            response = await harness.client.put(SPOT_CONFIG, headers=headers, json=bad)
+            assert response.status_code == 422, (bad, response.text)
+
+
+async def test_spot_market_config_rejects_an_operator_supplied_api_url(tmp_path: Path) -> None:
+    # Finding 1 (SSRF): the save body forbids extra fields, so an attempt to smuggle a network
+    # target back in through ``api_url`` is a hard 422, never silently stored.
+    async with running_app(spot_market_settings(tmp_path)) as harness:
+        headers = await admin_session(harness)
+        response = await harness.client.put(
+            SPOT_CONFIG, headers=headers, json=_spot_body(api_url="http://127.0.0.1/price")
+        )
+        assert response.status_code == 422, response.text
+
+
+async def test_spot_market_config_requires_an_admin_session(tmp_path: Path) -> None:
+    async with running_app(spot_market_settings(tmp_path)) as harness:
+        # No session cookie and no CSRF header: the mutation is refused.
+        anonymous = await harness.client.put(SPOT_CONFIG, json=_spot_body(), headers={"Origin": "http://test"})
+        assert anonymous.status_code in (401, 403)
+
+
+async def test_spot_market_preview_summarises_a_fetched_snapshot(tmp_path: Path) -> None:
+    from decimal import Decimal
+
+    start = datetime(2026, 1, 1, 0, 0, tzinfo=UTC)
+    intervals = (
+        SpotPriceInterval(start, start.replace(minute=15), Decimal("0.20")),
+        SpotPriceInterval(start.replace(minute=15), start.replace(minute=30), Decimal("0.10")),
+        SpotPriceInterval(start.replace(minute=30), start.replace(minute=45), Decimal("0.30")),
+    )
+
+    class _StubProvider:
+        def fetch_today(self, config):
+            return self.fetch_day_ahead(config)
+
+        def fetch_yesterday(self, config, timezone):
+            return self.fetch_day_ahead(config)
+
+        def fetch_day_ahead(self, config):
+            return SpotPriceSnapshot(
+                provider=SpotMarketProvider.ENERGY_CHARTS,
+                bidding_zone=config.bidding_zone,
+                currency="EUR",  # provider metadata, not operator config
+                fetched_at=datetime(2026, 1, 1, 0, 20, tzinfo=UTC),
+                intervals=intervals,
+            )
+
+    async with running_app(spot_market_settings(tmp_path)) as harness:
+        harness.app.state.spotmarket_provider = _StubProvider()
+        headers = await admin_session(harness)
+        response = await harness.client.post(SPOT_PREVIEW, headers=headers, json=_spot_body())
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["status"] == "connected"
+        assert body["intervals_available"] == 3
+        assert body["min_price_eur_per_kwh"] == 0.10
+        assert body["max_price_eur_per_kwh"] == 0.30
+        assert len(body["today_intervals"]) == 3
+        assert len(body["next_day_intervals"]) == 3
+        assert len(body["yesterday_intervals"]) == 3
+        # 00:20 falls inside the second interval (00:15–00:30).
+        assert body["current_price_eur_per_kwh"] == 0.10
+
+
+async def test_spot_market_preview_reports_a_provider_failure_as_an_error_status(tmp_path: Path) -> None:
+    class _FailingProvider:
+        def fetch_today(self, config):
+            raise SpotMarketConnectionError("Energy-Charts is unreachable")
+
+        def fetch_day_ahead(self, config):
+            raise SpotMarketConnectionError("Energy-Charts is unreachable")
+
+    async with running_app(spot_market_settings(tmp_path)) as harness:
+        harness.app.state.spotmarket_provider = _FailingProvider()
+        headers = await admin_session(harness)
+        response = await harness.client.post(SPOT_PREVIEW, headers=headers, json=_spot_body())
+        # A dead external API is a 200 with status=error, never a 5xx: it must not look like a
+        # server fault and must stay isolated from the inverter control path.
+        assert response.status_code == 200, response.text
+        assert response.json()["status"] == "error"
+        assert "unreachable" in response.json()["message"]
+
+
+async def test_spot_market_config_rejects_operator_currency_or_price_unit(tmp_path: Path) -> None:
+    # Finding 2: currency and price unit are provider metadata, not operator input. The save body
+    # forbids extra fields, so smuggling either one back in is a hard 422, never stored.
+    async with running_app(spot_market_settings(tmp_path)) as harness:
+        headers = await admin_session(harness)
+        for bad in (_spot_body(currency="USD"), _spot_body(price_unit="EUR/kWh")):
+            response = await harness.client.put(SPOT_CONFIG, headers=headers, json=bad)
+            assert response.status_code == 422, (bad, response.text)
+
+
+async def test_spot_market_config_preserves_the_fee_region_concept(tmp_path: Path) -> None:
+    # Amendment: the fee_region concept stays in the model and persistence even though the UI no
+    # longer offers a field for it; a save that carries it through keeps the stored value.
+    async with running_app(spot_market_settings(tmp_path)) as harness:
+        headers = await admin_session(harness)
+        await harness.client.put(
+            SPOT_CONFIG, headers=headers, json=_spot_body(fee_region={"code": "netze-bw", "label": "Netze BW"})
+        )
+        reloaded = await harness.client.get(SPOT_CONFIG, headers=headers)
+    assert reloaded.json()["fee_region"] == {"code": "netze-bw", "label": "Netze BW"}
+    assert harness.app.state.spotmarket_config.fee_region.code == "netze-bw"
+
+
+SPOT_ZONES = "/admin/api/energy/spot-market/bidding-zones"
+
+
+async def test_spot_market_bidding_zones_are_served_from_the_cache(tmp_path: Path) -> None:
+    # The endpoint reads the zone list cache-first; the stub cache answers without any network call.
+    from app.spotmarket.metadata import ZoneListing
+
+    listing = ZoneListing(
+        zones=("DE-LU", "AT", "FR"), default="DE-LU", stale=False, last_update=datetime(2026, 1, 1, tzinfo=UTC)
+    )
+
+    class _StubCache:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def get(self) -> ZoneListing:
+            self.calls += 1
+            return listing
+
+    async with running_app(spot_market_settings(tmp_path)) as harness:
+        harness.app.state.spotmarket_zone_cache = _StubCache()
+        headers = await admin_session(harness)
+        response = await harness.client.get(SPOT_ZONES, headers=headers)
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["zones"] == ["DE-LU", "AT", "FR"]
+        assert body["default"] == "DE-LU"
+        assert body["stale"] is False
+
+
+async def test_spot_market_bidding_zones_report_a_stale_list(tmp_path: Path) -> None:
+    from app.spotmarket.metadata import ZoneListing
+
+    class _StaleCache:
+        def get(self) -> ZoneListing:
+            return ZoneListing(
+                zones=("DE-LU",), default="DE-LU", stale=True, last_update=datetime(2026, 1, 1, tzinfo=UTC)
+            )
+
+    async with running_app(spot_market_settings(tmp_path)) as harness:
+        harness.app.state.spotmarket_zone_cache = _StaleCache()
+        headers = await admin_session(harness)
+        response = await harness.client.get(SPOT_ZONES, headers=headers)
+        assert response.status_code == 200, response.text
+        assert response.json()["stale"] is True
+
+
+async def test_spot_market_bidding_zones_report_a_total_failure_as_502(tmp_path: Path) -> None:
+    class _DeadCache:
+        def get(self):
+            raise SpotMarketConnectionError("down and nothing cached")
+
+    async with running_app(spot_market_settings(tmp_path)) as harness:
+        harness.app.state.spotmarket_zone_cache = _DeadCache()
+        headers = await admin_session(harness)
+        response = await harness.client.get(SPOT_ZONES, headers=headers)
+        # No cached list at all is a bad-gateway, isolated from inverter control; never a 5xx crash.
+        assert response.status_code == 502, response.text

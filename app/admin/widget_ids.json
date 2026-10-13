@@ -1,0 +1,15 @@
+[
+  "pv-power",
+  "grid-power",
+  "house-power",
+  "battery-soc",
+  "tsdb-status",
+  "metric-count",
+  "devices",
+  "device-count",
+  "connected-count",
+  "days-to-calibration",
+  "spot-price-current",
+  "spot-market-status",
+  "spot-price-curve"
+]
