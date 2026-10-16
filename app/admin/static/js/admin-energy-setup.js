@@ -732,6 +732,7 @@ function setEnergyNote(host, text, { kind = 'secondary', action = null } = {}) {
 async function pollEnergy() {
   if (energyPolling) return;
   energyPolling = true;
+  clearTimeout(energyPollTimer); // one timer only: a manual or visibility poll restarts the cycle
   const host = $('energy-list');
   const requestedAt = ++energyClock;
   // A hung fetch must not stop the polling for good; the abort lands in the failure branch.
@@ -739,6 +740,7 @@ async function pollEnergy() {
   const timer = setTimeout(() => controller.abort(Object.assign(new Error('The energy request timed out.'), { name: 'TimeoutError' })), ENERGY_POLL_TIMEOUT_MS);
   try {
     const devices = await api('energy/devices', { signal: controller.signal });
+    energyPollDelay = ENERGY_POLL_MS;
     const ids = devices.map((item) => item.device_id);
     // Keep panels of devices that still exist (their unsaved input survives); add or drop the rest.
     for (const [id, panel] of [...energyPanels]) {
@@ -776,6 +778,7 @@ async function pollEnergy() {
     // every panel; it clears on the next 200. Any other failure (including a timeout) is a
     // transient note (§13).
     const poll503 = error && error.status === 503;
+    energyPollDelay = poll503 ? ENERGY_POLL_BACKOFF_MS : ENERGY_POLL_MS;
     for (const panel of energyPanels.values()) panel.setPollState({ poll503, pollFailed: !poll503 });
     if (!energyPanels.size) {
       if (poll503) {
@@ -784,7 +787,18 @@ async function pollEnergy() {
         setEnergyNote(host, 'Energy data unavailable. Retrying …', { kind: 'warning' });
       }
     }
-  } finally { clearTimeout(timer); energyPolling = false; }
+  } finally {
+    clearTimeout(timer);
+    energyPolling = false;
+    scheduleEnergyPoll();
+  }
+}
+
+function scheduleEnergyPoll() {
+  clearTimeout(energyPollTimer);
+  energyPollTimer = setTimeout(() => {
+    if (document.hidden) scheduleEnergyPoll(); else pollEnergy();
+  }, energyPollDelay);
 }
 
 // One line per inverter. An unconnected inverter shows its configured host, never the internal
@@ -1635,7 +1649,6 @@ function initEnergy() {
   initDryRunPlan();
   pollEnergy();
   pollHardwareStrategies();
-  setInterval(() => { if (!document.hidden) pollEnergy(); }, ENERGY_POLL_MS);
   setInterval(() => { if (!document.hidden) pollHardwareStrategies(); }, 30000);
   document.addEventListener('visibilitychange', () => { if (!document.hidden) pollEnergy(); });
   document.addEventListener('visibilitychange', () => { if (!document.hidden) pollHardwareStrategies(); });

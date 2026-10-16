@@ -5,6 +5,7 @@
 - ``Fix`` Write allowlist bounds and step must be finite numbers, and a spot-price day (today, tomorrow, yesterday) is only accepted when it covers a complete local day (DST days included); an empty next-day feed counts as not yet published.
 - ``Fix`` Reading the bidding-zone list no longer waits for a running provider refresh, and a damaged stored zone catalog is ignored and reloaded.
 
+- ``Fix`` The Energy page no longer floods the log with errors while write support is off: the expected 503 from the energy device poll is logged at DEBUG, and the page polls every 30 s instead of 3 s until the next success.
 
 
 <details markdown="1">

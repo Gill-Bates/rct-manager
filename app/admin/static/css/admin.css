@@ -1675,8 +1675,17 @@ body {
 
 .plan-loading {
     min-height: 8rem;
-    align-items: flex-start;
     justify-content: flex-start;
+}
+
+/* The result column is only 7/12 wide next to the consumption history: while the plan is loading,
+   it spans the whole tile so the spinner sits in the horizontal middle of the card. */
+#energy-plan-result:has(> .plan-loading) {
+    width: 100%;
+}
+.col-xl-7:has(> #energy-plan-result > .plan-loading) {
+    flex: 0 0 auto;
+    width: 100%;
 }
 
 .spot-market-chart-box {

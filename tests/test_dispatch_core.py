@@ -1441,3 +1441,16 @@ async def test_a_live_limit_that_drops_then_rises_recovers_to_the_durable_bound(
     status = await dispatch.tick("main")
     assert status.commanded_power_w == 3000
     assert status.max_power_w == 3000
+
+
+def test_seed_default_fallback_gives_every_device_conservative_limits_only_when_requested() -> None:
+    """Basic mode needs no manual power limits: live dispatch seeds a default for a device without a
+    record, an existing record wins, and the planning-only path still reports no limits."""
+    from app.api.app_factory import _seed_limits
+    from app.limits import DEFAULT_DEVICE_POWER_LIMIT_W
+
+    settings = _seed_settings(dispatch_max_charge_power_w=None, dispatch_max_discharge_power_w=None)
+    assert _seed_limits(settings, {}) == {}
+    seeded = _seed_limits(settings, {"slave1": DeviceLimits(4000, 6000)}, default_fallback=True)
+    assert seeded["main"] == DeviceLimits(DEFAULT_DEVICE_POWER_LIMIT_W, DEFAULT_DEVICE_POWER_LIMIT_W)
+    assert seeded["slave1"] == DeviceLimits(4000, 6000)

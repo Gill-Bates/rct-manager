@@ -28,9 +28,15 @@ _BROWSER_PROBES = frozenset({"/.well-known/appspecific/com.chrome.devtools.json"
 _READ_ONLY_POSTS = frozenset({"/admin/api/energy/spot-market/preview", "/admin/api/energy/weather/preview"})
 
 
+# Answered 503 while write support is off, a steady state the admin GUI polls every few seconds.
+_NOT_CONFIGURED_POLLS = frozenset({"/admin/api/energy/devices"})
+
+
 def access_log_level(method: str, path: str, status: int) -> int:
     """Errors and warnings always show; admin actions (login, logout, password, settings, tokens)
     are INFO; plain browser traffic of the admin GUI (pages, assets, session polls) is DEBUG."""
+    if status == 503 and method == "GET" and path in _NOT_CONFIGURED_POLLS:
+        return logging.DEBUG
     if status >= 500:
         return logging.ERROR
     if status == 404 and path in _BROWSER_PROBES:

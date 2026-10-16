@@ -43,12 +43,15 @@
   const ENERGY_REQUIRED_CAPABILITIES = ['write_path_convention', 'battery_power_sign_convention', 'grid_power_sign_convention'];
   const ENERGY_POLICY_MODES = [['business_target', 'Business target'], ['below_current_soc', 'Below current SoC']];
   const ENERGY_POLL_MS = 3000;
+  const ENERGY_POLL_BACKOFF_MS = 30000; // write support off (503) is a steady state: poll rarely
   const ENERGY_POLL_TIMEOUT_MS = 8000;
   const ENERGY_IDLE_WATTS = 20; // below this a flow counts as standing still
   const SVG_NS = 'http://www.w3.org/2000/svg';
   const energyPanels = new Map();
   const energyHardwareStrategies = new Map();
   let energyPolling = false;
+  let energyPollDelay = ENERGY_POLL_MS;
+  let energyPollTimer = null;
   // Logical clock ordering poll requests against finished panel actions, so a poll requested before
   // an action completed never overwrites its result.
   let energyClock = 0;

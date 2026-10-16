@@ -54,6 +54,7 @@ from app.dispatch.capabilities import (
 )
 from app.dispatch.controller import DispatchController
 from app.dispatch.models import DeviceLimits, DispatchConfig, StopReason
+from app.limits import DEFAULT_DEVICE_POWER_LIMIT_W
 from app.dispatch.soc_policy import SocTargetPolicy, SocTargetPolicyRegistry
 from app.dispatch.store import DispatchStore
 from app.energy.manager import EnergyManager
@@ -558,7 +559,9 @@ def _effective_periodic_names(
     return _with_dashboard_metric_names(names, catalog)
 
 
-def _seed_limits(settings: Settings, stored: dict[str, DeviceLimits]) -> dict[str, DeviceLimits]:
+def _seed_limits(
+    settings: Settings, stored: dict[str, DeviceLimits], *, default_fallback: bool = False
+) -> dict[str, DeviceLimits]:
     """Stored operator limits win; the environment only seeds a device that has no record yet.
 
     Usable capacity is per-device (P2-8): an install may run several batteries with different usable
@@ -579,6 +582,14 @@ def _seed_limits(settings: Settings, stored: dict[str, DeviceLimits]) -> dict[st
                     settings.dispatch_max_discharge_power_w,
                     usable_capacity_wh=legacy_capacity,
                 ),
+            )
+    # Live dispatch only: Basic mode never asks for power limits, so a device with neither a stored
+    # record nor an environment value gets the conservative default (in memory; Expert can persist).
+    if default_fallback:
+        for device in settings.devices:
+            stored.setdefault(
+                device.device_id,
+                DeviceLimits(DEFAULT_DEVICE_POWER_LIMIT_W, DEFAULT_DEVICE_POWER_LIMIT_W, usable_capacity_wh=legacy_capacity),
             )
     if legacy_capacity is not None:
         for device_id, limits in stored.items():
@@ -1095,7 +1106,7 @@ def _lifespan(
                 # Rebuilt the same way as at boot: stored operator values win, the environment only
                 # seeds a device that has no record, so a device-list change cannot silently drop a
                 # limit or an engineering switch an operator set.
-                runtime.dispatch.set_limits(_seed_limits(target, stored))
+                runtime.dispatch.set_limits(_seed_limits(target, stored, default_fallback=True))
 
             for serializer in parts.serializers:
                 serializer.start()
@@ -1346,7 +1357,7 @@ def _create_dispatch(runtime: Runtime, config: DispatchConfig) -> "_DispatchBund
     # The store is the truth for the per-device limits and the engineering switch: they are an
     # operator setting, made through the admin dispatch API, and must survive a restart. The
     # environment values are only a bootstrap seed for a device that has no record yet.
-    limits = _seed_limits(settings, dispatch_store.get_device_configs())
+    limits = _seed_limits(settings, dispatch_store.get_device_configs(), default_fallback=True)
     controller = DispatchController(
         dispatch_gateway,
         dispatch_store,

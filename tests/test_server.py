@@ -247,6 +247,9 @@ def test_sigterm_drains_answers_503_and_exits_cleanly(tmp_path) -> None:
         ("POST", "/admin/api/login", 401, logging.WARNING),
         ("GET", "/admin/static/missing.js", 404, logging.WARNING),
         ("GET", "/api/v1/devices", 500, logging.ERROR),
+        # Dispatch not configured is an expected steady state for the GUI's energy poll.
+        ("GET", "/admin/api/energy/devices", 503, logging.DEBUG),
+        ("GET", "/admin/api/energy/devices", 500, logging.ERROR),
     ],
 )
 def test_access_log_level(method, path, status, level):
