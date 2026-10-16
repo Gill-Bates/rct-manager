@@ -40,7 +40,9 @@ class SolarForecastSource(Protocol):
     blocking ``urllib`` and run off the event loop via a thread, matching the spot-market provider.
     """
 
-    def fetch(self, config: WeatherConfig, now: datetime, horizon: timedelta) -> SolarForecast:
+    def fetch(
+        self, config: WeatherConfig, now: datetime, horizon: timedelta
+    ) -> SolarForecast:
         """Fetch a solar-production forecast for ``config`` covering ``horizon`` from ``now``.
 
         Returns the neutral :class:`SolarForecast` (timezone-aware UTC intervals, ``energy_wh``).

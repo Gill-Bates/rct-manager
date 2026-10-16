@@ -51,7 +51,11 @@ class TimezoneResolver:
         cache: TtlCache | None = None,
     ) -> None:
         self._http = JsonHttpClient("Open-Meteo timezone lookup", sleep=sleep)
-        self._cache = cache if cache is not None else TtlCache(_CACHE_MAX_ENTRIES, _CACHE_TTL_SECONDS)
+        self._cache = (
+            cache
+            if cache is not None
+            else TtlCache(_CACHE_MAX_ENTRIES, _CACHE_TTL_SECONDS)
+        )
 
     def resolve(self, latitude: float, longitude: float) -> str:
         """Return the IANA timezone for ``latitude``/``longitude`` or raise on failure.
@@ -63,7 +67,10 @@ class TimezoneResolver:
             raise WeatherResponseError("Coordinates must be finite numbers")
         if not (-90 <= latitude <= 90) or not (-180 <= longitude <= 180):
             raise WeatherResponseError("Coordinates are out of range")
-        key = (round(latitude, _COORDINATE_PRECISION), round(longitude, _COORDINATE_PRECISION))
+        key = (
+            round(latitude, _COORDINATE_PRECISION),
+            round(longitude, _COORDINATE_PRECISION),
+        )
         cached = self._cache.get(key)
         if cached is not None:
             return str(cached)
@@ -92,4 +99,8 @@ class TimezoneResolver:
 def _is_finite(value: object) -> bool:
     import math
 
-    return not isinstance(value, bool) and isinstance(value, (int, float)) and math.isfinite(value)
+    return (
+        not isinstance(value, bool)
+        and isinstance(value, (int, float))
+        and math.isfinite(value)
+    )

@@ -148,7 +148,9 @@ def require_country_code(country_code: str | None) -> str | None:
         return None
     normalized = normalize_country_code(country_code)
     if normalized is None:
-        raise WeatherResponseError("The country filter must be a two-letter country code")
+        raise WeatherResponseError(
+            "The country filter must be a two-letter country code"
+        )
     return normalized
 
 
@@ -178,7 +180,11 @@ class PhotonGeocoder:
             timeout_seconds=LOOKUP_TIMEOUT_SECONDS,
             max_attempts=LOOKUP_MAX_ATTEMPTS,
         )
-        self._cache = cache if cache is not None else TtlCache(CACHE_MAX_ENTRIES, CACHE_TTL_SECONDS)
+        self._cache = (
+            cache
+            if cache is not None
+            else TtlCache(CACHE_MAX_ENTRIES, CACHE_TTL_SECONDS)
+        )
 
     def search(
         self, query: str, *, count: int = MAX_RESULTS, country_code: str | None = None
@@ -259,7 +265,11 @@ class OpenMeteoGeocoder:
             timeout_seconds=LOOKUP_TIMEOUT_SECONDS,
             max_attempts=LOOKUP_MAX_ATTEMPTS,
         )
-        self._cache = cache if cache is not None else TtlCache(CACHE_MAX_ENTRIES, CACHE_TTL_SECONDS)
+        self._cache = (
+            cache
+            if cache is not None
+            else TtlCache(CACHE_MAX_ENTRIES, CACHE_TTL_SECONDS)
+        )
 
     def search(
         self, query: str, *, count: int = MAX_RESULTS, country_code: str | None = None
@@ -292,7 +302,12 @@ class OpenMeteoGeocoder:
 
     def _build_url(self, query: str, count: int, country: str | None) -> str:
         """Build an HTTPS geocoding URL by varying only query parameters."""
-        params = [("name", query), ("count", str(count)), ("format", "json"), ("language", "en")]
+        params = [
+            ("name", query),
+            ("count", str(count)),
+            ("format", "json"),
+            ("language", "en"),
+        ]
         if country is not None:
             # Open-Meteo expects the alpha-2 code upper-cased for its countryCode filter.
             params.append(("countryCode", country.upper()))
@@ -345,7 +360,11 @@ class OpenMeteoGeocoder:
             admin1=optional_str(record.get("admin1")),
             admin2=optional_str(record.get("admin2")),
             # GeoNames feature codes starting with PPL are populated places; only those are a city.
-            city=name.strip() if str(record.get("feature_code") or "").startswith("PPL") else None,
+            city=(
+                name.strip()
+                if str(record.get("feature_code") or "").startswith("PPL")
+                else None
+            ),
             timezone=optional_timezone(record.get("timezone")),
             postal_code=postal_code,
         )
@@ -382,14 +401,20 @@ def _map_photon_feature(feature: object, query: str) -> GeocodingResult | None:
         # by the place it belongs to.
         postal_code = raw_name
         city = optional_str(properties.get("city"))
-        name = city or district or optional_str(properties.get("locality")) or postal_code
+        name = (
+            city or district or optional_str(properties.get("locality")) or postal_code
+        )
     else:
         # Any other feature claims a postcode only when the query matched its own code exactly, so a
         # place-name search never shows an arbitrary postcode. A populated place is its own city.
         own_code = optional_str(properties.get("postcode"))
         postal_code = _exact_postal_match(query, (own_code,) if own_code else ())
         city = optional_str(properties.get("city"))
-        if city is None and osm_key == "place" and osm_value in _PHOTON_SETTLEMENT_VALUES:
+        if (
+            city is None
+            and osm_key == "place"
+            and osm_value in _PHOTON_SETTLEMENT_VALUES
+        ):
             city = raw_name
         # For an exact postcode search the postal locality titles the hit, not the matched OSM
         # object (which can be an administrative area); a normal search keeps the provider's name.
@@ -418,7 +443,11 @@ def _map_photon_feature(feature: object, query: str) -> GeocodingResult | None:
 def is_finite_number(value: object) -> bool:
     import math
 
-    return not isinstance(value, bool) and isinstance(value, (int, float)) and math.isfinite(value)
+    return (
+        not isinstance(value, bool)
+        and isinstance(value, (int, float))
+        and math.isfinite(value)
+    )
 
 
 def optional_str(value: object) -> str | None:

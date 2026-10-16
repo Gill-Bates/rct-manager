@@ -1,3 +1,10 @@
+## [1.2.2] - 2026-xx-xx
+
+
+
+<details markdown="1">
+<summary>Previous versions...</summary>
+
 ## [1.2.1] - 2026-10-16
 
 - ``New`` Configure an Open-Meteo solar forecast in Energy Manager (location search via Photon, production curve preview) with an optional read-only dashboard widget.
@@ -16,9 +23,6 @@
 - ``Fix`` On narrow screens the inverter card header keeps title, status badge, and delete button on one row, and the four energy status tiles stay in one row down to 320 px.
 - ``Security`` Dispatch refuses stale control telemetry before the first setpoint and blocks capability, limit, or policy changes while a restore is pending; direct writes to battery control registers can no longer interleave with an active dispatch command.
 - ``Security`` The inverter's `logger_*_log_ts` history objects are read-only; a write allowlist listing one is rejected at startup with the metric name. Logging out clears cached inverter telemetry from the browser.
-
-<details markdown="1">
-<summary>Previous versions...</summary>
 
 ## [1.2.0] - 2026-10-13
 
