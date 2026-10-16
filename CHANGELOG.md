@@ -1,27 +1,17 @@
 ## [1.2.2] - 2026-xx-xx
 
-- ``New`` After the first forced password change, you must accept a one-time usage and liability disclaimer before the admin interface can be used; once accepted it never asks again and survives later password changes.
-- ``New`` The battery health dashboard widgets now show one line per inverter when several are configured, each with the inverter's name and its serial on hover, instead of merging them into a single value.
-- ``New`` The Charging plan's Expert diagnostics show a battery calibration history: the usable capacity measured by the BMS over time against the datasheet capacity, kept per inverter serial and read from the local store only. A commissioning date entered by hand starts the curve; deriving it from the inverter energy logs is unverified on hardware and off by default (`battery_commissioning_derivation_enabled`); a replaced battery (new BMS serial) starts a new series.
-- ``New`` The dashboard has battery health widgets (usable kWh, remaining % vs datasheet, cycles, last calibration, commissioning date, and a degradation chart), off by default and shown per inverter serial. The calibration history is recorded independently of the Energy Manager.
-- ``Fix`` The battery health dashboard tiles list one inverter per row under its display name (serial in the tooltip) instead of one clipped line, and the widgets start directly below the inverter overview instead of far down the page.
-- ``Fix`` In the dashboard's "Add widget" dialog, clicking Add or Remove keeps keyboard focus on the same widget's button, so Escape still closes the dialog (it did nothing after the first click since 1.2.0); closing it with Escape no longer discards the unsaved layout edit.
-- ``Change`` The usable battery capacity is capped by the BMS ratio of measured to rated Ah (never above the datasheet value); the two Ah registers are refreshed in the background about once a day. A single tower accepts 2 to 6 modules, two towers only 4+4, 5+5 or 6+6.
-- ``New`` The Charging plan has a "Battery remaining" tile: the energy currently usable in the battery (verified usable capacity x measured SoC, e.g. 3.42 kWh, 33 % SoC of 10.37 kWh usable). It comes from the same battery snapshot as the plan (new `battery` block in the dynamic-plan response) and shows "—" while the battery state is unavailable.
-- ``Change`` The Charging plan uses the full width: four equal KPI tiles (2 x 2 on tablets, stacked on phones), the schedule chart below, the household consumption history underneath without reserving empty space, and a compact header with the Inverter select and Expert switch beside the title.
-- ``Change`` The Charging plan reloads on its own (every 5 minutes, when the tab becomes visible again, every 10 s while an input is pending); the Refresh button is gone. The next-charge figures sit in one row and the status cards have no frame.
-- ``Change`` A device without configured or stored power limits falls back to 3 kW charge and discharge power for dispatch; Expert mode can store its own values. An inverter that does not answer shows its host instead of "n/a" in the Energy page hardware summary.
-- ``Fix`` The verified usable battery capacity now uses the same debounced module topology as the module display, so one flipped complete read of the module serials no longer changes it.
-- ``Fix`` The site timezone lookup no longer reuses a cached zone for nearby coordinates (a timezone boundary could yield the wrong zone for up to 24 h), and a place search no longer shows a postal code taken from a postcode-area hit unless the query matched it exactly.
-- ``Fix`` A write cancelled during its quiet window now drops the connection, so a late write echo cannot answer the next request; a failed connection setup closes its socket.
-- ``Fix`` Write allowlist bounds and step must be finite numbers, and a spot-price day (today, tomorrow, yesterday) is only accepted when it covers a complete local day (DST days included); an empty next-day feed counts as not yet published.
-- ``Fix`` Reading the bidding-zone list no longer waits for a running provider refresh, and a damaged stored zone catalog is ignored and reloaded.
-- ``Fix`` The Energy page no longer floods the log with errors while write support is off: the expected 503 from the energy device poll is logged at DEBUG, and the page polls every 30 s instead of 3 s until the next success.
-- ``Fix`` The Charging plan no longer shows the "Please wait …" spinner for good: a missing or unverifiable battery state shows its explanation at once, a pending input that is still pending after the 30 polls keeps its status card instead of returning to the spinner every 5 minutes, and the text for a missing consumption estimate matches the baseline fallback. Several logger points for one local date in the inverter day history are now logged once.
-- ``Fix`` Non-finite floats are rejected when decoding a reply or encoding a write, and a device host is stored in its canonical form (IP address normalized, host name lower-cased).
-- ``Fix`` The outline-secondary buttons (e.g. "Edit dashboard") use the theme's secondary text colour in the light theme, so their label reaches the 4.5:1 contrast ratio.
-- ``Fix`` The Charging plan no longer announces a "Next grid charge" while the Energy Manager is off for the inverter; it states that no grid charge will be started.
-- ``Security`` The usage disclaimer is enforced on the server, not just in the browser: until it is accepted every admin request is refused (including personal access tokens), and opening any page by its direct URL only shows the acceptance prompt.
+- ``New`` A one-time usage and liability disclaimer must be accepted after the first login before the admin interface can be used.
+- ``New`` New dashboard battery health widgets (usable capacity, remaining capacity, cycles, last calibration, commissioning date, and a degradation chart), off by default and shown per inverter.
+- ``New`` The Charging plan shows a battery calibration history in Expert diagnostics and a "Battery remaining" tile with the energy currently usable in the battery.
+- ``Change`` The Charging plan uses the full width, reloads on its own (the Refresh button is gone), and shows its KPIs in a compact header with the inverter select and Expert switch.
+- ``Change`` An inverter without configured power limits falls back to 3 kW charge and discharge for the plan; Expert mode can set its own values.
+- ``Fix`` More reliable battery capacity and module detection, so the Charging plan no longer gets stuck on "could not be verified".
+- ``Fix`` Several Charging plan display fixes: the "Please wait …" spinner no longer sticks, and no "Next grid charge" is announced while the Energy Manager is off.
+- ``Fix`` More accurate location handling: the site timezone and a place's postal code are no longer taken from a nearby or partial match.
+- ``Fix`` Spot prices and bidding zones load more reliably, and a day's prices are only used once they cover a full local day.
+- ``Fix`` Steadier inverter connections and much less log noise while write support is off.
+- ``Fix`` Dashboard fixes: battery health tiles show one inverter per row, and the "Add widget" dialog keeps keyboard focus so Escape closes it again.
+- ``Security`` The usage disclaimer is enforced on the server, not just in the browser: until it is accepted every admin request is refused (including personal access tokens).
 
 <details markdown="1">
 <summary>Previous versions...</summary>
