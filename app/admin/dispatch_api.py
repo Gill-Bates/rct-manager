@@ -39,7 +39,7 @@ from app.dispatch.capabilities import (
 )
 from app.dispatch.controller import CapabilityConflict
 from app.dispatch.models import DeviceLimits
-from app.energy.manager import MAX_POWER_W
+from app.limits import MAX_POWER_W
 
 
 def _require_admin_read(request: Request) -> dict | None:

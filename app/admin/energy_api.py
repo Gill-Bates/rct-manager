@@ -71,14 +71,13 @@ from app.dispatch.soc_policy import (
 )
 from app.dispatch.store import DispatchStore
 from app.energy.base import EnergyAdminPort
-from app.energy.manager import MAX_POWER_W
 from app.energy.models import ADMIN_ACTOR, EnergyAction, EnergyCommand, EnergyMode
 from app.energy.soc_window import effective_target_window
 from app.errors import DeviceApiError, DeviceUnreachable
 from app.gateway.base import DeviceState
 from app.gateway.cache import CacheFreshness
 from app.gateway.rct_history import MIN_COMMISSIONING_DATE
-from app.limits import TARGET_SOC_MAX_PERCENT, TARGET_SOC_MIN_PERCENT
+from app.limits import MAX_POWER_W, TARGET_SOC_MAX_PERCENT, TARGET_SOC_MIN_PERCENT
 from app.optimizer.adapters import (
     DryRunInputs,
     EnergyReadingsBatteryStateProvider,
