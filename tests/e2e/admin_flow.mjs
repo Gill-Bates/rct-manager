@@ -78,7 +78,7 @@ async function stop(server) {
     const timeout = setTimeout(() => {
       proc.kill('SIGKILL');
       reject(new Error(`server process ${proc.pid} did not stop within 15 seconds`));
-    }, 15000); // uvicorn waits up to timeout_graceful_shutdown=5 s for the open SSE stream first
+    }, 15000); // a clean stop takes ~1 s even with an open SSE stream; this only bounds a real hang
     proc.once('exit', () => { clearTimeout(timeout); resolve(); });
     proc.kill('SIGTERM');
   });

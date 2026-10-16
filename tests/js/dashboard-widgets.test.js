@@ -177,7 +177,9 @@ test('battery widgets start directly below the inverter overview, not in a far-o
   const battery = DEFAULT_LAYOUT.filter((entry) => entry.id.startsWith('battery-') && entry.id !== 'battery-soc');
   assert.equal(battery.length, 6);
   for (const entry of battery) {
-    assert.ok(entry.y >= factoryBottom && entry.y <= factoryBottom + 2, `${entry.id} at y=${entry.y}`);
+    // The chart sits a few rows lower so tiles that grow with content (one row per inverter) do not collide with it.
+    const slack = entry.id === 'battery-degradation' ? 4 : 2;
+    assert.ok(entry.y >= factoryBottom && entry.y <= factoryBottom + slack, `${entry.id} at y=${entry.y}`);
   }
 });
 
