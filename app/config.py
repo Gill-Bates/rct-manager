@@ -138,6 +138,10 @@ class DeviceEntry(BaseModel):
         # Brackets are URL syntax for an IPv6 literal, not part of the socket host; strip them so
         # text and structured/admin config agree on one canonical value.
         value = strip_ipv6_brackets(value)
+        try:
+            value = str(ip_address(value))
+        except ValueError:
+            value = value.lower()
         if not value or any(c.isspace() for c in value):
             raise ValueError("host must not be empty or contain whitespace")
         return value
@@ -655,7 +659,7 @@ class Settings(BaseSettings):
         log.warning("%s credentials are sent over plain HTTP to '%s'; use only on trusted networks", prefix, endpoint.host)
 
     def export_endpoint(self) -> Endpoint | None:
-        """Resolved target of the active backend; None while the export is disabled."""
+        """Resolved target of the configured backend; None when no backend is selected."""
         if self.db_type is DbType.INFLUXDB_V2:
             return resolve_endpoint(
                 self.influxdb_hostname or "", self.influxdb_port, self.influxdb_tls_enabled, 8086, "INFLUXDB_HOSTNAME"

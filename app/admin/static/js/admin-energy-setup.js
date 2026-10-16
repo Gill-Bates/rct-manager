@@ -973,9 +973,11 @@ function planWaitState() {
   return loading;
 }
 
-// Inputs that only need time (a battery read, a price or forecast fetch, learning); every other
-// non-ok status needs an operator action and keeps its explanatory text.
-const PLAN_PENDING_STATUSES = new Set(['battery_state_unavailable', 'insufficient_history', 'spot_prices_unavailable', 'solar_forecast_unavailable']);
+// Inputs that only need time (a price or forecast fetch, learning) show the spinner. The battery
+// status cannot tell a stale reading from a missing capacity or limit, so it shows its text at once
+// and is only re-requested quietly; every other non-ok status needs an operator action.
+const PLAN_PENDING_STATUSES = new Set(['insufficient_history', 'spot_prices_unavailable', 'solar_forecast_unavailable']);
+const PLAN_RETRY_STATUSES = new Set([...PLAN_PENDING_STATUSES, 'battery_state_unavailable']);
 
 function planStatusCard(title, message) {
   const card = element('section', 'border rounded p-3 p-md-4');
@@ -1287,8 +1289,8 @@ function renderDryRunPlan(plan, { waiting = true } = {}) {
   clearPlanSchedule();
   if (plan.status !== 'ok') {
     const states = {
-      battery_state_unavailable: ['Plan not available yet', 'Battery data could not be verified automatically.'],
-      insufficient_history: ['Consumption model is learning', 'We are collecting consumption data. A preliminary plan can use a conservative baseline once the other inputs are ready.'],
+      battery_state_unavailable: ['Plan not available yet', 'Battery data could not be verified automatically. Check that the inverter is connected and reports its battery state and capacity; the plan is re-checked on its own.'],
+      insufficient_history: ['Consumption model is learning', 'No consumption estimate is available yet. Consumption is recorded from the live inverter readings; until enough is stored, the plan uses a conservative baseline.'],
       spot_disabled: ['Plan not available', 'The spot market integration is disabled. Enable it in the energy settings to plan with prices.'],
       solar_not_configured: ['Plan not available', 'The solar forecast is not configured. Complete the solar settings to plan with a forecast.'],
       spot_prices_unavailable: ['Plan not available yet', 'Spot prices could not be loaded yet. Refresh the plan when prices are available.'],
@@ -1542,6 +1544,7 @@ const PLAN_POLL_MAX = 30;
 const PLAN_REFRESH_MS = 5 * 60 * 1000;
 let planPollTimer = null;
 let planPollAttempts = 0;
+let planLastStatus = null; // a status change restarts the wait; a background refresh does not
 
 function stopPlanPolling() {
   clearTimeout(planPollTimer);
@@ -1562,7 +1565,7 @@ async function loadDryRunPlan({ poll = false } = {}) {
   const select = $('energy-plan-device');
   const host = $('energy-plan-result');
   stopPlanPolling();
-  if (!poll) planPollAttempts = 0;
+  if (!poll) { planPollAttempts = 0; planLastStatus = null; }
   if (!poll) {
     clearPlanForecast();
     clearPlanSchedule();
@@ -1579,9 +1582,10 @@ async function loadDryRunPlan({ poll = false } = {}) {
   try {
     const plan = await api(`energy/devices/${encodeURIComponent(select.value)}/dynamic-plan`);
     if (generation !== planGeneration) return;
+    if (plan.status !== planLastStatus) { planLastStatus = plan.status; planPollAttempts = 0; }
     const exhausted = planPollAttempts >= PLAN_POLL_MAX;
     renderDryRunPlan(plan, { waiting: !exhausted });
-    if (PLAN_PENDING_STATUSES.has(plan.status) && !exhausted) armPlanPolling();
+    if (PLAN_RETRY_STATUSES.has(plan.status) && !exhausted) armPlanPolling();
   } catch (error) {
     if (generation === planGeneration) host.replaceChildren(element('p', 'text-danger', messageFrom(error)));
   }
@@ -1602,8 +1606,8 @@ function initDryRunPlan() {
   }
   window.addEventListener('pagehide', stopPlanPolling);
   // The plan follows spot prices and forecasts, so it reloads by itself; no manual refresh needed.
-  setInterval(() => { if (!document.hidden && select.value) { planPollAttempts = 0; void loadDryRunPlan({ poll: true }); } }, PLAN_REFRESH_MS);
-  document.addEventListener('visibilitychange', () => { if (!document.hidden && select.value) { planPollAttempts = 0; void loadDryRunPlan({ poll: true }); } });
+  setInterval(() => { if (!document.hidden && select.value) void loadDryRunPlan({ poll: true }); }, PLAN_REFRESH_MS);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden && select.value) void loadDryRunPlan({ poll: true }); });
   select.addEventListener('focus', () => { refreshPlanDevices().catch(() => { }); });
   refreshPlanDevices().then(() => loadDryRunPlan())
     .catch((error) => $('energy-plan-result').replaceChildren(element('p', 'text-danger', messageFrom(error))));

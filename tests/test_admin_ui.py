@@ -1791,8 +1791,12 @@ def test_dry_run_plan_renderer_shows_one_readiness_checklist_without_a_basic_cal
         assert expected in text, expected
     battery_out = _render_plan(tmp_path, {"status": "battery_state_unavailable", "slots": []})
     battery = battery_out["text"]
-    assert battery_out["spinners"] == 1 and "Please wait" in battery  # a pending input shows a spinner
-    assert "Battery data could not be verified automatically." in battery  # detail kept for Expert mode
+    # A missing capacity or limit cannot be told from a stale reading, so no spinner hides the reason.
+    assert battery_out["spinners"] == 0 and "Please wait" not in battery
+    assert "Battery data could not be verified automatically." in battery
+    waiting = _render_plan(tmp_path, {"status": "insufficient_history", "slots": []})
+    assert waiting["spinners"] == 1 and "Please wait" in waiting["text"]
+    assert "conservative baseline" in waiting["text"]
     assert "Usable battery capacity: could not be verified" in battery and "Show details" not in battery
     assert "Pending" in battery  # the blocking battery row reads Pending, never an error
 

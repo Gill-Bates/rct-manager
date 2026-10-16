@@ -28,7 +28,7 @@ def retry_after_seconds(header: str | None, *, now: datetime | None = None) -> f
         return 1.0
     header = header.strip()
     try:
-        seconds = float(int(header))
+        seconds = int(header)
     except ValueError:
         try:
             when = parsedate_to_datetime(header)
@@ -36,8 +36,10 @@ def retry_after_seconds(header: str | None, *, now: datetime | None = None) -> f
             return 1.0
         if when.tzinfo is None:
             when = when.replace(tzinfo=UTC)
-        seconds = (when - (now if now is not None else datetime.now(UTC))).total_seconds()
-    return max(0.0, min(seconds, float(MAX_RETRY_AFTER_SECONDS)))
+        seconds = (
+            when - (now if now is not None else datetime.now(UTC))
+        ).total_seconds()
+    return float(max(0, min(seconds, MAX_RETRY_AFTER_SECONDS)))
 
 
 class SameOriginRedirectHandler(HTTPRedirectHandler):
@@ -50,8 +52,25 @@ class SameOriginRedirectHandler(HTTPRedirectHandler):
     provider_label: str = "request"
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
-        source = urlsplit(req.full_url)
-        target = urlsplit(newurl)
-        if (target.scheme, target.hostname, target.port) != (source.scheme, source.hostname, source.port):
-            raise HTTPError(req.full_url, code, f"{self.provider_label} redirected to a different origin", headers, fp)
+        try:
+            source = urlsplit(req.full_url)
+            target = urlsplit(newurl)
+            source_origin = (source.scheme, source.hostname, source.port)
+            target_origin = (target.scheme, target.hostname, target.port)
+        except ValueError as exc:
+            raise HTTPError(
+                req.full_url,
+                code,
+                f"{self.provider_label} returned an invalid redirect URL",
+                headers,
+                fp,
+            ) from exc
+        if target_origin != source_origin:
+            raise HTTPError(
+                req.full_url,
+                code,
+                f"{self.provider_label} redirected to a different origin",
+                headers,
+                fp,
+            )
         return super().redirect_request(req, fp, code, msg, headers, newurl)

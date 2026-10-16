@@ -54,7 +54,6 @@ from app.dispatch.capabilities import (
 )
 from app.dispatch.controller import DispatchController
 from app.dispatch.models import DeviceLimits, DispatchConfig, StopReason
-from app.limits import DEFAULT_DEVICE_POWER_LIMIT_W
 from app.dispatch.soc_policy import SocTargetPolicy, SocTargetPolicyRegistry
 from app.dispatch.store import DispatchStore
 from app.energy.manager import EnergyManager
@@ -66,6 +65,7 @@ from app.gateway.energy_readings import RctEnergyReadings
 from app.gateway.live_charge_limit import RctLiveChargeLimitProvider
 from app.gateway.rct import DeviceBinding, RctGateway
 from app.gateway.rct_dispatch import RctDispatchGateway
+from app.limits import DEFAULT_DEVICE_POWER_LIMIT_W
 from app.observability.event_hub import EventHub
 from app.observability.exporter import DeviceView, EndpointView, MetricsExporter
 from app.observability.log_stream import TsdbLogHandler, register_tsdb_log_type

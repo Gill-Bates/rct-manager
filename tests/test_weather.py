@@ -35,14 +35,27 @@ from app.weather.snapshot_cache import SolarSnapshotCache
 NOW = datetime(2026, 7, 21, 10, 0, tzinfo=UTC)
 
 
-@pytest.mark.parametrize(("header", "expected"), [
-    (None, 1.0), ("bad", 1.0), (" 2 ", 2.0), ("-2", 0.0), ("99999", 30.0),
-    ("Tue, 21 Jul 2026 10:00:05 GMT", 5.0),
-    ("Tue, 21 Jul 2026 09:59:55 GMT", 0.0),
-    ("Tue, 21 Jul 2026 10:00:05", 5.0),
-])
-def test_shared_retry_after_parser_bounds_delta_and_http_dates(header: str | None, expected: float) -> None:
+@pytest.mark.parametrize(
+    ("header", "expected"),
+    [
+        (None, 1.0),
+        ("bad", 1.0),
+        (" 2 ", 2.0),
+        ("-2", 0.0),
+        ("99999", 30.0),
+        ("Tue, 21 Jul 2026 10:00:05 GMT", 5.0),
+        ("Tue, 21 Jul 2026 09:59:55 GMT", 0.0),
+        ("Tue, 21 Jul 2026 10:00:05", 5.0),
+    ],
+)
+def test_shared_retry_after_parser_bounds_delta_and_http_dates(
+    header: str | None, expected: float
+) -> None:
     assert retry_after_seconds(header, now=NOW) == expected
+
+
+def test_retry_after_clamps_integer_too_large_for_float() -> None:
+    assert retry_after_seconds("9" * 400, now=NOW) == MAX_RETRY_AFTER_SECONDS
 
 
 def _config(**overrides) -> WeatherConfig:
@@ -88,7 +101,9 @@ class _FakeResponse(io.BytesIO):
         return False
 
 
-def _patch_opener(monkeypatch, *, payload=None, raw=None, error=None, capture=None, errors=None):
+def _patch_opener(
+    monkeypatch, *, payload=None, raw=None, error=None, capture=None, errors=None
+):
     """Stub the module-level opener's ``open``. ``errors`` is a list of exceptions raised in order
     (then the payload is served) so the retry path can be exercised deterministically.
     """
@@ -119,7 +134,13 @@ def test_disabled_config_may_be_partial():
 
 def test_enabled_config_requires_every_forecast_value():
     with pytest.raises(ValueError, match="latitude"):
-        WeatherConfig(enabled=True, longitude=13.0, pv_peak_power_wp=5000, tilt_deg=30, azimuth_deg=0)
+        WeatherConfig(
+            enabled=True,
+            longitude=13.0,
+            pv_peak_power_wp=5000,
+            tilt_deg=30,
+            azimuth_deg=0,
+        )
 
 
 def test_config_rejects_unknown_field():
@@ -130,8 +151,12 @@ def test_config_rejects_unknown_field():
 @pytest.mark.parametrize(
     "overrides",
     [
-        {"latitude": 91.0}, {"longitude": -181.0}, {"tilt_deg": 91.0},
-        {"azimuth_deg": 200.0}, {"performance_ratio": 1.5}, {"performance_ratio": 0.0},
+        {"latitude": 91.0},
+        {"longitude": -181.0},
+        {"tilt_deg": 91.0},
+        {"azimuth_deg": 200.0},
+        {"performance_ratio": 1.5},
+        {"performance_ratio": 0.0},
         {"pv_peak_power_wp": 0.0},
     ],
 )
@@ -146,7 +171,8 @@ def test_default_provider_is_open_meteo():
 
 def test_location_name_and_timezone_round_trip():
     config = WeatherConfig(
-        enabled=False, location_name="Remscheid, North Rhine-Westphalia, Germany",
+        enabled=False,
+        location_name="Remscheid, North Rhine-Westphalia, Germany",
         timezone="Europe/Berlin",
     )
     assert config.location_name == "Remscheid, North Rhine-Westphalia, Germany"
@@ -183,8 +209,12 @@ def test_forecast_required_fields_match_between_validation_and_is_forecastable()
 
 def test_request_targets_the_fixed_https_origin_with_expected_parameters(monkeypatch):
     capture = {}
-    _patch_opener(monkeypatch, payload=_payload(_labels(4), [0, 100, 200, 300]), capture=capture)
-    OpenMeteoProvider().fetch(_config(tilt_deg=35, azimuth_deg=-90), NOW, timedelta(hours=1))
+    _patch_opener(
+        monkeypatch, payload=_payload(_labels(4), [0, 100, 200, 300]), capture=capture
+    )
+    OpenMeteoProvider().fetch(
+        _config(tilt_deg=35, azimuth_deg=-90), NOW, timedelta(hours=1)
+    )
     url = capture["url"]
     assert url.startswith("https://api.open-meteo.com/v1/forecast?")
     assert "minutely_15=global_tilted_irradiance" in url
@@ -198,7 +228,9 @@ def test_request_targets_the_fixed_https_origin_with_expected_parameters(monkeyp
 
 def test_forecast_and_preview_urls_are_exact(monkeypatch):
     capture = {}
-    _patch_opener(monkeypatch, payload=_payload(_labels(4), [0, 100, 200, 300]), capture=capture)
+    _patch_opener(
+        monkeypatch, payload=_payload(_labels(4), [0, 100, 200, 300]), capture=capture
+    )
     OpenMeteoProvider().fetch(_config(), NOW, timedelta(hours=1))
     base = (
         "https://api.open-meteo.com/v1/forecast?latitude=52.520000&longitude=13.405000"
@@ -206,10 +238,13 @@ def test_forecast_and_preview_urls_are_exact(monkeypatch):
     )
     assert capture["url"] == base + "&forecast_days=2"
     window_start = datetime(2026, 7, 19, 22, 0, tzinfo=UTC)
-    _patch_opener(monkeypatch, payload=_payload(_labels(2, window_start), [1, 2]), capture=capture)
+    _patch_opener(
+        monkeypatch, payload=_payload(_labels(2, window_start), [1, 2]), capture=capture
+    )
     OpenMeteoProvider().fetch_preview(_config(timezone="Europe/Berlin"), NOW)
     assert capture["url"] == (
-        base + "&start_minutely_15=2026-07-19T22%3A00&end_minutely_15=2026-07-22T22%3A00"
+        base
+        + "&start_minutely_15=2026-07-19T22%3A00&end_minutely_15=2026-07-22T22%3A00"
     )
 
 
@@ -217,7 +252,9 @@ def test_preview_without_a_site_timezone_uses_utc_day_boundaries(monkeypatch):
     # The whole pipeline treats a missing timezone as UTC (refresh, storage, API windows).
     capture = {}
     window_start = datetime(2026, 7, 20, 0, 0, tzinfo=UTC)
-    _patch_opener(monkeypatch, payload=_payload(_labels(2, window_start), [1, 2]), capture=capture)
+    _patch_opener(
+        monkeypatch, payload=_payload(_labels(2, window_start), [1, 2]), capture=capture
+    )
     OpenMeteoProvider().fetch_preview(_config(timezone=None), NOW)
     assert "start_minutely_15=2026-07-20T00%3A00" in capture["url"]
     assert "end_minutely_15=2026-07-23T00%3A00" in capture["url"]
@@ -225,13 +262,18 @@ def test_preview_without_a_site_timezone_uses_utc_day_boundaries(monkeypatch):
 
 def test_horizon_bounds_the_requested_forecast_days(monkeypatch):
     capture = {}
-    _patch_opener(monkeypatch, payload=_payload(_labels(4), [0, 100, 200, 300]), capture=capture)
+    _patch_opener(
+        monkeypatch, payload=_payload(_labels(4), [0, 100, 200, 300]), capture=capture
+    )
     OpenMeteoProvider().fetch(_config(), NOW, timedelta(hours=1))
     # ceil(1h / 1 day) + 1 day of headroom so a horizon crossing midnight is still covered.
     assert "forecast_days=2" in capture["url"]
-    _patch_opener(monkeypatch, payload=_payload(_labels(4), [0, 100, 200, 300]), capture=capture)
+    _patch_opener(
+        monkeypatch, payload=_payload(_labels(4), [0, 100, 200, 300]), capture=capture
+    )
     OpenMeteoProvider().fetch(_config(), NOW, timedelta(days=40))
     assert f"forecast_days={open_meteo._MAX_FORECAST_DAYS}" in capture["url"]
+
 
 def test_preview_requests_exact_local_yesterday_today_tomorrow_window(monkeypatch):
     capture = {}
@@ -265,19 +307,28 @@ def _redirect(source_url: str, target_url: str):
     """Drive the shared same-origin handler's decision for a 302 from ``source`` to ``target``."""
     handler = open_meteo._SameOriginRedirectHandler()
     request = Request(source_url)
-    return handler.redirect_request(request, io.BytesIO(b""), 302, "Found", {}, target_url)
+    return handler.redirect_request(
+        request, io.BytesIO(b""), 302, "Found", {}, target_url
+    )
 
 
 def test_a_same_origin_redirect_is_allowed():
     # The handler is now shared via app.net; the provider must still follow a same-origin relocation.
-    new_request = _redirect("https://api.open-meteo.com/v1/forecast", "https://api.open-meteo.com/v1/forecast/alt")
+    new_request = _redirect(
+        "https://api.open-meteo.com/v1/forecast",
+        "https://api.open-meteo.com/v1/forecast/alt",
+    )
     assert new_request is not None
     assert new_request.full_url == "https://api.open-meteo.com/v1/forecast/alt"
 
 
 @pytest.mark.parametrize(
     "target",
-    ["http://127.0.0.1/forecast", "https://evil.example/forecast", "http://api.open-meteo.com/v1/forecast"],
+    [
+        "http://127.0.0.1/forecast",
+        "https://evil.example/forecast",
+        "http://api.open-meteo.com/v1/forecast",
+    ],
 )
 def test_the_handler_refuses_a_cross_origin_or_downgrade_redirect(target):
     with pytest.raises(HTTPError, match="Open-Meteo redirected to a different origin"):
@@ -301,9 +352,13 @@ def test_gti_is_converted_to_energy_with_the_documented_formula(monkeypatch):
 
 def test_performance_ratio_scales_the_energy(monkeypatch):
     _patch_opener(monkeypatch, payload=_payload(_labels(1), [1000]))
-    full = OpenMeteoProvider().fetch(_config(performance_ratio=1.0), NOW, timedelta(hours=1))
+    full = OpenMeteoProvider().fetch(
+        _config(performance_ratio=1.0), NOW, timedelta(hours=1)
+    )
     _patch_opener(monkeypatch, payload=_payload(_labels(1), [1000]))
-    half = OpenMeteoProvider().fetch(_config(performance_ratio=0.5), NOW, timedelta(hours=1))
+    half = OpenMeteoProvider().fetch(
+        _config(performance_ratio=0.5), NOW, timedelta(hours=1)
+    )
     assert half.intervals[0].energy_wh == pytest.approx(full.intervals[0].energy_wh / 2)
 
 
@@ -323,9 +378,14 @@ def test_a_partial_first_interval_counts_only_its_future_fraction(monkeypatch):
     # the energy of that clipped window — no second trimming downstream.
     label = NOW + timedelta(minutes=10)
     first_start = label - timedelta(minutes=15)  # NOW - 5min
-    times = [label.strftime("%Y-%m-%dT%H:%M"), (label + timedelta(minutes=15)).strftime("%Y-%m-%dT%H:%M")]
+    times = [
+        label.strftime("%Y-%m-%dT%H:%M"),
+        (label + timedelta(minutes=15)).strftime("%Y-%m-%dT%H:%M"),
+    ]
     _patch_opener(monkeypatch, payload=_payload(times, [600, 600]))
-    forecast = OpenMeteoProvider().fetch(_config(performance_ratio=1.0), NOW, timedelta(hours=1))
+    forecast = OpenMeteoProvider().fetch(
+        _config(performance_ratio=1.0), NOW, timedelta(hours=1)
+    )
     first = forecast.intervals[0]
     # 600 W/m² * 8000 Wp / 1000 = 4800 W; the clipped window is 10 minutes = 1/6 h -> 800 Wh.
     assert first.start == NOW
@@ -338,7 +398,9 @@ def test_a_fully_past_interval_is_dropped(monkeypatch):
     # Labels at NOW-15, NOW, NOW+15, NOW+30 -> intervals [NOW-30,NOW-15], [NOW-15,NOW] (both fully
     # past, dropped) and [NOW,NOW+15], [NOW+15,NOW+30].
     first_start = NOW - timedelta(minutes=30)
-    _patch_opener(monkeypatch, payload=_payload(_labels(4, first_start), [100, 200, 300, 400]))
+    _patch_opener(
+        monkeypatch, payload=_payload(_labels(4, first_start), [100, 200, 300, 400])
+    )
     forecast = OpenMeteoProvider().fetch(_config(), NOW, timedelta(hours=1))
     assert all(interval.end > NOW for interval in forecast.intervals)
     assert forecast.intervals[0].start == NOW
@@ -356,14 +418,18 @@ def test_the_horizon_trims_future_intervals(monkeypatch):
 def test_intervals_are_sorted_and_non_overlapping(monkeypatch):
     _patch_opener(monkeypatch, payload=_payload(_labels(4), [100, 200, 300, 400]))
     forecast = OpenMeteoProvider().fetch(_config(), NOW, timedelta(hours=2))
-    for previous, current in zip(forecast.intervals, forecast.intervals[1:], strict=False):
+    for previous, current in zip(
+        forecast.intervals, forecast.intervals[1:], strict=False
+    ):
         assert current.start >= previous.end
 
 
 # Malformed responses
 
 
-@pytest.mark.parametrize("value", [-10, float("nan"), float("inf"), None, "sunny", True])
+@pytest.mark.parametrize(
+    "value", [-10, float("nan"), float("inf"), None, "sunny", True]
+)
 def test_unusable_irradiance_values_are_response_errors(monkeypatch, value):
     payload = _payload(_labels(2), [100, value])
     _patch_opener(monkeypatch, payload=payload)
@@ -436,7 +502,9 @@ def test_a_429_is_retried_then_succeeds(monkeypatch):
         payload=_payload(_labels(2), [100, 200]),
         errors=[HTTPError("u", 429, "slow down", {"Retry-After": "2"}, None)],
     )
-    forecast = OpenMeteoProvider(sleep=slept.append).fetch(_config(), NOW, timedelta(hours=1))
+    forecast = OpenMeteoProvider(sleep=slept.append).fetch(
+        _config(), NOW, timedelta(hours=1)
+    )
     assert len(forecast.intervals) == 2
     assert slept == [2.0]
 
@@ -448,7 +516,9 @@ def test_a_5xx_is_retried(monkeypatch):
         payload=_payload(_labels(1), [100]),
         errors=[HTTPError("u", 503, "unavailable", {}, None)],
     )
-    forecast = OpenMeteoProvider(sleep=slept.append).fetch(_config(), NOW, timedelta(hours=1))
+    forecast = OpenMeteoProvider(sleep=slept.append).fetch(
+        _config(), NOW, timedelta(hours=1)
+    )
     assert len(forecast.intervals) == 1
     assert slept == [1.0]  # no Retry-After -> one second fallback
 
@@ -468,7 +538,9 @@ def test_an_exhausted_retry_budget_is_a_connection_error(monkeypatch):
     errors = [HTTPError("u", 429, "slow", {}, None) for _ in range(MAX_ATTEMPTS)]
     _patch_opener(monkeypatch, errors=errors)
     with pytest.raises(WeatherConnectionError):
-        OpenMeteoProvider(sleep=lambda _s: None).fetch(_config(), NOW, timedelta(hours=1))
+        OpenMeteoProvider(sleep=lambda _s: None).fetch(
+            _config(), NOW, timedelta(hours=1)
+        )
 
 
 # Cache
@@ -512,7 +584,9 @@ def test_disabled_config_triggers_no_fetch():
 def test_the_first_fetch_populates_the_cache(monkeypatch):
     from app.optimizer.models import SolarForecast, SolarForecastInterval
 
-    forecast = SolarForecast(NOW, (SolarForecastInterval(NOW, NOW + timedelta(minutes=15), 100.0),))
+    forecast = SolarForecast(
+        NOW, (SolarForecastInterval(NOW, NOW + timedelta(minutes=15), 100.0),)
+    )
     cache = SolarSnapshotCache(_ready(forecast))
     assert cache.get(_config()) == (None, False)  # refresh scheduled on a thread
     # The next get returns the populated snapshot (the window has not elapsed, so no new fetch).
@@ -530,6 +604,7 @@ def test_no_fetch_storm_within_the_refresh_window():
             count["n"] += 1
         gate.wait(1)
         from app.optimizer.models import SolarForecast
+
         return SolarForecast(NOW, ())
 
     cache = SolarSnapshotCache(fetch)

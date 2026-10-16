@@ -375,6 +375,30 @@ test('P2.3: switching the plan device requests a fresh dynamic-plan', async () =
   assert.ok(after > before, 'the device-change handler requests the dynamic plan');
 });
 
+// A pending plan that stayed pending past the poll limit keeps its readiness card: the periodic
+// background refresh must not swap it back to the spinner; only a status change restarts the wait.
+test('an exhausted pending plan is not replaced by the spinner on a background refresh', async () => {
+  let status = 'spot_prices_unavailable';
+  const h = harness({ apiImpl: async () => ({ status, slots: [], window: {} }) });
+  const select = h.context.element('select');
+  select.id = 'energy-plan-device';
+  select.value = 'dev-1';
+  const result = h.context.element('div');
+  result.id = 'energy-plan-result';
+  const spinners = () => result.children.filter((c) => (c.className || '').includes('plan-loading')).length;
+
+  await h.context.loadDryRunPlan();
+  assert.equal(spinners(), 1, 'the first wait shows the spinner');
+  vm.runInContext('planPollAttempts = PLAN_POLL_MAX', h.context);
+  await h.context.loadDryRunPlan({ poll: true });
+  assert.equal(spinners(), 0, 'the readiness card replaces the spinner and stays');
+  await h.context.loadDryRunPlan({ poll: true });
+  assert.equal(spinners(), 0, 'a later background refresh keeps the card');
+  status = 'solar_forecast_unavailable';
+  await h.context.loadDryRunPlan({ poll: true });
+  assert.equal(spinners(), 1, 'a status change restarts the wait');
+});
+
 // P3.1: nextGridCharge must only merge adjacent charge slots of EQUAL power, so the "Next grid
 // charge" summary never reports one slot's power for a window charged at another. The planner keeps
 // adjacent charge slots with different power separate (test_dynamic_optimizer::

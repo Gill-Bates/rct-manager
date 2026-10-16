@@ -28,7 +28,9 @@ TOKEN = "t" * 40
 
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
-    monkeypatch.chdir(tmp_path)  # no stray settings.env; conftest already cleared the process env
+    monkeypatch.chdir(
+        tmp_path
+    )  # no stray settings.env; conftest already cleared the process env
 
 
 def _fail(monkeypatch: pytest.MonkeyPatch, **env: str) -> str:
@@ -56,11 +58,23 @@ def test_tuning_variables_are_not_read_from_the_environment(monkeypatch) -> None
 def test_valid_defaults_load() -> None:
     settings = load_settings()
     assert settings.bind_port == 8000
-    assert settings.auth_required is True and settings.devices == [] and settings.enable_write_support is False
+    assert (
+        settings.auth_required is True
+        and settings.devices == []
+        and settings.enable_write_support is False
+    )
     assert settings.behind_reverse_proxy is False
     assert settings.allow_non_loopback_bind is False
     assert settings.docs_public is False
     assert settings.dispatch_live_charge_limit_max_age_seconds == 5.0
+
+
+def test_device_host_casing_cannot_bypass_duplicate_endpoint_check() -> None:
+    with pytest.raises(ValidationError, match="duplicate physical device keys"):
+        Settings(
+            _env_file=None,
+            devices="first=Inverter.Local:8899,second=inverter.local:8899",
+        )
 
 
 @pytest.mark.parametrize("value", [0.9, 15.1])
@@ -71,12 +85,16 @@ def test_live_charge_limit_freshness_rejects_out_of_range_values(value: float) -
 
 @pytest.mark.parametrize("value", [1.0, 15.0])
 def test_live_charge_limit_freshness_accepts_boundary_values(value: float) -> None:
-    settings = Settings(_env_file=None, dispatch_live_charge_limit_max_age_seconds=value)
+    settings = Settings(
+        _env_file=None, dispatch_live_charge_limit_max_age_seconds=value
+    )
     assert settings.dispatch_live_charge_limit_max_age_seconds == value
 
 
 @pytest.mark.parametrize(("raw", "expected"), [("true", True), ("false", False)])
-def test_docs_public_is_read_from_dotenv_and_environment(monkeypatch, tmp_path, caplog, raw, expected) -> None:
+def test_docs_public_is_read_from_dotenv_and_environment(
+    monkeypatch, tmp_path, caplog, raw, expected
+) -> None:
     env_file = tmp_path / "docs.env"
     env_file.write_text(f"DOCS_PUBLIC={raw}\n")
     with caplog.at_level("WARNING", logger="app.config"):
@@ -98,14 +116,18 @@ def test_non_loopback_bind_requires_explicit_consent(monkeypatch) -> None:
         Settings(bind_address="0.0.0.0", behind_reverse_proxy=True)
 
 
-def test_non_loopback_bind_with_consent_still_warns_without_proxy_mode(monkeypatch, caplog) -> None:
+def test_non_loopback_bind_with_consent_still_warns_without_proxy_mode(
+    monkeypatch, caplog
+) -> None:
     monkeypatch.setenv("BIND_ADDRESS", "0.0.0.0")
     monkeypatch.setenv("ALLOW_NON_LOOPBACK_BIND", "true")
     with caplog.at_level("WARNING", logger="app.config"):
         settings = load_settings()
     assert str(settings.bind_address) == "0.0.0.0"
     assert settings.allow_non_loopback_bind is True
-    assert "behind reverse proxy' is off" in " ".join(r.getMessage() for r in caplog.records)
+    assert "behind reverse proxy' is off" in " ".join(
+        r.getMessage() for r in caplog.records
+    )
 
 
 def test_fixed_settings_are_named_not_valued(monkeypatch, caplog) -> None:
@@ -125,12 +147,16 @@ def test_trusted_proxies_are_operator_settable(monkeypatch) -> None:
 
 
 @pytest.mark.parametrize(("raw", "expected"), [("true", True), ("false", False)])
-def test_metrics_endpoint_switch_is_operator_settable(monkeypatch, caplog, raw, expected) -> None:
+def test_metrics_endpoint_switch_is_operator_settable(
+    monkeypatch, caplog, raw, expected
+) -> None:
     monkeypatch.setenv("ENABLE_METRICS_ENDPOINT", raw)
     with caplog.at_level("WARNING", logger="app.config"):
         settings = load_settings()
     assert settings.enable_metrics_endpoint is expected
-    assert "ENABLE_METRICS_ENDPOINT" not in " ".join(r.getMessage() for r in caplog.records)
+    assert "ENABLE_METRICS_ENDPOINT" not in " ".join(
+        r.getMessage() for r in caplog.records
+    )
 
 
 def test_metrics_endpoint_is_disabled_by_factory_default() -> None:
@@ -149,10 +175,22 @@ def test_operator_environment_precedes_dotenv(monkeypatch, tmp_path) -> None:
 @pytest.mark.parametrize(
     ("kwargs", "names"),
     [
-        ({"max_metrics_per_request": 4, "max_fresh_metrics_per_request": 9}, ("MAX_FRESH", "MAX_METRICS", "9", "4")),
-        ({"read_retry_backoff_initial_ms": 900, "read_retry_backoff_max_ms": 100}, ("INITIAL", "MAX_MS", "900")),
-        ({"shutdown_periodic_reserve_seconds": 20, "shutdown_grace_seconds": 20}, ("RESERVE", "GRACE")),
-        ({"forwarded_header": "X-Forwarded-For"}, ("FORWARDED_HEADER", "TRUSTED_PROXIES")),
+        (
+            {"max_metrics_per_request": 4, "max_fresh_metrics_per_request": 9},
+            ("MAX_FRESH", "MAX_METRICS", "9", "4"),
+        ),
+        (
+            {"read_retry_backoff_initial_ms": 900, "read_retry_backoff_max_ms": 100},
+            ("INITIAL", "MAX_MS", "900"),
+        ),
+        (
+            {"shutdown_periodic_reserve_seconds": 20, "shutdown_grace_seconds": 20},
+            ("RESERVE", "GRACE"),
+        ),
+        (
+            {"forwarded_header": "X-Forwarded-For"},
+            ("FORWARDED_HEADER", "TRUSTED_PROXIES"),
+        ),
         ({"http_workers": 2}, ("HTTP_WORKERS",)),
         ({"periodic_metrics": [f"m{i}" for i in range(65)]}, ("PERIODIC_METRICS",)),
     ],
@@ -180,12 +218,18 @@ def test_invalid_devices_are_rejected_in_gui_settings(devices, fragment) -> None
 def _ignored_messages(caplog) -> dict[str, str]:
     """Join the ignored-settings records per level, so each group can be asserted on its own."""
     return {
-        level: " ".join(r.getMessage() for r in caplog.records if r.levelname == level and "Ignored" in r.getMessage())
+        level: " ".join(
+            r.getMessage()
+            for r in caplog.records
+            if r.levelname == level and "Ignored" in r.getMessage()
+        )
         for level in ("WARNING", "INFO")
     }
 
 
-def test_gui_only_variables_are_ignored_with_a_warning_that_names_them_only(monkeypatch, tmp_path, caplog) -> None:
+def test_gui_only_variables_are_ignored_with_a_warning_that_names_them_only(
+    monkeypatch, tmp_path, caplog
+) -> None:
     env_file = tmp_path / "x.env"
     env_file.write_text("DEVICES=a=10.0.0.5:1\nENABLE_WRITE_SUPPORT=true\n")
     monkeypatch.setenv("API_TOKENS", f"{TOKEN}:read")
@@ -194,9 +238,17 @@ def test_gui_only_variables_are_ignored_with_a_warning_that_names_them_only(monk
     with caplog.at_level("INFO", logger="app.config"):
         settings = load_settings(env_file)
     assert settings.devices == [] and settings.auth_required is True
-    assert settings.enable_write_support is False and settings.behind_reverse_proxy is False
+    assert (
+        settings.enable_write_support is False
+        and settings.behind_reverse_proxy is False
+    )
     messages = _ignored_messages(caplog)
-    for name in ("API_TOKENS", "AUTH_REQUIRED", "BEHIND_REVERSE_PROXY", "ENABLE_WRITE_SUPPORT"):
+    for name in (
+        "API_TOKENS",
+        "AUTH_REQUIRED",
+        "BEHIND_REVERSE_PROXY",
+        "ENABLE_WRITE_SUPPORT",
+    ):
         assert name in messages["WARNING"]
     assert "DEVICES" in messages["INFO"] and "DEVICES" not in messages["WARNING"]
     whole_log = " ".join(r.getMessage() for r in caplog.records)
@@ -204,9 +256,18 @@ def test_gui_only_variables_are_ignored_with_a_warning_that_names_them_only(monk
 
 
 @pytest.mark.parametrize(
-    "name", ["API_TOKENS", "API_TOKENS_FILE", "AUTH_REQUIRED", "BEHIND_REVERSE_PROXY", "ENABLE_WRITE_SUPPORT"]
+    "name",
+    [
+        "API_TOKENS",
+        "API_TOKENS_FILE",
+        "AUTH_REQUIRED",
+        "BEHIND_REVERSE_PROXY",
+        "ENABLE_WRITE_SUPPORT",
+    ],
 )
-def test_security_relevant_ignored_settings_stay_a_warning(monkeypatch, caplog, name) -> None:
+def test_security_relevant_ignored_settings_stay_a_warning(
+    monkeypatch, caplog, name
+) -> None:
     monkeypatch.setenv(name, "false")
     with caplog.at_level("INFO", logger="app.config"):
         load_settings()
@@ -234,20 +295,28 @@ def test_nothing_is_logged_when_no_ignored_setting_is_set(monkeypatch, caplog) -
 
 def _candidate_names() -> set[str]:
     """Derived at runtime, so a new non-operator field cannot silently escape both groups."""
-    return {f.upper() for f in Settings.model_fields if f not in OPERATOR_FIELDS} | set(_REMOVED_ENV_NAMES)
+    return {f.upper() for f in Settings.model_fields if f not in OPERATOR_FIELDS} | set(
+        _REMOVED_ENV_NAMES
+    )
 
 
 def test_security_relevant_names_are_real_ignored_settings() -> None:
     assert _SECURITY_RELEVANT_ENV_NAMES <= _candidate_names()
 
 
-def test_both_groups_together_cover_every_ignored_setting_exactly_once(tmp_path, caplog) -> None:
+def test_both_groups_together_cover_every_ignored_setting_exactly_once(
+    tmp_path, caplog
+) -> None:
     candidates = _candidate_names()
     with caplog.at_level("INFO", logger="app.config"):
-        warn_ignored_settings(tmp_path / "absent.env", environ=dict.fromkeys(candidates, "x"))
+        warn_ignored_settings(
+            tmp_path / "absent.env", environ=dict.fromkeys(candidates, "x")
+        )
     groups = [
         {name.strip() for name in match.group(1).split(",")}
-        for match in (re.search(r"settings: (.+?) - ", r.getMessage()) for r in caplog.records)
+        for match in (
+            re.search(r"settings: (.+?) - ", r.getMessage()) for r in caplog.records
+        )
         if match
     ]
     assert len(groups) == 2
@@ -268,7 +337,9 @@ def test_ignored_settings_never_log_their_values(monkeypatch, tmp_path, caplog) 
         assert value not in whole_log
 
 
-@pytest.mark.parametrize("field", ["hmac_secret", "admin_secret", "influxdb_token", "questdb_password"])
+@pytest.mark.parametrize(
+    "field", ["hmac_secret", "admin_secret", "influxdb_token", "questdb_password"]
+)
 def test_validation_error_on_a_secret_field_never_echoes_the_input(field) -> None:
     """P3-6: format_validation_error promises it never echoes a secret input. A non-string value
     for any SecretStr field must therefore name the field and its constraint but not the rejected
@@ -297,10 +368,13 @@ def test_validation_error_on_a_non_secret_field_still_echoes_the_input() -> None
         "DISPATCH_GRID_IMPORT_POSITIVE",
     ],
 )
-def test_removed_dispatch_hardware_assumptions_warn_and_no_longer_exist(monkeypatch, caplog, name) -> None:
+def test_removed_dispatch_hardware_assumptions_warn_and_no_longer_exist(
+    monkeypatch, caplog, name
+) -> None:
     """These three were assumptions about one inverter model. They are now per-device capability
     fields, verified on the device: a value from the environment must never release hardware again,
-    and an operator who still exports one has to notice that he never verified anything."""
+    and an operator who still exports one has to notice that he never verified anything.
+    """
     monkeypatch.setenv(name, "true")
     with caplog.at_level("INFO", logger="app.config"):
         settings = load_settings()
@@ -318,7 +392,10 @@ def test_engineering_ttl_cap_must_not_exceed_the_normal_cap() -> None:
     )
     assert "DISPATCH_MAX_OPERATION_DURATION_ENGINEERING_SECONDS" in detail
     assert "DISPATCH_MAX_OPERATION_DURATION_SECONDS" in detail
-    assert Settings(devices="a=h:1").dispatch_max_operation_duration_engineering_seconds == 1800.0
+    assert (
+        Settings(devices="a=h:1").dispatch_max_operation_duration_engineering_seconds
+        == 1800.0
+    )
 
 
 def test_cache_grace_shorter_than_ttl_is_allowed() -> None:
@@ -326,7 +403,9 @@ def test_cache_grace_shorter_than_ttl_is_allowed() -> None:
     assert settings.cache_grace_seconds == 10
 
 
-@pytest.mark.parametrize("field", ["dispatch_max_charge_power_w", "dispatch_max_discharge_power_w"])
+@pytest.mark.parametrize(
+    "field", ["dispatch_max_charge_power_w", "dispatch_max_discharge_power_w"]
+)
 def test_dispatch_power_settings_share_the_energy_manager_ceiling(field: str) -> None:
     settings = Settings(devices="a=h:1", **{field: MAX_POWER_W})
     assert getattr(settings, field) == MAX_POWER_W
@@ -345,7 +424,8 @@ def test_endpoint_id_is_the_direct_device_id_without_address() -> None:
 
 def test_structured_device_entry_strips_ipv6_brackets_like_the_text_parser() -> None:
     """A DeviceEntry built directly from structured data must canonicalize the host
-    the same way the text parser already does, so the transport never receives bracket syntax."""
+    the same way the text parser already does, so the transport never receives bracket syntax.
+    """
     from app.config import DeviceEntry
 
     entry = DeviceEntry(device_id="a", host="[2001:db8::1]", port=8899)

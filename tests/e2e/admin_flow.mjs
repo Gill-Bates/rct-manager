@@ -1463,6 +1463,12 @@ try {
   check('Add is busy during the request and sends exactly one PUT', locked && devicePuts.length === putsAtLock + 1, String(devicePuts.length - putsAtLock));
   scrubExpected(injectedStart, (p) => p.includes(`${base}/admin/api/settings`) &&
     (p.startsWith('http 500: PUT ') || p.startsWith('http 409: PUT ') || (p.startsWith('console ') && /\b(500|409)\b/.test(p))));
+  // The successful double-submit add above closed the dashboard modal (an add finishes the
+  // interaction); reopen it so the delete steps below act on the inverter list again.
+  await page.waitForSelector('#inverters-modal', { state: 'hidden' });
+  await page.click('#add-inverter');
+  await page.waitForSelector('#inverters-modal.show .device-settings-item input[data-field="host"]');
+  await page.waitForSelector('#device-list .device-settings-item');
 
   // Delete: the trash icon asks first (the reset warning), cancelling sends nothing, accepting saves at once.
   const putsAtDelete = devicePuts.length;
@@ -2577,7 +2583,7 @@ try {
         // Pending inputs show a spinner and re-request the plan; configuration states keep their text.
         await ep.clock.install();
         const spinnerShown = () => ep.locator('#energy-plan-result .spinner-border').count();
-        planStatus = 'battery_state_unavailable';
+        planStatus = 'spot_prices_unavailable';
         await ep.locator('#energy-plan-device').dispatchEvent('change');
         await ep.waitForSelector('#energy-plan-result [role="status"] .spinner-border, #energy-plan-result .spinner-border');
         const waitText = await ep.locator('#energy-plan-result [role="status"]').first().innerText();

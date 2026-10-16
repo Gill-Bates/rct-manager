@@ -16,19 +16,10 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 
 from app.catalog.registry import SECRET_METRIC_NAMES, RegistryCatalog
 from app.errors import ConfigError, UnknownMetric, WriteRejected
-from app.protocol.types import DataType
-from app.protocol.values import ScalarValue
+from app.protocol.types import NON_WRITABLE_DATA_TYPES, DataType
+from app.protocol.values import ScalarValue, integer_bounds
 
 _STEP_TOLERANCE = 1e-9
-_INT_RANGES = {
-    DataType.UINT8: (0, 2**8 - 1),
-    DataType.INT8: (-(2**7), 2**7 - 1),
-    DataType.UINT16: (0, 2**16 - 1),
-    DataType.INT16: (-(2**15), 2**15 - 1),
-    DataType.UINT32: (0, 2**32 - 1),
-    DataType.INT32: (-(2**31), 2**31 - 1),
-    DataType.ENUM: (0, 2**32 - 1),
-}
 
 
 class AllowlistEntry(BaseModel):
@@ -43,7 +34,7 @@ class AllowlistEntry(BaseModel):
 
     @model_validator(mode="after")
     def _check_range(self) -> Self:
-        if self.data_type in (DataType.STRUCT, DataType.TIMESERIES):
+        if self.data_type in NON_WRITABLE_DATA_TYPES:
             raise ValueError(f"{self.data_type.value} cannot be approved for writing")
         if (
             self.data_type not in (DataType.BOOL, DataType.STRING)
@@ -52,23 +43,38 @@ class AllowlistEntry(BaseModel):
         ):
             raise ValueError("a value range (minimum and maximum) is required")
         if self.data_type in (DataType.BOOL, DataType.STRING) and (
-            self.minimum is not None or self.maximum is not None or self.step is not None or self.allowed_values
+            self.minimum is not None
+            or self.maximum is not None
+            or self.step is not None
+            or self.allowed_values
         ):
-            raise ValueError(f"{self.data_type.value} takes no minimum, maximum, step or allowed_values")
-        if self.minimum is not None and self.maximum is not None and self.minimum > self.maximum:
+            raise ValueError(
+                f"{self.data_type.value} takes no minimum, maximum, step or allowed_values"
+            )
+        if (
+            self.minimum is not None
+            and self.maximum is not None
+            and self.minimum > self.maximum
+        ):
             raise ValueError("minimum must not exceed maximum")
-        if (width := _INT_RANGES.get(self.data_type)) is not None:
+        if (width := integer_bounds(self.data_type)) is not None:
             low, high = width
             bounds = [b for b in (self.minimum, self.maximum) if b is not None]
-            if any(not low <= b <= high for b in bounds) or any(not low <= v <= high for v in self.allowed_values):
-                raise ValueError(f"minimum, maximum and allowed_values must fit the range of {self.data_type.value}")
+            if any(not low <= b <= high for b in bounds) or any(
+                not low <= v <= high for v in self.allowed_values
+            ):
+                raise ValueError(
+                    f"minimum, maximum and allowed_values must fit the range of {self.data_type.value}"
+                )
         return self
 
 
 class Allowlist:
     """Approved write targets; deny by default."""
 
-    def __init__(self, entries: Mapping[str, AllowlistEntry], catalog: RegistryCatalog) -> None:
+    def __init__(
+        self, entries: Mapping[str, AllowlistEntry], catalog: RegistryCatalog
+    ) -> None:
         self._entries = dict(entries)
         self._catalog = catalog
 
@@ -85,37 +91,54 @@ class Allowlist:
             raw = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError) as exc:
             raise ConfigError(
-                "invalid_write_allowlist", detail=f"cannot read {path.name}: {type(exc).__name__}"
+                "invalid_write_allowlist",
+                detail=f"cannot read {path.name}: {type(exc).__name__}",
             ) from None
         problems: list[str] = []
         entries: dict[str, AllowlistEntry] = {}
-        if not isinstance(raw, dict) or not isinstance(raw.get("entries"), list) or raw.get("version") != 1:
+        if (
+            not isinstance(raw, dict)
+            or not isinstance(raw.get("entries"), list)
+            or raw.get("version") != 1
+        ):
             raise ConfigError(
-                "invalid_write_allowlist", detail=f"{path.name}: expected an object with version 1 and entries"
+                "invalid_write_allowlist",
+                detail=f"{path.name}: expected an object with version 1 and entries",
             )
         for index, item in enumerate(raw["entries"]):
             try:
                 entry = AllowlistEntry.model_validate(item)
             except ValidationError as exc:
-                for err in exc.errors(include_url=False, include_input=False, include_context=False):
+                for err in exc.errors(
+                    include_url=False, include_input=False, include_context=False
+                ):
                     where = ".".join(str(p) for p in err["loc"])
                     problems.append(
-                        f"entries[{index}] {where}: {err['msg'].removeprefix('Value error, ')}".replace(": :", ":")
+                        f"entries[{index}] {where}: {err['msg'].removeprefix('Value error, ')}".replace(
+                            ": :", ":"
+                        )
                     )
                 continue
             if entry.name in SECRET_METRIC_NAMES:
-                problems.append(f"entries[{index}] ({entry.name}): secret metric must not be writable")
+                problems.append(
+                    f"entries[{index}] ({entry.name}): secret metric must not be writable"
+                )
                 continue
             problems.extend(cls._check_against_registry(index, entry, catalog))
             if entry.name in entries:
                 problems.append(f"entries[{index}] ({entry.name}): duplicate entry")
             entries[entry.name] = entry
         if problems:
-            raise ConfigError("invalid_write_allowlist", detail="\n".join(f"{path.name}: {p}" for p in problems))
+            raise ConfigError(
+                "invalid_write_allowlist",
+                detail="\n".join(f"{path.name}: {p}" for p in problems),
+            )
         return cls(entries, catalog)
 
     @staticmethod
-    def _check_against_registry(index: int, entry: AllowlistEntry, catalog: RegistryCatalog) -> list[str]:
+    def _check_against_registry(
+        index: int, entry: AllowlistEntry, catalog: RegistryCatalog
+    ) -> list[str]:
         where = f"entries[{index}] ({entry.name})"
         try:
             reg = catalog.object_entry(entry.name)
@@ -125,10 +148,22 @@ class Allowlist:
         if reg.data_type is not entry.data_type:
             problems.append(f"{where}: data_type differs from the object registry")
         if not reg.writable:
-            hint = "; it is a read-only history series, remove it from the allowlist" if reg.is_compound else ""
-            problems.append(f"{where}: metric is not writable in the object registry{hint}")
-        if reg.is_action and (not entry.allowed_values or entry.minimum is not None or entry.maximum is not None):
-            problems.append(f"{where}: an action variable needs an explicit list of allowed_values and no range")
+            hint = (
+                "; it is a read-only history series, remove it from the allowlist"
+                if reg.is_compound
+                else ""
+            )
+            problems.append(
+                f"{where}: metric is not writable in the object registry{hint}"
+            )
+        if reg.is_action and (
+            not entry.allowed_values
+            or entry.minimum is not None
+            or entry.maximum is not None
+        ):
+            problems.append(
+                f"{where}: an action variable needs an explicit list of allowed_values and no range"
+            )
         return problems
 
     def check(self, name: str, value: ScalarValue, *, action: bool) -> AllowlistEntry:
@@ -160,7 +195,9 @@ class Allowlist:
         if kind is DataType.FLOAT:
             if not math.isfinite(value):
                 raise WriteRejected("value_not_finite")
-        elif type(value) is not int:  # integer types and enums: the encoder takes exact ints only
+        elif (
+            type(value) is not int
+        ):  # integer types and enums: the encoder takes exact ints only
             raise WriteRejected("value_type_mismatch")
         if entry.allowed_values:
             if value not in entry.allowed_values:

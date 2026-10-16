@@ -25,8 +25,17 @@ class Command(IntEnum):
 
 
 PLANT_BIT = 0x40  # bit 6 marks the plant-network variant
-LONG_COMMANDS = frozenset({Command.LONG_WRITE, Command.LONG_RESPONSE, Command.LONG_WRITE_M, Command.LONG_RESPONSE_M})
-WRITE_COMMANDS = frozenset({Command.WRITE, Command.LONG_WRITE, Command.WRITE_M, Command.LONG_WRITE_M})
+LONG_COMMANDS = frozenset(
+    {
+        Command.LONG_WRITE,
+        Command.LONG_RESPONSE,
+        Command.LONG_WRITE_M,
+        Command.LONG_RESPONSE_M,
+    }
+)
+WRITE_COMMANDS = frozenset(
+    {Command.WRITE, Command.LONG_WRITE, Command.WRITE_M, Command.LONG_WRITE_M}
+)
 START_BYTE = 0x2B
 STOP_BYTE = 0x2D
 BOOTLOADER_MAGIC = b"\x50\xf7\x05\xab"
@@ -46,6 +55,11 @@ class DataType(StrEnum):
     STRUCT = "t_struct"
     TIMESERIES = "t_timeseries"  # response-only compound of the logger objects
     EVENT_TABLE = "t_event_table"  # response-only compound logger reply (error log); classification only, not decoded
+
+
+NON_WRITABLE_DATA_TYPES = frozenset(
+    {DataType.STRUCT, DataType.TIMESERIES, DataType.EVENT_TABLE}
+)
 
 
 class StructKind(StrEnum):
