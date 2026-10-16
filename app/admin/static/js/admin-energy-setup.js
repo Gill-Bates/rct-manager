@@ -980,7 +980,7 @@ const PLAN_PENDING_STATUSES = new Set(['insufficient_history', 'spot_prices_unav
 const PLAN_RETRY_STATUSES = new Set([...PLAN_PENDING_STATUSES, 'battery_state_unavailable']);
 
 function planStatusCard(title, message) {
-  const card = element('section', 'border rounded p-3 p-md-4');
+  const card = element('section', 'mb-3');
   card.append(element('h3', 'h5 mb-2', title), element('p', 'mb-0', message));
   return card;
 }
@@ -1316,7 +1316,7 @@ function renderDryRunPlan(plan, { waiting = true } = {}) {
     : planStatusCard('No grid charge planned', 'The current plan does not schedule a grid charge.');
   if (next) {
     // Same hero-metric blocks as the Spot Market view (.spot-market-highlight).
-    const summary = element('div', 'spot-market-highlights mt-3');
+    const summary = element('div', 'spot-market-highlights spot-market-highlights-row mt-3');
     const add = (caption, value, icon) => {
       const block = element('div', 'spot-market-highlight');
       const glyph = element('span', 'material-icons spot-market-highlight-icon text-secondary', icon);

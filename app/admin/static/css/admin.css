@@ -1758,6 +1758,14 @@ body {
     }
 }
 
+/* Charging plan: all hero metrics in one row; they stack only on narrow screens. */
+@media (min-width: 576px) {
+    .spot-market-highlights.spot-market-highlights-row {
+        grid-template-columns: repeat(auto-fit, minmax(0, 1fr));
+        grid-auto-flow: column;
+    }
+}
+
 .spot-market-highlight {
     display: grid;
     grid-template-columns: auto minmax(0, 1fr);

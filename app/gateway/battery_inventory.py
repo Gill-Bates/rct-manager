@@ -28,6 +28,8 @@ log = logging.getLogger(__name__)
 # exists on this device; _battery_tower_present answers that from readings.
 _BATTERY_TOWER_PREFIXES = ("battery", "battery_placeholder_0")
 CAPACITY_AH_METRICS = ("battery_ah_capacity", "power_mng_amp_hours_measured")
+# BMS serial of the battery; a changed value marks a swapped battery in the calibration history.
+BMS_SERIAL_METRIC = "battery_bms_sn"
 CAPACITY_AH_FRESH_SECONDS = 2 * 24 * 60 * 60
 
 # RCT_MAX_MODULES_PER_TOWER is hardware (2 to 6 modules per tower, per RCT docs).
@@ -48,17 +50,23 @@ RCT_MODULE_SN_SLOTS = 7
 _BATTERY_PRESENCE_SUFFIXES = ("soc", "temperature", "cycles", "status2")
 
 
-def _battery_tower_present(runtime, device_id: str, prefix: str, trusted_module_slots: list[int]) -> bool:
+def _battery_tower_present(
+    runtime, device_id: str, prefix: str, trusted_module_slots: list[int]
+) -> bool:
     """`trusted_module_slots` must be the STABILIZED report's populated_module_slots (see
     _battery_module_report), never the current poll's raw _battery_populated_module_slots() - a
-    transient missing/incomplete serial read must not make an established second tower vanish."""
+    transient missing/incomplete serial read must not make an established second tower vanish.
+    """
     if trusted_module_slots:
         return True
     if prefix != "battery":
         return False  # a placeholder tower with no module serials is not installed
     for suffix in _BATTERY_PRESENCE_SUFFIXES:
         name = f"{prefix}_{suffix}"
-        if runtime.catalog.exists(name) and runtime.gateway.cached_reading(device_id, name) is not None:
+        if (
+            runtime.catalog.exists(name)
+            and runtime.gateway.cached_reading(device_id, name) is not None
+        ):
             return True
     return False
 
@@ -144,20 +152,36 @@ def _raw_battery_module_report(states: list[str]) -> dict:
     complete = _SLOT_UNKNOWN not in states
     populated = _battery_populated_module_slots(states)
     if not complete:
-        return {"module_count": None, "module_count_status": "pending",
-                "populated_module_slots": populated, "_complete": False}
+        return {
+            "module_count": None,
+            "module_count_status": "pending",
+            "populated_module_slots": populated,
+            "_complete": False,
+        }
     if not populated:
-        return {"module_count": None, "module_count_status": "pending",
-                "populated_module_slots": [], "_complete": True}
+        return {
+            "module_count": None,
+            "module_count_status": "pending",
+            "populated_module_slots": [],
+            "_complete": True,
+        }
     contiguous = populated == list(range(len(populated)))
     if contiguous and len(populated) <= RCT_MAX_MODULES_PER_TOWER:
         # A count of 1 is below the documented minimum of 2, but that is a legitimate complete
         # read (e.g. a tower stripped down to one module for service), not a mid-scan artifact -
         # the completeness gate above already ruled the mid-scan case out.
-        return {"module_count": len(populated), "module_count_status": "ok",
-                "populated_module_slots": populated, "_complete": True}
-    return {"module_count": None, "module_count_status": "anomaly",
-            "populated_module_slots": populated, "_complete": True}
+        return {
+            "module_count": len(populated),
+            "module_count_status": "ok",
+            "populated_module_slots": populated,
+            "_complete": True,
+        }
+    return {
+        "module_count": None,
+        "module_count_status": "anomaly",
+        "populated_module_slots": populated,
+        "_complete": True,
+    }
 
 
 # A changed module count must be read twice in a row before it replaces the trusted one, because
@@ -172,10 +196,16 @@ _BATTERY_MODULE_STATE_ATTR = "module_topology_state"
 
 
 def _battery_report_signature(report: dict) -> tuple:
-    return (report["module_count_status"], report["module_count"], tuple(report["populated_module_slots"]))
+    return (
+        report["module_count_status"],
+        report["module_count"],
+        tuple(report["populated_module_slots"]),
+    )
 
 
-def _stabilize_battery_module_report(runtime, device_id: str, prefix: str, raw: dict) -> dict:
+def _stabilize_battery_module_report(
+    runtime, device_id: str, prefix: str, raw: dict
+) -> dict:
     """Holds the last-known-good topology against two things that must never flip it: a mid-scan
     (incomplete) snapshot, and a single changed-but-complete read that has not repeated yet.
 
@@ -208,8 +238,9 @@ def _stabilize_battery_module_report(runtime, device_id: str, prefix: str, raw: 
             state["candidate"] = None
             state["candidate_count"] = 0
             return trusted
-        if (state["candidate"] is not None
-                and _battery_report_signature(raw) == _battery_report_signature(state["candidate"])):
+        if state["candidate"] is not None and _battery_report_signature(
+            raw
+        ) == _battery_report_signature(state["candidate"]):
             state["candidate_count"] += 1
         else:
             state["candidate"] = raw
@@ -234,17 +265,27 @@ def _log_pending_slots(device_id: str, prefix: str, states: list[str]) -> None:
     now = time.monotonic()
     key = (device_id, prefix)
     with _battery_module_lock:
-        if now - _pending_log_last.get(key, -_PENDING_LOG_INTERVAL_SECONDS) < _PENDING_LOG_INTERVAL_SECONDS:
+        if (
+            now - _pending_log_last.get(key, -_PENDING_LOG_INTERVAL_SECONDS)
+            < _PENDING_LOG_INTERVAL_SECONDS
+        ):
             return
         _pending_log_last[key] = now
-    log.debug("%s on %s: module serial slots %s never read yet (states: %s)", prefix, device_id, unknown, states)
+    log.debug(
+        "%s on %s: module serial slots %s never read yet (states: %s)",
+        prefix,
+        device_id,
+        unknown,
+        states,
+    )
 
 
 def _battery_module_report(runtime, device_id: str, prefix: str) -> dict:
     """Trusted module-count report for one tower: captures the current slot-state snapshot (see
     `_battery_module_slot_states`), classifies it (`_raw_battery_module_report`), and runs it
     through the last-known-good stabilizer so neither a mid-scan nor a single flaky complete read
-    can override an already-established topology (see `_stabilize_battery_module_report`)."""
+    can override an already-established topology (see `_stabilize_battery_module_report`).
+    """
     states = _battery_module_slot_states(runtime, device_id, prefix)
     raw = _raw_battery_module_report(states)
     _log_pending_slots(device_id, prefix, states)
@@ -253,7 +294,11 @@ def _battery_module_report(runtime, device_id: str, prefix: str) -> dict:
         log.warning(
             "%s on %s reports module serials in slots %s: not a contiguous run of at most %d slots, so no "
             "module count is derived from it (catalog carries %d slots; documented hardware takes %d modules)",
-            prefix, device_id, report["populated_module_slots"], RCT_MAX_MODULES_PER_TOWER, RCT_MODULE_SN_SLOTS,
+            prefix,
+            device_id,
+            report["populated_module_slots"],
+            RCT_MAX_MODULES_PER_TOWER,
+            RCT_MODULE_SN_SLOTS,
             RCT_MAX_MODULES_PER_TOWER,
         )
     return {k: v for k, v in report.items() if k != "_complete"}
@@ -267,6 +312,7 @@ _RATED_USABLE_WH_PER_MODULE = 1920 * 0.9
 @dataclass(frozen=True, slots=True)
 class CapacityCalibrationSample:
     device_id: str
+    inverter_serial: str
     measured_at: datetime
     battery_cycles: int | None
     reference_ah: float
@@ -276,6 +322,7 @@ class CapacityCalibrationSample:
     remaining_capacity_percent: float
     module_counts: tuple[int, ...]
     source_contract: str = "bms_ah_ratio_v1"
+    battery_bms_sn: str | None = None
 
 
 class MeasuredBatteryCapacity:
@@ -284,7 +331,9 @@ class MeasuredBatteryCapacity:
     def __init__(self, runtime) -> None:
         self._runtime = runtime
 
-    def _components(self, device_id: str) -> tuple[float, float, tuple[int, ...], float, float] | None:
+    def _components(
+        self, device_id: str
+    ) -> tuple[float, float, tuple[int, ...], float, float] | None:
         samples = [
             self._runtime.gateway.cached_sample(device_id, name)
             for name in CAPACITY_AH_METRICS
@@ -293,7 +342,12 @@ class MeasuredBatteryCapacity:
             if sample is None or sample[2] is not CacheFreshness.FRESH:
                 return None
             value = sample[0]
-            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(value)
+                or value <= 0
+            ):
                 return None
         reference_ah, measured_ah = (sample[0] for sample in samples)
 
@@ -303,7 +357,9 @@ class MeasuredBatteryCapacity:
             if _SLOT_UNKNOWN in states:
                 return None
             report = _raw_battery_module_report(states)
-            if not _battery_tower_present(self._runtime, device_id, prefix, report["populated_module_slots"]):
+            if not _battery_tower_present(
+                self._runtime, device_id, prefix, report["populated_module_slots"]
+            ):
                 if prefix == "battery":
                     return None
                 continue
@@ -318,13 +374,35 @@ class MeasuredBatteryCapacity:
             return None
         rated_wh = sum(counts) * _RATED_USABLE_WH_PER_MODULE
         current_wh = rated_wh * min(1.0, measured_ah / reference_ah)
-        return float(reference_ah), float(measured_ah), tuple(counts), rated_wh, current_wh
+        return (
+            float(reference_ah),
+            float(measured_ah),
+            tuple(counts),
+            rated_wh,
+            current_wh,
+        )
 
     def verified_usable_capacity_wh(self, device_id: str) -> float | None:
         components = self._components(device_id)
         return None if components is None else components[4]
 
-    def calibration_sample(self, device_id: str, measured_at: datetime) -> CapacityCalibrationSample | None:
+    def _bms_serial(self, device_id: str) -> str | None:
+        sample = self._runtime.gateway.cached_sample(device_id, BMS_SERIAL_METRIC)
+        if (
+            sample is None
+            or sample[2] is not CacheFreshness.FRESH
+            or not isinstance(sample[0], str)
+        ):
+            return None
+        return _clean_module_serial(sample[0])[:64] or None
+
+    def calibration_sample(
+        self, device_id: str, measured_at: datetime
+    ) -> CapacityCalibrationSample | None:
+        """Sample keyed by the inverter serial; None while that serial is unknown (no device_id fallback)."""
+        inverter_serial = self._runtime.gateway.reported_serial(device_id)
+        if not inverter_serial:
+            return None
         components = self._components(device_id)
         if components is None:
             return None
@@ -337,6 +415,8 @@ class MeasuredBatteryCapacity:
                 cycles = raw
         return CapacityCalibrationSample(
             device_id=device_id,
+            inverter_serial=inverter_serial,
+            battery_bms_sn=self._bms_serial(device_id),
             measured_at=measured_at.astimezone(UTC),
             battery_cycles=cycles,
             reference_ah=reference_ah,
@@ -346,5 +426,3 @@ class MeasuredBatteryCapacity:
             remaining_capacity_percent=100.0 * current_wh / rated_wh,
             module_counts=counts,
         )
-
-
