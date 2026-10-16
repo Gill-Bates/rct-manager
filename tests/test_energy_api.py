@@ -32,6 +32,7 @@ from app.api.problems import _is_write_path
 from app.catalog.base import is_numeric
 from app.catalog.registry import RegistryCatalog
 from app.energy.models import EnergyMode
+from app.gateway.battery_inventory import CapacityCalibrationSample
 from app.protocol.types import WRITE_COMMANDS
 from app.protocol.values import encode_value
 from app.scheduling.shutdown import ShutdownPlan
@@ -424,6 +425,36 @@ async def test_battery_characterization_is_authorized_cache_only_and_never_deriv
         assert metrics["battery_placeholder_0_maximum_charge_current"]["unit"] == "A"
         assert [tower["id"] for tower in body["towers"]] == ["battery", "battery_placeholder_0"]
         assert all(tower["module_count_status"] == "pending" for tower in body["towers"])
+        assert harness.runtime.gateway.device_status("main").transactions == before
+        assert len(harness.net.frames) == frames
+
+
+async def test_battery_calibration_history_is_authorized_local_only_and_bounded(tmp_path: Path) -> None:
+    settings = characterization_settings(tmp_path, enable_write_support=False, enable_periodic_reads=False)
+    async with running_app(settings) as harness:
+        path = "/admin/api/energy/devices/main/battery-calibration-history"
+        assert (await harness.client.get(path)).status_code == 401
+        sample = CapacityCalibrationSample(
+            device_id="main", measured_at=datetime(2026, 10, 16, 12, tzinfo=UTC), battery_cycles=128,
+            reference_ah=17.0, measured_ah=14.0, rated_usable_capacity_wh=10368.0,
+            current_usable_capacity_wh=8538.35, remaining_capacity_percent=82.35,
+            module_counts=(6,), source_contract="bms_ah_ratio_v1",
+        )
+        harness.app.state.admin_store.record_battery_calibration(sample)
+        headers = await admin_session(harness)
+        before = harness.runtime.gateway.device_status("main").transactions
+        frames = len(harness.net.frames)
+
+        response = await harness.client.get(path, headers=headers)
+
+        assert response.status_code == 200, response.text
+        point = response.json()["points"][0]
+        assert point["battery_cycles"] == 128
+        assert point["current_usable_capacity_wh"] == pytest.approx(8538.35)
+        assert point["remaining_capacity_percent"] == pytest.approx(82.35)
+        assert point["module_counts"] == [6]
+        assert (await harness.client.get(path + "?limit=5001", headers=headers)).status_code == 422
+        assert (await harness.client.get("/admin/api/energy/devices/missing/battery-calibration-history", headers=headers)).status_code == 404
         assert harness.runtime.gateway.device_status("main").transactions == before
         assert len(harness.net.frames) == frames
 

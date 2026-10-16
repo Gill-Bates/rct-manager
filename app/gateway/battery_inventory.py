@@ -4,11 +4,10 @@
 # Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
 #
 
-"""Battery tower topology derived from cached module serials.
+"""Battery tower topology and BMS-Ah-capped usable capacity from cached readings.
 
-Cache-only: nothing here reads a device. The admin dashboard uses one classification of the
-module-serial slots. The last-known-good state is owned by the
-gateway (`module_topology_state`), which drops it whenever it invalidates its module inventory.
+Cache-only: nothing here reads a device. The admin dashboard and planning source use the
+module-serial classification. The gateway drops last-known-good topology when inventory changes.
 """
 
 import logging
@@ -16,6 +15,8 @@ import math
 import re
 import threading
 import time
+from dataclasses import dataclass
+from datetime import UTC, datetime
 
 from app.gateway.cache import CacheFreshness
 
@@ -263,13 +264,27 @@ def _battery_module_report(runtime, device_id: str, prefix: str) -> dict:
 _RATED_USABLE_WH_PER_MODULE = 1920 * 0.9
 
 
+@dataclass(frozen=True, slots=True)
+class CapacityCalibrationSample:
+    device_id: str
+    measured_at: datetime
+    battery_cycles: int | None
+    reference_ah: float
+    measured_ah: float
+    rated_usable_capacity_wh: float
+    current_usable_capacity_wh: float
+    remaining_capacity_percent: float
+    module_counts: tuple[int, ...]
+    source_contract: str = "bms_ah_ratio_v1"
+
+
 class MeasuredBatteryCapacity:
     """Cache-only usable Wh from trusted topology capped by the BMS measured/reference Ah ratio."""
 
     def __init__(self, runtime) -> None:
         self._runtime = runtime
 
-    def verified_usable_capacity_wh(self, device_id: str) -> float | None:
+    def _components(self, device_id: str) -> tuple[float, float, tuple[int, ...], float, float] | None:
         samples = [
             self._runtime.gateway.cached_sample(device_id, name)
             for name in CAPACITY_AH_METRICS
@@ -301,6 +316,35 @@ class MeasuredBatteryCapacity:
             return None
         if not counts:
             return None
-        return sum(counts) * _RATED_USABLE_WH_PER_MODULE * min(1.0, measured_ah / reference_ah)
+        rated_wh = sum(counts) * _RATED_USABLE_WH_PER_MODULE
+        current_wh = rated_wh * min(1.0, measured_ah / reference_ah)
+        return float(reference_ah), float(measured_ah), tuple(counts), rated_wh, current_wh
+
+    def verified_usable_capacity_wh(self, device_id: str) -> float | None:
+        components = self._components(device_id)
+        return None if components is None else components[4]
+
+    def calibration_sample(self, device_id: str, measured_at: datetime) -> CapacityCalibrationSample | None:
+        components = self._components(device_id)
+        if components is None:
+            return None
+        reference_ah, measured_ah, counts, rated_wh, current_wh = components
+        cycles_sample = self._runtime.gateway.cached_sample(device_id, "battery_cycles")
+        cycles = None
+        if cycles_sample is not None and cycles_sample[2] is CacheFreshness.FRESH:
+            raw = cycles_sample[0]
+            if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 0:
+                cycles = raw
+        return CapacityCalibrationSample(
+            device_id=device_id,
+            measured_at=measured_at.astimezone(UTC),
+            battery_cycles=cycles,
+            reference_ah=reference_ah,
+            measured_ah=measured_ah,
+            rated_usable_capacity_wh=rated_wh,
+            current_usable_capacity_wh=current_wh,
+            remaining_capacity_percent=100.0 * current_wh / rated_wh,
+            module_counts=counts,
+        )
 
 

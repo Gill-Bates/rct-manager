@@ -20,8 +20,11 @@ The point of these tests is twofold:
    between e.g. 3 and 6 modules while the slots are still being filled in.
 """
 
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 from app.admin.api import (
     SECOND_TOWER_METRIC_NAMES,
@@ -32,6 +35,7 @@ from app.gateway.battery_inventory import (
     _BATTERY_MODULE_STABILITY_READS,
     RCT_MAX_MODULES_PER_TOWER,
     RCT_MODULE_SN_SLOTS,
+    MeasuredBatteryCapacity,
     _battery_module_report,
     _battery_module_slot_states,
     _battery_populated_module_slots,
@@ -41,7 +45,10 @@ from app.gateway.cache import CacheFreshness
 from app.gateway.rct import REFRESH_FAILURES_CONFIRMED
 
 
-def _runtime(serials: dict[str, str], *, known: set[str] | None = None, unanswered: frozenset[str] = frozenset()):
+def _runtime(
+    serials: dict[str, str], *, known: set[str] | None = None, unanswered: frozenset[str] = frozenset(),
+    ah_samples: dict[str, tuple[float, CacheFreshness]] | None = None,
+):
     """Runtime stub whose catalog knows `known` (default: every battery name used here).
 
     A slot name present in `serials` is a slot that WAS read (even if its value is blank/garbage -
@@ -60,8 +67,13 @@ def _runtime(serials: dict[str, str], *, known: set[str] | None = None, unanswer
             return None
         return (serials[name], CacheFreshness.FRESH)
 
+    def cached_sample(device_id: str, name: str):
+        sample = (ah_samples or {}).get(name)
+        return None if sample is None else (sample[0], 0.0, sample[1])
+
     return SimpleNamespace(catalog=SimpleNamespace(exists=exists),
                            gateway=SimpleNamespace(cached_reading=cached_reading,
+                                                   cached_sample=cached_sample,
                                                    read_failed=lambda _device_id, name: name in unanswered))
 
 
@@ -814,6 +826,131 @@ def _single_tower(count: int) -> dict[str, str]:
     return _slots("battery", count)
 
 
+def _measured_capacity(runtime) -> float | None:
+    return MeasuredBatteryCapacity(runtime).verified_usable_capacity_wh("dev")
+
+
+def _ah_samples(reference: float = 17.82485008239746, measured: float = 14.450748443603516,
+                freshness: CacheFreshness = CacheFreshness.FRESH):
+    return {
+        "battery_ah_capacity": (reference, freshness),
+        "power_mng_amp_hours_measured": (measured, freshness),
+    }
+
+
+def test_module_count_alone_never_releases_current_usable_capacity() -> None:
+    runtime = _runtime(_single_tower(6), unanswered=_PLACEHOLDER_SILENT)
+    assert _battery_module_report(runtime, "dev", "battery")["module_count"] == 6
+    assert _measured_capacity(runtime) is None
+
+
+def test_measured_ah_caps_single_tower_capacity_below_rated_value() -> None:
+    runtime = _runtime(_single_tower(6), unanswered=_PLACEHOLDER_SILENT, ah_samples=_ah_samples())
+    assert _measured_capacity(runtime) == pytest.approx(10_368 * 14.450748443603516 / 17.82485008239746)
+
+
+def test_calibration_sample_carries_rated_and_current_capacity_with_raw_cycles() -> None:
+    readings = {**_ah_samples(), "battery_cycles": (42, CacheFreshness.FRESH)}
+    runtime = _runtime(_single_tower(6), unanswered=_PLACEHOLDER_SILENT, ah_samples=readings)
+    sample = MeasuredBatteryCapacity(runtime).calibration_sample("dev", datetime(2026, 10, 16, tzinfo=UTC))
+    assert sample is not None
+    assert sample.module_counts == (6,)
+    assert sample.battery_cycles == 42
+    assert sample.rated_usable_capacity_wh == pytest.approx(10_368)
+    assert sample.current_usable_capacity_wh == pytest.approx(_measured_capacity(runtime))
+    assert sample.remaining_capacity_percent == pytest.approx(100 * 14.450748443603516 / 17.82485008239746)
+    assert sample.source_contract == "bms_ah_ratio_v1"
+
+
+def test_bms_ah_cache_remains_fresh_between_daily_background_reads() -> None:
+    from app.catalog.registry import RegistryCatalog
+    from app.gateway.cache import MemoryCache
+    from app.gateway.rct import RctGateway
+    from app.security.allowlist import Allowlist
+    from tests.conftest import AutoClock
+
+    clock = AutoClock()
+    catalog = RegistryCatalog.from_file(_PROD_REGISTRY)
+    cache = MemoryCache(10, 10)
+    RctGateway(catalog, cache, clock, Allowlist({}, catalog))
+    key = ("dev", "power_mng_amp_hours_measured")
+    cache.put(key, 14.45, measured_at=clock.now(), received_monotonic=clock.monotonic(), origin="transaction")
+    entry = cache.get(key)
+    assert entry is not None
+    assert cache.classify(key, entry, now_monotonic=clock.monotonic() + 24 * 60 * 60) is CacheFreshness.FRESH
+    assert cache.classify(key, entry, now_monotonic=clock.monotonic() + 49 * 60 * 60) is CacheFreshness.EXPIRED
+
+
+def test_measured_ah_above_reference_never_exceeds_rated_ceiling() -> None:
+    runtime = _runtime(_single_tower(6), unanswered=_PLACEHOLDER_SILENT,
+                       ah_samples=_ah_samples(reference=15.0, measured=18.0))
+    assert _measured_capacity(runtime) == pytest.approx(10_368)
+
+
+@pytest.mark.parametrize("bad_samples", [
+    {"battery_ah_capacity": (17.0, CacheFreshness.FRESH)},
+    _ah_samples(freshness=CacheFreshness.GRACE),
+    _ah_samples(reference=0),
+    _ah_samples(measured=float("nan")),
+])
+def test_missing_stale_or_invalid_ah_fails_closed(bad_samples) -> None:
+    runtime = _runtime(_single_tower(6), unanswered=_PLACEHOLDER_SILENT, ah_samples=bad_samples)
+    assert _measured_capacity(runtime) is None
+
+
+@pytest.mark.parametrize("failure", [None, "battery_ah_capacity"])
+async def test_background_capacity_refresh_reads_both_metrics_and_isolates_failure(failure: str | None) -> None:
+    from app.api.app_factory import _inventory_loop
+    from app.errors import DeviceApiError
+    from app.gateway.base import DeviceState
+
+    class StopCycle(Exception):
+        pass
+
+    class Clock:
+        elapsed = 0.0
+
+        def monotonic(self):
+            return self.elapsed
+
+        def now(self):
+            return datetime(2026, 10, 16, tzinfo=UTC)
+
+        async def sleep(self, seconds):
+            self.elapsed += seconds
+            if self.elapsed > 15:
+                raise StopCycle
+
+    reads = []
+    persisted = []
+
+    async def read_system(device_id, name):
+        reads.append(name)
+        if name == failure:
+            raise DeviceApiError("unavailable")
+
+    async def persist(sample):
+        persisted.append(sample)
+
+    gateway = SimpleNamespace(
+        read_module_inventory=lambda *_args: _done(),
+        device_status=lambda _device_id: SimpleNamespace(state=DeviceState.OK, queue_length=0),
+        read_system=read_system,
+    )
+
+    async def _done():
+        return 0
+
+    with pytest.raises(StopCycle):
+        await _inventory_loop(
+            gateway, "dev", Clock(), capacity_ah_names=("battery_ah_capacity", "power_mng_amp_hours_measured"),
+            capacity_source=SimpleNamespace(calibration_sample=lambda *_args: "sample"),
+            on_capacity_calibration=persist,
+        )
+    assert reads == ["battery_ah_capacity", "power_mng_amp_hours_measured"]
+    assert persisted == ([] if failure else ["sample"])
+
+
 def test_power_battery_11_5_six_modules_are_reported_as_topology_only() -> None:
     runtime = _runtime(_single_tower(6), unanswered=_PLACEHOLDER_SILENT)
     report = _battery_module_report(runtime, "dev", "battery")
@@ -826,6 +963,8 @@ def test_symmetric_two_towers_keep_their_separate_diagnostic_counts(modules: int
     runtime = _runtime(serials)
     assert _battery_module_report(runtime, "dev", "battery")["module_count"] == modules
     assert _battery_module_report(runtime, "dev", "battery_placeholder_0")["module_count"] == modules
+    measured = _runtime(serials, ah_samples=_ah_samples(reference=18.0, measured=18.0))
+    assert _measured_capacity(measured) == pytest.approx(2 * modules * 1920 * 0.9)
 
 
 @pytest.mark.parametrize(("primary", "second"), [(6, 5), (3, 3), (4, 5), (2, 2)])
@@ -834,6 +973,8 @@ def test_mixed_or_small_two_towers_remain_diagnostic_only(primary: int, second: 
     runtime = _runtime(serials)
     assert _battery_module_report(runtime, "dev", "battery")["module_count"] == primary
     assert _battery_module_report(runtime, "dev", "battery_placeholder_0")["module_count"] == second
+    measured = _runtime(serials, ah_samples=_ah_samples())
+    assert _measured_capacity(measured) is None
 
 
 @pytest.mark.parametrize("modules", range(2, 7))

@@ -227,11 +227,17 @@ read cache, power limits from the dispatch configuration). The battery-facts res
 uses a verified usable capacity when one is available, with a persisted per-device
 Expert override taking precedence. The resolver is fed by a cache-only capacity port
 (`Runtime.battery_capacity`) that both the device list and the plan read; the plan
-endpoint never queries the inverter. The port derives the usable capacity from the
-stabilized module count (one populated `module_sn` slot per battery unit) times the RCT Power
-Battery datasheet value of 1.92 kWh per unit at 90 % depth of discharge: a Power Battery 11.5
-(6 units) yields 10.37 kWh. Every present tower must report an `ok` module count, otherwise the
-port reports no value; state of health is not applied. No RCT register is proven to yield usable Wh:
+endpoint never queries the inverter. Module serials establish a rated upper baseline:
+the RCT Power Battery datasheet specifies 1.92 kWh per module and 90 % usable depth of
+discharge, so six modules have 10.368 kWh rated usable capacity when new. Current usable
+capacity is capped by the BMS ratio `power_mng_amp_hours_measured / battery_ah_capacity`,
+never above 100 % of that rated baseline. Both Ah readings must be fresh, finite and positive,
+and every tower scan must be complete and trustworthy. A single tower may have 2–6 modules;
+two towers are accepted only as documented symmetric 4+4, 5+5 or 6+6 installations.
+Missing or unsupported data leaves capacity unavailable. Neither live voltage nor the
+unverified `battery_soh` scale is used. The two Ah registers are refreshed automatically
+in the background at a bounded daily cadence, with isolated retries after failures.
+No RCT register is proven to yield usable Wh directly:
 `battery_ah_capacity` x live `battery_voltage` is gross, voltage-dependent and ignores
 module count and state of health. `battery_stored_energy` and `battery_used_energy` are
 documented by the [RCT serial protocol](reference/protocol.md) as total energy flow into and
@@ -240,12 +246,11 @@ protocol names `battery_ah_capacity` as battery capacity in Ah,
 `power_mng_amp_hours_measured` as measured battery capacity in Ah, and `battery_soh` as
 State of Health. It gives no usable-capacity value in Wh, no Ah-to-Wh conversion or
 nominal-voltage mapping, no SoH scale, and no labels for the `power_mng_battery_type`
-enum codes. The planner therefore never derives capacity from these registers. The next candidates to characterise on
-real one- and two-tower systems are `power_mng_n_batteries`, `power_mng_amp_hours_measured`
-("Measured battery capacity" in the protocol), `battery_ah_capacity` and
-`battery_placeholder_0_ah_capacity`: whether each value is per tower or device-wide, and
-whether a documented nominal voltage exists to turn Ah into Wh. The live voltage stays
-unsuitable for that conversion. Existing
+enum codes. The planner uses the two Ah values only as a ratio to reduce the datasheet
+baseline, never as standalone Wh. Per-tower versus device-wide semantics for
+`battery_placeholder_0_ah_capacity` and other battery registers still need characterization;
+unsupported tower combinations therefore remain unavailable. Live voltage stays unsuitable
+for an Ah-to-Wh conversion. Existing
 persisted `usable_capacity_wh` values remain effective as Expert overrides, including
 values seeded from the legacy `DISPATCH_USABLE_BATTERY_CAPACITY_WH` setting. Saving
 other limits without the capacity field keeps the stored override; an explicit `null`
@@ -267,7 +272,7 @@ time-series chart (it replaces the former slot table): grid charge power (kW, id
 slot's time range, action, power, target SoC and plain-language reason; the canvas carries a text summary
 and a visually hidden list of the charge slots for assistive technology. `GET /admin/api/energy/planning-devices` reports
 `battery_capacity_source` as `verified`, `expert_override`, or `unavailable`;
-`verified` means the module-count capacity above. While an
+`verified` means the topology- and BMS-Ah-capped capacity above. While an
 input is only pending (battery state, spot prices, solar forecast, consumption model), Basic mode shows
 nothing but a rotating "Please wait …" spinner and re-requests the plan every 10 s (at most 30 times, then
 the status text with the readiness checklist stays); a new load, a device change, a hidden tab or a

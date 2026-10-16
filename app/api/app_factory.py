@@ -10,7 +10,7 @@ import asyncio
 import contextlib
 import functools
 import logging
-from collections.abc import AsyncIterator, Callable, Iterable, Iterator, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import timedelta
 from pathlib import Path
@@ -59,7 +59,12 @@ from app.dispatch.store import DispatchStore
 from app.energy.manager import EnergyManager
 from app.energy.models import EnergyMode, ModeRecord
 from app.errors import ConfigError, DeviceApiError, ReconfigurationBuildError
-from app.gateway.battery_inventory import RCT_MODULE_SN_SLOTS, MeasuredBatteryCapacity
+from app.gateway.battery_inventory import (
+    CAPACITY_AH_METRICS,
+    RCT_MODULE_SN_SLOTS,
+    CapacityCalibrationSample,
+    MeasuredBatteryCapacity,
+)
 from app.gateway.cache import MemoryCache
 from app.gateway.energy_readings import RctEnergyReadings
 from app.gateway.live_charge_limit import RctLiveChargeLimitProvider
@@ -110,6 +115,8 @@ _PASSWORD_POLL_SECONDS = 1.0
 _RECONFIGURE_DRAIN_SECONDS = 10.0  # shutdown waits this long for an in-flight reconfiguration
 _REFRESH_CYCLE_SECONDS = 10.0  # 8 reads per cycle cover 40 values within the 2 x pas.period threshold
 _INVENTORY_CHECK_SECONDS = 15.0  # loop cadence; read_module_inventory itself gates the slow device reads
+_CAPACITY_AH_REFRESH_SECONDS = 24 * 60 * 60
+_CAPACITY_AH_RETRY_SECONDS = 6 * 60 * 60
 _bearer = HTTPBearer(auto_error=False, description="Bearer token")
 _FAVICON_BYTES = (Path(__file__).resolve().parent.parent / "admin" / "static" / "img" / "favicon.ico").read_bytes()
 _DOCS_HEADERS = {
@@ -704,7 +711,10 @@ def _activate_second_tower(runtime: Runtime, manager: PeriodicManager, device_id
 
 
 async def _inventory_loop(
-    gateway: RctGateway, device_id: str, clock: Clock, activate_second_tower: Callable[[], bool] | None = None
+    gateway: RctGateway, device_id: str, clock: Clock, activate_second_tower: Callable[[], bool] | None = None,
+    capacity_ah_names: tuple[str, ...] = (),
+    capacity_source: MeasuredBatteryCapacity | None = None,
+    on_capacity_calibration: Callable[[CapacityCalibrationSample], Awaitable[object]] | None = None,
 ) -> None:
     """Drive the bounded initial discovery of the static module-serial inventory, then idle.
 
@@ -716,6 +726,7 @@ async def _inventory_loop(
     cheap refresh - there is deliberately no recurring device re-probe. (A very-slow explicit
     rediscovery for hardware-change-without-reconfiguration could be added here later.)
     """
+    next_capacity_read = clock.monotonic() + _INVENTORY_CHECK_SECONDS
     while True:
         try:
             await gateway.read_module_inventory(device_id, _MODULE_INVENTORY_NAMES)
@@ -727,6 +738,29 @@ async def _inventory_loop(
                     activate_second_tower = None  # one-way: the periodic set keeps the metrics
             except Exception:
                 log.exception("Second-tower detection failed")
+        status = gateway.device_status(device_id)
+        if (capacity_ah_names and clock.monotonic() >= next_capacity_read
+                and status.state in READY_STATES and status.queue_length == 0):
+            failed = False
+            for name in capacity_ah_names:
+                try:
+                    await gateway.read_system(device_id, name)
+                except DeviceApiError:
+                    failed = True
+                    log.debug("Battery Ah background read failed: device=%s metric=%s", device_id, name)
+                except Exception:
+                    failed = True
+                    log.exception("Battery Ah background read failed: device=%s metric=%s", device_id, name)
+            if not failed and capacity_source is not None and on_capacity_calibration is not None:
+                sample = capacity_source.calibration_sample(device_id, clock.now())
+                if sample is not None:
+                    try:
+                        await on_capacity_calibration(sample)
+                    except Exception:
+                        log.exception("Battery calibration persistence failed for device %s", device_id)
+            next_capacity_read = clock.monotonic() + (
+                _CAPACITY_AH_RETRY_SECONDS if failed else _CAPACITY_AH_REFRESH_SECONDS
+            )
         await clock.sleep(_INVENTORY_CHECK_SECONDS)
 
 
@@ -818,6 +852,10 @@ def _lifespan(
                 runtime.export_task = export_task
 
         def start_polling_tasks() -> None:
+            async def record_capacity(sample: CapacityCalibrationSample) -> None:
+                if store is not None:
+                    await asyncio.to_thread(store.record_battery_calibration, sample)
+
             for endpoint, heartbeat in parts.heartbeats:
                 task = asyncio.create_task(_heartbeat_loop(connects[id(endpoint)], heartbeat))
                 heartbeat_tasks.append(task)
@@ -833,6 +871,9 @@ def _lifespan(
                 inv_task = asyncio.create_task(_inventory_loop(
                     gateway, device_id, runtime.clock,
                     functools.partial(_activate_second_tower, runtime, manager, device_id),
+                    CAPACITY_AH_METRICS if all(runtime.catalog.exists(name) for name in CAPACITY_AH_METRICS) else (),
+                    runtime.battery_capacity,
+                    record_capacity if store is not None else None,
                 ))
                 refresh_tasks.append(inv_task)  # same per-device lifecycle as the refresh loop
                 tasks.append(inv_task)

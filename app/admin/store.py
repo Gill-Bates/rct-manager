@@ -11,6 +11,7 @@ import hashlib
 import hmac
 import json
 import logging
+import math
 import os
 import secrets
 import sqlite3
@@ -137,6 +138,17 @@ _SCHEMA: dict[str, str] = {
         "device_id TEXT NOT NULL, created_at TEXT NOT NULL, method TEXT NOT NULL, interval_start TEXT NOT NULL, "
         "energy_wh REAL NOT NULL CHECK (energy_wh >= 0), "
         "PRIMARY KEY (device_id, created_at, method, interval_start)) STRICT;"
+    ),
+    "battery_calibration_history": (
+        "CREATE TABLE battery_calibration_history ("
+        "id INTEGER PRIMARY KEY, device_id TEXT NOT NULL, measured_at TEXT NOT NULL, "
+        "battery_cycles INTEGER CHECK (battery_cycles >= 0), "
+        "reference_ah REAL NOT NULL CHECK (reference_ah > 0), "
+        "measured_ah REAL NOT NULL CHECK (measured_ah > 0), "
+        "rated_usable_capacity_wh REAL NOT NULL CHECK (rated_usable_capacity_wh > 0), "
+        "current_usable_capacity_wh REAL NOT NULL CHECK (current_usable_capacity_wh > 0), "
+        "module_counts TEXT NOT NULL, source_contract TEXT NOT NULL, "
+        "UNIQUE (device_id, measured_at)) STRICT;"
     ),
 }
 
@@ -649,6 +661,61 @@ class AdminStore:
                 (device_id, first_date, last_date),
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def record_battery_calibration(self, sample) -> bool:
+        """Keep each changed BMS capacity measurement permanently; return whether a row was added."""
+        if sample.measured_at.tzinfo is None or sample.measured_at.utcoffset() is None:
+            raise ValueError("battery calibration timestamp must be timezone-aware")
+        measured_at = sample.measured_at.astimezone(UTC).isoformat()
+        values = (
+            sample.reference_ah, sample.measured_ah,
+            sample.rated_usable_capacity_wh, sample.current_usable_capacity_wh,
+        )
+        if any(not math.isfinite(value) or value <= 0 for value in values):
+            raise ValueError("battery calibration capacities must be finite and positive")
+        if sample.battery_cycles is not None and (isinstance(sample.battery_cycles, bool) or sample.battery_cycles < 0):
+            raise ValueError("battery calibration cycle count must be nonnegative")
+        counts = tuple(sample.module_counts)
+        if not counts or any(isinstance(count, bool) or not isinstance(count, int) or count <= 0 for count in counts):
+            raise ValueError("battery calibration topology must contain positive module counts")
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            latest = db.execute(
+                "SELECT measured_ah FROM battery_calibration_history WHERE device_id=? ORDER BY id DESC LIMIT 1",
+                (sample.device_id,),
+            ).fetchone()
+            if latest is not None and abs(latest["measured_ah"] - sample.measured_ah) < 0.01:
+                return False
+            inserted = db.execute(
+                "INSERT OR IGNORE INTO battery_calibration_history ("
+                "device_id, measured_at, battery_cycles, reference_ah, measured_ah, "
+                "rated_usable_capacity_wh, current_usable_capacity_wh, module_counts, source_contract"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    sample.device_id, measured_at, sample.battery_cycles, sample.reference_ah,
+                    sample.measured_ah, sample.rated_usable_capacity_wh, sample.current_usable_capacity_wh,
+                    json.dumps(counts), sample.source_contract,
+                ),
+            )
+            return inserted.rowcount == 1
+
+    def get_battery_calibration_history(self, device_id: str, limit: int = 1200) -> list[dict]:
+        """Return the newest bounded portion of the permanent history, oldest first."""
+        if not 1 <= limit <= 5000:
+            raise ValueError("battery calibration history limit must be between 1 and 5000")
+        with self.connect() as db:
+            rows = db.execute(
+                "SELECT measured_at, battery_cycles, reference_ah, measured_ah, "
+                "rated_usable_capacity_wh, current_usable_capacity_wh, module_counts, source_contract "
+                "FROM battery_calibration_history WHERE device_id=? ORDER BY id DESC LIMIT ?",
+                (device_id, limit),
+            ).fetchall()
+        return [
+            {**dict(row), "module_counts": json.loads(row["module_counts"]),
+             "remaining_capacity_percent": round(min(100.0, row["current_usable_capacity_wh"]
+                / row["rated_usable_capacity_wh"] * 100), 2)}
+            for row in reversed(rows)
+        ]
 
     def prune_consumption_daily(self, cutoff_date: str) -> None:
         """Drop day totals older than the ISO local date ``cutoff_date``."""

@@ -47,8 +47,8 @@ from app.gateway.base import (
     StaleReason,
     WriteOutcome,
 )
-from app.gateway.cache import CacheEntry, CacheFreshness, ValueStore, age_seconds
 from app.gateway.battery_inventory import CAPACITY_AH_FRESH_SECONDS, CAPACITY_AH_METRICS
+from app.gateway.cache import CacheEntry, CacheFreshness, ValueStore, age_seconds
 from app.gateway.sample_sink import MetricSampleSink
 from app.gateway.vendor import SlaveDiscovery, TransportInfo
 from app.observability.stats import Histogram

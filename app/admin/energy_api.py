@@ -2019,6 +2019,23 @@ class BatteryCharacterizationView(BaseModel):
     towers: list[BatteryTowerModulesView]
 
 
+class BatteryCalibrationHistoryPoint(BaseModel):
+    measured_at: datetime
+    battery_cycles: int | None
+    reference_ah: float
+    measured_ah: float
+    rated_usable_capacity_wh: float
+    current_usable_capacity_wh: float
+    remaining_capacity_percent: float
+    module_counts: list[int]
+    source_contract: str
+
+
+class BatteryCalibrationHistoryView(BaseModel):
+    device_id: str
+    points: list[BatteryCalibrationHistoryPoint]
+
+
 class BatteryCharacterizationRefreshBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -2068,6 +2085,20 @@ async def battery_characterization(
     del admin
     _device_or_404(request, device_id)
     return _battery_characterization_view(request.app.state.runtime, device_id)
+
+
+@router.get("/devices/{device_id}/battery-calibration-history")
+async def battery_calibration_history(
+    request: Request,
+    device_id: str,
+    admin: Annotated[dict | None, Depends(_require_admin_read)],
+    limit: Annotated[int, Query(ge=1, le=5000)] = 1200,
+) -> BatteryCalibrationHistoryView:
+    """Read permanent local BMS calibration records without contacting the inverter."""
+    del admin
+    _device_or_404(request, device_id)
+    points = await asyncio.to_thread(_spotmarket_store(request).get_battery_calibration_history, device_id, limit)
+    return BatteryCalibrationHistoryView(device_id=device_id, points=points)
 
 
 def _require_admin_device_refresh(request: Request) -> dict | None:

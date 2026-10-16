@@ -137,6 +137,39 @@ function harness({ apiImpl } = {}) {
 
 const flush = () => new Promise((resolve) => setImmediate(resolve));
 
+test('BMS calibration history shows dated measurements, cycles, kWh and remaining percent', () => {
+  const h = harness();
+  try {
+    const host = h.context.element('div');
+    host.id = 'energy-plan-calibration';
+    const details = h.context.element('details');
+    details.id = 'energy-plan-diagnostics';
+    details.open = true;
+    const charts = [];
+    h.context.getComputedStyle = () => ({ getPropertyValue: () => '#456789' });
+    h.context.Chart = class {
+      constructor(canvas, config) { charts.push(config); }
+      destroy() { }
+    };
+    h.context.renderBatteryCalibrationHistory([{
+      measured_at: '2026-10-16T12:00:00+00:00', battery_cycles: 128,
+      current_usable_capacity_wh: 8538.35, rated_usable_capacity_wh: 10368,
+      remaining_capacity_percent: 82.35,
+    }]);
+    const table = flatten(host).find((node) => node.tagName === 'table');
+    assert.ok(table);
+    const text = flatten(table).map((node) => node.textContent).join(' ');
+    assert.match(text, /128/);
+    assert.match(text, /82[.,]35/);
+    assert.equal(charts[0].data.datasets[0].data[0], 8.53835);
+    assert.equal(charts[0].data.datasets[1].data[0], 10.368);
+    assert.deepEqual(Array.from(charts[0].options.plugins.tooltip.callbacks.afterBody([{ dataIndex: 0 }])),
+      ['Cycles: 128', 'Remaining: 82.35 %']);
+    h.context.renderBatteryCalibrationHistory([]);
+    assert.match(flatten(host).map((node) => node.textContent).join(' '), /No BMS calibration/);
+  } finally { h.cleanup(); }
+});
+
 // A device payload good enough for refill()/the submit tasks.
 function device(overrides = {}) {
   return {

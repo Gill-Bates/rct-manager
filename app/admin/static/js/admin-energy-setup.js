@@ -1343,6 +1343,103 @@ function renderDryRunPlan(plan, { waiting = true } = {}) {
 }
 
 let planDevices = [];
+let calibrationHistoryGeneration = 0;
+let calibrationHistoryPoints = [];
+let calibrationChart = null;
+
+function drawBatteryCalibrationChart() {
+  calibrationChart?.destroy();
+  calibrationChart = null;
+  const details = $('energy-plan-diagnostics');
+  const canvas = $('energy-plan-calibration-chart');
+  if (!details?.open || !canvas || !globalThis.Chart || !calibrationHistoryPoints.length) return;
+  const points = calibrationHistoryPoints;
+  const { label, grid, power } = planChartColors($('energy-plan-calibration'));
+  const labels = points.map((point) => new Date(point.measured_at).toLocaleDateString());
+  calibrationChart = new globalThis.Chart(canvas, {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [
+        { label: 'Usable capacity (kWh)', data: points.map((point) => point.current_usable_capacity_wh / 1000),
+          borderColor: power, backgroundColor: power, pointRadius: 4, tension: 0 },
+        { label: 'Datasheet capacity (100%)', data: points.map((point) => point.rated_usable_capacity_wh / 1000),
+          borderColor: label, backgroundColor: label, borderDash: [5, 4], pointRadius: 0, tension: 0 },
+      ],
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false, animation: false,
+      plugins: {
+        legend: { labels: { color: label } },
+        tooltip: { callbacks: { afterBody: (items) => {
+          const point = points[items[0]?.dataIndex];
+          return point ? [`Cycles: ${point.battery_cycles ?? 'n/a'}`, `Remaining: ${point.remaining_capacity_percent} %`] : [];
+        } } },
+      },
+      scales: {
+        x: { ticks: { color: label }, grid: { color: grid } },
+        y: { beginAtZero: true, title: { display: true, text: 'kWh', color: label },
+          ticks: { color: label }, grid: { color: grid } },
+      },
+    },
+  });
+}
+
+function renderBatteryCalibrationHistory(points) {
+  const host = $('energy-plan-calibration');
+  if (!host) return;
+  calibrationChart?.destroy();
+  calibrationChart = null;
+  calibrationHistoryPoints = points;
+  if (!points.length) {
+    host.replaceChildren(element('p', 'small text-secondary', 'No BMS calibration has been recorded yet.'));
+    return;
+  }
+  const heading = element('p', 'small text-secondary mb-2',
+    'The datasheet usable capacity is the fixed 100% reference. Dated points come from BMS measurements.');
+  const box = element('div', 'spot-market-chart-box mb-2');
+  const canvas = element('canvas');
+  canvas.id = 'energy-plan-calibration-chart';
+  canvas.setAttribute('aria-hidden', 'true');
+  box.append(canvas);
+  const table = element('table', 'table table-sm small');
+  const caption = element('caption', 'visually-hidden', 'Battery calibration history: date, cycles, usable capacity and remaining capacity');
+  const header = element('thead');
+  const headerRow = element('tr');
+  for (const title of ['Date', 'Cycles', 'Usable kWh', 'Remaining %']) headerRow.append(element('th', '', title));
+  header.append(headerRow);
+  const body = element('tbody');
+  for (const point of points) {
+    const row = element('tr');
+    const values = [new Date(point.measured_at).toLocaleString(), point.battery_cycles ?? 'n/a',
+      (point.current_usable_capacity_wh / 1000).toLocaleString(undefined, { maximumFractionDigits: 2 }),
+      point.remaining_capacity_percent.toLocaleString(undefined, { maximumFractionDigits: 2 })];
+    for (const value of values) row.append(element('td', '', String(value)));
+    body.append(row);
+  }
+  table.append(caption, header, body);
+  host.replaceChildren(heading, box, table);
+  drawBatteryCalibrationChart();
+}
+
+async function loadBatteryCalibrationHistory(deviceId) {
+  const host = $('energy-plan-calibration');
+  if (!host) return;
+  const generation = ++calibrationHistoryGeneration;
+  calibrationChart?.destroy();
+  calibrationChart = null;
+  calibrationHistoryPoints = [];
+  host.replaceChildren(element('p', 'small text-secondary', 'Loading BMS calibration history …'));
+  try {
+    const history = await api(`energy/devices/${encodeURIComponent(deviceId)}/battery-calibration-history`);
+    if (generation !== calibrationHistoryGeneration || $('energy-plan-device')?.value !== deviceId) return;
+    renderBatteryCalibrationHistory(Array.isArray(history.points) ? history.points : []);
+  } catch (error) {
+    if (generation === calibrationHistoryGeneration) {
+      host.replaceChildren(element('p', 'small text-danger', `Could not load battery calibration history: ${messageFrom(error)}`));
+    }
+  }
+}
 
 // Read-only device list: independent of write support and of the dispatch controller.
 async function refreshPlanDevices() {
@@ -1575,6 +1672,7 @@ async function loadDryRunPlan({ poll = false } = {}) {
     return;
   }
   const generation = ++planGeneration; // a slower earlier response must not overwrite a newer one
+  if (energyExpertMode) void loadBatteryCalibrationHistory(select.value);
   if (!poll) {
     void loadConsumptionHistory(select.value);
     host.replaceChildren(planWaitState());
@@ -1594,6 +1692,7 @@ async function loadDryRunPlan({ poll = false } = {}) {
 function initDryRunPlan() {
   const select = $('energy-plan-device');
   if (!select) return;
+  $('energy-plan-diagnostics')?.addEventListener('toggle', drawBatteryCalibrationChart);
   select.addEventListener('change', () => { fillPlanLimits(); void loadDryRunPlan(); });
   $('energy-plan-limits')?.addEventListener('submit', (event) => { void savePlanLimits(event); });
   const planExpertSwitch = $('energy-plan-expert-mode');
@@ -1623,6 +1722,7 @@ function setEnergyExpertMode(enabled) {
   if (state) state.textContent = enabled ? 'On' : 'Off';
   const advanced = $('energy-plan-advanced');
   if (advanced) advanced.hidden = !enabled;
+  if (enabled && $('energy-plan-device')?.value) void loadBatteryCalibrationHistory($('energy-plan-device').value);
   for (const node of document.querySelectorAll('#energy-plan-result [data-expert-only]')) node.hidden = !enabled;
   const form = $('energy-plan-limits');
   if (form) {

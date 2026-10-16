@@ -6,6 +6,7 @@
 - ``Fix`` Reading the bidding-zone list no longer waits for a running provider refresh, and a damaged stored zone catalog is ignored and reloaded.
 
 - ``Fix`` The Energy page no longer floods the log with errors while write support is off: the expected 503 from the energy device poll is logged at DEBUG, and the page polls every 30 s instead of 3 s until the next success.
+- ``Fix`` The Charging plan no longer shows the "Please wait …" spinner for good: a missing or unverifiable battery state shows its explanation at once, a pending input that is still pending after the 30 polls keeps its status card instead of returning to the spinner every 5 minutes, and the text for a missing consumption estimate matches the baseline fallback. Several logger points for one local date in the inverter day history are now logged once.
 
 
 <details markdown="1">
