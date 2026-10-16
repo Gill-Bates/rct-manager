@@ -2545,39 +2545,47 @@ samp,
    on .app-shell rather than the 0.9-zoomed #main-content keeps it free of zoom rounding, so the page
    never gains even a hairline scrollbar. Scoped to :has(.tsdb-console) so design rule R11 — which only
    inspects param-* and page-specific selectors — never matches it, and no other page is affected. */
-.app-shell:has(.tsdb-console) {
-    /* Viewport less the sticky header. The small extra margin absorbs the few-pixel difference
-       between 100dvh and the header's measured height (and any dvh rounding) so the document never
-       gains a hairline scrollbar. */
-    height: calc(100dvh - 4.1rem - 0.6rem);
-    min-height: 0;
-    /* The footer is fixed (outside the shell) and the console scrolls internally, so there is nothing
-       meaningful to clip; this just contains any residual sub-pixel spill. */
-    overflow: hidden;
-}
+/* The viewport-fill construct is scoped to >=38rem (the multi-column grid): there the shell is
+   clamped to a definite height, the content area is a flex column, and the console is pinned to a
+   single growing track so it reaches the footer and tails internally. Below 38rem the grid is a
+   single column; clamping the shell there would trap the stacked cards, so the page keeps its
+   natural height and scrolls, and the console is bounded by its own max-height instead (phone rule
+   at the end of this block). */
+@media (min-width: 38rem) {
+    .app-shell:has(.tsdb-console) {
+        /* Viewport less the sticky header. The small extra margin absorbs the few-pixel difference
+           between 100dvh and the header's measured height (and any dvh rounding) so the document
+           never gains a hairline scrollbar. */
+        height: calc(100dvh - 4.1rem - 0.6rem);
+        min-height: 0;
+        /* The footer is fixed (outside the shell) and the console scrolls internally, so there is
+           nothing meaningful to clip; this just contains any residual sub-pixel spill. */
+        overflow: hidden;
+    }
 
-#main-content:has(.tsdb-console) {
-    display: flex;
-    flex-direction: column;
-    min-height: 0;
-    overflow: auto;
-}
+    #main-content:has(.tsdb-console) {
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
+        overflow: auto;
+    }
 
-#main-content:has(.tsdb-console)>.settings-grid {
-    flex: 1 1 auto;
-    min-height: 0;
-    /* At two or more columns the settings cards occupy two content rows (control+database+connection,
-       then export settings), so the third, full-width console row takes the surplus while the cards
-       keep their natural height. Below ~38rem the grid is a single column (one card per row); there
-       the console just follows in natural flow (single-column fallback below). */
-    grid-template-rows: repeat(2, min-content) minmax(8rem, 1fr);
-}
-
-/* Single column (narrow screens): every card is its own row, so a fixed two-row prefix would grow
-   the wrong card. Fall back to natural row flow. */
-@media (max-width: 38rem) {
     #main-content:has(.tsdb-console)>.settings-grid {
-        grid-template-rows: none;
+        flex: 1 1 auto;
+        min-height: 0;
+        /* Two content rows hold the settings cards (at >=38rem the grid is two to four columns, so
+           the four cards wrap into at most two rows), then one growing 1fr row. The console was
+           landing on a content-sized row (where it grew to its whole tail) while this 1fr row sat
+           empty below it; pinning the console card's end to the final grid line (grid-row-end:-1
+           below) drops it onto the 1fr track whether the cards filled one row or two, so the console
+           always takes the surplus down to the footer and tails internally. */
+        grid-template-rows: repeat(2, min-content) minmax(8rem, 1fr);
+    }
+
+    #main-content:has(.tsdb-console)>.settings-grid>.card-span-all:has(.tsdb-console) {
+        /* The full-width console card is the last child; pinning its end to the final grid line puts
+           it on the lone 1fr track, with the cards keeping their natural height above it. */
+        grid-row-end: -1;
     }
 }
 
@@ -2598,6 +2606,15 @@ samp,
 #tsdb-mini-console {
     flex: 1 1 auto;
     min-height: 6rem;
+}
+
+/* Single column (phones, <38rem): the page scrolls naturally rather than being clamped, so bound the
+   console to a slice of the viewport and let its own overflow:auto tail the log instead of the card
+   growing to the full backlog and pushing the page down endlessly. */
+@media (max-width: 37.98rem) {
+    #tsdb-mini-console {
+        max-height: 60vh;
+    }
 }
 
 /* Modal Consistency: every modal centres in the viewport by default (ported from wirebuddy's

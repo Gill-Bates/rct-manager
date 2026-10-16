@@ -594,7 +594,10 @@ def test_export_group_is_withheld_as_a_group_and_revalidated_at_send_time():
 def test_tsdb_form_has_a_button_only_apply_bar_and_only_the_master_switch_autosaves():
     js = _admin_js()
     html = (TEMPLATES / "tsdb.html").read_text(encoding="utf-8")
-    assert 'id="export-actions"' in html and "align-items-end" in html
+    # Apply changes sits at the top left, before the settings grid, left-aligned (not the old
+    # bottom-right float), so it is the first action near the first settings card.
+    assert 'id="export-actions"' in html and "align-items-start" in html
+    assert html.index('id="export-actions"') < html.index('id="settings-sections"')
     # The shared bar is parameterised, not overridden: TSDB asks for the button alone.
     assert "buildApplyBar('export', {" in js
     builder = js[js.index("function buildApplyBar("):js.index("function buildGroupBody(")]
