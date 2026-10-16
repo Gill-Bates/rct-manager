@@ -2642,8 +2642,10 @@ body.is-reconnecting .modal-backdrop.show {
     background-color: rgb(15 23 42 / 60%);
 }
 
-/* Mandatory usage disclaimer: the dashboard behind the modal is blurred and dimmed (same treatment
-   as the connection-lost modal) so the gate reads as a true overlay the page cannot be used past. */
+/* Mandatory usage disclaimer: the whole page chrome behind the modal is blurred and dimmed (same
+   treatment as the connection-lost modal, but including the top navbar so the gate covers every
+   edge) so it reads as a true overlay the page cannot be used past. */
+body.is-disclaimer-pending .admin-navbar,
 body.is-disclaimer-pending .main-content,
 body.is-disclaimer-pending .sidebar {
     opacity: .35;
