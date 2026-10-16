@@ -1113,8 +1113,8 @@ function planChartColors(host) {
   return {
     label: styles.getPropertyValue('--bs-body-color').trim(),
     grid: styles.getPropertyValue('--rct-line').trim(),
-    power: styles.getPropertyValue('--plan-power').trim(),
-    soc: styles.getPropertyValue('--plan-soc').trim(),
+    power: styles.getPropertyValue('--rct-plan-power').trim(),
+    soc: styles.getPropertyValue('--rct-plan-soc').trim(),
   };
 }
 

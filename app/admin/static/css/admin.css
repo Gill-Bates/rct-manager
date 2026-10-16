@@ -55,6 +55,11 @@
     --bs-primary-rgb: 136, 23, 26;
     /* Focus ring: at least 3:1 against the page and card backgrounds of its theme. */
     --rct-focus-ring: #88171a;
+    /* Charging-plan time-series colours (power / target SoC). Shared by the Energy Manager chart,
+       the dashboard charging-schedule widget and the battery-health chart so one place sets the hue
+       for every plan chart; theme-independent today, defined once to stay that way. */
+    --rct-plan-power: #0d6efd;
+    --rct-plan-soc: #fd7e14;
     --rct-auth-card-shadow: 0 .25rem .75rem rgba(0, 0, 0, .08);
     /* Off-state switch outline and knob: at least 3:1 (WCAG 1.4.11) against page, card and track. */
     --rct-switch-off: #6c757d;
@@ -148,6 +153,13 @@ body {
 
 :root {
     --rct-footer-height: 2.75rem;
+    /* Effective painted footer height: the fixed .admin-footer adds env(safe-area-inset-bottom) as
+       extra bottom padding, so its real height is --rct-footer-height plus that inset. Everything that
+       RESERVES or POSITIONS against the footer (the .app-shell bottom padding, the footer's own
+       min-height, the toast offset) uses this one value, so the reserved space always matches the
+       painted footer even when the bottom safe-area inset is non-zero. The 420px --rct-footer-height
+       bump below (text-wrap height) composes with it automatically. */
+    --rct-footer-reserve: calc(var(--rct-footer-height) + env(safe-area-inset-bottom));
     /* The one knob for the content scale of every admin page (0.9 = the look of a 90% browser zoom).
        Navbar, sidebar and footer stay at 100%; login and password pages have no #main-content. */
     --content-zoom: .9;
@@ -210,7 +222,7 @@ body {
     /* Fills what the header leaves (body is a column): a hard-coded header height was ~5px short of
        the real one and made short pages scroll. */
     flex: 1 0 auto;
-    padding-bottom: var(--rct-footer-height);
+    padding-bottom: var(--rct-footer-reserve);
 }
 
 /* Below the sticky header (1030) and the toasts (1100); .app-shell reserves its height at the bottom. */
@@ -218,7 +230,9 @@ body {
     position: fixed;
     inset: auto 0 0 0;
     z-index: 1020;
-    min-height: var(--rct-footer-height);
+    /* Reserve the full painted height (text strip + safe-area inset) so .app-shell's matching
+       padding-bottom always clears it; border-box means this min-height includes the inset padding. */
+    min-height: var(--rct-footer-reserve);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -1768,12 +1782,6 @@ body {
     --consumption-history: #0d6efd;
 }
 
-/* Charging schedule: time-series chart colours. */
-#energy-plan-schedule {
-    --plan-power: #0d6efd;
-    --plan-soc: #fd7e14;
-}
-
 /* Title and status badge share one row; the fixed height keeps it from shifting when the badge
    appears, changes or is absent (e.g. an unsaved weather form). */
 .spot-market-preview-title-row {
@@ -2374,8 +2382,9 @@ samp,
 .toast-region {
     position: fixed;
     z-index: 1100;
-    /* Bottom right, above the fixed footer, so the header buttons and the mode switcher stay uncovered. */
-    bottom: calc(var(--rct-footer-height) + 1rem + env(safe-area-inset-bottom));
+    /* Bottom right, above the fixed footer, so the header buttons and the mode switcher stay uncovered.
+       --rct-footer-reserve already includes the safe-area inset, so the toast clears the painted footer. */
+    bottom: calc(var(--rct-footer-reserve) + 1rem);
     right: max(1rem, env(safe-area-inset-right));
     max-width: min(23rem, calc(100vw - 2rem - env(safe-area-inset-left) - env(safe-area-inset-right)));
     display: grid;
@@ -2536,27 +2545,40 @@ samp,
 }
 
 /* Change 4 — the Status & Log console fills the viewport down to the footer and tails INTERNALLY,
-   reaching the same full-height bottom boundary as the Inverters param-card. The flex chain from the
-   content area down to the console node (#main-content -> .settings-grid -> console card -> card-body
-   -> console node) is shrinkable (flex + min-height:0), so the console's own overflow:auto absorbs a
-   long tail instead of the page growing. body{min-height:100dvh} is only a MINIMUM, so one viewport
-   bound is still required; it is a definite height on the UNZOOMED .app-shell (the sticky header,
-   min-height 4.1rem, sits above it; its padding-bottom already reserves the footer strip). Putting it
-   on .app-shell rather than the 0.9-zoomed #main-content keeps it free of zoom rounding, so the page
-   never gains even a hairline scrollbar. Scoped to :has(.tsdb-console) so design rule R11 — which only
-   inspects param-* and page-specific selectors — never matches it, and no other page is affected. */
-/* The viewport-fill construct is scoped to >=38rem (the multi-column grid): there the shell is
-   clamped to a definite height, the content area is a flex column, and the console is pinned to a
-   single growing track so it reaches the footer and tails internally. Below 38rem the grid is a
-   single column; clamping the shell there would trap the stacked cards, so the page keeps its
-   natural height and scrolls, and the console is bounded by its own max-height instead (phone rule
-   at the end of this block). */
+   reaching the same full-height bottom boundary as the Inverters param-card.
+
+   MOBILE IS THE BASE: on a phone the page is one ordinary document — no fixed shell height, no
+   overflow:hidden, no inner scroll container, no pinned console. The cards and the console simply
+   flow and the DOCUMENT scrolls, which is the robust behaviour on iOS where a dvh-sized shell plus
+   browser chrome and the on-screen keyboard make a nested scroll container fragile. The console
+   keeps a readable minimum height here; it grows with its content instead of tailing internally.
+
+   AT >=38rem the viewport-pinned desktop layout takes over (single @media below): the flex chain
+   from the content area down to the console node (#main-content -> .settings-grid -> console card ->
+   card-body -> console node) is shrinkable (flex + min-height:0) so the console's own overflow:auto
+   absorbs a long tail instead of the page growing. The shell height uses svh (small viewport height)
+   rather than dvh so showing/hiding browser chrome does not resize the pinned shell and jump the
+   layout. body{min-height:100dvh} is only a MINIMUM, so one viewport bound is still required; it is a
+   definite height on the UNZOOMED .app-shell (the sticky header, min-height 4.1rem, sits above it;
+   its padding-bottom already reserves the footer strip). Putting it on .app-shell rather than the
+   0.9-zoomed #main-content keeps it free of zoom rounding, so the page never gains a hairline
+   scrollbar. Scoped to :has(.tsdb-console) so design rule R11 — which only inspects param-* and
+   page-specific selectors — never matches it, and no other page is affected. */
+
+/* The console node: a readable minimum everywhere. On mobile (base) it keeps this natural height and
+   the document scrolls; at >=38rem the flex:1 1 auto added below lets it fill the pinned shell and
+   tail internally. */
+#tsdb-mini-console {
+    min-height: 6rem;
+}
+
 @media (min-width: 38rem) {
     .app-shell:has(.tsdb-console) {
-        /* Viewport less the sticky header. The small extra margin absorbs the few-pixel difference
-           between 100dvh and the header's measured height (and any dvh rounding) so the document
-           never gains a hairline scrollbar. */
-        height: calc(100dvh - 4.1rem - 0.6rem);
+        /* Viewport less the sticky header. svh (not dvh) keeps the pinned shell stable while browser
+           chrome shows/hides. The small extra margin absorbs the few-pixel difference between the
+           viewport unit and the header's measured height (and any rounding) so the document never
+           gains a hairline scrollbar. */
+        height: calc(100svh - 4.1rem - 0.6rem);
         min-height: 0;
         /* The footer is fixed (outside the shell) and the console scrolls internally, so there is
            nothing meaningful to clip; this just contains any residual sub-pixel spill. */
@@ -2573,47 +2595,33 @@ samp,
     #main-content:has(.tsdb-console)>.settings-grid {
         flex: 1 1 auto;
         min-height: 0;
-        /* Two content rows hold the settings cards (at >=38rem the grid is two to four columns, so
-           the four cards wrap into at most two rows), then one growing 1fr row. The console was
-           landing on a content-sized row (where it grew to its whole tail) while this 1fr row sat
-           empty below it; pinning the console card's end to the final grid line (grid-row-end:-1
-           below) drops it onto the 1fr track whether the cards filled one row or two, so the console
-           always takes the surplus down to the footer and tails internally. */
+        /* At two or more columns the settings cards occupy two content rows (control+database+
+           connection, then export settings), so the third, full-width console row takes the surplus
+           while the cards keep their natural height. Below this breakpoint the grid is a single column
+           and the base natural row flow applies, so there is no overlapping max-width companion. */
         grid-template-rows: repeat(2, min-content) minmax(8rem, 1fr);
     }
 
     #main-content:has(.tsdb-console)>.settings-grid>.card-span-all:has(.tsdb-console) {
+        min-height: 0;
         /* The full-width console card is the last child; pinning its end to the final grid line puts
-           it on the lone 1fr track, with the cards keeping their natural height above it. */
+           it on the lone 1fr track whether the cards filled one row or two, so the console always
+           takes the surplus down to the footer and tails internally (TSDB root-cause fix). */
         grid-row-end: -1;
     }
-}
 
-#main-content:has(.tsdb-console)>.settings-grid>.card-span-all:has(.tsdb-console) {
-    min-height: 0;
-}
+    #main-content:has(.tsdb-console)>.settings-grid>.card-span-all:has(.tsdb-console)>.card-body {
+        /* A flex column so the console node (not the h2 title) absorbs the card's surplus height. */
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
+    }
 
-#main-content:has(.tsdb-console)>.settings-grid>.card-span-all:has(.tsdb-console)>.card-body {
-    /* A flex column so the console node (not the h2 title) absorbs the card's surplus height. */
-    display: flex;
-    flex-direction: column;
-    min-height: 0;
-}
-
-/* The console node fills its card and tails internally: min-height:0 lets it shrink below content so
-   its own overflow:auto scrollbar (not the page) handles a long tail; a modest min-height keeps it
-   usable when space is tight. */
-#tsdb-mini-console {
-    flex: 1 1 auto;
-    min-height: 6rem;
-}
-
-/* Single column (phones, <38rem): the page scrolls naturally rather than being clamped, so bound the
-   console to a slice of the viewport and let its own overflow:auto tail the log instead of the card
-   growing to the full backlog and pushing the page down endlessly. */
-@media (max-width: 37.98rem) {
+    /* The console node fills its card and tails internally: min-height:0 lets it shrink below content
+       so its own overflow:auto scrollbar (not the page) handles a long tail. */
     #tsdb-mini-console {
-        max-height: 60vh;
+        flex: 1 1 auto;
+        min-height: 0;
     }
 }
 

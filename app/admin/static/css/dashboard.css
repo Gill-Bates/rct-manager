@@ -21,7 +21,9 @@
 }
 
 @keyframes dashboard-grid-failsafe {
-    to { visibility: visible; }
+    to {
+        visibility: visible;
+    }
 }
 
 .dashboard-grid .grid-stack-item-content {
@@ -69,7 +71,9 @@
 }
 
 @keyframes inverter-hint-arrow {
-    50% { transform: translateX(.35rem); }
+    50% {
+        transform: translateX(.35rem);
+    }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -132,7 +136,7 @@
 }
 
 /* Inset the corner grip from the tile's rounded edge and keep a 24px touch target. */
-.dashboard-editing.dashboard-grid .grid-stack-item > .ui-resizable-se {
+.dashboard-editing.dashboard-grid .grid-stack-item>.ui-resizable-se {
     width: 24px;
     height: 24px;
     right: calc(var(--gs-item-margin-right, 10px) + 6px);
@@ -184,7 +188,7 @@
         gap: .5rem;
     }
 
-    .dashboard-grid > .grid-stack-item {
+    .dashboard-grid>.grid-stack-item {
         position: static !important;
         width: auto !important;
         height: auto !important;
@@ -192,11 +196,11 @@
         transform: none !important;
     }
 
-    .dashboard-grid > .grid-stack-item[data-widget-id="devices"] {
+    .dashboard-grid>.grid-stack-item[data-widget-id="devices"] {
         grid-column: 1 / -1;
     }
 
-    .dashboard-grid > .grid-stack-item > .grid-stack-item-content {
+    .dashboard-grid>.grid-stack-item>.grid-stack-item-content {
         position: relative !important;
         inset: auto;
         margin: 0 !important;
@@ -205,7 +209,7 @@
 }
 
 /* Inverter overview grows with its content (see dashboard.js fitAutoHeight): never scrolls. */
-.dashboard-grid .grid-stack-item[data-widget-id="devices"] > .grid-stack-item-content {
+.dashboard-grid .grid-stack-item[data-widget-id="devices"]>.grid-stack-item-content {
     overflow: visible;
 }
 
@@ -232,10 +236,4 @@
 .dashboard-chart-state:not(:empty)::before {
     content: "·";
     margin-inline: .35rem;
-}
-
-/* Charging schedule widget: same series colours as the Energy Manager chart. */
-.dashboard-grid [data-widget-id="charging-schedule"] {
-    --plan-power: #0d6efd;
-    --plan-soc: #fd7e14;
 }

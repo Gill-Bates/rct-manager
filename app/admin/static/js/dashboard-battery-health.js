@@ -111,7 +111,7 @@
     const read = (name, fallback) => styles.getPropertyValue(name).trim() || fallback;
     return {
       label: read('--bs-body-color', '#212529'), grid: read('--rct-line', '#dee2e6'),
-      series: [read('--plan-power', '#0d6efd'), read('--plan-soc', '#fd7e14'), '#198754', '#6f42c1']
+      series: [read('--rct-plan-power', '#0d6efd'), read('--rct-plan-soc', '#fd7e14'), '#198754', '#6f42c1']
     };
   }
 
