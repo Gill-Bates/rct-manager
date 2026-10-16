@@ -24,26 +24,32 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from app.admin.api import (
+    SECOND_TOWER_METRIC_NAMES,
+    _battery_metric_names,
+    second_tower_confirmed,
+)
+from app.gateway.battery_inventory import (
     _BATTERY_MODULE_STABILITY_READS,
     RCT_MAX_MODULES_PER_TOWER,
     RCT_MODULE_SN_SLOTS,
-    RCT_NON_MODULE_SLOTS,
-    _battery_metric_names,
+    ModuleCountVerifiedCapacity,
     _battery_module_report,
     _battery_module_slot_states,
     _battery_populated_module_slots,
     _battery_tower_present,
 )
-from app.cache import CacheFreshness
+from app.gateway.cache import CacheFreshness
+from app.gateway.rct import REFRESH_FAILURES_CONFIRMED
 
 
-def _runtime(serials: dict[str, str], *, known: set[str] | None = None):
+def _runtime(serials: dict[str, str], *, known: set[str] | None = None, unanswered: frozenset[str] = frozenset()):
     """Runtime stub whose catalog knows `known` (default: every battery name used here).
 
     A slot name present in `serials` is a slot that WAS read (even if its value is blank/garbage -
     "empty", not "unknown"). A slot name absent from `serials` but present in `known`/unrestricted
     catalog existence is a slot that is defined but never read yet - UNKNOWN - matching
-    cached_reading()'s real None-means-unread contract.
+    cached_reading()'s real None-means-unread contract. A name in `unanswered` is a slot the device
+    repeatedly left silent (RctGateway.read_failed), which the inventory scan then never reads past.
     """
     names = known if known is not None else None
 
@@ -56,15 +62,16 @@ def _runtime(serials: dict[str, str], *, known: set[str] | None = None):
         return (serials[name], CacheFreshness.FRESH)
 
     return SimpleNamespace(catalog=SimpleNamespace(exists=exists),
-                           gateway=SimpleNamespace(cached_reading=cached_reading))
+                           gateway=SimpleNamespace(cached_reading=cached_reading,
+                                                   read_failed=lambda _device_id, name: name in unanswered))
 
 
 def _slots(prefix: str, count: int) -> dict[str, str]:
-    """A COMPLETE read of a tower with `count` battery modules: count + RCT_NON_MODULE_SLOTS populated
-    slots (the base/top part carries a serial too) followed by explicitly-read-empty slots up to
+    """A COMPLETE read of a tower with `count` battery modules: count populated
+    slots followed by explicitly-read-empty slots up to
     RCT_MODULE_SN_SLOTS - i.e. a finished scan, not a mid-scan snapshot. Use `_partial_slots` to
     build a snapshot that still has UNKNOWN slots."""
-    populated_slots = count + RCT_NON_MODULE_SLOTS
+    populated_slots = count
     populated = {f"{prefix}_module_sn_{i}": f"SN-{i}" for i in range(populated_slots)}
     rest_empty = {f"{prefix}_module_sn_{i}": "" for i in range(populated_slots, RCT_MODULE_SN_SLOTS)}
     return {**populated, **rest_empty}
@@ -93,7 +100,7 @@ def test_contiguous_run_within_the_hardware_limit_is_trusted() -> None:
         report = _report(_runtime(_slots("battery", count)), "battery")
         assert report["module_count"] == count, count
         assert report["module_count_status"] == "ok"
-        assert report["populated_module_slots"] == list(range(count + RCT_NON_MODULE_SLOTS))
+        assert report["populated_module_slots"] == list(range(count))
 
 
 def test_no_serial_read_yet_is_pending_not_zero_modules() -> None:
@@ -109,7 +116,7 @@ def test_blank_serials_do_not_count_as_populated() -> None:
                "battery_module_sn_3": "", "battery_module_sn_4": "", "battery_module_sn_5": "",
                "battery_module_sn_6": ""}
     report = _report(_runtime(serials), "battery")
-    assert report["module_count"] == 0, "the only populated slot is the base/top part, not a module"
+    assert report["module_count"] == 1, "only the one real serial counts as a module"
     assert report["module_count_status"] == "ok"
 
 
@@ -126,16 +133,23 @@ def test_null_and_control_byte_garbage_does_not_count_as_populated() -> None:
         "battery_module_sn_6": "",
     }
     report = _report(_runtime(serials), "battery")
-    assert report["module_count"] == 0, "the only populated slot is the base/top part, not a module"
+    assert report["module_count"] == 1, "only the one real serial counts as a module"
     assert report["module_count_status"] == "ok"
     assert report["populated_module_slots"] == [0]
 
 
-def test_all_seven_slots_populated_is_the_six_module_maximum_plus_the_base_part() -> None:
+def test_six_populated_slots_are_the_six_module_power_battery_11_5() -> None:
     report = _report(_runtime(_slots("battery", RCT_MAX_MODULES_PER_TOWER)), "battery")
     assert report["module_count"] == RCT_MAX_MODULES_PER_TOWER
     assert report["module_count_status"] == "ok"
-    assert report["populated_module_slots"] == list(range(RCT_MODULE_SN_SLOTS))
+    assert report["populated_module_slots"] == list(range(RCT_MAX_MODULES_PER_TOWER))
+
+
+def test_all_seven_slots_populated_is_an_anomaly() -> None:
+    serials = {f"battery_module_sn_{i}": f"SN-{i}" for i in range(RCT_MODULE_SN_SLOTS)}
+    report = _report(_runtime(serials), "battery")
+    assert report["module_count"] is None
+    assert report["module_count_status"] == "anomaly"
 
 
 _GAPPED_SERIALS = {"battery_module_sn_0": "a", "battery_module_sn_1": "b", "battery_module_sn_4": "e",
@@ -145,10 +159,7 @@ _GAPPED_SERIALS = {"battery_module_sn_0": "a", "battery_module_sn_1": "b", "batt
 
 def test_a_gap_in_the_middle_is_an_anomaly() -> None:
     # Complete read (all 7 slots): 0, 1, 4 populated, 2, 3, 5, 6 explicitly read as empty.
-    serials = {"battery_module_sn_0": "a", "battery_module_sn_1": "b", "battery_module_sn_4": "e",
-               "battery_module_sn_2": "", "battery_module_sn_3": "", "battery_module_sn_5": "",
-               "battery_module_sn_6": ""}
-    report = _report(_runtime(serials), "battery")
+    report = _report(_runtime(_GAPPED_SERIALS), "battery")
     assert report["module_count"] is None
     assert report["module_count_status"] == "anomaly"
     assert report["populated_module_slots"] == [0, 1, 4]
@@ -328,7 +339,7 @@ def test_a_single_flaky_read_does_not_flip_an_already_trusted_count() -> None:
     flaky = _report(runtime, "battery")
     assert flaky["module_count"] == 5, "an incomplete re-read must hold the trusted count"
     assert flaky["module_count_status"] == "ok"
-    assert flaky["populated_module_slots"] == [0, 1, 2, 3, 4, 5]
+    assert flaky["populated_module_slots"] == [0, 1, 2, 3, 4]
     # The next poll sees the real (unchanged) hardware again; the trusted count is unaffected by the
     # one flaky read in between.
     serials["battery_module_sn_3"] = "SN-3"
@@ -423,7 +434,7 @@ def test_slots_the_device_repeatedly_leaves_unanswered_do_not_hold_pending_forev
     assert states[3:] == ["empty"] * (RCT_MODULE_SN_SLOTS - 3)
     for _ in range(_BATTERY_MODULE_STABILITY_READS):
         report = _report(runtime)
-    assert (report["module_count"], report["module_count_status"]) == (2, "ok")
+    assert (report["module_count"], report["module_count_status"]) == (3, "ok")
 
 
 def test_a_slot_not_yet_confirmed_unanswered_still_counts_as_unknown() -> None:
@@ -432,12 +443,10 @@ def test_a_slot_not_yet_confirmed_unanswered_still_counts_as_unknown() -> None:
     assert _battery_module_slot_states(runtime, "dev", "battery")[3] == "unknown"
 
 
-# ---------------------------------------------------------------------------
-# FIX 1: static module serials are read by the bounded, cached inventory pass
+# Static module serials are read by the bounded, cached inventory pass.
 # (RctGateway.read_inventory), NOT by the connection-destabilising periodic set.
 # These tests use the PRODUCTION registry, which carries the module_sn slots the
 # tests/fixtures/objects.json fixture does not.
-# ---------------------------------------------------------------------------
 
 _PROD_REGISTRY = Path(__file__).resolve().parent.parent / "app" / "catalog" / "objects.json"
 
@@ -455,7 +464,9 @@ def test_module_serials_are_not_in_the_periodic_read_set() -> None:
     periodic = _effective_periodic_names(settings, catalog, None)
 
     assert not [n for n in periodic if "module_sn" in n], "module serials must be out of the periodic set"
-    assert len(periodic) == 46  # 39 preselected numeric + energy/card pins, minus the 14 serials
+    # Optional second-tower live metrics join only after the topology confirmed the tower.
+    assert not set(SECOND_TOWER_METRIC_NAMES) & set(periodic)
+    assert len(periodic) == 43  # 39 preselected numeric + energy/card pins, minus serials and tower 2
     # The inventory names cover both towers' seven slots, exactly what devices() needs.
     assert len(_MODULE_INVENTORY_NAMES) == 2 * RCT_MODULE_SN_SLOTS
     assert set(_MODULE_INVENTORY_NAMES) <= set(catalog.names())
@@ -470,23 +481,23 @@ async def test_inventory_read_feeds_devices_module_count_without_the_periodic_se
     settled."""
     from datetime import timedelta
 
-    from app.allowlist import Allowlist
     from app.api.app_factory import _MODULE_INVENTORY_NAMES
-    from app.cache import MemoryCache
     from app.catalog.registry import RegistryCatalog
     from app.config import DeviceEntry
+    from app.gateway.cache import MemoryCache
     from app.gateway.rct import DeviceBinding, RctGateway
     from app.scheduling.retry import RetryConfig
     from app.scheduling.serializer import AccessSerializer
+    from app.security.allowlist import Allowlist
     from app.transport.endpoint import EndpointConfig, TransportEndpoint
     from tests.conftest import AutoClock
     from tests.fakes import FakeNetwork
 
     clock = AutoClock()
     catalog = RegistryCatalog.from_file(_PROD_REGISTRY)
-    # A 3-module primary tower: slots 0..3 populated (3 modules + the base/top part), 4..6 never
+    # A 3-module primary tower: slots 0..2 populated (3 modules), 3..6 never
     # answered. The second tower answers nothing at all (no placeholder tower installed).
-    answered = {f"battery_module_sn_{i}": f"SN-{i}" for i in range(3 + RCT_NON_MODULE_SLOTS)}
+    answered = {f"battery_module_sn_{i}": f"SN-{i}" for i in range(3)}
     answered_ids = {catalog.object_entry(n).object_id for n in answered}
 
     def behavior(frame):
@@ -545,14 +556,14 @@ async def test_settled_inventory_slots_are_not_re_read_across_later_loop_ticks()
     one probe (its first serial slot only)."""
     from datetime import timedelta
 
-    from app.allowlist import Allowlist
     from app.api.app_factory import _MODULE_INVENTORY_NAMES
-    from app.cache import MemoryCache
     from app.catalog.registry import RegistryCatalog
     from app.config import DeviceEntry
+    from app.gateway.cache import MemoryCache
     from app.gateway.rct import DeviceBinding, RctGateway
     from app.scheduling.retry import RetryConfig
     from app.scheduling.serializer import AccessSerializer
+    from app.security.allowlist import Allowlist
     from app.transport.endpoint import EndpointConfig, TransportEndpoint
     from tests.conftest import AutoClock
     from tests.fakes import FakeNetwork
@@ -561,7 +572,7 @@ async def test_settled_inventory_slots_are_not_re_read_across_later_loop_ticks()
     catalog = RegistryCatalog.from_file(_PROD_REGISTRY)
     # Primary tower answers slots 0..3 (3 modules + base part); 4..6 never answer. The whole second
     # (placeholder) tower never answers.
-    answered = {f"battery_module_sn_{i}": f"SN-{i}" for i in range(3 + RCT_NON_MODULE_SLOTS)}
+    answered = {f"battery_module_sn_{i}": f"SN-{i}" for i in range(3)}
     answered_ids = {catalog.object_entry(n).object_id for n in answered}
 
     def behavior(frame):
@@ -611,3 +622,269 @@ async def test_settled_inventory_slots_are_not_re_read_across_later_loop_ticks()
         assert all(oid not in probed_ids for oid in higher_placeholder_ids)
     finally:
         await serializer.stop()
+
+
+async def test_single_tower_with_a_silent_placeholder_yields_capacity_after_the_real_inventory_scan() -> None:
+    """Regression: the scan reads only placeholder slot 0 and never its higher slots; the capacity
+    must not stay unavailable because those slots remain unread."""
+    from datetime import timedelta
+
+    from app.api.app_factory import _MODULE_INVENTORY_NAMES
+    from app.catalog.registry import RegistryCatalog
+    from app.config import DeviceEntry
+    from app.gateway.cache import MemoryCache
+    from app.gateway.rct import DeviceBinding, RctGateway
+    from app.scheduling.retry import RetryConfig
+    from app.scheduling.serializer import AccessSerializer
+    from app.security.allowlist import Allowlist
+    from app.transport.endpoint import EndpointConfig, TransportEndpoint
+    from tests.conftest import AutoClock
+    from tests.fakes import FakeNetwork
+
+    clock = AutoClock()
+    catalog = RegistryCatalog.from_file(_PROD_REGISTRY)
+    answered = {f"battery_module_sn_{i}": f"SN-{i}" for i in range(6)}
+    answered_ids = {catalog.object_entry(n).object_id for n in answered}
+    net = FakeNetwork(clock, behavior=lambda frame: "respond" if frame.object_id in answered_ids else "ignore")
+    for name, serial in answered.items():
+        net.payloads[catalog.object_entry(name).object_id] = serial.encode("latin-1")
+    gateway = RctGateway(
+        catalog, MemoryCache(100_000, 100_000), clock, Allowlist({}, catalog),
+        retry=RetryConfig(response_timeout_seconds=0.01),
+    )
+    device = DeviceEntry(device_id="main", host="10.0.0.5")
+    cfg = EndpointConfig(response_timeout_seconds=0.01, min_interval=timedelta(0))
+    endpoint = TransportEndpoint("endpoint-1", device.key.endpoint, cfg, clock, connector=net.connect)
+    serializer = AccessSerializer(endpoint, gateway.handler(endpoint), queue_max_length=10, queue_max_wait_seconds=10)
+    serializer.start()
+    gateway.add_device(DeviceBinding(device, endpoint, serializer))
+    runtime = SimpleNamespace(catalog=catalog, gateway=gateway)
+    higher_placeholder_ids = {
+        catalog.object_entry(f"battery_placeholder_0_module_sn_{i}").object_id for i in range(1, RCT_MODULE_SN_SLOTS)
+    }
+    try:
+        for _ in range(8):
+            await gateway.read_module_inventory("main", _MODULE_INVENTORY_NAMES)
+        assert gateway.read_failed("main", "battery_placeholder_0_module_sn_0")
+        assert not higher_placeholder_ids & {frame.object_id for _ts, frame in net.frames}
+        capacity = ModuleCountVerifiedCapacity(runtime).verified_usable_capacity_wh("main")
+        assert capacity is not None and round(capacity) == 10_368
+        second = _battery_module_report(runtime, "main", "battery_placeholder_0")
+        assert second["module_count_status"] == "pending" and second["populated_module_slots"] == []
+        assert not _battery_tower_present(runtime, "main", "battery_placeholder_0", second["populated_module_slots"])
+    finally:
+        await serializer.stop()
+
+
+def test_second_tower_is_confirmed_only_by_module_serials_not_by_numeric_readings() -> None:
+    """A placeholder soc/temperature value proves nothing (an unwired register reads back as 0)."""
+    numeric_only = _runtime({"battery_placeholder_0_soc": 0.0, "battery_placeholder_0_temperature": 0.0})
+    assert second_tower_confirmed(numeric_only, "dev-a") is False
+    with_serials = _runtime(_slots("battery_placeholder_0", 3))
+    assert second_tower_confirmed(with_serials, "dev-b") is True
+
+
+def test_second_tower_is_not_confirmed_while_the_inventory_scan_is_incomplete() -> None:
+    # No serial read yet (mid-scan / not started): nothing is confirmed.
+    assert second_tower_confirmed(_runtime({}), "dev-c") is False
+
+
+async def test_second_tower_metrics_join_the_periodic_set_only_after_confirmation() -> None:
+    from datetime import timedelta
+
+    from app.api.app_factory import _activate_second_tower
+    from app.catalog.registry import RegistryCatalog
+    from app.config import DeviceKey, EndpointKey
+    from app.scheduling.periodic import PeriodicManager
+    from app.scheduling.serializer import AccessSerializer
+    from app.transport.endpoint import EndpointConfig, TransportEndpoint
+    from tests.conftest import AutoClock
+    from tests.fakes import FakeNetwork
+
+    clock = AutoClock()
+    catalog = RegistryCatalog.from_file(_PROD_REGISTRY)
+    tower2_ids = {catalog.object_entry(n).object_id for n in SECOND_TOWER_METRIC_NAMES}
+    base_id = catalog.object_entry("battery_soc").object_id
+    key = EndpointKey("10.0.0.5", 8899)
+    # A single-tower inverter: the second tower's registers are never answered.
+    net = FakeNetwork(clock, behavior=lambda f: "ignore" if f.object_id in tower2_ids else "respond")
+    cfg = EndpointConfig(response_timeout_seconds=0.01, min_interval=timedelta(0))
+    endpoint = TransportEndpoint("endpoint-1", key, cfg, clock, connector=net.connect)
+    serializer = AccessSerializer(endpoint, lambda r: endpoint.execute(r), queue_max_length=10, queue_max_wait_seconds=10)
+    serializer.start()
+    manager = PeriodicManager(endpoint, serializer, DeviceKey(key), [base_id], 30, clock)
+    try:
+        assert await manager.ensure() is True
+        epoch = endpoint.connection_epoch
+        # No tower 2 in the inventory: nothing is added, nothing is read, the connection stays.
+        single = SimpleNamespace(catalog=catalog, gateway=SimpleNamespace(
+            cached_reading=lambda d, n: None, read_failed=lambda d, n: True))
+        assert _activate_second_tower(single, manager, "dev-d") is False
+        assert await manager.ensure() is True
+        assert set(manager.object_ids) == {base_id}
+        assert endpoint.connection_epoch == epoch
+        assert not tower2_ids & {frame.object_id for _t, frame in net.frames}  # never sent to the device
+        assert net.connects == 1  # no reconnect
+
+        # Tower 2 confirmed via its serials: the metrics are registered by the next ensure().
+        net.behavior = lambda f: "respond"
+        pair = SimpleNamespace(catalog=catalog, gateway=SimpleNamespace(
+            cached_reading=lambda d, n: (f"SN-{n}", CacheFreshness.FRESH) if "placeholder_0_module_sn" in n else None,
+            read_failed=lambda d, n: False))
+        assert _activate_second_tower(pair, manager, "dev-d") is True
+        assert await manager.ensure() is True
+        assert tower2_ids <= set(manager.object_ids)
+        assert all(manager.is_registered(i) for i in tower2_ids)
+    finally:
+        await serializer.stop()
+
+
+def test_a_placeholder_inventory_with_no_populated_serial_does_not_confirm_a_second_tower() -> None:
+    # The gate confirms the second tower from a POPULATED module serial, not merely from the
+    # placeholder registers existing and answering. A single-tower device whose placeholder prefix
+    # the catalog carries but whose slots all read back blank/garbage (physically no second tower)
+    # must stay unconfirmed - the "a transient/partial inventory does not activate" half of FEAT-002.
+    blanks = {f"battery_placeholder_0_module_sn_{i}": "" for i in range(RCT_MODULE_SN_SLOTS)}
+    answered_blank = _runtime(blanks)
+    report = _report(answered_blank, "battery_placeholder_0")
+    assert report["populated_module_slots"] == []
+    assert second_tower_confirmed(answered_blank, "dev-blank") is False
+    # A scan that has not surfaced any slot yet (nothing read) is likewise unconfirmed.
+    assert second_tower_confirmed(_runtime({}), "dev-unread") is False
+
+
+async def test_a_placeholder_tower_with_no_serial_never_adds_or_reads_the_second_tower_metrics() -> None:
+    # End to end against a real PeriodicManager: while the placeholder inventory shows no populated
+    # module serial, _activate_second_tower must refuse - no add_object_ids, no device read of the
+    # placeholder registers, and therefore no reconnect that an unanswered optional read would cause.
+    from datetime import timedelta
+
+    from app.api.app_factory import _activate_second_tower
+    from app.catalog.registry import RegistryCatalog
+    from app.config import DeviceKey, EndpointKey
+    from app.scheduling.periodic import PeriodicManager
+    from app.scheduling.serializer import AccessSerializer
+    from app.transport.endpoint import EndpointConfig, TransportEndpoint
+    from tests.conftest import AutoClock
+    from tests.fakes import FakeNetwork
+
+    clock = AutoClock()
+    catalog = RegistryCatalog.from_file(_PROD_REGISTRY)
+    tower2_ids = {catalog.object_entry(n).object_id for n in SECOND_TOWER_METRIC_NAMES}
+    base_id = catalog.object_entry("battery_soc").object_id
+    key = EndpointKey("10.0.0.5", 8899)
+    net = FakeNetwork(clock, behavior=lambda f: "ignore" if f.object_id in tower2_ids else "respond")
+    cfg = EndpointConfig(response_timeout_seconds=0.01, min_interval=timedelta(0))
+    endpoint = TransportEndpoint("endpoint-1", key, cfg, clock, connector=net.connect)
+    serializer = AccessSerializer(endpoint, lambda r: endpoint.execute(r), queue_max_length=10, queue_max_wait_seconds=10)
+    serializer.start()
+    manager = PeriodicManager(endpoint, serializer, DeviceKey(key), [base_id], 30, clock)
+    try:
+        assert await manager.ensure() is True
+        epoch = endpoint.connection_epoch
+        # The placeholder slots all read back blank (device answers, but no second tower is wired):
+        # the stabilized report has no populated slot -> second_tower_confirmed False.
+        blank_serials = {f"battery_placeholder_0_module_sn_{i}": "" for i in range(RCT_MODULE_SN_SLOTS)}
+
+        def cached_reading(device_id, name):
+            if name in blank_serials:
+                return (blank_serials[name], CacheFreshness.FRESH)
+            return None
+
+        transient = SimpleNamespace(catalog=catalog, gateway=SimpleNamespace(cached_reading=cached_reading))
+        assert _activate_second_tower(transient, manager, "dev-blank") is False
+        assert await manager.ensure() is True
+        assert set(manager.object_ids) == {base_id}  # the placeholder metrics were NOT added
+        assert endpoint.connection_epoch == epoch  # no reconnect
+        assert not tower2_ids & {frame.object_id for _t, frame in net.frames}  # never read from the device
+        assert net.connects == 1
+    finally:
+        await serializer.stop()
+
+
+# ---- Usable capacity from the trusted module count (RCT Power Battery datasheet) ----------------
+
+
+# What the inventory scan leaves behind on a single-tower system: the placeholder tower's slot 0
+# never answers, so its higher slots are never read at all (not cached, not marked failed).
+_PLACEHOLDER_SILENT = frozenset({"battery_placeholder_0_module_sn_0"})
+
+
+def _single_tower(count: int) -> dict[str, str]:
+    """Primary tower with `count` modules; the placeholder tower contributes no reading at all."""
+    return _slots("battery", count)
+
+
+def test_power_battery_11_5_six_modules_yield_the_datasheet_usable_capacity() -> None:
+    runtime = _runtime(_single_tower(6), unanswered=_PLACEHOLDER_SILENT)
+    capacity = ModuleCountVerifiedCapacity(runtime).verified_usable_capacity_wh("dev")
+    assert round(capacity) == 10_368  # datasheet: 11.52 kWh nominal, 10.37 kWh usable at 90 % DoD
+
+
+def test_a_second_tower_adds_its_own_modules() -> None:
+    serials = {**_slots("battery", 6), **_slots("battery_placeholder_0", 5)}
+    capacity = ModuleCountVerifiedCapacity(_runtime(serials)).verified_usable_capacity_wh("dev")
+    assert round(capacity) == round(11 * 1920 * 0.9)
+
+
+def test_no_capacity_while_the_module_scan_is_incomplete() -> None:
+    capacity = ModuleCountVerifiedCapacity(_runtime(_partial_slots("battery", 3))).verified_usable_capacity_wh("dev")
+    assert capacity is None
+
+
+def test_no_capacity_from_an_anomalous_tower() -> None:
+    capacity = ModuleCountVerifiedCapacity(_runtime(_GAPPED_SERIALS)).verified_usable_capacity_wh("dev")
+    assert capacity is None
+
+
+def test_no_partial_capacity_while_the_second_tower_scan_is_unfinished() -> None:
+    capacity = ModuleCountVerifiedCapacity(_runtime(_slots("battery", 6))).verified_usable_capacity_wh("dev")
+    assert capacity is None
+
+
+def test_capacity_is_available_on_the_first_call_after_the_scan_completes() -> None:
+    # The planner may call only every few minutes; it must not need repeated calls to "settle".
+    serials = {f"battery_placeholder_0_module_sn_{i}": "" for i in range(RCT_MODULE_SN_SLOTS)}
+    runtime = _runtime(serials)
+    capacity = ModuleCountVerifiedCapacity(runtime)
+    assert capacity.verified_usable_capacity_wh("dev") is None  # primary tower still unread
+    serials.update(_slots("battery", 6))
+    assert round(capacity.verified_usable_capacity_wh("dev")) == 10_368
+
+
+# ---- Live reconfiguration must not carry the old hardware's topology forward ---------------------
+
+
+def test_replace_devices_drops_the_trusted_battery_topology() -> None:
+    from app.catalog.registry import RegistryCatalog
+    from app.gateway.cache import MemoryCache
+    from app.gateway.rct import RctGateway
+    from app.security.allowlist import Allowlist
+    from tests.conftest import AutoClock
+
+    clock = AutoClock()
+    catalog = RegistryCatalog.from_file(Path(__file__).resolve().parent / "fixtures" / "objects.json")
+    cache = MemoryCache(30, 30)
+    gateway = RctGateway(catalog, cache, clock, Allowlist({}, catalog))
+    runtime = SimpleNamespace(catalog=SimpleNamespace(exists=lambda _name: True), gateway=gateway)
+
+    def scan(serials: dict[str, str]) -> None:
+        for name in [f"{p}_module_sn_{i}" for p in ("battery", "battery_placeholder_0")
+                     for i in range(RCT_MODULE_SN_SLOTS)]:
+            cache.invalidate(("dev", name))
+        for name, value in serials.items():
+            cache.put(("dev", name), value, measured_at=clock.now(),
+                      received_monotonic=clock.monotonic(), origin="transaction")
+
+    scan(_single_tower(6))
+    gateway._refresh_failures[("dev", "battery_placeholder_0_module_sn_0")] = REFRESH_FAILURES_CONFIRMED
+    assert _battery_module_report(runtime, "dev", "battery")["module_count"] == 6
+    assert ModuleCountVerifiedCapacity(runtime).verified_usable_capacity_wh("dev") is not None
+
+    gateway.replace_devices([])  # same device id, re-addressed hardware: nothing may be inherited
+    scan(_partial_slots("battery", 3))  # the new device's scan has only just begun
+
+    report = _battery_module_report(runtime, "dev", "battery")
+    assert report["module_count"] is None
+    assert report["module_count_status"] == "pending"
+    assert ModuleCountVerifiedCapacity(runtime).verified_usable_capacity_wh("dev") is None

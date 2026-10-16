@@ -7,26 +7,153 @@
 """Admin GUI pages: menu structure, English-only text and the About page."""
 
 import contextlib
+import json
 import re
+import shutil
+import subprocess
 from collections.abc import AsyncIterator
 from pathlib import Path
 
 import httpx
 import pytest
+from fastapi import HTTPException
 from jinja2 import Environment, FileSystemLoader, select_autoescape
+from pydantic import ValidationError
 
 from app import __version__, resolve_build
 from app.admin import updates
+from app.admin.api import _DASHBOARD_MAX_Y, _HOST, _SECRET_EDITABLE, _network_id
+from app.admin.dispatch_api import DeviceLimitsUpdate
 from app.api.app_factory import create_app
 from app.config import Settings
+from app.dispatch.capabilities import CapabilityName
+from app.energy.models import EnergyMode
+from app.limits import MAX_POWER_W
 
 ADMIN_DIR = Path(__file__).resolve().parent.parent / "app" / "admin"
 
 
-JS = ADMIN_DIR / "static/js/admin.js"
+def _admin_js() -> str:
+    base = (ADMIN_DIR / "templates/base.html").read_text(encoding="utf-8")
+    names = re.findall(r'<script src="/admin/static/js/(admin(?:-[\w-]+)?\.js)" defer></script>', base)
+    assert names[-1] == "admin.js"
+    assert set(names) == {path.name for path in (ADMIN_DIR / "static/js").glob("admin-*.js")} | {"admin.js"}
+    return "\n".join((ADMIN_DIR / "static/js" / name).read_text(encoding="utf-8") for name in names)
 
 
 TEMPLATES = ADMIN_DIR / "templates"
+
+
+def test_energy_power_inputs_match_the_server_limit() -> None:
+    js = (ADMIN_DIR / "static/js/admin-energy-setup.js").read_text(encoding="utf-8")
+    for field in ("maxCharge", "maxDischarge"):
+        match = re.search(rf"const {field} = numberInput\(0\.001, (\d+), 0\.001\)", js)
+        assert match is not None
+        assert int(match[1]) * 1000 == MAX_POWER_W
+    bounds = {type(item).__name__: item for item in DeviceLimitsUpdate.model_fields["max_charge_power_w"].metadata}
+    assert bounds["Le"].le == MAX_POWER_W
+
+
+@pytest.mark.parametrize("key", ["metrics_rate_limit_requests", "metrics_rate_limit_window_seconds", "bind_port"])
+def test_settings_numeric_inputs_match_server_bounds(key: str) -> None:
+    js = (ADMIN_DIR / "static/js/admin-settings.js").read_text(encoding="utf-8")
+    match = re.search(rf"\{{ key: '{key}'[^\n]*min: (\d+), max: (\d+)", js)
+    assert match is not None
+    bounds = {type(item).__name__: item for item in Settings.model_fields[key].metadata}
+    assert (int(match[1]), int(match[2])) == (bounds["Ge"].ge, bounds["Le"].le)
+
+
+def test_dashboard_client_vertical_bound_matches_server() -> None:
+    js = (ADMIN_DIR / "static/js/dashboard.js").read_text(encoding="utf-8")
+    match = re.search(r"const MAX_Y = (\d+);", js)
+    assert match is not None and int(match[1]) == _DASHBOARD_MAX_Y
+
+
+def test_device_host_pattern_matches_server() -> None:
+    js = (ADMIN_DIR / "static/js/admin-settings-devices.js").read_text(encoding="utf-8")
+    match = re.search(r"const HOST_PATTERN = /(.+)/;\n", js)
+    assert match is not None and match[1] == _HOST.pattern
+
+
+def test_device_network_id_bound_matches_server() -> None:
+    js = (ADMIN_DIR / "static/js/admin-settings-devices.js").read_text(encoding="utf-8")
+    match = re.search(r"const MAX_NETWORK_ID = (\d+) \*\* (\d+) - 1;", js)
+    assert match is not None
+    bound = int(match[1]) ** int(match[2]) - 1
+    assert _network_id({"network_id": 0}) == 0
+    assert _network_id({"network_id": bound}) == bound
+    for outside in (-1, bound + 1):
+        with pytest.raises(HTTPException):
+            _network_id({"network_id": outside})
+
+
+def test_settings_secret_keys_match_server() -> None:
+    js = (ADMIN_DIR / "static/js/admin-settings.js").read_text(encoding="utf-8")
+    match = re.search(r"const SECRET_KEYS = new Set\(\[([^\]]*)\]\);", js)
+    assert match is not None and frozenset(re.findall(r"'([^']+)'", match[1])) == _SECRET_EDITABLE
+
+
+# Values that pass every other export rule, so a rejection can only come from a missing field.
+_EXPORT_VALUES: dict[str, object] = {
+    "influxdb_hostname": "https://db.example", "influxdb_organization": "org", "influxdb_bucket": "bucket",
+    "influxdb_token": "secret-token", "questdb_hostname": "localhost", "questdb_raw_retention_days": 3,
+    "questdb_username": "user", "questdb_password": "secret",
+}
+
+
+def _export_js_lists(pattern: str, js: str) -> list[list[str]]:
+    match = re.search(pattern, js)
+    assert match is not None
+    return [re.findall(r"'([^']+)'", group) for group in match.groups()]
+
+
+@pytest.mark.parametrize(("db_type", "downsampling", "pattern", "index"), [
+    ("influxdb_v2", "off", r"if \(type === 'influxdb_v2'\) return \[([^\]]*)\];", 0),
+    ("questdb", "manual", r"=== 'manual'\s*\?\s*\[([^\]]*)\]\s*:\s*\[([^\]]*)\];", 0),
+    ("questdb", "off", r"=== 'manual'\s*\?\s*\[([^\]]*)\]\s*:\s*\[([^\]]*)\];", 1),
+])
+def test_export_required_keys_match_server(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, db_type: str, downsampling: str, pattern: str, index: int,
+) -> None:
+    # Both directions: the client list alone is accepted, and dropping any one entry is rejected.
+    monkeypatch.chdir(tmp_path)
+    js = (ADMIN_DIR / "static/js/admin-settings-export.js").read_text(encoding="utf-8")
+    keys = _export_js_lists(pattern, js)[index]
+    assert keys
+    base = {"devices": "wr1=10.0.0.5:8899", "db_type": db_type}
+    if db_type == "questdb":
+        base["questdb_downsampling"] = downsampling
+    Settings(**base, **{key: _EXPORT_VALUES[key] for key in keys})
+    for dropped in keys:
+        with pytest.raises(ValidationError):
+            Settings(**base, **{key: _EXPORT_VALUES[key] for key in keys if key != dropped})
+
+
+def test_export_paired_fields_match_server(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.chdir(tmp_path)
+    js = (ADMIN_DIR / "static/js/admin-settings-export.js").read_text(encoding="utf-8")
+    match = re.search(r"const EXPORT_PAIRED_FIELDS = \{ questdb: \[(.*)\] \};", js)
+    assert match is not None
+    pairs = re.findall(r"\['([^']+)', '([^']+)'\]", match[1])
+    assert pairs
+    base = {"devices": "wr1=10.0.0.5:8899", "db_type": "questdb", "questdb_hostname": "localhost"}
+    for first, second in pairs:
+        Settings(**base, **{first: _EXPORT_VALUES[first], second: _EXPORT_VALUES[second]})
+        for alone in (first, second):
+            with pytest.raises(ValidationError):
+                Settings(**base, **{alone: _EXPORT_VALUES[alone]})
+
+
+def test_energy_controls_use_server_mode_and_capability_values() -> None:
+    js = (ADMIN_DIR / "static/js/admin-energy-controls.js").read_text(encoding="utf-8")
+    modes = js.split("const ENERGY_MODES = [", 1)[1].split("  ];", 1)[0]
+    capabilities = js.split("const ENERGY_REQUIRED_CAPABILITIES = [", 1)[1].split("];", 1)[0]
+    assert set(re.findall(r"\['([^']+)',", modes)) == {mode.value for mode in EnergyMode}
+    assert set(re.findall(r"'([^']+)'", capabilities)) == {
+        CapabilityName.WRITE_PATH.value,
+        CapabilityName.BATTERY_POWER_SIGN.value,
+        CapabilityName.GRID_POWER_SIGN.value,
+    }
 
 
 E2E_ADMIN_FLOW = Path(__file__).resolve().parent / "e2e" / "admin_flow.mjs"
@@ -210,7 +337,7 @@ def test_connection_monitor_probes_health_and_the_modal_is_wired_into_every_page
     modal = re.search(r'<div class="modal fade" id="reconnect-modal"[^>]*>', base).group(0)
     assert 'data-bs-backdrop="static"' in modal and 'data-bs-keyboard="false"' in modal
     assert 'aria-labelledby="reconnect-title"' in modal and 'id="reconnect-title"' in base
-    assert "window.RCTReconnect?.start()" in JS.read_text(encoding="utf-8")
+    assert "window.RCTReconnect?.start()" in _admin_js()
 
 
 def test_header_is_sticky_above_content_and_toasts_stay_on_top():
@@ -222,7 +349,7 @@ def test_header_is_sticky_above_content_and_toasts_stay_on_top():
 
 
 def test_device_editor_has_host_port_and_network_id_fields():
-    js = (ADMIN_DIR / "static/js/admin.js").read_text(encoding="utf-8")
+    js = _admin_js()
     assert "Device ID" not in js and "Display name" not in js
     assert ("data-field" in js or "dataset.field" in js) and "Add inverter" in js
     # The network id is part of the backend uniqueness key, so master/slave setups need the field.
@@ -233,7 +360,7 @@ def test_device_editor_has_host_port_and_network_id_fields():
 
 
 def test_device_duplicate_rule_matches_the_backend_key_and_a_save_adopts_the_server_list():
-    js = (ADMIN_DIR / "static/js/admin.js").read_text(encoding="utf-8")
+    js = _admin_js()
     assert "networkId(other.network_id) === network" in js  # host, port and network id together
     assert "Object.assign(device, (result.settings" not in js
     # After a successful save the list is the server state, including newly assigned ids.
@@ -242,7 +369,7 @@ def test_device_duplicate_rule_matches_the_backend_key_and_a_save_adopts_the_ser
 
 
 def test_numeric_settings_carry_their_own_bounds():
-    js = (ADMIN_DIR / "static/js/admin.js").read_text(encoding="utf-8")
+    js = _admin_js()
     assert "control.min = String(field.min); control.max = String(field.max)" in js
     assert "min: 1, max: 10000" in js and "min: 1, max: 3600" in js and "min: 1024, max: 65535" in js
 
@@ -251,7 +378,7 @@ def test_tsdb_secret_fields_render_even_though_their_raw_value_is_never_sent_to_
     """Regression: _settings_view() exposes only "<key>_configured" for a secret, never the raw
     value, so a field-presence check keyed on settingsDraft[field.key] alone hid the password
     input next to Username entirely (it has no raw value in settingsDraft until it is edited)."""
-    js = (ADMIN_DIR / "static/js/admin.js").read_text(encoding="utf-8")
+    js = _admin_js()
     assert "function exportFieldKnown(field)" in js
     assert "field.type === 'secret' && Object.hasOwn(settingsDraft, `${field.key}_configured`)" in js
     # Both call sites that gate which export fields render/post must use the fixed helper.
@@ -260,14 +387,14 @@ def test_tsdb_secret_fields_render_even_though_their_raw_value_is_never_sent_to_
 
 
 def test_parameter_reorder_focus_uses_stable_action_hooks():
-    js = (ADMIN_DIR / "static/js/admin.js").read_text(encoding="utf-8")
+    js = _admin_js()
     assert "button.dataset.action = key" in js
     assert "'.metric-menu-toggle'" in js
     assert not re.search(r'\[title="[^"]*"\]', js)
 
 
 def test_inverters_and_prometheus_share_the_parameter_table_helpers():
-    js = (ADMIN_DIR / "static/js/admin.js").read_text(encoding="utf-8")
+    js = _admin_js()
     assert js.count("renderParameterTable(") == 3  # definition and both tables
     assert js.count("parameterActionMenu(") == 3
     assert "renderParameterTable('writable'" in js and "renderParameterTable('exposed'" in js
@@ -335,7 +462,7 @@ def test_prometheus_and_inverters_share_parameter_table_markup():
 
 
 def test_metrics_fields_hide_behind_the_master_toggle():
-    js = (ADMIN_DIR / "static/js/admin.js").read_text(encoding="utf-8")
+    js = _admin_js()
     assert "label: 'Enable Metrics Endpoint'" in js
     for key in ("metrics_require_token", "metrics_trusted_sources",
                 "metrics_rate_limit_requests", "metrics_rate_limit_window_seconds"):
@@ -351,7 +478,7 @@ def test_metrics_fields_hide_behind_the_master_toggle():
 
 def test_token_table_shows_masked_suffix_between_permission_and_created():
     html = (ADMIN_DIR / "templates/tokens.html").read_text(encoding="utf-8")
-    js = (ADMIN_DIR / "static/js/admin.js").read_text(encoding="utf-8")
+    js = _admin_js()
     headers = re.findall(r'<th scope="col">([^<]+)</th>', html)
     assert headers.index("Token") == headers.index("Permission") + 1 == headers.index("Created") - 1
     # The masked suffix renders as a boxed monospace code element; old tokens fall back to a placeholder.
@@ -361,7 +488,7 @@ def test_token_table_shows_masked_suffix_between_permission_and_created():
 
 def test_token_expiry_uses_presets_with_a_ninety_day_default():
     html = (ADMIN_DIR / "templates/tokens.html").read_text(encoding="utf-8")
-    js = (ADMIN_DIR / "static/js/admin.js").read_text(encoding="utf-8")
+    js = _admin_js()
     assert 'type="date"' not in html
     assert '<label for="token-expires" class="form-label">Expiry</label>' in html
     for value, text in (("30d", "30 days"), ("90d", "90 days"), ("1y", "1 year"), ("never", "Never expires")):
@@ -392,11 +519,11 @@ def test_parameter_action_buttons_have_touch_target_size():
 
 
 def test_dashboard_polling_is_sequential_bounded_and_incremental():
-    js = (ADMIN_DIR / "static/js/admin.js").read_text(encoding="utf-8")
+    js = _admin_js()
     start = js.index("function syncChildren(")
     block = js[start:js.index("function formatDate(", start)]
     # Recursive timeout instead of a fixed interval, with an in-flight guard and a stale-response guard.
-    assert "setInterval" not in js[js.index("async function bootstrap()"):]
+    assert "setInterval" not in js[js.index("async function bootstrapAdminPage()"):]
     assert "setTimeout(" in block and "if (automatic && dashboardController) return 'skipped';" in block
     assert "generation !== dashboardGeneration" in block
     # Fetch timeout, immediate refresh on tab visibility, and capped backoff with jitter.
@@ -415,7 +542,7 @@ def test_setting_control_and_export_control_share_the_field_builder():
     """Consolidation (behavior-preserving): both functions build their label/control/help markup
     through one shared helper instead of duplicating the select/toggle/number/text/list/secret
     construction, so the number-range validation added for review item 3/4 lives in one place."""
-    js = (ADMIN_DIR / "static/js/admin.js").read_text(encoding="utf-8")
+    js = _admin_js()
     assert "function buildFieldControl(field, value)" in js
     assert "const { wrap, control } = buildFieldControl(field, settingsDraft[field.key]);" in js
     assert js.count("buildFieldControl(field, settingsDraft[field.key])") == 2
@@ -430,7 +557,7 @@ def test_export_secret_is_cleared_from_the_draft_after_a_successful_save():
     """Review item 1 (HIGH): a saved secret must not stay in settingsDraft, or it keeps being
     resent on every later unrelated export-settings change. Finding 5: the clearing is gated by a
     per-secret revision, so an older response cannot clear a value typed during the request."""
-    js = (ADMIN_DIR / "static/js/admin.js").read_text(encoding="utf-8")
+    js = _admin_js()
     success_block = _send_block(js, "success")
     assert "for (const key of secretKeysIn(payload)) {" in success_block
     assert "if (secretRevision.get(key) !== sendRevisions.get(key)) continue;" in success_block
@@ -446,7 +573,7 @@ def test_export_secret_is_cleared_from_the_draft_after_a_successful_save():
 def test_export_group_is_withheld_as_a_group_and_revalidated_at_send_time():
     """An incomplete export configuration is never sent, nothing is sent while typing, and the group
     is re-checked immediately before sending."""
-    js = (ADMIN_DIR / "static/js/admin.js").read_text(encoding="utf-8")
+    js = _admin_js()
     assert "let pendingExportGroup = false;" in js
     queue = js[js.index("function queueExportSettings()"):js.index("function refreshExportBar()")]
     assert "setSectionState('export', 'incomplete', missingExportHint(type));" in queue
@@ -464,7 +591,7 @@ def test_export_group_is_withheld_as_a_group_and_revalidated_at_send_time():
 
 
 def test_tsdb_form_has_a_button_only_apply_bar_and_only_the_master_switch_autosaves():
-    js = (ADMIN_DIR / "static/js/admin.js").read_text(encoding="utf-8")
+    js = _admin_js()
     html = (TEMPLATES / "tsdb.html").read_text(encoding="utf-8")
     assert 'id="export-actions"' in html and "align-items-end" in html
     # The shared bar is parameterised, not overridden: TSDB asks for the button alone.
@@ -500,7 +627,7 @@ def test_admin_scripts_never_open_the_native_leave_page_dialog():
 def test_missing_export_hint_names_both_failure_causes():
     """Review item 8 (MEDIUM): exportReady() also fails for an unpaired username/password, where
     every required key is present — a single "… is required" message would name nothing missing."""
-    js = (ADMIN_DIR / "static/js/admin.js").read_text(encoding="utf-8")
+    js = _admin_js()
     hint = js[js.index("function missingExportHint(type)"):js.index("// The export group is applied explicitly")]
     assert "required for ${backendLabel(type)}" in hint
     assert "must be set together or left empty" in hint
@@ -514,7 +641,7 @@ def test_failed_settings_save_does_not_re_render_the_whole_page():
     """Review item 6 (MEDIUM): a global renderSettings() on a failed save would also rebuild a
     section the operator was mid-edit on but that was never part of this save. Finding 2: the
     devices draft is not rolled back at all, because that would orphan the live row objects."""
-    js = (ADMIN_DIR / "static/js/admin.js").read_text(encoding="utf-8")
+    js = _admin_js()
     catch_block = _send_block(js, "catch")
     assert "renderSettings();" not in catch_block
     # Re-queued during the request, device rows and secrets are all skipped by the rollback.
@@ -526,7 +653,7 @@ def test_failed_settings_save_does_not_re_render_the_whole_page():
 
 def test_device_list_has_no_autosave_path():
     """The device list reconfigures live connections, so only an explicit add or delete may send it."""
-    js = (ADMIN_DIR / "static/js/admin.js").read_text(encoding="utf-8")
+    js = _admin_js()
     assert "queueSettings('devices')" not in js
     assert "pendingKeys.has('devices')" not in js
     assert "function syncDeviceInputs(" not in js and "function addInverter(" not in js
@@ -540,7 +667,7 @@ def test_device_list_has_no_autosave_path():
 
 
 def test_inverters_dialog_has_no_apply_step_and_only_add_delete_and_close():
-    js = (ADMIN_DIR / "static/js/admin.js").read_text(encoding="utf-8")
+    js = _admin_js()
     html = (TEMPLATES / "dashboard.html").read_text(encoding="utf-8")
     modal = html[html.index('<div id="inverters-modal"'):html.index("{% endblock %}", html.index('<div id="inverters-modal"'))]
     # No apply concept left: no bar, no Apply/Discard/Reset text, no dirty tracking, no unload guard.
@@ -563,7 +690,7 @@ def test_inverters_dialog_has_no_apply_step_and_only_add_delete_and_close():
 
 
 def test_inverters_dialog_saves_each_add_and_delete_at_once_and_reports_inline():
-    js = (ADMIN_DIR / "static/js/admin.js").read_text(encoding="utf-8")
+    js = _admin_js()
     remove = js[js.index("async function removeDevice("):js.index("// Validates the new row")]
     # Deleting is destructive (resets evidence and modes): the shared confirm dialog comes first.
     assert remove.index("await confirmAction({") < remove.index("await commitDevices(")
@@ -584,7 +711,7 @@ def test_questdb_username_and_password_must_be_filled_together():
     """Regression: app/config.py's Settings._check_export rejects a PUT with exactly one of
     questdb_username/questdb_password set ("must be set together or not at all"); admin.js must
     withhold the autosave until both are filled, or both are empty, same as a required field."""
-    js = (ADMIN_DIR / "static/js/admin.js").read_text(encoding="utf-8")
+    js = _admin_js()
     assert "const EXPORT_PAIRED_FIELDS = { questdb: [['questdb_username', 'questdb_password']] };" in js
     assert "function exportPairsReady(type)" in js
     assert "exportRequiredKeys(type).every(exportFieldFilled) && exportPairsReady(type)" in js
@@ -596,7 +723,7 @@ def test_login_form_posts_and_registers_its_handler_before_any_await():
     password lands in the URL, the browser history and the server access log."""
     login = (TEMPLATES / "login.html").read_text(encoding="utf-8")
     change = (TEMPLATES / "change_password.html").read_text(encoding="utf-8")
-    js = JS.read_text(encoding="utf-8")
+    js = _admin_js()
     assert '<form id="login-form" method="post" action="/admin/api/login">' in login
     assert 'method="post" action="/admin/api/change-password"' in change
     assert "<noscript>" in login and "JavaScript is required to log in." in login
@@ -607,13 +734,13 @@ def test_login_form_posts_and_registers_its_handler_before_any_await():
     assert "login-init-state" not in js
     for path in TEMPLATES.glob("*.html"):
         assert "login-init-state" not in path.read_text(encoding="utf-8"), path.name
-    # Registered during page parse, outside bootstrap(): start() is not async at all, so nothing
-    # can be awaited before the handler exists, and the async remainder runs detached.
+    # Registered during page parse, outside bootstrapAdminPage(): start() is synchronous, so the
+    # handler exists before the detached async remainder starts.
     assert "async function start()" not in js
     start = js[js.index("function start() {"):]
     assert "if (page === 'login') initAuthForm('login-form', submitLogin);" in start
-    assert start.index("initAuthForm('login-form'") < start.index("bootstrap()")
-    assert "bootstrap().catch((error) => toast(messageFrom(error), 'danger'));" in start
+    assert start.index("initAuthForm('login-form'") < start.index("bootstrapAdminPage()")
+    assert "bootstrapAdminPage().catch((error) => toast(messageFrom(error), 'danger'));" in start
     handler = js[js.index("function initAuthForm(formId, submit)"):js.index("async function submitLogin(")]
     assert handler.index("event.preventDefault();") < handler.index("await")
 
@@ -621,7 +748,7 @@ def test_login_form_posts_and_registers_its_handler_before_any_await():
 def test_ensure_session_does_not_cache_a_rejection():
     """A rejected promise is truthy, so caching it would make every later submit await the same
     failure and never issue a second request — the recovery path could not work at all."""
-    js = JS.read_text(encoding="utf-8")
+    js = _admin_js()
     assert "sessionPromise ||=" not in js
     block = js[js.index("function ensureSession()"):js.index("// The status line of both auth pages")]
     assert "sessionPromise = session().catch((error) => { sessionPromise = null; throw error; });" in block
@@ -633,7 +760,7 @@ def test_ensure_session_does_not_cache_a_rejection():
 def test_flush_settings_propagates_the_result_of_an_in_flight_save():
     """Finding 3 (HIGH): the in-flight branch returned true regardless of what the running save
     resolved."""
-    js = JS.read_text(encoding="utf-8")
+    js = _admin_js()
     flush = js[js.index("async function flushSettings({ sections = null } = {})"):js.index("// Synchronous wrapper")]
     assert "const result = await inFlight.promise.catch(() => false);" in flush
     # Only a request that carried one of the caller's sections may decide the caller's result.
@@ -644,7 +771,7 @@ def test_flush_settings_propagates_the_result_of_an_in_flight_save():
 
 
 def test_the_settings_request_is_scoped_to_the_keys_it_carries():
-    js = JS.read_text(encoding="utf-8")
+    js = _admin_js()
     send = js[js.index("function sendSettings(sections = null)"):js.index("function secretKeysIn(")]
     assert "const keys = keysFor(sections);" in send
     # The sent keys leave the queue before the await, which is what the rollback guard reads.
@@ -670,7 +797,7 @@ def test_secret_keys_mirror_the_server_secret_list():
     it from the payload when off and blanks the checkbox when on."""
     from app.admin.api import _SECRET_EDITABLE
 
-    js = JS.read_text(encoding="utf-8")
+    js = _admin_js()
     body = re.search(r"const SECRET_KEYS = new Set\(\[([^\]]*)\]\)", js)
     assert body, "SECRET_KEYS allowlist missing"
     assert set(re.findall(r"'([^']+)'", body.group(1))) == set(_SECRET_EDITABLE)
@@ -685,7 +812,7 @@ def test_secret_keys_mirror_the_server_secret_list():
 
 
 def test_save_state_has_one_writer_and_five_distinguishable_states():
-    js = JS.read_text(encoding="utf-8")
+    js = _admin_js()
     assert "const SAVE_STATES = { idle: 0, saved: 1, incomplete: 2, unsaved: 3, saving: 4, failed: 5 };" in js
     render = js[js.index("function renderSaveState()"):js.index("function reportSaveFailure(")]
     for text in ("Save failed", "Saving …", "Unsaved changes", "Incomplete — not saved yet"):
@@ -720,7 +847,7 @@ def test_save_state_has_one_writer_and_five_distinguishable_states():
 def test_devices_are_bound_by_a_stable_identity_not_by_array_index():
     """Finding 2 (HIGH): replacing settingsDraft.devices (and every object in it) on a failed save
     orphans the objects the live change handlers and the row DOM still reference."""
-    js = JS.read_text(encoding="utf-8")
+    js = _admin_js()
     assert "function withUid(device) { if (!device._uid) device._uid = `d${++deviceUid}`; return device; }" in js
     assert "settingsDraft.devices = (list || []).map(withUid);" in js
     assert js.count("device._uid = `d${++deviceUid}`") == 1  # exactly one place mints a _uid
@@ -738,7 +865,7 @@ def test_devices_are_bound_by_a_stable_identity_not_by_array_index():
 
 
 def test_device_remove_handler_confirms_saves_and_keeps_focus():
-    js = JS.read_text(encoding="utf-8")
+    js = _admin_js()
     handler = js[js.index("async function removeDevice("):js.index("// Validates the new row")]
     assert "confirm(" not in handler.replace("confirmAction(", "")  # the themed dialog, never window.confirm
     assert "const device = deviceByUid(uid);" in handler  # identity, not a captured array index
@@ -752,7 +879,7 @@ def test_dashboard_card_trash_icon_reuses_the_modal_delete_flow():
     """The dashboard inverter card surfaces the same delete as the modal: a danger trash icon that
     maps the GET /devices card to the draft inverter by its server id and hands off to removeDevice,
     so the confirm dialog, busy-guard, PUT /settings and refresh stay a single implementation."""
-    js = JS.read_text(encoding="utf-8")
+    js = _admin_js()
     css = (ADMIN_DIR / "static/css/admin.css").read_text(encoding="utf-8")
     # The card builds the same Material danger button as the modal, with the icon kept aria-hidden.
     card = js[js.index("function createDeviceCard("):js.index("function patchDeviceCard(")]
@@ -786,7 +913,7 @@ def test_dashboard_card_trash_icon_reuses_the_modal_delete_flow():
 
 
 def test_build_group_body_is_shared_so_a_group_rerender_adds_no_second_heading():
-    js = JS.read_text(encoding="utf-8")
+    js = _admin_js()
     builder = js[js.index("function buildGroupBody(group)"):js.index("function groupSectionId(")]
     # The Account relabel lives in one place, used by both renderSettings() and rerenderGroup().
     assert "{ Account: 'Administrator account' }[group]" in builder
@@ -801,7 +928,7 @@ def test_build_group_body_is_shared_so_a_group_rerender_adds_no_second_heading()
 
 def test_dashboard_keeps_last_known_data_on_fetch_failure():
     """A failed or empty poll must not blank or shrink the Overview: values expire, the layout stays."""
-    js = JS.read_text(encoding="utf-8")
+    js = _admin_js()
     html = (TEMPLATES / "dashboard.html").read_text(encoding="utf-8")
     block = js[js.index("async function loadDashboard("):js.index("function initDashboardPolling(")]
     fail = block[block.index("} catch (error) {"):]
@@ -822,7 +949,7 @@ def test_dashboard_keeps_last_known_data_on_fetch_failure():
 
 
 def test_accessibility_wiring_for_help_texts_field_errors_and_icon_only_buttons():
-    js = JS.read_text(encoding="utf-8")
+    js = _admin_js()
     base = (TEMPLATES / "base.html").read_text(encoding="utf-8")
     css = (ADMIN_DIR / "static/css/admin.css").read_text(encoding="utf-8")
     # The logout label text is hidden below the sm breakpoint and the icon is aria-hidden.
@@ -849,7 +976,7 @@ def test_accessibility_wiring_for_help_texts_field_errors_and_icon_only_buttons(
 
 
 def test_dashboard_metrics_are_whole_numbers_in_the_browser_locale():
-    js = (ADMIN_DIR / "static/js/admin.js").read_text(encoding="utf-8")
+    js = _admin_js()
     start = js.index("function metricParts(")
     block = js[start:js.index("function showHeroMetrics(", start)]
     # No decimal places; Intl.NumberFormat(undefined, ...) picks the separator from the browser locale.
@@ -858,7 +985,7 @@ def test_dashboard_metrics_are_whole_numbers_in_the_browser_locale():
 
 
 def test_grid_power_is_shown_as_magnitude_with_a_direction_indicator():
-    js = (ADMIN_DIR / "static/js/admin.js").read_text(encoding="utf-8")
+    js = _admin_js()
     css = (ADMIN_DIR / "static/css/admin.css").read_text(encoding="utf-8")
     # Negative = feed-in, positive = draw; values that round to zero (including -0) get no indicator.
     assert "if (!Number.isFinite(value) || Math.round(value) === 0) return null;" in js
@@ -870,7 +997,7 @@ def test_grid_power_is_shown_as_magnitude_with_a_direction_indicator():
 
 
 def test_dates_follow_the_browser_locale():
-    js = (ADMIN_DIR / "static/js/admin.js").read_text(encoding="utf-8")
+    js = _admin_js()
     start = js.index("function formatDate(")
     block = js[start:js.index("function ", start + 10)]
     assert "Intl.DateTimeFormat(undefined" in block
@@ -878,7 +1005,7 @@ def test_dates_follow_the_browser_locale():
 
 
 def test_time_and_power_helpers_follow_the_browser_locale():
-    js = (ADMIN_DIR / "static/js/admin.js").read_text(encoding="utf-8")
+    js = _admin_js()
     hhmm = js[js.index("const hhmm"):js.index("function element(")]
     assert "toLocaleTimeString(undefined" in hhmm and "'en-GB'" not in hhmm
     power_start = js.index("const power = (value)")
@@ -887,8 +1014,8 @@ def test_time_and_power_helpers_follow_the_browser_locale():
 
 
 def test_shipped_admin_js_pins_no_region_locale():
-    for name in ("static/js/admin.js", "static/js/connection.js"):
-        assert "'en-GB'" not in (ADMIN_DIR / name).read_text(encoding="utf-8"), name
+    assert "'en-GB'" not in _admin_js()
+    assert "'en-GB'" not in (ADMIN_DIR / "static/js/connection.js").read_text(encoding="utf-8")
 
 
 @pytest.mark.asyncio
@@ -976,7 +1103,8 @@ def test_dashboard_template_positions_equal_the_factory_default_layout():
             r'<div class="grid-stack-item( d-none)?" gs-id="([\w-]+)"\s+gs-x="(\d+)" gs-y="(\d+)" gs-w="(\d+)" gs-h="(\d+)"',
             html):
         template[m[2]] = (*map(int, m.group(3, 4, 5, 6)), not m[1])
-    assert template == default and len(default) == 13
+    # Sixteen widgets after the two Open-Meteo solar tiles were added next to the spot-market ones. The charging-schedule widget is the 16th.
+    assert template == default and len(default) == 16
     # Off-by-default (visible:false) but still addable through the "Add widget" library.
     assert not default["days-to-calibration"][4]
     # Factory default: one row of six 2-column tiles, the inverter overview directly below it.
@@ -1017,7 +1145,7 @@ def test_gridstack_assets_load_only_on_the_dashboard_page():
 
 def test_dashboard_js_reuses_the_shared_api_helper_and_does_not_touch_polling():
     js = (ADMIN_DIR / "static/js/dashboard.js").read_text(encoding="utf-8")
-    admin_js = JS.read_text(encoding="utf-8")
+    admin_js = _admin_js()
     assert "const { api, toast, messageFrom } = window.RCTAdmin;" in js
     # Tiles are moved by mouse drag on the header strip; the old Move/Resize context menu is gone.
     assert "handle: '.dashboard-widget-header'" in js
@@ -1031,7 +1159,7 @@ def test_dashboard_js_reuses_the_shared_api_helper_and_does_not_touch_polling():
 
 
 def test_energy_poll_is_bounded_keeps_panels_and_never_overwrites_a_running_action():
-    js = JS.read_text(encoding="utf-8")
+    js = _admin_js()
     poll = js[js.index("async function pollEnergy("):js.index("function initEnergy(")]
     # A caller-initiated abort (timeout or supersede) must not open the reconnect modal.
     assert "error?.name === 'TimeoutError'" in js and "options.signal?.aborted" in js
@@ -1040,7 +1168,7 @@ def test_energy_poll_is_bounded_keeps_panels_and_never_overwrites_a_running_acti
     assert "energyPanels.clear()" not in poll.split("const ordered")[0]
     assert "panel.acceptsPoll(requestedAt)" in poll
     assert "pendingMode === 'off' ? null" in js
-    assert "device.mode === 'off' && !offConfirmed() ? null : device.mode" in js
+    assert "device.mode === 'off' && !offView().recorded ? null : device.mode" in js
     # A selected mode that the unfinished setup blocks is shown as pending, never as active.
     assert "setupLead.hidden = !pendingSetup" in js and "'is-pending'" in js
     assert ".energy-mode-option.is-selected.is-pending" in (ADMIN_DIR / "static/css/admin.css").read_text(encoding="utf-8")
@@ -1049,7 +1177,7 @@ def test_energy_poll_is_bounded_keeps_panels_and_never_overwrites_a_running_acti
 
 
 def test_energy_mode_is_a_three_state_radio_group_with_mode_dependent_controls():
-    js = JS.read_text(encoding="utf-8")
+    js = _admin_js()
     css = (ADMIN_DIR / "static/css/admin.css").read_text(encoding="utf-8")
     # Off / Manual / External as a radio group; the old on/off switch and the /armed call are gone.
     assert "setAttribute('role', 'radiogroup')" in js and "setAttribute('role', 'radio')" in js
@@ -1061,33 +1189,51 @@ def test_energy_mode_is_a_three_state_radio_group_with_mode_dependent_controls()
     assert "const enabled = operable && item.available && !busy && device.connected;" in js
     assert "This inverter is controlled by an external app through the API (PAT required)." in js
     assert "external: 'controlled by an external app'" in js and "mode_off:" in js
+    assert "Manual control is off for this inverter" not in js
+    assert "readyState.kind === 'setup' || !readyState.text" in js
     assert "Measurements are" not in js and "'Live data unavailable.'" in js
     # Operate actions use the shared filled brand button in every theme.
     actions = js[js.index("const actions = element('div', 'energy-actions')"):js.index("const target = element('div', 'energy-target')")]
     assert "element('button', 'btn btn-primary'" in actions
     assert "btn-outline-primary" not in actions and "btn-outline-secondary" not in actions
+    assert ".energy-actions .btn:disabled" in css
+    assert "--bs-btn-disabled-bg: var(--bs-secondary-bg);" in css
     # Write access off: hint with a link to the Inverters page.
     assert "modeLink.href = '/ui/inverters'" in js
     assert ".energy-mode-option" in css and ".energy-mode-option:focus-visible" in css
 
 
+def test_energy_controls_are_locked_while_the_inverter_is_not_connected():
+    js = _admin_js()
+    setup = (ADMIN_DIR / "static/js/admin-energy-setup.js").read_text(encoding="utf-8")
+    # Header and strategy summary show n/a instead of the internal device id.
+    assert "nameNode.textContent = device.connected ? device.device_name : NOT_AVAILABLE;" in js
+    assert "energyPanels.get(device.device_id)?.isConnected() ? device.device_name : NOT_AVAILABLE" in setup
+    # Mode buttons get the disabled attribute plus a visible hint, and every handler is guarded.
+    assert "button.disabled = !device.connected;" in js and "modeOffline.hidden = device.connected;" in js
+    assert "!device.connected || (wanted === device.mode" in js
+    assert "if (device.connected) send({ action: 'hold' });" in js
+    assert "if (!selected || !device.connected) return;" in js
+    charge = js[js.index("for (const action of ['charge', 'discharge']) {\n      buttons[action].addEventListener"):]
+    assert "if (!device.connected) return;" in charge[:200]
+
+
 def test_destructive_actions_use_the_themed_confirm_modal_not_native_confirm():
     base = (TEMPLATES / "base.html").read_text(encoding="utf-8")
     assert 'id="confirm-modal"' in base and 'id="confirm-accept"' in base
-    for name in ("admin.js", "dashboard.js"):
-        js = (ADMIN_DIR / "static/js" / name).read_text(encoding="utf-8")
+    for js in (_admin_js(), (ADMIN_DIR / "static/js/dashboard.js").read_text(encoding="utf-8")):
         assert not re.search(r"(?<![\w.])confirm\(", js)
 
 
 def test_toasts_are_dismissible_and_errors_do_not_vanish_quickly():
-    js = JS.read_text(encoding="utf-8")
+    js = _admin_js()
     toast = js[js.index("function toast("):js.index("function messageFrom(")]
     assert "'Dismiss notification'" in toast and "'mouseenter'" in toast and "'focusin'" in toast
     assert "danger: 30000" in js and "warning: 12000" in js
 
 
 def test_one_time_token_cannot_be_dismissed_by_backdrop_or_escape():
-    js = JS.read_text(encoding="utf-8")
+    js = _admin_js()
     tokens = js[js.index("function initTokens()"):js.index("// Business labels for the Energy Manager")]
     assert "'hide.bs.modal'" in tokens and "event.preventDefault()" in tokens
     assert "$('copy-token').focus()" in tokens
@@ -1100,14 +1246,14 @@ def test_token_copy_button_is_icon_only_and_done_waits_for_a_successful_copy():
     assert 'class="material-icons"' in copy and ">Copy<" not in copy
     assert re.search(r'id="token-done"[^>]*\bdisabled\b', html)
     assert re.search(r'id="token-close"[^>]*\bdisabled\b', html)
-    js = JS.read_text(encoding="utf-8")
+    js = _admin_js()
     tokens = js[js.index("function initTokens()"):js.index("// Business labels for the Energy Manager")]
     assert "if (!copied) return;" in tokens
     assert tokens.index("setCopied(true)") > tokens.index("await copyToClipboard")
 
 
 def test_hardware_verification_form_is_expert_only_and_the_basic_step_only_points_to_it():
-    js = JS.read_text(encoding="utf-8")
+    js = _admin_js()
     advanced = js[js.index("function energyAdvanced("):js.index("// Shows one status paragraph in the list")]
     # The form lives in the Expert section; no Setup slot hosts it, so Basic mode never shows
     # strategy code or byte widths.
@@ -1143,7 +1289,7 @@ def test_resolve_build_accepts_only_hex(raw, expected):
 
 
 def test_banner_shows_build_hash(monkeypatch):
-    from app import banner
+    from app.observability import banner
 
     monkeypatch.setattr(banner, "__build__", "abc1234")
     banner.build_info.cache_clear()
@@ -1154,19 +1300,19 @@ def test_banner_shows_build_hash(monkeypatch):
 
 
 def test_manual_mode_toast_does_not_promise_control_while_the_setup_is_incomplete():
-    js = JS.read_text(encoding="utf-8")
+    js = _admin_js()
     assert "control stays locked until the setup steps below are complete" in js
     assert "wanted === 'manual' && energyNeedsSetup(energyChecklist(device))" in js
 
 
 def test_hardware_step_text_names_the_guided_check_and_the_expert_path():
-    js = JS.read_text(encoding="utf-8")
+    js = _admin_js()
     assert "The check runs automatically and asks only when a measurement is unclear" in js
     assert "Use the guided check or enter measured values below" in js
 
 
 def test_verification_assistant_explains_a_missing_route_without_calling_the_inverter_missing():
-    js = JS.read_text(encoding="utf-8")
+    js = _admin_js()
     assistant = js[js.index("function openVerificationAssistant("):js.index("function energyAdvanced(")]
     assert "error?.status === 404" in assistant
     assert "The verification service is unavailable" in assistant
@@ -1187,7 +1333,7 @@ def test_about_page_keeps_the_inline_code_style():
 
 def test_tsdb_page_uses_the_shared_page_heading_cards_and_setting_rows():
     css = (ADMIN_DIR / "static/css/admin.css").read_text(encoding="utf-8")
-    js = (ADMIN_DIR / "static/js/admin.js").read_text(encoding="utf-8")
+    js = _admin_js()
     html = (TEMPLATES / "tsdb.html").read_text(encoding="utf-8")
     # No TSDB-specific layout or typography rules: only the log console keeps its own look.
     own = set(re.findall(r"\.(tsdb-[a-z-]+|export-[a-z-]+)", css))
@@ -1202,7 +1348,7 @@ def test_tsdb_page_uses_the_shared_page_heading_cards_and_setting_rows():
 
 
 def test_a_missing_metric_value_reads_n_a_in_every_formatter_and_placeholder():
-    js = JS.read_text(encoding="utf-8")
+    js = _admin_js()
     dash = (TEMPLATES / "dashboard.html").read_text(encoding="utf-8")
     # One spelling for "no value", whatever the reason; the unit is never attached to it.
     assert "const NOT_AVAILABLE = 'n/a';" in js
@@ -1217,7 +1363,7 @@ def test_a_missing_metric_value_reads_n_a_in_every_formatter_and_placeholder():
 
 
 def test_tsdb_tile_shows_n_a_without_an_export_value_and_keeps_the_reason_secondary():
-    js = JS.read_text(encoding="utf-8")
+    js = _admin_js()
     tile = js[js.index("function renderTsdbTile("):js.index("function renderDashboard(")]
     assert "label.textContent = 'Not configured'" not in tile and "'–'" not in tile
     assert tile.count("label.textContent = NOT_AVAILABLE") == 2
@@ -1228,7 +1374,7 @@ def test_tsdb_tile_shows_n_a_without_an_export_value_and_keeps_the_reason_second
 
 
 def test_all_status_badges_share_one_component_with_fixed_tones():
-    js = JS.read_text(encoding="utf-8")
+    js = _admin_js()
     css = (ADMIN_DIR / "static/css/admin.css").read_text(encoding="utf-8")
     tones = ("success", "neutral", "warning", "danger")
     # Every tone is defined once, light and dark through Bootstrap's theme-aware variables.
@@ -1258,7 +1404,7 @@ def test_all_status_badges_share_one_component_with_fixed_tones():
     assert "is-stale" not in set_badge
 
 
-# --- Layout contract: one card gap, one stacking rule, one shared parameter table -------------------
+# Layout contract: one card gap, one stacking rule, one shared parameter table.
 
 CSS = ADMIN_DIR / "static/css/admin.css"
 
@@ -1329,7 +1475,7 @@ def test_prometheus_and_inverters_build_their_table_from_the_one_shared_macro():
         assert f'id="{{{{ prefix }}}}-{suffix}"' in macro, suffix
     for shared in ("param-table-wrap", "param-table", "btn btn-primary", "btn-group btn-group-sm"):
         assert shared in macro, shared
-    js = JS.read_text(encoding="utf-8")
+    js = _admin_js()
     assert "const EXPOSED_PAGE_SIZE = 15;" in js
     assert "renderParameterTable('exposed'" in js and "renderParameterTable('writable'" in js
 
@@ -1350,7 +1496,7 @@ async def test_prometheus_and_inverters_render_the_same_table_card_structure(tmp
 
 
 def test_incomplete_export_group_is_reported_by_toast_and_on_the_field_not_by_a_banner():
-    js = (ADMIN_DIR / "static/js/admin.js").read_text(encoding="utf-8")
+    js = _admin_js()
     render = js[js.index("function renderSaveState()"):js.index("function reportSaveFailure(")]
     assert "toast(entry.message, 'warning')" in render and "lastIncompleteToast.get(id) !== entry.message" in render
     assert "sectionNotice(id, 'hint')" not in render  # no persistent yellow banner
@@ -1366,43 +1512,51 @@ def test_primary_button_themes_its_disabled_and_focus_state():
 
 
 def test_device_header_serial_number_is_text_only_and_omitted_when_unknown():
-    js = JS.read_text(encoding="utf-8")
+    js = _admin_js()
     assert "if (serial) setText(ref.serial, `S/N: ${serial}`);" in js
     assert "ref.serial.innerHTML" not in js
     assert "...(serial ? [ref.serial] : [])" in js
 
 
 @pytest.mark.asyncio
-async def test_energy_page_renders_three_tabs_with_inverter_default_and_keeps_the_existing_ui(tmp_path):
-    """The Energy Manager page is a three-tab layout: Inverter (default, carrying the existing
-    energy UI unchanged), Spot Market and Weather. The tabs are keyboard-operable Bootstrap tabs."""
+async def test_energy_page_renders_four_tabs_with_inverter_default_and_keeps_the_existing_ui(tmp_path):
+    """The Energy Manager page is a four-tab layout: Inverter (default, carrying the existing
+    energy UI unchanged), Charging plan (the read-only Dry-Run preview), Spot Market and Weather. The tabs are keyboard-operable Bootstrap tabs."""
     async with _logged_in(tmp_path) as client:
         html = (await client.get("/ui/energy")).text
-    for tab in ("Inverter", "Spot Market", "Weather"):
+    for tab in ("Inverter", "Charging plan", "Spot Market", "Weather"):
         assert f">{tab}</button>" in html, tab
     # Standard Bootstrap tabs: toggle attribute, panes, and an active default on Inverter.
-    assert html.count('data-bs-toggle="tab"') == 3
-    assert 'id="energy-pane-inverter"' in html and 'id="energy-pane-spot-market"' in html and 'id="energy-pane-weather"' in html
+    assert html.count('data-bs-toggle="tab"') == 4
+    for pane in ("inverter", "plan", "spot-market", "weather"):
+        assert f'id="energy-pane-{pane}"' in html, pane
     inverter_tab = re.search(r'<button[^>]*id="energy-tab-inverter"[^>]*>', html, re.DOTALL).group(0)
     assert 'class="nav-link active"' in inverter_tab and 'aria-selected="true"' in inverter_tab
     # The existing energy UI still lives on the page (Inverter tab), so initEnergy/pollEnergy drive it.
     assert 'id="energy-expert-mode"' in html and 'id="energy-hardware-strategies"' in html and 'id="energy-list"' in html
-    # Spot Market carries the config form and the preview area; Weather is a prepared placeholder.
+    # Both Spot Market and Weather carry a config form and a preview area; the old Weather
+    # placeholder ("Solar forecast integration is not configured yet.") is fully replaced by the
+    # real Open-Meteo configuration and preview, the single control surface for the feature.
     assert 'id="spot-market-form"' in html and 'id="spot-market-preview"' in html
-    assert "Solar forecast integration is not configured yet." in html
+    assert 'id="weather-form"' in html and 'id="weather-preview"' in html
+    assert "Solar forecast integration is not configured yet." not in html
+    # The whole feature is operable from this one tab. Preview refresh is automatic; there is no
+    # separate "Test forecast" control.
+    assert 'id="weather-save"' in html
+    assert 'id="weather-test"' not in html
 
 
 def test_energy_tabs_sync_with_the_url_fragment_without_a_full_reload():
-    js = (ADMIN_DIR / "static/js/admin.js").read_text(encoding="utf-8")
-    assert "function initEnergyTabs()" in js
+    js = _admin_js()
+    assert "function initEnergyTabs(" in js
     # The active tab is written back to the fragment via replaceState (no history entry, no reload).
     assert "history.replaceState(null, ''" in js
     assert "shown.bs.tab" in js
-    assert "const ENERGY_TABS = ['inverter', 'spot-market', 'weather'];" in js
+    assert "const ENERGY_TABS = ['inverter', 'plan', 'spot-market', 'weather'];" in js
 
 
 def test_spot_market_keeps_bidding_zone_and_fee_region_as_separate_fields():
-    js = (ADMIN_DIR / "static/js/admin.js").read_text(encoding="utf-8")
+    js = _admin_js()
     # The posted body nests fee_region separately from bidding_zone; the two are never one field.
     body = js[js.index("function spotMarketBody()"):js.index("function renderSpotMarket(")]
     assert "bidding_zone:" in body and "fee_region:" in body
@@ -1412,7 +1566,7 @@ def test_spot_market_keeps_bidding_zone_and_fee_region_as_separate_fields():
 
 
 def test_spot_market_preview_uses_a_readable_time_axis_without_interval_counts():
-    js = (ADMIN_DIR / "static/js/admin.js").read_text(encoding="utf-8")
+    js = _admin_js()
     chart = js[js.index("function drawSpotMarketChart("):js.index("function renderSpotMarketPreview(")]
     assert "autoSkip: true" in chart and "maxTicksLimit: 7" in chart
     assert "minRotation: 0" in chart and "maxRotation: 0" in chart
@@ -1420,3 +1574,264 @@ def test_spot_market_preview_uses_a_readable_time_axis_without_interval_counts()
     assert "quarter-hour intervals" not in preview
     assert "spot-market-preview-intervals" not in preview
     assert "Source unit EUR/MWh · Bidding zone ${result.bidding_zone}" in preview
+
+
+def test_weather_body_carries_location_and_pv_geometry_but_not_timezone():
+    js = _admin_js()
+    body = js[js.index("function weatherBody()"):js.index("function weatherSectionHeading(")]
+    # Timezone is server-derived from latitude/longitude and is deliberately not client input.
+    for key in ("location_name:", "latitude:", "longitude:", "pv_peak_power_wp:",
+                "tilt_deg:", "azimuth_deg:", "performance_ratio:"):
+        assert key in body, key
+    assert "timezone:" not in body
+
+
+def test_weather_location_search_calls_the_admin_endpoint_not_open_meteo():
+    js = _admin_js()
+    search = js[js.index("async function searchWeatherLocations("):js.index("function weatherLocationLabel(")]
+    # The browser talks only to the admin locations endpoint, never to Open-Meteo directly.
+    assert "energy/weather/locations?q=" in search
+    assert "open-meteo" not in search.lower()
+    # The query is URL-encoded and the request is abortable/superseded like the preview.
+    assert "encodeURIComponent" in search and "AbortController" in search
+
+
+def test_weather_location_searching_state_shows_a_decorative_spinner_in_the_live_region():
+    js = _admin_js()
+    css = (ADMIN_DIR / "static" / "css" / "admin.css").read_text(encoding="utf-8")
+    searching = js[js.index("function showWeatherLocationSearching("):js.index("function setWeatherLocationStatus(")]
+    assert "'Searching …', true" in searching
+    status = js[js.index("function setWeatherLocationStatus("):js.index("function clearWeatherLocationStatus(")]
+    # The spinner is decorative; the polite live region announces the text once.
+    assert "spinner-border spinner-border-sm" in status and "aria-hidden" in status
+    # Clearing the status removes the spinner together with the text.
+    clear = js[js.index("function clearWeatherLocationStatus("):js.index("function hideWeatherLocationResults(")]
+    assert "textContent = ''" in clear
+    assert ".weather-location-spinner" in css
+    assert "prefers-reduced-motion" in css[css.index(".weather-location-spinner"):][:300]
+
+
+def test_selecting_a_location_sets_coordinates_and_derives_timezone():
+    js = _admin_js()
+    start = js.index("function selectWeatherLocation(")
+    select = js[start:start + 1400]
+    assert "set('latitude'" in select and "set('longitude'" in select
+    assert "setWeatherTimezone(null)" in select
+    assert "resolveWeatherTimezone(Number(hit.latitude), Number(hit.longitude)" in select
+    assert "hit.timezone" not in select
+    assert "weatherLocationName = weatherLocationLabel(hit)" in select
+
+
+def test_a_manual_coordinate_change_does_not_trigger_geocoding():
+    js = _admin_js()
+    # Geocoding is bound only to the dedicated search field's input, never to the lat/lon controls.
+    bind = js[js.index("function bindWeatherLocationSearch("):js.index("function scheduleWeatherLocationSearch(")]
+    assert "search.addEventListener('input'" in bind
+    # The number-field input listener in initWeather only schedules a preview, not a location search.
+    init = js[js.index("async function initWeather("):js.index("function scheduleWeatherPreview(")]
+    assert "scheduleWeatherPreview" in init
+    assert "searchWeatherLocations" not in init and "scheduleWeatherLocationSearch" not in init
+
+
+def test_weather_preview_updates_automatically_from_form_state():
+    js = _admin_js()
+    init = js[js.index("async function initWeather("):js.index("function scheduleWeatherPreview(")]
+    assert "weather-test" not in init
+    assert "scheduleWeatherPreview({ immediate: true })" in init
+    assert "fields.addEventListener('change'" in init
+    assert "fields.addEventListener('input'" in init
+    preview = js[js.index("async function previewWeather("):js.index("function providerLabel(")]
+    # Automatic preview posts current unsaved form state and never persists it.
+    assert "energy/weather/preview" in preview and "weatherBody()" in preview
+
+
+def test_weather_preview_renders_disabled_connected_and_unavailable_states():
+    js = _admin_js()
+    render = js[js.index("function renderWeatherPreview("):js.index("async function previewWeather(")]
+    assert "Disabled" in render and "Connected" in render and "Unavailable" in render
+    assert "Next 24 h" in render and "kWh" in render
+    assert "Source: ${result.source" in render
+
+
+def test_energy_page_wires_the_read_only_dry_run_plan_preview():
+    html = (TEMPLATES / "energy.html").read_text(encoding="utf-8")
+    js = (ADMIN_DIR / "static/js/admin-energy-setup.js").read_text(encoding="utf-8")
+    for element_id in ("energy-plan-device", "energy-plan-load", "energy-plan-result"):
+        assert f'id="{element_id}"' in html and f"$('{element_id}')" in js
+    assert "/dynamic-plan`" in js
+    # The device list and the battery data do not go through the dispatch-sensitive status route.
+    assert "api('energy/planning-devices')" in js and "/planning-limits`" in js
+    assert "api('energy/devices')" not in js[js.index("async function refreshPlanDevices"):js.index("async function loadDryRunPlan")]
+    assert 'id="energy-plan-schedule"' in html and "$('energy-plan-schedule')" in js
+    assert 'id="energy-plan-limits"' in html and 'name="capacity"' in html
+    assert "usable_capacity_wh" in js
+    assert 'id="energy-plan-limits" class="row g-2 align-items-end mb-3 d-none"' in html
+    assert 'id="energy-plan-expert-mode"' in html
+    assert "form.classList.toggle('d-none', !enabled)" in js
+    assert "capacityField.hidden = !expertOn" in js
+    assert "!capacityOverrideEnabled || capacity.value === ''" in js
+    assert "setEnergyExpertMode(planExpertSwitch.checked)" in js
+    # The preview lives in its own "Charging plan" tab, not inside the Inverter pane.
+    plan_pane = html[html.index('id="energy-pane-plan"'):html.index('id="energy-pane-spot-market"')]
+    assert 'id="energy-plan-card"' in plan_pane
+    assert "method:" not in js[js.index("async function loadDryRunPlan"):js.index("function initDryRunPlan")]
+
+
+_PLAN_RENDER_DRIVER = r"""
+const fs = require('node:fs');
+const vm = require('node:vm');
+const [jsPath, planPath] = process.argv.slice(2);
+const src = fs.readFileSync(jsPath, 'utf8');
+const block = src.slice(src.indexOf('const PLAN_STATUS_LABELS'), src.indexOf('let planDevices'));
+class Node {
+  constructor(tag) { this.tag = tag; this.children = []; this.className = ''; this.text = ''; this.dataset = {}; }
+  set textContent(value) { this.text = String(value); this.children = []; }
+  get textContent() { return this.text + this.children.map((child) => child.textContent).join(' '); }
+  append(...items) { for (const item of items) this.children.push(typeof item === 'string' ? Object.assign(new Node('#text'), { text: item }) : item); }
+  replaceChildren(...items) { this.children = []; this.append(...items); }
+  get firstChild() { return this.children[0]; }
+  setAttribute() {}
+  addEventListener() {}
+  count(cls) { return (this.className.split(' ').includes(cls) ? 1 : 0) + this.children.reduce((n, child) => n + (child.count ? child.count(cls) : 0), 0); }
+  find(tag) { return [...(this.tag === tag ? [this] : []), ...this.children.flatMap((child) => child.find ? child.find(tag) : [])]; }
+}
+const host = new Node('div');
+const technical = new Node('div');
+const schedule = new Node('div');
+const context = vm.createContext({
+  NOT_AVAILABLE: 'n/a', formatPower: (w) => `${w} W`, $: (id) => ({ 'energy-plan-technical': technical, 'energy-plan-schedule': schedule })[id] || host,
+  element: (tag, className, value) => { const node = new Node(tag); node.className = className || ''; if (value !== undefined) node.text = String(value); return node; },
+});
+vm.runInContext(`${block}; this.renderDryRunPlan = renderDryRunPlan; this.labels = PLAN_ACTION_LABELS; this.planChartSeries = planChartSeries;`, context);
+const plan = JSON.parse(fs.readFileSync(planPath, 'utf8'));
+context.renderDryRunPlan(plan);
+const rows = technical.find('tbody').flatMap((body) => body.children.map((row) => row.children.map((cell) => cell.textContent)));
+console.log(JSON.stringify({ labels: context.labels, rows, spinners: host.count('spinner-border'), series: context.planChartSeries(plan.slots), items: schedule.find('li').map((li) => li.textContent), text: `${host.textContent} ${schedule.textContent} ${technical.textContent}` }));
+"""
+
+
+def _render_plan(tmp_path, plan: dict) -> dict:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not installed")
+    driver, plan_file = tmp_path / "render_plan.cjs", tmp_path / "plan.json"
+    driver.write_text(_PLAN_RENDER_DRIVER, encoding="utf-8")
+    plan_file.write_text(json.dumps(plan), encoding="utf-8")
+    js = ADMIN_DIR / "static/js/admin-energy-setup.js"
+    done = subprocess.run([node, str(driver), str(js), str(plan_file)], check=False, capture_output=True, text=True, timeout=30)
+    assert done.returncode == 0, done.stderr
+    return json.loads(done.stdout)
+
+
+def test_dry_run_plan_renderer_shows_idle_and_null_slots_with_horizon_and_windows(tmp_path):
+    slot = {"start": "2026-10-15T01:00:00+00:00", "end": "2026-10-15T02:00:00+00:00", "reason": "cheap"}
+    plan = {
+        "device_id": "main", "status": "ok", "detail": None, "created_at": "2026-10-15T00:00:00+00:00",
+        "valid_until": "2026-10-16T00:00:00+00:00", "horizon_hours": 24.0, "preview_only": True,
+        "slots": [
+            {**slot, "action": "charge", "max_power_w": 3000.0, "target_soc_percent": 80.0},
+            {**slot, "action": "idle", "max_power_w": None, "target_soc_percent": None, "reason": "expensive"},
+        ],
+        "window": {"consumption_from": "2026-10-01T00:00:00+00:00", "consumption_until": "2026-10-15T00:00:00+00:00",
+                   "solar_from": "2026-10-15T00:00:00+00:00", "solar_until": "2026-10-17T00:00:00+00:00",
+                   "prices_from": None, "prices_until": None},
+    }
+    out = _render_plan(tmp_path, plan)
+    assert len(out["rows"]) == 3  # forecast window rows; the schedule is a chart, not a table
+    assert len(out["items"]) == 1 and "3000 W" in out["items"][0] and "target SoC 80 %" in out["items"][0]
+    assert [point["y"] for point in out["series"]["power"]] == [3.0, 3.0, None, 0, 0]  # idle reads 0; the overlapping duplicate slot breaks the line
+    assert "Horizon: 24 h" in out["text"] and "Forecast inputs" in out["text"]
+    assert out["rows"][2][1] == "n/a"  # spot prices window is unknown
+
+
+def test_dry_run_plan_renderer_shows_policy_flags_assumptions_and_limiting_reasons(tmp_path):
+    plan = {
+        "device_id": "main", "status": "ok", "detail": None, "created_at": "2026-10-15T00:00:00+00:00",
+        "valid_until": "2026-10-16T00:00:00+00:00", "horizon_hours": 24.0, "preview_only": True, "slots": [],
+        "window": {}, "policy": "gentle", "reserve_soc_percent": 7.0, "reserve_satisfied": True,
+        "reserve_shortfall_wh": 0.0, "target_soc_percent": 90.0, "target_time": "2026-10-15T06:00:00+00:00",
+        "target_reachable": False, "unserved_target_energy_wh": 3000.0,
+        "power": {"static_charge_limit_w": 4000.0, "live_charge_limit_w": None, "live_limit_available": False,
+                  "permitted_charge_power_w": 4000.0, "preferred_min_w": 500.0, "preferred_max_w": 1000.0},
+        "energy": {"commanded_charge_energy_wh": 3000.0, "battery_terminal_energy_wh": 3000.0,
+                   "stored_energy_delta_wh": 3000.0, "grid_charge_energy_wh": 3333.0},
+        "assumptions": {"charge_efficiency": 0.9, "charge_efficiency_source": "assumed",
+                        "power_reference": "battery-side charge setpoint, measuring point unverified",
+                        "power_reference_verified": False, "live_limit_status": "no verified live limit",
+                        "forecast_basis": "stored history", "battery_internal_losses": "not modelled",
+                        "charge_efficiency_note": "0.90 is an explicit planning assumption",
+                        "preferred_range_status": "unverified; a soft preference"},
+        "limiting_reasons": [{"code": "target_unreachable_in_preferred_range", "detail": "needs meet_deadline"},
+                             {"code": "live_limit_unavailable", "detail": "static limit applies"}],
+        "replan": {"triggers": [{"code": "soc_deviation", "description": "Measured SoC deviates"}], "thresholds": {}},
+    }
+    text = _render_plan(tmp_path, plan)["text"]
+    for expected in (
+        "Policy: Gentle", "Reserve kept:", "Yes", "Target 90 %", "Not reachable", "3 kWh missing",
+        "live limit not available", "preferred range 500 W", "from grid 3.33 kWh", "90 % (assumed)",
+        "[unverified]", "0.90 is an explicit planning assumption", "Preferred range: unverified; a soft preference", "Live limit: no verified live limit", "Forecast basis: stored history",
+        "Limiting reasons", "Target not reachable in the preferred range: needs meet_deadline",
+        "No verified live charge limit: static limit applies", "Replan when: measured soc deviates",
+    ):
+        assert expected in text, expected
+    # Unreachable target and a violated reserve are both shown as such, independently.
+    violated = _render_plan(tmp_path, {**plan, "reserve_satisfied": False, "reserve_shortfall_wh": 500.0,
+                                       "target_reachable": True, "unserved_target_energy_wh": 0.0})["text"]
+    assert "No (0.5 kWh of demand not covered)" in violated and "Reachable under the currently known limits" in violated
+
+
+def test_dry_run_plan_renderer_shows_one_readiness_checklist_without_a_basic_call_to_action(tmp_path):
+    text = _render_plan(tmp_path, {"status": "spot_prices_unavailable", "slots": []})["text"]
+    for expected in (
+        "Usable battery capacity: available", "Spot prices: not available yet",
+        "Solar forecast: not checked yet", "Consumption model: not checked yet",
+        # Each row carries an explicit text marker, so state is legible without colour or glyph.
+        "Ready", "Pending", "Not checked",
+    ):
+        assert expected in text, expected
+    battery_out = _render_plan(tmp_path, {"status": "battery_state_unavailable", "slots": []})
+    battery = battery_out["text"]
+    assert battery_out["spinners"] == 1 and "Please wait" in battery  # a pending input shows a spinner
+    assert "Battery data could not be verified automatically." in battery  # detail kept for Expert mode
+    assert "Usable battery capacity: could not be verified" in battery and "Show details" not in battery
+    assert "Pending" in battery  # the blocking battery row reads Pending, never an error
+
+
+def test_dry_run_plan_renderer_tells_disabled_inputs_from_pending_ones(tmp_path):
+    spot_out = _render_plan(tmp_path, {"status": "spot_disabled", "slots": []})
+    spot = spot_out["text"]
+    assert spot_out["spinners"] == 0 and "Please wait" not in spot  # waiting cannot fix a disabled input
+    assert "The spot market integration is disabled." in spot
+    assert "Spot prices: disabled in settings" in spot and "Solar forecast: not checked yet" in spot
+    solar = _render_plan(tmp_path, {"status": "solar_not_configured", "slots": []})["text"]
+    assert "The solar forecast is not configured." in solar
+    assert "Spot prices: available" in solar and "Solar forecast: not configured in settings" in solar
+
+
+def test_every_planner_action_has_a_plan_label(tmp_path):
+    from app.optimizer.models import EnergyAction
+
+    labels = _render_plan(tmp_path, {"status": "ok", "slots": [], "horizon_hours": 1, "window": {}})["labels"]
+    assert {action.value for action in EnergyAction} <= set(labels)
+
+
+def test_dry_run_schedule_chart_series_keep_uneven_slots_and_gaps_on_a_time_axis(tmp_path):
+    def slot(start, end, action, watts, soc):
+        return {"start": start, "end": end, "action": action, "max_power_w": watts, "target_soc_percent": soc,
+                "reason": "forecast PV covers demand"}
+
+    plan = {
+        "device_id": "main", "status": "ok", "detail": None, "created_at": "2026-10-15T00:00:00+00:00",
+        "valid_until": "2026-10-16T00:00:00+00:00", "horizon_hours": 24.0, "preview_only": True, "window": {},
+        "slots": [  # unsorted; the second slot starts after a gap and the first one ends the next day
+            slot("2026-10-15T20:00:00+00:00", "2026-10-16T09:00:00+00:00", "idle", None, None),
+            slot("2026-10-15T01:00:00+00:00", "2026-10-15T02:00:00+00:00", "charge", 2000.0, 70.0),
+        ],
+    }
+    out = _render_plan(tmp_path, plan)
+    power, soc = out["series"]["power"], out["series"]["soc"]
+    xs = [point["x"] for point in power if point["y"] is not None]
+    assert xs == sorted(xs) and len(xs) == 4  # a point at every slot start and end, chronological
+    assert [point["y"] for point in power] == [2.0, 2.0, None, 0, 0]  # a gap breaks the line, idle reads 0
+    assert [point["y"] for point in soc] == [70.0, 70.0, None, None, None]
+    assert power[4]["x"] - power[3]["x"] == 13 * 3600 * 1000  # the long slot keeps its true length

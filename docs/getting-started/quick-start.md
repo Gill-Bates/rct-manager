@@ -30,7 +30,7 @@ administration GUI.
 For Docker, supply a stable random `HMAC_SECRET` (`openssl rand -base64 32`)
 before starting. Local startup generates the secret in `settings.env` if absent.
 
-The application reads `settings.env` beside `run.py` automatically.
+The application reads `settings.env` at the project root automatically.
 `--env-file` selects another file. Environment variables take precedence.
 See [Environment Variables](../configuration/environment.md) for all settings.
 
@@ -74,9 +74,9 @@ curl -H "Authorization: Bearer <token>" http://127.0.0.1:8000/api/v1/devices
 
 | Page | Purpose |
 | --- | --- |
-| Overview | Configurable widgets with live values (solar, house consumption, grid, battery, TSDB export) and one card per inverter with its energy-flow graphic, online and operating state, and one card per battery tower; add, edit and remove inverters from the Inverters dialog. Values are shown as whole numbers, with the decimal and thousands separators of the browser locale. A value that is missing for any reason (not configured, inverter unreachable, no reading yet, export off) reads `n/a` |
+| Overview | Configurable widgets with live values (solar, house consumption, grid, battery, TSDB export), optional spot-price, day-ahead, solar-forecast and charging-schedule widgets, and one card per inverter with its energy-flow graphic, online and operating state, and one card per battery tower; add, edit and remove inverters from the Inverters dialog. Values are shown as whole numbers, with the decimal and thousands separators of the browser locale. A value that is missing for any reason (not configured, inverter unreachable, no reading yet, export off) reads `n/a` |
 | Inverters | Write access and the writable parameters |
-| Energy Manager | Manual battery control (charge, keep idle, discharge) per inverter; Off returns control to the inverter's Internal strategy. A compact grid, house and battery energy-flow view appears beside the controls when space allows; see [Energy Manager](../energy-manager.md) |
+| Energy Manager | Manual battery control (charge, keep idle, discharge) per inverter; Off returns control to the inverter's Internal strategy. Spot Market offers a day-ahead price preview and Weather an Open-Meteo solar-forecast preview, both read-only. A compact grid, house and battery energy-flow view appears beside the controls when space allows; see [Energy Manager](../energy-manager.md) |
 | TSDB | InfluxDB 2 / QuestDB export |
 | Prometheus | Metrics endpoint and the exposed metrics |
 | API tokens | Create and revoke personal access tokens |

@@ -10,6 +10,29 @@ import asyncio
 import time
 from datetime import UTC, datetime
 from typing import Protocol
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+
+def is_aware(moment: datetime) -> bool:
+    """Whether ``moment`` denotes a usable instant: a tzinfo that yields a UTC offset."""
+    return moment.tzinfo is not None and moment.tzinfo.utcoffset(moment) is not None
+
+
+def is_valid_iana_zone(name: str) -> bool:
+    """Whether ``name`` resolves to an IANA zone; the caller decides how to react and what to trim."""
+    try:
+        ZoneInfo(name)
+    except (ValueError, ZoneInfoNotFoundError):
+        return False
+    return True
+
+
+def require_aware(moment: datetime, field: str) -> None:
+    """Raise ``ValueError`` unless ``moment`` is a timezone-aware datetime."""
+    if not isinstance(moment, datetime):
+        raise ValueError(f"{field} must be a datetime")  # noqa: TRY004 - ValueError is the established contract
+    if not is_aware(moment):
+        raise ValueError(f"{field} must be timezone-aware")
 
 
 class Clock(Protocol):

@@ -102,3 +102,65 @@ def _crc_unpadded(data: bytes) -> int:
 def test_unknown_command_is_rejected() -> None:
     with pytest.raises(FrameError):
         decode_frame(b"\x77\x04\x00\x00\x00\x01\x00\x00")
+
+
+# --- TIMESERIES reply (logger objects) ------------------------------------------------------------
+
+
+def _series(query: int, pairs: list[tuple[int, float]]) -> bytes:
+    import struct
+
+    return struct.pack(">I", query) + b"".join(struct.pack(">If", t, v) for t, v in pairs)
+
+
+def test_timeseries_is_never_decoded_as_a_scalar() -> None:
+    from app.protocol.types import DataType
+    from app.protocol.values import decode_value, encode_value
+
+    with pytest.raises(ValueError):
+        decode_value(DataType.TIMESERIES, _series(1, [(2, 3.0)]))
+    with pytest.raises(ValueError):
+        encode_value(DataType.TIMESERIES, 1)
+
+
+def test_event_table_is_never_decoded_as_a_scalar() -> None:
+    from app.protocol.types import DataType
+    from app.protocol.values import decode_value, encode_value
+
+    with pytest.raises(ValueError):
+        decode_value(DataType.EVENT_TABLE, b"")
+    with pytest.raises(ValueError):
+        encode_value(DataType.EVENT_TABLE, 1)
+
+
+def test_valid_timeseries_payload_is_decoded_in_wire_order() -> None:
+    from datetime import UTC, datetime
+
+    from app.protocol.timeseries import decode_timeseries
+
+    points = decode_timeseries(_series(1_700_000_000, [(1_699_990_000, 12450.5), (1_699_900_000, 11000.0)]),
+                               expected_query=1_700_000_000)
+    assert [p.value for p in points] == [12450.5, 11000.0]
+    assert points[0].timestamp == datetime.fromtimestamp(1_699_990_000, UTC)
+    assert decode_timeseries(_series(5, [])) == ()
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [b"", b"\x00\x00", _series(1, [(2, 3.0)])[:-1], _series(1, [(2, 3.0)]) + b"\x00",
+     _series(1, [(2, float("nan"))]), _series(1, [(2, float("inf"))])],
+)
+def test_truncated_or_malformed_timeseries_is_rejected_in_a_controlled_way(payload: bytes) -> None:
+    from app.errors import ProtocolError
+    from app.protocol.timeseries import decode_timeseries
+
+    with pytest.raises(ProtocolError):
+        decode_timeseries(payload)
+
+
+def test_timeseries_echo_of_another_query_is_rejected() -> None:
+    from app.errors import ProtocolError
+    from app.protocol.timeseries import decode_timeseries
+
+    with pytest.raises(ProtocolError):
+        decode_timeseries(_series(1, []), expected_query=2)

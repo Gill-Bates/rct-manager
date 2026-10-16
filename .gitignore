@@ -34,3 +34,7 @@ data/
 # Git worktrees created for isolated task branches. Never commit these: git records a
 # live worktree as a gitlink (mode 160000), which looks like a stray submodule.
 .worktrees/
+
+# uv is not this project's dependency workflow (pip + pyproject.toml / Docker resolve deps).
+# Do not commit a uv lockfile: it would be a second, unused dependency resolution.
+uv.lock

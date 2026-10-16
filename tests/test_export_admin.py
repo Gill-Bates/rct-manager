@@ -374,7 +374,7 @@ async def test_disabling_export_stops_the_running_task_without_a_restart(tmp_pat
                     await asyncio.sleep(0.05)
                 assert running_task.cancelled() or running_task.done()
                 assert running_task not in h.app.state.runtime.tasks
-                # Finding 3/4: an explicit handle, not a 0.3 s timing-based negative assertion, proves
+                # An explicit handle, not a timing-based negative assertion, proves
                 # that disabling export left no export task registered at all (not even a replacement).
                 assert h.app.state.runtime.export_task is None
 
@@ -484,3 +484,72 @@ def test_a_pat_cannot_change_retention_presets_or_delete_credentials(body):
     settings = Settings(_env_file=None, hmac_secret="s" * 48)
     request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(admin_desired_settings=settings)))
     assert _changed_session_only(request, body) == set(body)
+
+
+async def test_restart_export_is_a_no_op_once_teardown_has_begun(tmp_path):
+    """P2-3: the lifespan finalizer sets ``closing`` (covered by ``is_closing()``) before the rest
+    of shutdown, precisely so no new export/polling/recovery task registers during teardown. Once
+    the shutdown coordinator has a plan, ``restart_export`` must not start a fresh export task.
+    """
+    import asyncio
+    import contextlib
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    from tests.api_helpers import make_settings, running_app
+
+    class _Server:
+        def __init__(self) -> None:
+            class _H(BaseHTTPRequestHandler):
+                def do_POST(self):
+                    self.send_response(204)
+                    self.end_headers()
+
+                def log_message(self, *_a):
+                    return
+
+            self.httpd = HTTPServer(("127.0.0.1", 0), _H)
+            self.url = f"http://127.0.0.1:{self.httpd.server_address[1]}"
+            threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+
+        def close(self) -> None:
+            self.httpd.shutdown()
+            self.httpd.server_close()
+
+    from app.admin.store import AdminStore
+
+    server = _Server()
+    try:
+        settings = make_settings(
+            hmac_secret="s" * 48, admin_db_path=tmp_path / "rct.db", db_type="questdb",
+            questdb_hostname=server.url, metrics_export_interval_seconds=5,
+            metrics_export_enabled=True,  # factory default is now off; this test starts with export running
+        )
+        # Export only starts after the first bootstrap password change; do it before boot so the
+        # device jobs (export among them) are not held back by _await_password_change.
+        store = AdminStore(settings.admin_db_path, "s" * 48)
+        try:
+            assert store.change_password(store.initialize(), "a much stronger password")
+        finally:
+            store.close()
+        async with running_app(settings, settle=False) as h:
+            runtime = h.app.state.runtime
+            for _ in range(100):
+                if runtime.export_task is not None:
+                    break
+                await asyncio.sleep(0.05)
+            assert runtime.export_task is not None
+
+            # Begin teardown: run() installs a shutdown plan, so is_closing() is now true.
+            await runtime.shutdown.run()
+            assert runtime.shutting_down() is True
+            with contextlib.suppress(asyncio.CancelledError):
+                if runtime.export_task is not None:
+                    runtime.export_task.cancel()
+                    await runtime.export_task
+            runtime.export_task = None
+
+            await h.app.state.restart_export()
+            assert runtime.export_task is None  # no fresh export task registered during teardown
+    finally:
+        server.close()

@@ -54,6 +54,10 @@ class SpotPriceProvider(Protocol):
         """Fetch the current local day's complete quarter-hour price curve."""
         ...
 
+    def fetch_current(self, config: SpotMarketConfig) -> SpotPriceSnapshot:
+        """Fetch the current interval and its validity from the dedicated endpoint."""
+        ...
+
     def fetch_yesterday(self, config: SpotMarketConfig, timezone: str | None) -> SpotPriceSnapshot:
         """Fetch exactly the previous local day in the timezone returned by ``fetch_today``."""
         ...

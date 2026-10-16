@@ -21,13 +21,35 @@ from app.admin.api import _normalize_devices
 from app.admin.store import AdminStore
 from app.api.app_factory import create_app
 from app.api.server import first_start_banner
-from app.config import Settings
+from app.config import DEVICE_ID_PATTERN, MAX_DEVICES, DeviceEntry, Settings
 
 
 def test_admin_host_rule_is_a_plausibility_check() -> None:
     assert _normalize_devices([{"host": "bad-.example", "port": 8899}])[0]["host"] == "bad-.example"
     with pytest.raises(HTTPException, match="plain IP address or host name"):
         _normalize_devices([{"host": "https://example.org/path", "port": 8899}])
+
+
+@pytest.mark.parametrize("device_id", ["A", "x_1.2-3", "-bad", "a" * 65, "a/b"])
+def test_admin_and_config_share_device_id_rule(device_id: str) -> None:
+    valid = DEVICE_ID_PATTERN.fullmatch(device_id) is not None
+    if valid:
+        assert _normalize_devices([{"host": "localhost", "device_id": device_id}])[0]["device_id"] == device_id
+        assert DeviceEntry(device_id=device_id, host="localhost").device_id == device_id
+    else:
+        with pytest.raises(HTTPException, match="device id"):
+            _normalize_devices([{"host": "localhost", "device_id": device_id}])
+        with pytest.raises(ValidationError):
+            DeviceEntry(device_id=device_id, host="localhost")
+
+
+def test_admin_and_config_share_device_count_limit() -> None:
+    devices = [{"host": f"host-{index}"} for index in range(MAX_DEVICES + 1)]
+    with pytest.raises(HTTPException, match=f"at most {MAX_DEVICES}"):
+        _normalize_devices(devices)
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, devices=[DeviceEntry(device_id=f"d{index}", host=f"host-{index}")
+                                           for index in range(MAX_DEVICES + 1)])
 
 
 @pytest.mark.asyncio
@@ -87,6 +109,31 @@ async def test_admin_first_login_change_and_pat(tmp_path):
     assert restarted.state.admin_desired_settings.influxdb_token.get_secret_value() == "private-influx-token"
 
 
+@pytest.mark.asyncio
+async def test_live_charge_limit_freshness_persists_and_reaches_dispatch_config_after_restart(tmp_path):
+    settings = Settings(_env_file=None, hmac_secret="s" * 48, admin_db_path=tmp_path / "rct.db")
+    app = create_app(settings)
+    assert app.state.admin_store.change_password(app.state.first_start_password, "a much stronger password")
+    token = app.state.admin_store.create_token("settings", "read/write", None)[1]
+    headers = {"Authorization": f"Bearer {token}"}
+    key = "dispatch_live_charge_limit_max_age_seconds"
+    assert app.state.dispatch_config.live_charge_limit_max_age_seconds == 5.0
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver") as client:
+        for invalid in (0.9, 15.1):
+            rejected = await client.put("/admin/api/settings", headers=headers, json={key: invalid})
+            assert rejected.status_code == 400
+        saved = await client.put("/admin/api/settings", headers=headers, json={key: 8.0})
+        assert saved.status_code == 200
+        assert saved.json()["settings"][key] == 8.0
+        assert app.state.admin_store.get("operator_settings")[key] == 8.0
+        assert app.state.dispatch_config.live_charge_limit_max_age_seconds == 5.0
+
+    restarted = create_app(settings)
+    assert restarted.state.admin_desired_settings.dispatch_live_charge_limit_max_age_seconds == 8.0
+    assert restarted.state.dispatch_config.live_charge_limit_max_age_seconds == 8.0
+
+
 def test_admin_database_requires_original_secret(tmp_path):
     path = tmp_path / "rct.db"
     first = AdminStore(path, "x" * 48)
@@ -109,6 +156,14 @@ def test_database_pat_revocation_persists_across_restart(tmp_path):
     restarted = AdminStore(path, "x" * 48)
     restarted.initialize()
     assert restarted.authenticate_token(token) is None
+
+
+def test_unknown_pat_role_is_rejected_before_storage(tmp_path):
+    store = AdminStore(tmp_path / "rct.db", "x" * 48)
+    store.initialize()
+    with pytest.raises(ValueError, match="invalid token role"):
+        store.create_token("test", "administrator", None)
+    assert store.list_tokens() == []
 
 
 def test_create_token_persists_and_lists_last_four_characters(tmp_path):
@@ -425,6 +480,64 @@ async def test_switching_db_type_still_restarts_the_exporter(tmp_path):
             )
             assert second_type.status_code == 200
             mocked.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_a_busy_transition_rejects_a_live_settings_change_before_persisting(tmp_path):
+    """Finding C invariant: when a live transition is already running, a transition-bearing settings
+    PUT is refused with 409 under _LIVE_CHANGE_LOCK BEFORE anything is persisted -- the desired
+    settings must be unchanged, so no diverged saved-vs-active state can arise. 'Busy' is simulated
+    deterministically by forcing _transition_running True rather than racing real timings."""
+    settings = Settings(_env_file=None, hmac_secret="s" * 48, admin_db_path=tmp_path / "rct.db")
+    app = create_app(settings)
+    password = app.state.first_start_password
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver", headers={"Origin": "http://testserver"}) as client:
+        csrf = (await client.get("/admin/api/session")).json()["csrf_token"]
+        login = await client.post("/admin/api/login", headers={"X-CSRF-Token": csrf},
+                                  json={"username": "admin", "password": password})
+        changed = await client.post("/admin/api/change-password", headers={"X-CSRF-Token": login.json()["csrf_token"]},
+                                    json={"current_password": password, "new_password": "a much stronger password"})
+        headers = {"X-CSRF-Token": changed.json()["csrf_token"]}
+
+        before = app.state.admin_desired_settings
+        assert before.enable_write_support is False
+        with patch("app.admin.api._transition_running", return_value=True):
+            busy = await client.put("/admin/api/settings", headers=headers, json={"enable_write_support": True})
+        assert busy.status_code == 409
+        # Nothing was persisted or applied: the desired-state object is the same, writes still off.
+        assert app.state.admin_desired_settings is before
+        assert app.state.admin_desired_settings.enable_write_support is False
+
+
+@pytest.mark.asyncio
+async def test_a_busy_transition_rejects_a_parameter_selection_change_before_persisting(tmp_path):
+    """Finding C invariant for the /parameters selection-changed path: a busy transition refuses the
+    change with 409 under _LIVE_CHANGE_LOCK before the exposed-names selection is persisted."""
+    settings = Settings(_env_file=None, hmac_secret="s" * 48, admin_db_path=tmp_path / "rct.db")
+    app = create_app(settings)
+    password = app.state.first_start_password
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver", headers={"Origin": "http://testserver"}) as client:
+        csrf = (await client.get("/admin/api/session")).json()["csrf_token"]
+        login = await client.post("/admin/api/login", headers={"X-CSRF-Token": csrf},
+                                  json={"username": "admin", "password": password})
+        changed = await client.post("/admin/api/change-password", headers={"X-CSRF-Token": login.json()["csrf_token"]},
+                                    json={"current_password": password, "new_password": "a much stronger password"})
+        headers = {"X-CSRF-Token": changed.json()["csrf_token"]}
+
+        store = app.state.admin_store
+        exposed_before = store.get("exposed_names")
+        # A selection that differs from the current one, chosen from the catalog's numeric entries.
+        from app.catalog.base import is_numeric
+
+        numeric = [entry.name for entry in app.state.runtime.catalog.entries() if is_numeric(entry.value_type)]
+        new_selection = numeric[:1]
+        assert new_selection and new_selection != (exposed_before or [])
+        with patch("app.admin.api._transition_running", return_value=True):
+            busy = await client.put("/admin/api/parameters", headers=headers,
+                                    json={"exposed_names": new_selection, "write_names": []})
+        assert busy.status_code == 409
+        # The exposed-names selection was not persisted.
+        assert store.get("exposed_names") == exposed_before
 
 
 def test_fresh_install_starts_with_empty_write_selection(tmp_path):

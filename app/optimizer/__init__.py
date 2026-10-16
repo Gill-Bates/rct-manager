@@ -10,6 +10,7 @@ This package defines validated planning inputs and plans, but deliberately conta
 implementation and cannot command a battery. The Energy Manager remains the only executor.
 """
 
+from app.optimizer.align import align_energy, align_prices, build_grid
 from app.optimizer.base import (
     BatteryStateProvider,
     ConsumptionForecastProvider,
@@ -17,6 +18,8 @@ from app.optimizer.base import (
     PlanScheduler,
     SolarForecastProvider,
 )
+from app.optimizer.consumption import BaselineConsumptionForecastProvider
+from app.optimizer.greedy import GreedyEnergyOptimizer
 from app.optimizer.models import (
     BatteryState,
     ConsumptionForecast,
@@ -28,22 +31,40 @@ from app.optimizer.models import (
     SolarForecast,
     SolarForecastInterval,
 )
+from app.optimizer.planner import DynamicChargeOptimizer, PlanParameters
 from app.optimizer.scheduler import InMemoryPlanScheduler
+from app.optimizer.service import (
+    DataAge,
+    PlanningService,
+    PlanView,
+    ReadingsBatteryStateProvider,
+)
 
 __all__ = [
+    "BaselineConsumptionForecastProvider",
     "BatteryState",
     "BatteryStateProvider",
     "ConsumptionForecast",
     "ConsumptionForecastInterval",
     "ConsumptionForecastProvider",
+    "DataAge",
+    "DynamicChargeOptimizer",
     "EnergyAction",
     "EnergyOptimizer",
     "EnergyPlan",
     "EnergyPlanSlot",
+    "GreedyEnergyOptimizer",
     "InMemoryPlanScheduler",
+    "PlanParameters",
     "PlanScheduler",
+    "PlanView",
     "PlanningInput",
+    "PlanningService",
+    "ReadingsBatteryStateProvider",
     "SolarForecast",
     "SolarForecastInterval",
     "SolarForecastProvider",
+    "align_energy",
+    "align_prices",
+    "build_grid",
 ]

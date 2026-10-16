@@ -46,6 +46,32 @@ proxy address. See [Network and TLS](configuration/network.md).
 The inverter signalled its bootloader. Requests resume after the cool-down once
 a single read succeeds.
 
+## Unsolicited response frames for objects that are not polled
+
+At DEBUG level the log shows `Unsolicited response burst started ...` for the first such frame, then
+one `burst summary` line per 60 s window (and when the connection drops) listing object ids with
+frame counts. Unmatched frames are never cached.
+
+This is a logging-only change: unexpected frames still count towards the flood limit. More than 50
+within 60 s make the receiver reconnect (`unexpected_flood`, see
+`rct_transport_unexpected_frames_total`); reconnect and flood semantics are unchanged.
+
+Working hypothesis, not yet verified on hardware: the inverter keeps `READ PERIODICALLY`
+subscriptions from an earlier session (diagnostic script, other client, unclean shutdown). At
+startup the service only clears its own demultiplexer state; no device-side unsubscribe is
+known, so none is sent. Characterize it on the real device:
+
+1. Which object ids does this service register? Compare the periodic set in the startup log
+   (`Periodic reads active: N of M`) with the object ids in the summary.
+2. Which unsolicited object ids remain after a normal start with no other client connected?
+3. Stop the service cleanly (SIGTERM, which writes `pas.period = 0`), wait 10 s, start it again and
+   record 2-3 minutes of DEBUG log. Do the unsolicited ids disappear?
+4. Kill the service abruptly (`kill -9`) and restart it. Do they reappear?
+5. Repeat 2 with the vendor app, home automation and every diagnostic script stopped. Do they
+   still occur?
+
+Record the firmware version with the result.
+
 ## Mixed or stale values
 
 Check `foreign_access_suspected` in `GET /api/v1/readiness`: another client
@@ -93,8 +119,14 @@ How to read them:
 - Rising `framing_errors` or `discarded_bytes` without `crc_errors`: stray bytes or broken escaping on
   the line.
 - `connection_epoch` rising while `crc_errors` stays flat: connections end by timeout or network, not
-  by damaged frames. Each unanswered read after 5 s drops the connection and with it all periodic
-  registrations.
+  by damaged frames. A single unanswered read (5 s) keeps the connection for other objects, but the
+  same object is re-read only on a new connection, because the protocol has no transaction id and a
+  late answer would be taken for the retry's; the second unanswered read in a row drops the
+  connection too. Either reconnect drops all periodic registrations. The
+  log lines for both cases carry the parser state (`buffered`, age of the last frame, CRC and framing
+  error counts), which tells an answer held or discarded by the parser from one never sent.
+- `Duplicate response to object ... after its transaction was answered`: a second frame for an
+  already answered read (a duplicate or another client's request for the same object), harmless.
 - `periodic_available=false` with `periodic_setup_failures` growing: registration keeps being
   interrupted; the retry delay doubles from 10 s to 300 s. Values then come from reads and cache and
   are marked by `stale`, `source` and `age_seconds`.

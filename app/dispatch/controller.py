@@ -11,7 +11,7 @@ import contextlib
 import logging
 import math
 import uuid
-from collections.abc import Iterable
+from collections.abc import AsyncIterator, Iterable
 from dataclasses import replace
 from datetime import datetime, timedelta
 
@@ -25,7 +25,9 @@ from app.dispatch.capabilities import (
     required_for,
 )
 from app.dispatch.gating import should_write
+from app.dispatch.live_limit import LiveChargeLimitProvider, NullLiveChargeLimitProvider
 from app.dispatch.models import (
+    ControlTelemetry,
     DeviceLimits,
     DispatchCommand,
     DispatchConfig,
@@ -35,13 +37,14 @@ from app.dispatch.models import (
     DispatchRecordCorrupt,
     DispatchState,
     DispatchStatus,
+    PowerDirection,
     PowerSetpoint,
     StopReason,
     phase_for,
 )
 from app.dispatch.soc_policy import SocTargetPolicy, SocTargetPolicyRegistry
 from app.dispatch.store import DispatchStore
-from app.dispatch.strategy import calculate_setpoint, target_reached
+from app.dispatch.strategy import calculate_setpoint, effective_charge_limit_w, target_reached
 from app.errors import DeviceApiError
 
 log = logging.getLogger(__name__)
@@ -61,6 +64,15 @@ _STATE_FOR_MODE = {
 
 class DispatchRejected(DeviceApiError):
     pass
+
+
+class _TelemetryStale(Exception):
+    """Control telemetry read for the first setpoint write was older than the staleness policy.
+
+    Internal to the controller: ``submit()`` maps it to a ``TELEMETRY_STALE`` restore and a
+    ``dispatch_snapshot_stale`` rejection, exactly like the snapshot-stale gate (D5). It must never
+    propagate as a generic device error, so a stale reading can never drive the first write.
+    """
 
 
 def _guarded_names(mode: DispatchMode) -> frozenset[CapabilityName]:
@@ -109,12 +121,19 @@ class DispatchController:
         *,
         capabilities: CapabilityRegistry,
         soc_target_policies: SocTargetPolicyRegistry,
+        live_charge_limit: LiveChargeLimitProvider | None = None,
     ) -> None:
         self._gateway = gateway
         self._store = store
         self._clock = clock
         self._config = config
         self._limits = limits
+        # The Live Charge Envelope seam. Defaults to the inert Null provider: the contract, clamp
+        # chain, freshness rule and immediate-derate write are all live, but no live ceiling is
+        # emitted until a producer whose hardware register semantics are verified replaces it. A
+        # missing/stale/unverified limit is never invented — dispatch falls back to the configured
+        # static DeviceLimits.max_charge_power_w (the RCT/BMS keeps its own internal protection).
+        self._live_charge_limit = live_charge_limit or NullLiveChargeLimitProvider()
         # The very same registry instance the adapter reads from: a second instance would be a
         # second truth, and a capability update has to take effect live, without a restart.
         self._capabilities = capabilities
@@ -178,12 +197,43 @@ class DispatchController:
     async def status(self, device_id: str) -> DispatchStatus:
         return self._status(await self._get(device_id))
 
+    def _owns_device(self, record: DispatchRecord) -> bool:
+        """Whether dispatch currently owns the control registers of ``record``'s device.
+
+        Anything other than a clean IDLE — an active operation, a pending/required restore, or a
+        lingering intent — means the dispatch layer controls these registers and a parallel raw
+        write must be refused.
+        """
+        return (
+            record.state is not DispatchState.IDLE
+            or record.restore_required
+            or record.intent is not None
+        )
+
+    @contextlib.asynccontextmanager
+    async def guard_raw_write(self, device_id: str) -> AsyncIterator[None]:
+        """Hold the per-device dispatch lock across a raw caller write and refuse it if dispatch owns
+        the device, re-checked UNDER the lock.
+
+        Closes the TOCTOU window in the generic write path: the ownership check and the write must be
+        atomic against ``submit()``/``tick()``, which take the same lock. Without this the check and
+        the write straddle a window in which a dispatch could start and interleave its control-mode/
+        setpoint writes with the raw write on the same registers. The caller performs the device
+        write inside the ``with`` block, while this lock keeps dispatch from starting meanwhile.
+        """
+        async with self._lock(device_id):
+            if self._owns_device(await self._get(device_id)):
+                raise DispatchRejected("dispatch_register_locked", device_id=device_id)
+            yield
+
     async def submit_verification_probe(self, device_id: str, command: DispatchCommand) -> DispatchStatus:
         """Run one short HOLD on unverified hardware for the guided verification.
 
         Only a HOLD (0 W, no SoC goal) qualifies: it moves no energy on purpose, and it goes through
         the same snapshot, durable intent, TTL cap and restore path as any dispatch. The gate is
-        passed as if engineering mode were on, without persisting that switch.
+        passed as if engineering mode were on, without persisting that switch. The probe runs only
+        on a genuinely idle device: ``submit`` re-asserts IDLE under the device lock and raises
+        ``dispatch_operation_conflict`` if an operation started after the caller's preflight check.
         """
         if command.mode is not DispatchMode.HOLD:
             raise DispatchRejected("invalid_request")
@@ -233,6 +283,16 @@ class DispatchController:
                     reason=gate.reject_detail,
                 )
             current = await self._get(device_id)
+            if _verification_probe and (
+                current.state is not DispatchState.IDLE
+                or current.intent is not None
+                or current.restore_required
+            ):
+                # A verification probe may only run on a genuinely idle device. The caller's
+                # preflight check holds no lock, so a real charge/discharge can start between that
+                # check and here; under this lock we re-assert idle-only and refuse rather than let
+                # the probe fall into the normal replacement path and overwrite a live operation.
+                raise DispatchRejected("dispatch_operation_conflict")
             if current.state in (
                 DispatchState.APPLYING,
                 DispatchState.REPLACING,
@@ -333,12 +393,26 @@ class DispatchController:
             steps += ["grid_charge", "setpoint"]
             record.plan = [{"name": name, "status": "planned"} for name in steps]
             await self._put(record)  # snapshot and complete plan before writes
+            preflight_passed = False
             try:
+                telemetry = await self._gateway.read_control_telemetry(device_id)
+                if self._telemetry_stale(telemetry):
+                    raise _TelemetryStale
+                preflight_passed = True
                 # The SoC submit() already read is handed down: _apply() adds no device read, and
                 # the derivation of the device-level SoC target needs the measured value.
                 await self._apply(record, soc_percent=soc)
+            except _TelemetryStale:
+                # A rejected first preflight made no hardware change; an apply-phase rejection
+                # still needs the saved snapshot restored.
+                if not preflight_passed and not replacing:
+                    record.snapshot = None
+                await self._restore(record, StopReason.TELEMETRY_STALE)
+                raise DispatchRejected("dispatch_snapshot_stale") from None
             except Exception as exc:
                 try:
+                    if not preflight_passed and not replacing:
+                        record.snapshot = None
                     await self._restore(record, StopReason.DEVICE_ERROR, getattr(exc, "code", "internal_error"))
                 except Exception:
                     # The record stays RESTORING/APPLYING, so tick()/recover() finish the restore;
@@ -366,12 +440,20 @@ class DispatchController:
         return record.intent.mode if record.intent is not None else None
 
     async def _raise_if_active(self, device_id: str, names: Iterable[CapabilityName] | None = None) -> None:
-        """Refuse a gate change while an operation of the device is active; the caller holds the lock.
+        """Refuse a gate change while an operation is active OR a restore is outstanding; the caller
+        holds the lock.
 
         ``names`` limits the refusal to capabilities the active mode depends on; ``None`` refuses
-        any change.
+        any change. An outstanding restore (``FAULT_RESTORE_PENDING``) refuses unconditionally,
+        regardless of ``names``: the pending restore reapplies the WHOLE captured snapshot, so any
+        capability, limit or policy change made meanwhile could make that restore inconsistent (D2).
         """
         current = await self._get(device_id)
+        if current.restore_required and current.intent is not None:
+            # A restore is still outstanding (e.g. FAULT_RESTORE_PENDING awaiting its backoff
+            # retry). Block every change until the device is cleanly restored, so the snapshot the
+            # restore replays is not changed under it.
+            raise CapabilityConflict(device_id, current.intent.operation_id, current.intent.mode)
         blocking_mode = self._active_mode_blocking(current)
         if blocking_mode is None:
             return
@@ -435,11 +517,21 @@ class DispatchController:
             if step["name"] == "setpoint":
                 # The telemetry read stays immediately before the setpoint write.
                 telemetry = await self._gateway.read_control_telemetry(record.device_id)
+                # Gate the first setpoint on the same freshness policy tick() enforces: a stale or
+                # missing reading must not drive the first write any more than a later one.
+                if self._telemetry_stale(telemetry):
+                    raise _TelemetryStale
+                live_limit_w = self._live_charge_limit_w(
+                    record.device_id, record.intent.mode, self._clock.now()
+                )
+                # Transient execution ceiling: the durable intent.max_power_w is never lowered here,
+                # so a later increase of the live limit can rise back to it (AC-9).
+                execution_ceiling = effective_charge_limit_w(record.intent.max_power_w, live_limit_w)
                 desired = calculate_setpoint(
                     record.intent.mode,
                     telemetry,
                     target_soc_percent=record.intent.target_soc_percent,
-                    max_power_w=record.intent.max_power_w,
+                    max_power_w=execution_ceiling,
                     config=self._config,
                     last=PowerSetpoint(),
                 )
@@ -456,6 +548,36 @@ class DispatchController:
             )
         record.last_commanded = desired
         record.last_write_at = self._clock.now()
+
+    def _telemetry_stale(self, telemetry: ControlTelemetry) -> bool:
+        """Whether a control-telemetry reading is older than the staleness policy allows.
+
+        One policy for every write: the per-tick gate and the first setpoint write in _apply() both
+        refuse a reading older than the configured bounds, so a stale/missing reading can never
+        drive a write — the first one included.
+        """
+        return (
+            telemetry.soc_age_seconds > self._config.soc_telemetry_max_age_seconds
+            or telemetry.grid_age_seconds > self._config.control_telemetry_max_age_seconds
+            or telemetry.battery_age_seconds > self._config.control_telemetry_max_age_seconds
+        )
+
+    def _live_charge_limit_w(self, device_id: str, mode: DispatchMode, now: datetime) -> float | None:
+        """The verified+fresh live charge ceiling in watts, or ``None`` to leave the static bound.
+
+        Only applies to grid charging. The provider returns ``None`` for a missing/invalid/
+        unverified limit; a returned limit must additionally be fresh against
+        ``live_charge_limit_max_age_seconds``. Anything short of verified AND fresh yields ``None``
+        (fall back to the configured static bound), and no value is ever invented.
+        """
+        if mode is not DispatchMode.CHARGE_FROM_GRID:
+            return None
+        limit = self._live_charge_limit.live_charge_limit(device_id)
+        if limit is None:
+            return None
+        if not limit.is_fresh(now, self._config.live_charge_limit_max_age_seconds):
+            return None
+        return limit.value_w
 
     async def tick(self, device_id: str) -> DispatchStatus:
         async with self._lock(device_id):
@@ -493,11 +615,7 @@ class DispatchController:
                 return self._status(record)
             try:
                 telemetry = await self._gateway.read_control_telemetry(device_id)
-                if (
-                    telemetry.soc_age_seconds > self._config.soc_telemetry_max_age_seconds
-                    or telemetry.grid_age_seconds > self._config.control_telemetry_max_age_seconds
-                    or telemetry.battery_age_seconds > self._config.control_telemetry_max_age_seconds
-                ):
+                if self._telemetry_stale(telemetry):
                     await self._restore(record, StopReason.TELEMETRY_STALE)
                     return self._status(record)
                 if target_reached(record.intent.mode, telemetry.soc_percent, record.intent.target_soc_percent):
@@ -505,13 +623,24 @@ class DispatchController:
                     await self._put(record)
                     await self._restore(record, StopReason.TARGET_REACHED)
                     return self._status(record)
+                live_limit_w = self._live_charge_limit_w(device_id, record.intent.mode, self._clock.now())
+                # Transient execution ceiling, recomputed every tick from the current live limit;
+                # the durable intent.max_power_w is unchanged so an increased live limit can recover.
+                execution_ceiling = effective_charge_limit_w(record.intent.max_power_w, live_limit_w)
                 desired = calculate_setpoint(
                     record.intent.mode,
                     telemetry,
                     target_soc_percent=record.intent.target_soc_percent,
-                    max_power_w=record.intent.max_power_w,
+                    max_power_w=execution_ceiling,
                     config=self._config,
                     last=record.last_commanded,
+                )
+                # A live charge ceiling that drops below the current setpoint is a safety derate and
+                # must be written immediately; an increase obeys the normal deadband/interval.
+                charge_derate = (
+                    record.intent.mode is DispatchMode.CHARGE_FROM_GRID
+                    and desired.direction is PowerDirection.CHARGE
+                    and desired.watts < record.last_commanded.watts
                 )
                 if should_write(
                     desired,
@@ -522,6 +651,7 @@ class DispatchController:
                     export_cut=(
                         record.intent.mode is DispatchMode.DISCHARGE_TO_LOAD and telemetry.grid_import_w <= 0
                     ),
+                    charge_derate=charge_derate,
                 ):
                     record.plan = [{"name": "setpoint", "status": "sent"}]
                     await self._put(record)
@@ -723,6 +853,13 @@ class DispatchController:
 
     def device_limits(self, device_id: str) -> DeviceLimits | None:
         return self._limits.get(device_id)
+
+    def verified_live_charge_limit_w(self, device_id: str) -> float | None:
+        """The verified, fresh live grid-charge ceiling in watts, or ``None`` when there is none.
+
+        Read-only view for planning; ``None`` is "no verified limit", never "unlimited".
+        """
+        return self._live_charge_limit_w(device_id, DispatchMode.CHARGE_FROM_GRID, self._clock.now())
 
     def soc_target_policy(self, device_id: str) -> SocTargetPolicy:
         return self._soc_target_policies.policy(device_id)

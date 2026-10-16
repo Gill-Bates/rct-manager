@@ -25,10 +25,17 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.admin.api import require_admin
 from app.dispatch.capabilities import (
+    EXPLICIT_REQUIRED_FLAGS,
     NOTE_MAX_LENGTH,
+    REFRESH_INTERVAL_SECONDS_MAX,
+    REGISTER_BYTE_WIDTH_MAX,
+    REGISTER_BYTE_WIDTH_MIN,
+    REQUIRED_FOR_VERIFIED,
+    SOC_STRATEGY_CODE_MAX,
     CapabilityName,
     CapabilityRecord,
     CapabilityStatus,
+    missing_verified_evidence,
 )
 from app.dispatch.controller import CapabilityConflict
 from app.dispatch.models import DeviceLimits
@@ -54,36 +61,6 @@ log = logging.getLogger(__name__)
 # username. "admin" is the only possible actor and is recorded as such, not invented per request.
 _ADMIN_ACTOR = "admin"
 
-# Required evidence per capability before `status=verified` may be entered (4.1/4.6). V-17
-# (soc_target_unit) is now required for WRITE_PATH: every non-HOLD dispatch writes a SoC target
-# (controller.py submit()/_apply()), so the register representation it is written in must be
-# attested like the other write-path evidence, not left on the dataclass's unchecked default.
-_REQUIRED_FOR_VERIFIED: dict[CapabilityName, tuple[str, ...]] = {
-    CapabilityName.WRITE_PATH: (
-        "soc_strategy_external_code",
-        "enum_byte_width",
-        "bool_byte_width",
-        "write_frame_layout_verified",
-        "apply_sequence_verified",
-        "soc_target_unit",
-        # The strategy code is a vendor-specific raw value with no project-wide meaning, so it is
-        # only interpretable together with the evidence an operator writes down for it.
-        "note",
-    ),
-    CapabilityName.BATTERY_POWER_SIGN: ("battery_discharge_positive",),
-    CapabilityName.GRID_POWER_SIGN: ("grid_import_positive",),
-    CapabilityName.EXPORT_LIMIT: ("export_limit_zero_blocks_export",),
-    CapabilityName.SETPOINT_VOLATILITY: (),
-}
-_SIGN_FLAGS = ("battery_discharge_positive", "grid_import_positive")
-# soc_target_unit has the same "non-None default looks like a value" shape as the sign flags: it
-# must be explicitly sent (model_fields_set) to count as evidence, not silently taken from the
-# CapabilityRecord/CapabilityUpdate default of "ratio".
-_EXPLICIT_REQUIRED_FLAGS = (*_SIGN_FLAGS, "soc_target_unit")
-_TRUTHY_FLAGS = frozenset({"write_frame_layout_verified", "apply_sequence_verified"})
-# A value that is present but blank is no evidence: `note` carries the human-readable backing for
-# the strategy code, so an empty or whitespace-only string counts as missing.
-_NON_BLANK_FIELDS = frozenset({"note"})
 # Which capability reads which field. Kept apart from _REQUIRED_FOR_VERIFIED: a field can belong to
 # a capability without being required for VERIFIED (volatile, refresh_interval_seconds, ...). The
 # adapter reads each of these from exactly that one capability; the same value stored on any other
@@ -102,16 +79,6 @@ _GOVERNED_BY: dict[str, CapabilityName] = {
     "volatile": CapabilityName.SETPOINT_VOLATILITY,
     "refresh_interval_seconds": CapabilityName.SETPOINT_VOLATILITY,
 }
-
-
-def _missing_evidence(name: CapabilityName, record: CapabilityRecord) -> list[str]:
-    missing = []
-    for field_name in _REQUIRED_FOR_VERIFIED[name]:
-        value = getattr(record, field_name)
-        blank = field_name in _NON_BLANK_FIELDS and isinstance(value, str) and not value.strip()
-        if value is None or blank or (field_name in _TRUTHY_FLAGS and not value):
-            missing.append(field_name)
-    return missing
 
 
 def _governed(record: CapabilityRecord, field_name: str):
@@ -182,16 +149,16 @@ class CapabilityUpdate(BaseModel):
     status: CapabilityStatus
     battery_discharge_positive: bool = True
     grid_import_positive: bool = True
-    soc_strategy_external_code: int | None = Field(None, ge=0, le=255)
-    enum_byte_width: int | None = Field(None, ge=1, le=4)
-    bool_byte_width: int | None = Field(None, ge=1, le=4)
+    soc_strategy_external_code: int | None = Field(None, ge=0, le=SOC_STRATEGY_CODE_MAX)
+    enum_byte_width: int | None = Field(None, ge=REGISTER_BYTE_WIDTH_MIN, le=REGISTER_BYTE_WIDTH_MAX)
+    bool_byte_width: int | None = Field(None, ge=REGISTER_BYTE_WIDTH_MIN, le=REGISTER_BYTE_WIDTH_MAX)
     write_frame_layout_verified: bool = False
     apply_sequence_verified: bool = False
     sequence_order_relevant: bool | None = None
     export_limit_zero_blocks_export: bool | None = None
     soc_target_unit: Literal["ratio", "percent"] = "ratio"
     volatile: bool | None = None
-    refresh_interval_seconds: float | None = Field(None, ge=0, le=86_400, allow_inf_nan=False)
+    refresh_interval_seconds: float | None = Field(None, ge=0, le=REFRESH_INTERVAL_SECONDS_MAX, allow_inf_nan=False)
     verified_device_model: str | None = Field(None, min_length=1, max_length=128)
     verified_firmware: str | None = Field(None, min_length=1, max_length=64)
     note: str | None = Field(None, max_length=NOTE_MAX_LENGTH)
@@ -319,6 +286,10 @@ class DeviceLimitsUpdate(BaseModel):
     max_charge_power_w: float = Field(gt=0, le=MAX_POWER_W, allow_inf_nan=False)
     max_discharge_power_w: float = Field(gt=0, le=MAX_POWER_W, allow_inf_nan=False)
     engineering_mode: bool = False
+    # Operator-supplied usable battery capacity in watt-hours; optional and per-device. Omitted
+    # keeps the stored value, explicit null clears it (a device without one fails closed in the
+    # Dry-Run plan). Never guessed.
+    usable_capacity_wh: float | None = Field(default=None, gt=0, le=1_000_000, allow_inf_nan=False)
 
 
 class DeviceLimitsResponse(BaseModel):
@@ -326,6 +297,7 @@ class DeviceLimitsResponse(BaseModel):
     max_charge_power_w: float
     max_discharge_power_w: float
     engineering_mode: bool
+    usable_capacity_wh: float | None = None
 
 
 @router.get("/devices")
@@ -375,13 +347,13 @@ async def put_capability(
             candidate = CapabilityRecord(device_id=device_id, name=name, **evidence)
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
-        missing = _missing_evidence(name, candidate)
+        missing = missing_verified_evidence(name, candidate)
         # These flags have a non-None default that looks like a value, so only an explicitly sent
         # value counts as evidence.
         missing += [
             field_name
-            for field_name in _EXPLICIT_REQUIRED_FLAGS
-            if field_name in _REQUIRED_FOR_VERIFIED[name] and field_name not in body.model_fields_set
+            for field_name in EXPLICIT_REQUIRED_FLAGS
+            if field_name in REQUIRED_FOR_VERIFIED[name] and field_name not in body.model_fields_set
         ]
         if missing:
             raise HTTPException(400, f"missing evidence for {name.value}: {', '.join(missing)}")
@@ -478,17 +450,29 @@ async def put_device_limits(
     del admin
     _device_or_404(request, device_id)
     dispatch = _dispatch_or_503(request)
+    capacity_wh = body.usable_capacity_wh
+    if "usable_capacity_wh" not in body.model_fields_set:
+        existing = dispatch.device_limits(device_id)
+        capacity_wh = None if existing is None else existing.usable_capacity_wh
     limits = DeviceLimits(
         max_charge_power_w=body.max_charge_power_w,
         max_discharge_power_w=body.max_discharge_power_w,
         engineering_mode=body.engineering_mode,
+        usable_capacity_wh=capacity_wh,
     )
     try:
         await dispatch.set_device_limits(device_id, limits)
     except CapabilityConflict as exc:
         raise _conflict(exc) from exc
     log.warning(
-        "Dispatch device limits updated: device=%s charge_w=%s discharge_w=%s engineering_mode=%s",
+        "Dispatch device limits updated: device=%s charge_w=%s discharge_w=%s engineering_mode=%s capacity_wh=%s",
         device_id, limits.max_charge_power_w, limits.max_discharge_power_w, limits.engineering_mode,
+        limits.usable_capacity_wh,
     )  # fmt: skip
-    return DeviceLimitsResponse(device_id=device_id, **body.model_dump())
+    return DeviceLimitsResponse(
+        device_id=device_id,
+        max_charge_power_w=limits.max_charge_power_w,
+        max_discharge_power_w=limits.max_discharge_power_w,
+        engineering_mode=limits.engineering_mode,
+        usable_capacity_wh=limits.usable_capacity_wh,
+    )

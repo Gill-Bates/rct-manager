@@ -1,19 +1,9 @@
-# Set HMAC_SECRET in ../settings.env before starting Compose; administer devices and PATs in the GUI.
-# docker.cirrio.de/rct-api is the manual local-build/private-registry target (see docker/build.sh);
-# tagged releases are published to Docker Hub as giiibates/rct-manager (.github/workflows/release.yml).
-# Point RCT_API_TAG and this image reference at that repository to run a published release instead.
 services:
   rct-api:
-    image: docker.cirrio.de/rct-api:${RCT_API_TAG:?RCT_API_TAG must be set}
+    image: ${RCT_API_IMAGE:-giiibates/rct-manager}:${RCT_API_TAG:?RCT_API_TAG must be set}
     container_name: rct-api
     restart: always
     stop_grace_period: 1m
-    # Loopback only: without a host address a published port binds to every
-    # interface, which would expose the inverter gateway (and, with
-    # write access, once enabled in the GUI) to the whole network. TLS is
-    # terminated by a reverse proxy on the same host. Only the host port is
-    # configurable. Exactly one replica per device group: several instances
-    # against one inverter endpoint break the access serialization.
     ports:
       - "127.0.0.1:${RCT_API_PORT:-8000}:8000"
     env_file:
@@ -21,9 +11,6 @@ services:
     environment:
       TZ: ${TZ:-Etc/UTC}
       BIND_ADDRESS: 0.0.0.0
-      # Pinned to the container port in the mapping above: settings.env must
-      # not be able to move the app's listener away from the port Compose
-      # publishes, or a healthy container becomes unreachable through it.
       BIND_PORT: "8000"
       ALLOW_NON_LOOPBACK_BIND: "true"
     logging:
@@ -33,11 +20,6 @@ services:
         max-file: "5"
     security_opt:
       - no-new-privileges:true
-    # The entrypoint starts as root to repair the volume ownership, then drops to
-    # uid 10001 with gosu. CHOWN: chown of the data directory; SETUID/SETGID: the
-    # gosu drop. No DAC_OVERRIDE/FOWNER: the ownership repair is ordered so root
-    # never needs them (a volume owned by a foreign non-root uid must be fixed on
-    # the host). The server itself runs with an empty capability set.
     cap_drop:
       - ALL
     cap_add:
@@ -51,7 +33,6 @@ services:
     tmpfs:
       - /tmp:rw,noexec,nosuid,nodev,size=1m,mode=1777
     volumes:
-      # Settings, admin credentials and PAT records survive container replacement.
       - rct-data:/app/data
 
 volumes:

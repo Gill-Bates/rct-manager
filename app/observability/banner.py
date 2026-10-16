@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 #
-# app/banner.py
+# app/observability/banner.py
 # Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
 #
 
@@ -18,7 +18,7 @@ import sys
 from importlib import metadata
 
 from app import __build__, __version__
-from app.logging_setup import use_colors
+from app.observability.logging_setup import use_colors
 
 DISTRIBUTION = "rct-manager"
 

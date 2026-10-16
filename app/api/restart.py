@@ -188,7 +188,17 @@ def probe_listener(
 
 
 def reexec() -> NoReturn:
-    """Replace the process image with the same command line; settings are re-read from the store."""
+    """Replace the process image with the same command line; settings are re-read from the store.
+
+    Assumption (stable for the supported deployments): ``sys.orig_argv`` and the current working
+    directory still resolve to the same program as at startup. ``os.execv`` does not re-resolve
+    ``PATH`` — ``sys.executable`` is an absolute interpreter path — but a relative script path in
+    ``sys.orig_argv[1:]`` is resolved against the cwd, so a process started with a relative path in
+    a since-changed cwd could re-exec a different file. The container entrypoint and the systemd
+    unit both invoke an absolute path from a fixed WorkingDirectory, so neither varies in practice.
+    If the exec still fails, ``os.execv`` raises ``OSError``; the caller in ``api/server.py`` logs
+    it and exits non-zero so the supervisor's restart policy brings the service back.
+    """
     os.environ[RESTARTED_AT_ENV] = str(time.time())
     # A test harness hands over a pre-bound socket; the new process must bind its own.
     os.environ.pop("RCT_API_BOUND_FD", None)

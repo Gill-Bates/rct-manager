@@ -24,6 +24,7 @@ from app.dispatch.controller import (
     ReconfigurationRejected,
 )
 from app.dispatch.gating import should_write
+from app.dispatch.live_limit import ChargePowerLimit
 from app.dispatch.models import (
     ControlTelemetry,
     DeviceControlSnapshot,
@@ -290,6 +291,54 @@ def test_dispatch_store_round_trips_capabilities_and_device_configs(tmp_path: Pa
     assert store.get_device_configs() == {"main": DeviceLimits(2000, 4000, engineering_mode=False)}
 
 
+def test_p2_8_usable_capacity_is_persisted_per_device(tmp_path: Path) -> None:
+    """P2-8: usable battery capacity travels per device with the device's dispatch limits and
+    round-trips through the authenticated blob. Two devices keep their own distinct capacity, and a
+    device stored without one reads back as unset (None) so the Dry-Run plan fails closed."""
+    store = DispatchStore(tmp_path / "dispatch.db", "s" * 48)
+    store.initialize()
+    store.put_device_config("main", DeviceLimits(2000, 4000, usable_capacity_wh=8_000.0))
+    store.put_device_config("slave1", DeviceLimits(3000, 5000, usable_capacity_wh=20_000.0))
+    store.put_device_config("nocap", DeviceLimits(1000, 2000))
+    configs = store.get_device_configs()
+    assert configs["main"].usable_capacity_wh == pytest.approx(8_000.0)
+    assert configs["slave1"].usable_capacity_wh == pytest.approx(20_000.0)
+    assert configs["nocap"].usable_capacity_wh is None
+
+
+def _seed_settings(**overrides):
+    from tests.api_helpers import make_settings
+
+    base = {"dispatch_max_charge_power_w": 3000.0, "dispatch_max_discharge_power_w": 5000.0}
+    base.update(overrides)
+    return make_settings(**base)
+
+
+def test_p2_8_seed_migrates_legacy_global_capacity_once_per_device() -> None:
+    """P2-8 backward-compat (migration): the legacy global DISPATCH_USABLE_BATTERY_CAPACITY_WH seeds
+    a device that has NO per-device capacity yet; a device that already carries its own capacity
+    keeps it (the per-device value wins and the global is never applied on top of it)."""
+    from app.api.app_factory import _seed_limits
+
+    settings = _seed_settings(dispatch_usable_battery_capacity_wh=9600.0)
+    # "slave1" already has its own, different capacity set; "main" has none yet.
+    stored = {"slave1": DeviceLimits(3000, 5000, usable_capacity_wh=20_000.0)}
+    seeded = _seed_limits(settings, stored)
+    assert seeded["main"].usable_capacity_wh == pytest.approx(9600.0)  # seeded from legacy global
+    assert seeded["slave1"].usable_capacity_wh == pytest.approx(20_000.0)  # per-device value wins
+
+
+def test_p2_8_without_legacy_global_a_device_without_capacity_stays_unset() -> None:
+    """No legacy global and no per-device value: the device stays without a capacity and later fails
+    closed to battery_state_unavailable. The global is never guessed into existence."""
+    from app.api.app_factory import _seed_limits
+
+    settings = _seed_settings(dispatch_usable_battery_capacity_wh=None)
+    seeded = _seed_limits(settings, {})
+    assert seeded["main"].usable_capacity_wh is None
+    assert seeded["slave1"].usable_capacity_wh is None
+
+
 def test_engineering_mode_cleartext_flipped_against_the_blob_reads_as_off(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -323,6 +372,39 @@ def test_a_pre_mirror_device_config_row_reads_as_engineering_off_then_reauthenti
     assert store.get_device_configs() == {}  # fail closed: the unauthenticated claim is not trusted
     store.put_device_config("main", DeviceLimits(2000, 4000, engineering_mode=True))
     assert store.get_device_configs() == {"main": DeviceLimits(2000, 4000, engineering_mode=True)}
+
+
+def test_reset_identity_bound_state_keeps_the_power_limits_when_engineering_mode_was_on(
+    tmp_path: Path,
+) -> None:
+    """P3: the reset promises to preserve the power limits (a site property) while clearing the
+    identity-bound engineering switch. engineering_mode is authoritative in the authenticated blob,
+    so clearing only the cleartext column would make the next read discard the whole row and lose
+    the limits. The reset must rewrite both representations, leaving the row readable with the same
+    limits and engineering mode off."""
+    store = DispatchStore(tmp_path / "dispatch.db", "s" * 48)
+    store.initialize()
+    store.put_device_config("main", DeviceLimits(2000, 4000, engineering_mode=True))
+
+    store.reset_identity_bound_state(["main"])
+
+    # The row survives and reads back with its limits intact and engineering mode cleared: no
+    # integrity mismatch, so nothing is discarded.
+    assert store.get_device_configs() == {"main": DeviceLimits(2000, 4000, engineering_mode=False)}
+    with store.connect() as db:
+        assert db.execute("SELECT engineering_mode FROM dispatch_device_config").fetchone()[0] == 0
+
+
+def test_reset_identity_bound_state_is_idempotent_and_a_no_op_without_a_config_row(tmp_path: Path) -> None:
+    """A device with no stored config row is reset without creating one; resetting a device that is
+    already off keeps its limits readable."""
+    store = DispatchStore(tmp_path / "dispatch.db", "s" * 48)
+    store.initialize()
+    store.put_device_config("main", DeviceLimits(2000, 4000, engineering_mode=False))
+
+    store.reset_identity_bound_state(["main", "absent"])
+
+    assert store.get_device_configs() == {"main": DeviceLimits(2000, 4000, engineering_mode=False)}
 
 
 def test_dispatch_store_status_and_engineering_mode_stay_readable_without_the_secret(tmp_path: Path) -> None:
@@ -498,6 +580,7 @@ def controller_with_store(
     capabilities: CapabilityRegistry | None = None,
     limits: dict[str, DeviceLimits] | None = None,
     config: DispatchConfig | None = None,
+    live_charge_limit: object | None = None,
 ) -> DispatchController:
     return DispatchController(
         gateway,
@@ -507,6 +590,7 @@ def controller_with_store(
         limits if limits is not None else {"main": DeviceLimits(3000, 5000)},
         capabilities=capabilities if capabilities is not None else verified_registry("main"),
         soc_target_policies=gateway.soc_target_policies,
+        live_charge_limit=live_charge_limit,
     )
 
 
@@ -552,10 +636,10 @@ async def test_charge_apply_and_cancel_restores_snapshot(tmp_path: Path) -> None
     assert gateway.calls[:6] == [
         ("read_soc", "main"),
         ("snapshot", "main"),
+        ("telemetry", "main"),
         ("control", True),
         ("soc_target", 0.8),
         ("grid_charge", True),
-        ("telemetry", "main"),
     ]
     stopped = await dispatch.cancel("main")
     assert stopped.state is DispatchState.IDLE
@@ -900,6 +984,82 @@ async def test_submit_rejects_a_new_dispatch_when_the_fresh_snapshot_read_is_sta
     assert status.restore_required is False
 
 
+async def test_guard_raw_write_refuses_when_dispatch_owns_the_device(tmp_path: Path) -> None:
+    """A raw write to a control register must be refused while dispatch controls the device, and the
+    ownership check happens under the per-device lock so it is atomic with the write.
+    """
+    clock = ManualClock()
+    gateway = FakeDispatchGateway(clock)
+    dispatch = controller(tmp_path, clock, gateway)
+    await dispatch.submit(
+        "main",
+        DispatchCommand(DispatchMode.CHARGE_FROM_GRID, 80, 2000, clock.now() + timedelta(hours=1)),
+    )
+    with pytest.raises(DispatchRejected, match="dispatch_register_locked"):
+        async with dispatch.guard_raw_write("main"):
+            raise AssertionError("the guarded write must never run while dispatch owns the device")
+
+
+async def test_guard_raw_write_holds_the_lock_so_a_submit_cannot_interleave(tmp_path: Path) -> None:
+    """TOCTOU: the ownership check and the raw write are one critical section. While a raw write runs
+    inside guard_raw_write (device idle, so it is permitted), a concurrent submit() for the same
+    device must block on the per-device lock until the write's block exits — it cannot start and
+    interleave its control-mode/setpoint writes with the raw write.
+    """
+    clock = ManualClock()
+    gateway = FakeDispatchGateway(clock)
+    dispatch = controller(tmp_path, clock, gateway)
+    inside = asyncio.Event()
+    release = asyncio.Event()
+
+    async def raw_write() -> None:
+        async with dispatch.guard_raw_write("main"):  # device is idle: permitted
+            inside.set()
+            await release.wait()  # hold the lock across the "write"
+
+    writer = asyncio.create_task(raw_write())
+    await asyncio.wait_for(inside.wait(), 2)
+    submit = asyncio.create_task(
+        dispatch.submit("main", DispatchCommand(DispatchMode.CHARGE_FROM_GRID, 80, 2000, clock.now() + timedelta(hours=1)))
+    )
+    # The submit cannot make progress while the raw write holds the lock: no dispatch write happens.
+    await asyncio.sleep(0)
+    assert not submit.done()
+    assert not any(call[0] in ("control", "setpoint", "soc_target", "grid_charge") for call in gateway.calls)
+    release.set()
+    await writer
+    status = await asyncio.wait_for(submit, 2)
+    assert status.state is DispatchState.CHARGING  # the submit proceeds once the lock is free
+
+
+async def test_submit_refuses_the_first_setpoint_when_control_telemetry_is_stale(tmp_path: Path) -> None:
+    """The first setpoint write must obey the same freshness policy as tick(): control telemetry
+    older than the configured bound refuses the write, restores to a clean IDLE and reports the
+    retryable dispatch_snapshot_stale, so a stale/missing reading can never drive the first write.
+    """
+    clock = ManualClock()
+    gateway = FakeDispatchGateway(clock)
+    # control_telemetry_max_age_seconds defaults to 5s; return a reading well past it.
+    dispatch = controller(tmp_path, clock, gateway)
+
+    async def stale_telemetry(device_id: str) -> ControlTelemetry:
+        gateway.calls.append(("telemetry", device_id))
+        return ControlTelemetry(50, 0, "device", 1200, 99, "device", PowerSetpoint(), 99, "device", 1200, 0)
+
+    gateway.read_control_telemetry = stale_telemetry  # type: ignore[method-assign]
+
+    with pytest.raises(DispatchRejected, match="dispatch_snapshot_stale"):
+        await dispatch.submit(
+            "main",
+            DispatchCommand(DispatchMode.CHARGE_FROM_GRID, 80, 2000, clock.now() + timedelta(hours=1)),
+        )
+
+    assert not any(call[0] in {"control", "soc_target", "grid_charge", "setpoint", "restore"} for call in gateway.calls)
+    status = await dispatch.status("main")
+    assert status.state is DispatchState.IDLE
+    assert status.restore_required is False
+
+
 async def test_submit_restores_after_a_non_device_error_during_apply(tmp_path: Path) -> None:
     """Any failure after the first write (not only DeviceApiError) must roll the hardware back."""
     clock = ManualClock()
@@ -1162,3 +1322,122 @@ async def test_run_lets_an_in_flight_tick_finish_before_a_cancellation_takes_eff
     # The write completed and was persisted ("confirmed"), not left stuck at "sent"/half-written.
     assert status.state is DispatchState.DISCHARGING
     assert any(call[0] == "setpoint" for call in gateway.calls)
+
+
+class FakeLiveChargeLimitProvider:
+    """A configurable Live Charge Envelope producer for the controller tests.
+
+    ``limit`` is the ``ChargePowerLimit | None`` returned for every device. Swapping it mid-test
+    models a live hardware ceiling that appears, drops or expires between ticks.
+    """
+
+    def __init__(self, limit: ChargePowerLimit | None = None) -> None:
+        self.limit = limit
+
+    def live_charge_limit(self, device_id: str) -> ChargePowerLimit | None:
+        return self.limit
+
+
+async def _submit_charge(dispatch: DispatchController, clock: ManualClock, max_power_w: float = 3000) -> None:
+    await dispatch.submit(
+        "main",
+        DispatchCommand(DispatchMode.CHARGE_FROM_GRID, 80, max_power_w, clock.now() + timedelta(hours=1)),
+    )
+
+
+async def test_fresh_live_limit_below_static_clamps_the_charge_setpoint(tmp_path: Path) -> None:
+    clock = ManualClock()
+    gateway = FakeDispatchGateway(clock)
+    provider = FakeLiveChargeLimitProvider(ChargePowerLimit(1500, clock.now(), "test"))
+    dispatch = controller(tmp_path, clock, gateway, live_charge_limit=provider)
+    # The apply during submit already clamps the initial setpoint to the live ceiling.
+    await _submit_charge(dispatch, clock)
+    status = await dispatch.status("main")
+    assert status.commanded_direction is PowerDirection.CHARGE
+    assert status.commanded_power_w == 1500
+
+
+async def test_stale_live_limit_is_ignored_and_the_static_bound_governs(tmp_path: Path) -> None:
+    clock = ManualClock()
+    gateway = FakeDispatchGateway(clock)
+    # Measured well beyond the freshness window: treated as absent.
+    provider = FakeLiveChargeLimitProvider(ChargePowerLimit(1500, clock.now() - timedelta(seconds=60), "test"))
+    dispatch = controller(tmp_path, clock, gateway, live_charge_limit=provider)
+    await _submit_charge(dispatch, clock)
+    status = await dispatch.status("main")
+    assert status.commanded_power_w == 3000  # the configured static DeviceLimits.max_charge_power_w
+
+
+async def test_missing_live_limit_falls_back_to_the_static_bound(tmp_path: Path) -> None:
+    clock = ManualClock()
+    gateway = FakeDispatchGateway(clock)
+    provider = FakeLiveChargeLimitProvider(None)  # inert-until-verified: no live ceiling
+    dispatch = controller(tmp_path, clock, gateway, live_charge_limit=provider)
+    await _submit_charge(dispatch, clock)
+    status = await dispatch.status("main")
+    assert status.commanded_power_w == 3000
+
+
+async def test_a_downward_live_limit_step_while_charging_is_written_immediately(tmp_path: Path) -> None:
+    """A derate must bypass the deadband and the min-write interval."""
+    clock = ManualClock()
+    gateway = FakeDispatchGateway(clock)
+    provider = FakeLiveChargeLimitProvider(None)
+    dispatch = controller(tmp_path, clock, gateway, live_charge_limit=provider)
+    await _submit_charge(dispatch, clock)  # commands 3000 W, last_write_at = now
+    gateway.calls.clear()
+
+    # Still inside the min-write interval; a tiny downward derate (100 W, inside the 200 W deadband)
+    # must still be written at once because it is a safety derate.
+    provider.limit = ChargePowerLimit(2900, clock.now(), "test")
+    status = await dispatch.tick("main")
+    assert status.commanded_power_w == 2900
+    assert ("setpoint", PowerDirection.CHARGE, 2900.0) in gateway.calls
+
+
+async def test_an_upward_live_limit_step_obeys_the_normal_deadband(tmp_path: Path) -> None:
+    clock = ManualClock()
+    gateway = FakeDispatchGateway(clock)
+    provider = FakeLiveChargeLimitProvider(ChargePowerLimit(2800, clock.now(), "test"))
+    dispatch = controller(tmp_path, clock, gateway, live_charge_limit=provider)
+    await _submit_charge(dispatch, clock)  # commands 2800 W (clamped), last_write_at = now
+    gateway.calls.clear()
+
+    # The ceiling rises by 100 W, within the deadband and inside the min-write interval: an increase
+    # is not urgent, so no write is issued and the commanded power stays put.
+    provider.limit = ChargePowerLimit(2900, clock.now(), "test")
+    status = await dispatch.tick("main")
+    assert status.commanded_power_w == 2800
+    assert not any(call[0] == "setpoint" for call in gateway.calls)
+
+
+async def test_a_live_limit_that_drops_then_rises_recovers_to_the_durable_bound(tmp_path: Path) -> None:
+    """AC-9: the live clamp is a TRANSIENT execution ceiling. A momentary low live limit must never
+    permanently lower the durable DispatchIntent.max_power_w, so once the limit rises again the
+    commanded power rises back up to the configured static bound (3000 W here).
+    """
+    clock = ManualClock()
+    gateway = FakeDispatchGateway(clock)
+    provider = FakeLiveChargeLimitProvider(None)
+    dispatch = controller(tmp_path, clock, gateway, live_charge_limit=provider)
+    await _submit_charge(dispatch, clock)  # durable intent.max_power_w = 3000, commands 3000 W
+
+    # 1) The live limit drops to 1000 W: immediate derate down to 1000 W.
+    provider.limit = ChargePowerLimit(1000, clock.now(), "test")
+    status = await dispatch.tick("main")
+    assert status.commanded_power_w == 1000
+    assert status.max_power_w == 3000  # the durable bound is untouched
+
+    # 2) The live limit rises back to 2500 W (below static). An increase obeys the min-write
+    # interval, so advance past it; the commanded power recovers toward the durable bound.
+    clock.advance(dispatch._config.min_write_interval_seconds + 1)
+    provider.limit = ChargePowerLimit(2500, clock.now(), "test")
+    status = await dispatch.tick("main")
+    assert status.commanded_power_w == 2500
+
+    # 3) The live limit disappears entirely: the durable static bound governs again, full recovery.
+    clock.advance(dispatch._config.min_write_interval_seconds + 1)
+    provider.limit = None
+    status = await dispatch.tick("main")
+    assert status.commanded_power_w == 3000
+    assert status.max_power_w == 3000

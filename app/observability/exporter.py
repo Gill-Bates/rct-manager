@@ -17,8 +17,8 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 
-from app.cache import CacheFreshness, ValueStore, age_seconds
 from app.errors import ConfigError
+from app.gateway.cache import CacheFreshness, ValueStore, age_seconds
 from app.observability.stats import Histogram, ServiceCounters
 from app.transport.counters import EndpointCounters
 

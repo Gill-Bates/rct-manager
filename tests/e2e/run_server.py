@@ -8,6 +8,7 @@
 
 Usage: python -m tests.e2e.run_server DB_PATH HTTP_PORT DEVICE_PORT [energy]
 "energy" enables write support and the dispatch store (next to DB_PATH) for the Energy Manager smoke.
+"planning" keeps write support off but isolates the limits store next to DB_PATH (Dry-Run preview).
 The admin database path is not operator-settable, so it is injected here and the real data/rct.db
 is never touched.
 """
@@ -34,6 +35,8 @@ def main(db: str, http_port: str, device_port: str, mode: str = "") -> int:
             "dispatch_max_discharge_power_w": 5000,
         }
         if mode == "energy"
+        else {"dispatch_db_path": path.with_name("dispatch.db")}
+        if mode == "planning"
         else {}
     )
     settings = Settings(

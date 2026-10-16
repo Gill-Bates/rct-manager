@@ -17,10 +17,12 @@ import pytest
 from starlette.requests import Request
 
 from app.admin.energy_api import _solar_dashboard_view, _spot_dashboard_view, dashboard_forecast
+from app.admin.forecast_refresh import spot_config_key
 from app.api.app_factory import create_app
 from app.config import Settings
 from app.optimizer.models import SolarForecast, SolarForecastInterval
 from app.spotmarket.models import SpotMarketConfig, SpotMarketProvider, SpotPriceInterval, SpotPriceSnapshot
+from app.weather.models import WeatherConfig
 
 
 @contextlib.asynccontextmanager
@@ -57,31 +59,25 @@ def test_forecast_projection_converts_units_and_excludes_past_data():
 
     current_interval = SpotPriceInterval(now, now + timedelta(minutes=15), Decimal("0.124"))
     next_interval = SpotPriceInterval(now + timedelta(days=1), now + timedelta(days=1, minutes=15), Decimal("0.2"))
-    current = SpotPriceSnapshot(
-        SpotMarketProvider.ENERGY_CHARTS, "DE-LU", "EUR", now, (current_interval,),
-        valid_until=now + timedelta(minutes=15),
-    )
-    future = SpotPriceSnapshot(
-        SpotMarketProvider.ENERGY_CHARTS, "DE-LU", "EUR", now, (next_interval,),
+    stored = SpotPriceSnapshot(
+        SpotMarketProvider.ENERGY_CHARTS, "DE-LU", "EUR", now - timedelta(hours=20), (current_interval, next_interval),
         timezone="Europe/Berlin", source_generated_at=now - timedelta(minutes=3),
     )
-    spot_view = _spot_dashboard_view(SpotMarketConfig(enabled=True), future, False, current, False, now)
+    config = SpotMarketConfig(enabled=True)
+    # The data is a day old (one retrieval per day) and still "available": age alone is no criterion.
+    spot_view = _spot_dashboard_view(config, stored, False, now)
+    assert spot_view["status"] == "available" and spot_view["current_status"] == "available"
     assert spot_view["current_price_ct_per_kwh"] == 12.4
-    assert spot_view["future_curve"][0]["price_ct_per_kwh"] == 20.0
+    assert spot_view["future_curve"][0]["price_ct_per_kwh"] == 12.4
     assert spot_view["timezone"] == "Europe/Berlin"
     assert spot_view["source_generated_at"] == (now - timedelta(minutes=3)).isoformat()
     assert spot_view["current_valid_until"] == (now + timedelta(minutes=15)).isoformat()
-    stale_view = _spot_dashboard_view(SpotMarketConfig(enabled=True), future, True, current, False, now)
-    assert stale_view["status"] == "stale"
-    assert len(stale_view["future_curve"]) == 1
-    delayed_view = _spot_dashboard_view(SpotMarketConfig(enabled=True), future, False, current, True, now)
-    assert delayed_view["current_status"] == "stale"
-    assert delayed_view["current_price_ct_per_kwh"] == 12.4
-    expired_view = _spot_dashboard_view(
-        SpotMarketConfig(enabled=True), future, False, current, True, now + timedelta(minutes=15),
-    )
-    assert expired_view["current_status"] == "stale"
-    assert expired_view["current_price_ct_per_kwh"] is None
+    failed_view = _spot_dashboard_view(config, stored, True, now)
+    assert failed_view["status"] == "stale" and failed_view["current_status"] == "stale"
+    assert failed_view["current_price_ct_per_kwh"] == 12.4
+    gap_view = _spot_dashboard_view(config, stored, False, now + timedelta(hours=1))
+    assert gap_view["current_status"] == "stale"
+    assert gap_view["current_price_ct_per_kwh"] is None
 
 
 @pytest.mark.asyncio
@@ -92,7 +88,10 @@ async def test_forecast_projection_requires_admin_auth(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_logged_in_forecast_projection_reports_disabled_and_unavailable(tmp_path):
+async def test_logged_in_forecast_projection_reports_disabled_for_both_sections(tmp_path):
+    # A fresh app has spot market and the weather forecast both disabled, so each section reports its
+    # published "disabled" state (not "error"/"unavailable", which signal a configured-but-failed or
+    # not-yet-cached forecast). Solar mirrors spot here: a non-forecastable WeatherConfig is disabled.
     async with _logged_in(tmp_path) as (client, _csrf):
         response = await client.get("/admin/api/energy/dashboard-forecast?include=spot_current&include=spot_day_ahead&include=solar")
         assert response.status_code == 200
@@ -100,7 +99,7 @@ async def test_logged_in_forecast_projection_reports_disabled_and_unavailable(tm
         assert data["spot"]["status"] == "disabled"
         assert data["spot"]["current_status"] == "disabled"
         assert data["spot"]["future_curve"] == []
-        assert data["solar"]["status"] == "unavailable"
+        assert data["solar"]["status"] == "disabled"
         assert data["solar"]["future_curve"] == []
 
 
@@ -108,22 +107,18 @@ async def test_logged_in_forecast_projection_reports_disabled_and_unavailable(tm
 async def test_forecast_projection_only_reads_requested_caches():
     calls = []
 
-    def cache(name):
-        def get(_config):
-            calls.append(name)
-            return None, False
-
-        return SimpleNamespace(get=get)
+    def get_spot(config_key):
+        calls.append("day_ahead")
+        return []
 
     state = SimpleNamespace(
         spotmarket_config=SpotMarketConfig(enabled=True),
-        spotmarket_current_cache=cache("current"),
-        spotmarket_snapshot_cache=cache("day_ahead"),
+        admin_store=SimpleNamespace(get_spot_market_intervals=get_spot),
     )
     request = Request({"type": "http", "app": SimpleNamespace(state=state)})
     current = await dashboard_forecast(request, None, ["spot_current"])
     assert list(current) == ["spot"]
-    assert calls == ["current"]
+    assert calls == ["day_ahead"]
     calls.clear()
     day_ahead = await dashboard_forecast(request, None, ["spot_day_ahead"])
     assert list(day_ahead) == ["spot"]
@@ -132,6 +127,56 @@ async def test_forecast_projection_only_reads_requested_caches():
     solar = await dashboard_forecast(request, None, ["solar"])
     assert list(solar) == ["solar"]
     assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_dashboard_forecast_without_an_admin_store_is_a_graceful_503_not_a_500():
+    """A missing admin store must yield the same 503 the other admin endpoints return, never an
+    unhandled AttributeError -> 500. (In the running app the admin router is only mounted with a
+    store present; this guards the handler's own contract against a stateless request.)
+    """
+    from fastapi import HTTPException
+
+    state = SimpleNamespace(spotmarket_config=SpotMarketConfig(enabled=True), admin_store=None)
+    request = Request({"type": "http", "app": SimpleNamespace(state=state)})
+    with pytest.raises(HTTPException) as excinfo:
+        await dashboard_forecast(request, None, ["spot_current"])
+    assert excinfo.value.status_code == 503
+
+
+@pytest.mark.asyncio
+async def test_dashboard_empty_solar_cache_is_unavailable():
+    config = WeatherConfig(
+        enabled=True, latitude=51.18, longitude=7.19, timezone="Europe/Berlin",
+        pv_peak_power_wp=10000, tilt_deg=35, azimuth_deg=0,
+    )
+    state = SimpleNamespace(
+        spotmarket_config=SpotMarketConfig(), weather_config=config,
+        admin_store=SimpleNamespace(get_solar_forecast_intervals=lambda *args: []),
+    )
+    request = Request({"type": "http", "app": SimpleNamespace(state=state)})
+    result = await dashboard_forecast(request, None, ["solar"])
+    assert result["solar"]["status"] == "unavailable"
+
+
+@pytest.mark.asyncio
+async def test_dashboard_current_price_comes_from_the_stored_intervals(tmp_path):
+    async with _logged_in(tmp_path) as (client, _csrf):
+        app = client._transport.app
+        config = SpotMarketConfig(enabled=True)
+        app.state.spotmarket_config = config
+        start = datetime.now(UTC).replace(second=0, microsecond=0) - timedelta(minutes=1)
+        end = start + timedelta(minutes=15)
+        app.state.admin_store.replace_spot_market_intervals([{
+            "config_key": spot_config_key(config), "local_date": start.date().isoformat(),
+            "interval_start": start.isoformat(), "interval_end": end.isoformat(),
+            "price_eur_per_kwh": 0.37, "timezone": "UTC", "fetched_at": start.isoformat(),
+        }])
+        response = await client.get("/admin/api/energy/dashboard-forecast?include=spot_current")
+        assert response.status_code == 200
+        spot = response.json()["spot"]
+        assert spot["current_price_ct_per_kwh"] == 37
+        assert spot["current_valid_until"] == end.isoformat()
 
 
 @pytest.mark.asyncio
@@ -225,6 +270,17 @@ async def test_duplicate_widget_id_is_rejected(tmp_path):
 async def test_width_exceeding_the_grid_is_rejected(tmp_path):
     async with _logged_in(tmp_path) as (client, csrf):
         body = _layout({**_VALID_WIDGET, "x": 10, "w": 5})
+        response = await client.put("/admin/api/dashboard-layout", headers={"X-CSRF-Token": csrf}, json=body)
+        assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_height_exceeding_the_vertical_bound_is_rejected(tmp_path):
+    # A widget whose top is pinned at the max row but whose body spills past the vertical bound
+    # (y + h > 1000) is rejected, mirroring the horizontal x + w <= 12 rule. Such a layout cannot be
+    # resolved below the bound and would otherwise force the client resolver to discard it.
+    async with _logged_in(tmp_path) as (client, csrf):
+        body = _layout({**_VALID_WIDGET, "y": 1000, "h": 2})
         response = await client.put("/admin/api/dashboard-layout", headers={"X-CSRF-Token": csrf}, json=body)
         assert response.status_code == 422
 

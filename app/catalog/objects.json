@@ -222,12 +222,13 @@
       "object_id": "0x05C7CFB1",
       "data_type": "t_int32",
       "unit": "",
-      "value_type": "integer",
+      "value_type": "object",
+      "response_type": "t_timeseries",
       "idempotent_write": false,
       "is_action": false,
       "preselected": false,
       "description": "logger.day_egrid_load_log_ts",
-      "writable": true
+      "writable": false
     },
     {
       "name": "battery_cells_stat_4_t_max_index",
@@ -246,12 +247,13 @@
       "object_id": "0x064E4340",
       "data_type": "t_int32",
       "unit": "",
-      "value_type": "integer",
+      "value_type": "object",
+      "response_type": "t_timeseries",
       "idempotent_write": false,
       "is_action": false,
       "preselected": false,
       "description": "logger.minutes_ubat_log_ts",
-      "writable": true
+      "writable": false
     },
     {
       "name": "battery_charged_amp_hours",
@@ -402,12 +404,13 @@
       "object_id": "0x095AFAA8",
       "data_type": "t_int32",
       "unit": "",
-      "value_type": "integer",
+      "value_type": "object",
+      "response_type": "t_timeseries",
       "idempotent_write": false,
       "is_action": false,
       "preselected": false,
       "description": "logger.minutes_ul3_log_ts",
-      "writable": true
+      "writable": false
     },
     {
       "name": "battery_placeholder_0_minimum_discharge_voltage_constant_u",
@@ -632,12 +635,13 @@
       "object_id": "0x0DF164DE",
       "data_type": "t_int32",
       "unit": "",
-      "value_type": "integer",
+      "value_type": "object",
+      "response_type": "t_timeseries",
       "idempotent_write": false,
       "is_action": false,
       "preselected": false,
       "description": "logger.day_eb_log_ts",
-      "writable": true
+      "writable": false
     },
     {
       "name": "io_board_io1_polarity",
@@ -728,12 +732,13 @@
       "object_id": "0x0FA29566",
       "data_type": "t_int32",
       "unit": "",
-      "value_type": "integer",
+      "value_type": "object",
+      "response_type": "t_timeseries",
       "idempotent_write": false,
       "is_action": false,
       "preselected": false,
       "description": "logger.minutes_ub_log_ts",
-      "writable": true
+      "writable": false
     },
     {
       "name": "io_board_check_rs485_result",
@@ -848,12 +853,13 @@
       "object_id": "0x132AA71E",
       "data_type": "t_int32",
       "unit": "",
-      "value_type": "integer",
+      "value_type": "object",
+      "response_type": "t_timeseries",
       "idempotent_write": false,
       "is_action": false,
       "preselected": false,
       "description": "logger.minutes_temp2_log_ts",
-      "writable": true
+      "writable": false
     },
     {
       "name": "battery_cells_4",
@@ -1076,12 +1082,13 @@
       "object_id": "0x19B814F2",
       "data_type": "t_int32",
       "unit": "",
-      "value_type": "integer",
+      "value_type": "object",
+      "response_type": "t_timeseries",
       "idempotent_write": false,
       "is_action": false,
       "preselected": false,
       "description": "logger.year_egrid_feed_log_ts",
-      "writable": true
+      "writable": false
     },
     {
       "name": "p_rec_req_0",
@@ -1184,12 +1191,13 @@
       "object_id": "0x1D49380A",
       "data_type": "t_int32",
       "unit": "",
-      "value_type": "integer",
+      "value_type": "object",
+      "response_type": "t_timeseries",
       "idempotent_write": false,
       "is_action": false,
       "preselected": false,
       "description": "logger.minutes_eb_log_ts",
-      "writable": true
+      "writable": false
     },
     {
       "name": "battery_placeholder_0_cells_4",
@@ -1340,12 +1348,13 @@
       "object_id": "0x21879805",
       "data_type": "t_int32",
       "unit": "",
-      "value_type": "integer",
+      "value_type": "object",
+      "response_type": "t_timeseries",
       "idempotent_write": false,
       "is_action": false,
       "preselected": false,
       "description": "logger.minutes_eac1_log_ts",
-      "writable": true
+      "writable": false
     },
     {
       "name": "battery_current",
@@ -1798,12 +1807,13 @@
       "object_id": "0x2A449E89",
       "data_type": "t_int32",
       "unit": "",
-      "value_type": "integer",
+      "value_type": "object",
+      "response_type": "t_timeseries",
       "idempotent_write": false,
       "is_action": false,
       "preselected": false,
       "description": "logger.year_log_ts",
-      "writable": true
+      "writable": false
     },
     {
       "name": "battery_max_cell_voltage",
@@ -1906,12 +1916,13 @@
       "object_id": "0x2F0A6B15",
       "data_type": "t_int32",
       "unit": "",
-      "value_type": "integer",
+      "value_type": "object",
+      "response_type": "t_timeseries",
       "idempotent_write": false,
       "is_action": false,
       "preselected": false,
       "description": "logger.month_ea_log_ts",
-      "writable": true
+      "writable": false
     },
     {
       "name": "energy_e_load_day",
@@ -2099,12 +2110,13 @@
       "object_id": "0x34ECA9CA",
       "data_type": "t_int32",
       "unit": "",
-      "value_type": "integer",
+      "value_type": "object",
+      "response_type": "t_timeseries",
       "idempotent_write": false,
       "is_action": false,
       "preselected": false,
       "description": "logger.year_eb_log_ts",
-      "writable": true
+      "writable": false
     },
     {
       "name": "net_index",
@@ -2248,6 +2260,7 @@
       "is_action": false,
       "preselected": false,
       "description": "battery.soh",
+      "help_text": "State of Health (SOH), as named in RCT Power Serial Communication Protocol v1.14. The protocol does not specify this value's scale or a conversion to usable capacity.",
       "writable": true
     },
     {
@@ -2291,12 +2304,13 @@
       "object_id": "0x3906A1D0",
       "data_type": "t_int32",
       "unit": "",
-      "value_type": "integer",
+      "value_type": "object",
+      "response_type": "t_timeseries",
       "idempotent_write": false,
       "is_action": false,
       "preselected": false,
       "description": "logger.minutes_eext_log_ts",
-      "writable": true
+      "writable": false
     },
     {
       "name": "wifi_connect_to_server",
@@ -2712,12 +2726,13 @@
       "object_id": "0x431509D1",
       "data_type": "t_int32",
       "unit": "",
-      "value_type": "integer",
+      "value_type": "object",
+      "response_type": "t_timeseries",
       "idempotent_write": false,
       "is_action": false,
       "preselected": false,
       "description": "logger.month_eload_log_ts",
-      "writable": true
+      "writable": false
     },
     {
       "name": "g_sync_p_ac_0",
@@ -2952,12 +2967,13 @@
       "object_id": "0x488052BA",
       "data_type": "t_int32",
       "unit": "",
-      "value_type": "integer",
+      "value_type": "object",
+      "response_type": "t_timeseries",
       "idempotent_write": false,
       "is_action": false,
       "preselected": false,
       "description": "logger.minutes_ul2_log_ts",
-      "writable": true
+      "writable": false
     },
     {
       "name": "g_sync_i_dr_lp_2",
@@ -3096,12 +3112,13 @@
       "object_id": "0x4C14CC7C",
       "data_type": "t_int32",
       "unit": "",
-      "value_type": "integer",
+      "value_type": "object",
+      "response_type": "t_timeseries",
       "idempotent_write": false,
       "is_action": false,
       "preselected": false,
       "description": "logger.year_ea_log_ts",
-      "writable": true
+      "writable": false
     },
     {
       "name": "nsm_cos_phi_p_2_1",
@@ -3276,12 +3293,13 @@
       "object_id": "0x4E9D95A6",
       "data_type": "t_int32",
       "unit": "",
-      "value_type": "integer",
+      "value_type": "object",
+      "response_type": "t_timeseries",
       "idempotent_write": false,
       "is_action": false,
       "preselected": false,
       "description": "logger.year_eext_log_ts",
-      "writable": true
+      "writable": false
     },
     {
       "name": "energy_e_load_year_sum",
@@ -3397,12 +3415,13 @@
       "object_id": "0x50B441C1",
       "data_type": "t_int32",
       "unit": "",
-      "value_type": "integer",
+      "value_type": "object",
+      "response_type": "t_timeseries",
       "idempotent_write": false,
       "is_action": false,
       "preselected": false,
       "description": "logger.minutes_ea_log_ts",
-      "writable": true
+      "writable": false
     },
     {
       "name": "prim_sm_island_reset_retrials_counter_time",
@@ -3445,12 +3464,13 @@
       "object_id": "0x5293B668",
       "data_type": "t_int32",
       "unit": "",
-      "value_type": "integer",
+      "value_type": "object",
+      "response_type": "t_timeseries",
       "idempotent_write": false,
       "is_action": false,
       "preselected": false,
       "description": "logger.minutes_soc_log_ts",
-      "writable": true
+      "writable": false
     },
     {
       "name": "battery_placeholder_0_cells_stat_2_u_max_index",
@@ -3505,12 +3525,13 @@
       "object_id": "0x5411CE1B",
       "data_type": "t_int32",
       "unit": "",
-      "value_type": "integer",
+      "value_type": "object",
+      "response_type": "t_timeseries",
       "idempotent_write": false,
       "is_action": false,
       "preselected": false,
       "description": "logger.minutes_ul1_log_ts",
-      "writable": true
+      "writable": false
     },
     {
       "name": "grid_mon_1_u_over_threshold",
@@ -3565,12 +3586,13 @@
       "object_id": "0x554D8FEE",
       "data_type": "t_int32",
       "unit": "",
-      "value_type": "integer",
+      "value_type": "object",
+      "response_type": "t_timeseries",
       "idempotent_write": false,
       "is_action": false,
       "preselected": false,
       "description": "logger.minutes_eac2_log_ts",
-      "writable": true
+      "writable": false
     },
     {
       "name": "battery_stored_energy",
@@ -3901,12 +3923,13 @@
       "object_id": "0x5D34D09D",
       "data_type": "t_int32",
       "unit": "",
-      "value_type": "integer",
+      "value_type": "object",
+      "response_type": "t_timeseries",
       "idempotent_write": false,
       "is_action": false,
       "preselected": false,
       "description": "logger.month_egrid_load_log_ts",
-      "writable": true
+      "writable": false
     },
     {
       "name": "net_update_slaves",
@@ -4027,12 +4050,13 @@
       "object_id": "0x60A9A532",
       "data_type": "t_int32",
       "unit": "",
-      "value_type": "integer",
+      "value_type": "object",
+      "response_type": "t_timeseries",
       "idempotent_write": false,
       "is_action": false,
       "preselected": false,
       "description": "logger.day_eext_log_ts",
-      "writable": true
+      "writable": false
     },
     {
       "name": "g_sync_s_ac_1",
@@ -4292,12 +4316,13 @@
       "object_id": "0x669D02FE",
       "data_type": "t_int32",
       "unit": "",
-      "value_type": "integer",
+      "value_type": "object",
+      "response_type": "t_timeseries",
       "idempotent_write": false,
       "is_action": false,
       "preselected": false,
       "description": "logger.minutes_eac_log_ts",
-      "writable": true
+      "writable": false
     },
     {
       "name": "energy_e_ac_year_sum",
@@ -4381,6 +4406,7 @@
       "is_action": false,
       "preselected": false,
       "description": "power_mng.battery_type",
+      "help_text": "Battery type enum from RCT Power Serial Communication Protocol v1.14. The protocol does not define labels for the numeric codes.",
       "writable": true,
       "byte_width": 1
     },
@@ -4485,12 +4511,13 @@
       "object_id": "0x6B5A56C2",
       "data_type": "t_int32",
       "unit": "",
-      "value_type": "integer",
+      "value_type": "object",
+      "response_type": "t_timeseries",
       "idempotent_write": false,
       "is_action": false,
       "preselected": false,
       "description": "logger.month_eb_log_ts",
-      "writable": true
+      "writable": false
     },
     {
       "name": "db_power_board_afi_i30",
@@ -4713,12 +4740,13 @@
       "object_id": "0x6F3876BC",
       "data_type": "t_int32",
       "unit": "",
-      "value_type": "integer",
+      "value_type": "object",
       "idempotent_write": false,
       "is_action": false,
       "preselected": false,
+      "response_type": "t_event_table",
       "description": "logger.error_log_time_stamp",
-      "writable": true
+      "writable": false
     },
     {
       "name": "db_power_board_afi_i150",
@@ -4797,12 +4825,13 @@
       "object_id": "0x70BD7C46",
       "data_type": "t_int32",
       "unit": "",
-      "value_type": "integer",
+      "value_type": "object",
+      "response_type": "t_timeseries",
       "idempotent_write": false,
       "is_action": false,
       "preselected": false,
       "description": "logger.year_eac_log_ts",
-      "writable": true
+      "writable": false
     },
     {
       "name": "grid_mon_0_f_under_time",
@@ -4942,12 +4971,13 @@
       "object_id": "0x72ACC0BF",
       "data_type": "t_int32",
       "unit": "",
-      "value_type": "integer",
+      "value_type": "object",
+      "response_type": "t_timeseries",
       "idempotent_write": false,
       "is_action": false,
       "preselected": false,
       "description": "logger.minutes_ua_log_ts",
-      "writable": true
+      "writable": false
     },
     {
       "name": "flash_rtc_time_stamp_factory",
@@ -5062,12 +5092,13 @@
       "object_id": "0x76C9A0BD",
       "data_type": "t_int32",
       "unit": "",
-      "value_type": "integer",
+      "value_type": "object",
+      "response_type": "t_timeseries",
       "idempotent_write": false,
       "is_action": false,
       "preselected": false,
       "description": "logger.minutes_soc_targ_log_ts",
-      "writable": true
+      "writable": false
     },
     {
       "name": "wifi_encryption_algorithm",
@@ -6411,24 +6442,26 @@
       "object_id": "0x921997EE",
       "data_type": "t_int32",
       "unit": "",
-      "value_type": "integer",
+      "value_type": "object",
+      "response_type": "t_timeseries",
       "idempotent_write": false,
       "is_action": false,
       "preselected": false,
       "description": "logger.month_egrid_feed_log_ts",
-      "writable": true
+      "writable": false
     },
     {
       "name": "logger_minutes_egrid_load_log_ts",
       "object_id": "0x9247DB99",
       "data_type": "t_int32",
       "unit": "",
-      "value_type": "integer",
+      "value_type": "object",
+      "response_type": "t_timeseries",
       "idempotent_write": false,
       "is_action": false,
       "preselected": false,
       "description": "logger.minutes_egrid_load_log_ts",
-      "writable": true
+      "writable": false
     },
     {
       "name": "svnversion_last_known",
@@ -7136,12 +7169,13 @@
       "object_id": "0xA60082A9",
       "data_type": "t_int32",
       "unit": "",
-      "value_type": "integer",
+      "value_type": "object",
+      "response_type": "t_timeseries",
       "idempotent_write": false,
       "is_action": false,
       "preselected": false,
       "description": "logger.minutes_egrid_feed_log_ts",
-      "writable": true
+      "writable": false
     },
     {
       "name": "battery_soc_target_low",
@@ -7220,12 +7254,13 @@
       "object_id": "0xA7C708EB",
       "data_type": "t_int32",
       "unit": "",
-      "value_type": "integer",
+      "value_type": "object",
+      "response_type": "t_timeseries",
       "idempotent_write": false,
       "is_action": false,
       "preselected": false,
       "description": "logger.minutes_eload_log_ts",
-      "writable": true
+      "writable": false
     },
     {
       "name": "battery_cells_stat_2_t_max_index",
@@ -7592,12 +7627,13 @@
       "object_id": "0xB20D1AD6",
       "data_type": "t_int32",
       "unit": "",
-      "value_type": "integer",
+      "value_type": "object",
+      "response_type": "t_timeseries",
       "idempotent_write": false,
       "is_action": false,
       "preselected": false,
       "description": "logger.day_egrid_feed_log_ts",
-      "writable": true
+      "writable": false
     },
     {
       "name": "g_sync_p_ac_sc_2",
@@ -7765,6 +7801,7 @@
       "is_action": false,
       "preselected": true,
       "description": "Battery capacity in Ah (battery.ah_capacity, 0xB57B59BD)",
+      "help_text": "Battery capacity in Ah, as named in RCT Power Serial Communication Protocol v1.14. This is not a usable-capacity value in Wh.",
       "writable": true
     },
     {
@@ -8449,12 +8486,13 @@
       "object_id": "0xC55EF32E",
       "data_type": "t_int32",
       "unit": "",
-      "value_type": "integer",
+      "value_type": "object",
+      "response_type": "t_timeseries",
       "idempotent_write": false,
       "is_action": false,
       "preselected": false,
       "description": "logger.year_egrid_load_log_ts",
-      "writable": true
+      "writable": false
     },
     {
       "name": "battery_placeholder_0_cells_stat_4_t_max_index",
@@ -8702,12 +8740,13 @@
       "object_id": "0xCA6D6472",
       "data_type": "t_int32",
       "unit": "",
-      "value_type": "integer",
+      "value_type": "object",
+      "response_type": "t_timeseries",
       "idempotent_write": false,
       "is_action": false,
       "preselected": false,
       "description": "logger.day_eload_log_ts",
-      "writable": true
+      "writable": false
     },
     {
       "name": "g_sync_s_ac_0",
@@ -8786,12 +8825,13 @@
       "object_id": "0xCBDAD315",
       "data_type": "t_int32",
       "unit": "",
-      "value_type": "integer",
+      "value_type": "object",
+      "response_type": "t_timeseries",
       "idempotent_write": false,
       "is_action": false,
       "preselected": false,
       "description": "logger.minutes_ebat_log_ts",
-      "writable": true
+      "writable": false
     },
     {
       "name": "hw_test_timer2",
@@ -8990,12 +9030,13 @@
       "object_id": "0xD3E94E6B",
       "data_type": "t_int32",
       "unit": "",
-      "value_type": "integer",
+      "value_type": "object",
+      "response_type": "t_timeseries",
       "idempotent_write": false,
       "is_action": false,
       "preselected": false,
       "description": "logger.minutes_temp_bat_log_ts",
-      "writable": true
+      "writable": false
     },
     {
       "name": "battery_placeholder_0_cells_stat_0_t_max_time",
@@ -9470,12 +9511,13 @@
       "object_id": "0xE04C3900",
       "data_type": "t_int32",
       "unit": "",
-      "value_type": "integer",
+      "value_type": "object",
+      "response_type": "t_timeseries",
       "idempotent_write": false,
       "is_action": false,
       "preselected": false,
       "description": "logger.day_eac_log_ts",
-      "writable": true
+      "writable": false
     },
     {
       "name": "cs_map_0",
@@ -9566,12 +9608,13 @@
       "object_id": "0xE29C24EB",
       "data_type": "t_int32",
       "unit": "",
-      "value_type": "integer",
+      "value_type": "object",
+      "response_type": "t_timeseries",
       "idempotent_write": false,
       "is_action": false,
       "preselected": false,
       "description": "logger.minutes_eac3_log_ts",
-      "writable": true
+      "writable": false
     },
     {
       "name": "prim_sm_uzk_pump_grad_0",
@@ -9614,12 +9657,13 @@
       "object_id": "0xE4DC040A",
       "data_type": "t_int32",
       "unit": "",
-      "value_type": "integer",
+      "value_type": "object",
+      "response_type": "t_timeseries",
       "idempotent_write": false,
       "is_action": false,
       "preselected": false,
       "description": "logger.month_eext_log_ts",
-      "writable": true
+      "writable": false
     },
     {
       "name": "battery_placeholder_0_maximum_charge_voltage_constant_u",
@@ -9650,12 +9694,13 @@
       "object_id": "0xE5FBCC6F",
       "data_type": "t_int32",
       "unit": "",
-      "value_type": "integer",
+      "value_type": "object",
+      "response_type": "t_timeseries",
       "idempotent_write": false,
       "is_action": false,
       "preselected": false,
       "description": "logger.year_eload_log_ts",
-      "writable": true
+      "writable": false
     },
     {
       "name": "hw_test_bt_power_8",
@@ -9787,6 +9832,7 @@
       "is_action": false,
       "preselected": false,
       "description": "power_mng.amp_hours_measured",
+      "help_text": "Measured battery capacity in Ah, as named in RCT Power Serial Communication Protocol v1.14. The protocol does not define a conversion to usable capacity in Wh.",
       "writable": true
     },
     {
@@ -10191,12 +10237,13 @@
       "object_id": "0xF28341E2",
       "data_type": "t_int32",
       "unit": "",
-      "value_type": "integer",
+      "value_type": "object",
+      "response_type": "t_timeseries",
       "idempotent_write": false,
       "is_action": false,
       "preselected": false,
       "description": "logger.month_eac_log_ts",
-      "writable": true
+      "writable": false
     },
     {
       "name": "p_buf_available",
@@ -10396,12 +10443,13 @@
       "object_id": "0xF76DE445",
       "data_type": "t_int32",
       "unit": "",
-      "value_type": "integer",
+      "value_type": "object",
+      "response_type": "t_timeseries",
       "idempotent_write": false,
       "is_action": false,
       "preselected": false,
       "description": "logger.minutes_temp_log_ts",
-      "writable": true
+      "writable": false
     },
     {
       "name": "heat_sink_temperature",
@@ -10684,12 +10732,13 @@
       "object_id": "0xFCF4E78D",
       "data_type": "t_int32",
       "unit": "",
-      "value_type": "integer",
+      "value_type": "object",
+      "response_type": "t_timeseries",
       "idempotent_write": false,
       "is_action": false,
       "preselected": false,
       "description": "logger.day_ea_log_ts",
-      "writable": true
+      "writable": false
     },
     {
       "name": "grid_mon_1_f_over_time",

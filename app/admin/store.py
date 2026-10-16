@@ -17,7 +17,7 @@ import sqlite3
 import string
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -29,7 +29,7 @@ from cryptography.fernet import Fernet, InvalidToken
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
-from app.config import Settings
+from app.config import Settings, TokenRole
 from app.security.pat import (
     FileToken,
     generate_pat,
@@ -52,7 +52,7 @@ _BOOTSTRAP_ALPHABET = string.ascii_letters + string.digits
 
 # The current baseline admin schema, created directly (the application is unreleased: no deployed
 # database to migrate). Keyed by table name so initialize() can create a table only when absent and
-# otherwise verify its on-disk columns against the current shape.
+# otherwise verify its on-disk definition against the current shape.
 _SCHEMA: dict[str, str] = {
     "settings": "CREATE TABLE settings (key TEXT PRIMARY KEY, encrypted BLOB NOT NULL) STRICT;",
     "admin_user": "CREATE TABLE admin_user (username TEXT PRIMARY KEY, encrypted BLOB NOT NULL) STRICT;",
@@ -61,15 +61,93 @@ _SCHEMA: dict[str, str] = {
         "CREATE TABLE pats (id TEXT PRIMARY KEY, digest TEXT NOT NULL UNIQUE, "
         "encrypted BLOB NOT NULL) STRICT;"
     ),
+    "spot_market_intervals": (
+        "CREATE TABLE spot_market_intervals ("
+        "config_key TEXT NOT NULL, local_date TEXT NOT NULL, interval_start TEXT PRIMARY KEY, "
+        "interval_end TEXT NOT NULL, price_eur_per_kwh REAL NOT NULL, timezone TEXT NOT NULL, "
+        "fetched_at TEXT NOT NULL) STRICT;"
+    ),
+    "solar_forecast_intervals": (
+        "CREATE TABLE solar_forecast_intervals ("
+        "config_key TEXT NOT NULL, local_date TEXT NOT NULL, interval_start TEXT PRIMARY KEY, "
+        "interval_end TEXT NOT NULL, energy_wh REAL NOT NULL CHECK (energy_wh >= 0), "
+        "timezone TEXT NOT NULL, fetched_at TEXT NOT NULL) STRICT;"
+    ),
+    # Local household-consumption history, aggregated into fixed 15-minute UTC buckets per device.
+    # It is the optimizer's own data source and is deliberately independent of the TSDB exporter:
+    # the integrated energy, the number of samples and the covered seconds are stored so a later
+    # forecast can treat a poorly-covered bucket as uncertain. UTC ISO-8601 instants, one row per
+    # (device, bucket start), atomically upserted.
+    "consumption_history_intervals": (
+        "CREATE TABLE consumption_history_intervals ("
+        "device_id TEXT NOT NULL, interval_start TEXT NOT NULL, interval_end TEXT NOT NULL, "
+        "energy_wh REAL NOT NULL CHECK (energy_wh >= 0), "
+        "sample_count INTEGER NOT NULL CHECK (sample_count >= 0), "
+        "coverage_seconds REAL NOT NULL CHECK (coverage_seconds >= 0), "
+        "PRIMARY KEY (device_id, interval_start)) STRICT;"
+    ),
+    # Counter-based (meter) energy per bucket: MEASURED parts come from counter pairs close together,
+    # ESTIMATED parts are a counter difference spread across an app stop. Kept apart from the power-
+    # integrated table so quality is never blended, and so an older database needs no migration.
+    "consumption_meter_intervals": (
+        "CREATE TABLE consumption_meter_intervals ("
+        "device_id TEXT NOT NULL, interval_start TEXT NOT NULL, interval_end TEXT NOT NULL, "
+        "measured_wh REAL NOT NULL CHECK (measured_wh >= 0), "
+        "measured_seconds REAL NOT NULL CHECK (measured_seconds >= 0), "
+        "estimated_wh REAL NOT NULL CHECK (estimated_wh >= 0), "
+        "estimated_seconds REAL NOT NULL CHECK (estimated_seconds >= 0), "
+        "PRIMARY KEY (device_id, interval_start)) STRICT;"
+    ),
+    # Thinned cumulative-counter readings (about one per 15 minutes) kept for cross-checks and for
+    # reconstructing a day boundary, plus the single newest reading per counter that bridges an app stop.
+    "consumption_counter_readings": (
+        "CREATE TABLE consumption_counter_readings ("
+        "device_id TEXT NOT NULL, metric TEXT NOT NULL, measured_at TEXT NOT NULL, value_wh REAL NOT NULL, "
+        "PRIMARY KEY (device_id, metric, measured_at)) STRICT;"
+    ),
+    "consumption_counter_state": (
+        "CREATE TABLE consumption_counter_state ("
+        "device_id TEXT NOT NULL, metric TEXT NOT NULL, measured_at TEXT NOT NULL, value_wh REAL NOT NULL, "
+        "PRIMARY KEY (device_id, metric)) STRICT;"
+    ),
+    # Ledger of applied write batches: a retried batch is recognised and not added a second time.
+    "consumption_applied_batches": (
+        "CREATE TABLE consumption_applied_batches ("
+        "device_id TEXT NOT NULL, batch_id TEXT NOT NULL, batch_time TEXT NOT NULL, "
+        "PRIMARY KEY (device_id, batch_id)) STRICT;"
+    ),
+    # Completed local calendar days taken from the inverter's own daily logger. A day total is an
+    # alternative day source, never a 15-minute observation: it is kept apart from the interval tables
+    # so it can neither enter the forecast nor be added to a locally measured sum.
+    "consumption_daily_history": (
+        "CREATE TABLE consumption_daily_history ("
+        "device_id TEXT NOT NULL, local_date TEXT NOT NULL, "
+        "energy_wh REAL NOT NULL CHECK (energy_wh >= 0), "
+        "source TEXT NOT NULL, timezone TEXT NOT NULL, fetched_at TEXT NOT NULL, "
+        "PRIMARY KEY (device_id, local_date)) STRICT;"
+    ),
+    # Timestamped next-day consumption forecasts, to be compared with later measured actuals.
+    "consumption_forecast_runs": (
+        "CREATE TABLE consumption_forecast_runs ("
+        "device_id TEXT NOT NULL, created_at TEXT NOT NULL, target_date TEXT NOT NULL, "
+        "method TEXT NOT NULL, explanation TEXT NOT NULL, PRIMARY KEY (device_id, created_at, method)) STRICT;"
+    ),
+    "consumption_forecast_values": (
+        "CREATE TABLE consumption_forecast_values ("
+        "device_id TEXT NOT NULL, created_at TEXT NOT NULL, method TEXT NOT NULL, interval_start TEXT NOT NULL, "
+        "energy_wh REAL NOT NULL CHECK (energy_wh >= 0), "
+        "PRIMARY KEY (device_id, created_at, method, interval_start)) STRICT;"
+    ),
 }
 
-# The columns each baseline table must have on disk; an existing table that differs is rejected.
-_TABLE_COLUMNS: dict[str, frozenset[str]] = {
-    "settings": frozenset({"key", "encrypted"}),
-    "admin_user": frozenset({"username", "encrypted"}),
-    "sessions": frozenset({"digest", "encrypted"}),
-    "pats": frozenset({"id", "digest", "encrypted"}),
-}
+_CONSUMPTION_PRUNE_INDEX = (
+    "CREATE INDEX consumption_history_intervals_interval_start_idx "
+    "ON consumption_history_intervals(interval_start)"
+)
+
+
+def _schema_sql(sql: str) -> str:
+    return sql.strip().rstrip(";")
 
 
 def _bootstrap_password(length: int = 8) -> str:
@@ -87,6 +165,9 @@ class AdminStore:
         self._closed = False
         self._last_touch: dict[str, float] = {}
         self._touch_lock = threading.Lock()  # authenticate_token runs in worker threads
+        # Serialises forecast-table writes of the background refresh against a config save, so a
+        # refresh that started under the old config cannot write rows back after the save cleared them.
+        self.forecast_write_lock = threading.Lock()
         self._touch_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="pat-last-used")
         key = HKDF(algorithm=hashes.SHA256(), length=32, salt=None, info=b"rct-admin-db-v1").derive(secret.encode())
         self._fernet = Fernet(base64.urlsafe_b64encode(key))
@@ -102,11 +183,12 @@ class AdminStore:
         finally:
             os.close(fd)
         db = sqlite3.connect(self.path, timeout=5)
-        db.row_factory = sqlite3.Row
-        db.execute("PRAGMA foreign_keys = ON")
-        db.execute("PRAGMA busy_timeout = 5000")
-        db.execute("PRAGMA synchronous = NORMAL")  # safe with WAL; a power cut loses at most the last commits
         try:
+            db.row_factory = sqlite3.Row
+            db.execute("PRAGMA foreign_keys = ON")
+            db.execute("PRAGMA busy_timeout = 5000")
+            journal_mode = db.execute("PRAGMA journal_mode").fetchone()[0].lower()
+            db.execute("PRAGMA synchronous = NORMAL" if journal_mode == "wal" else "PRAGMA synchronous = FULL")
             yield db
             db.commit()
         except BaseException:
@@ -132,18 +214,25 @@ class AdminStore:
         """Create any missing baseline table; reject one whose on-disk shape is not the current one.
 
         A fresh file gets every table created; a normal restart finds them already present with the
-        expected columns and does nothing; an incompatible old database fails clearly rather than
+        expected definition and does nothing; an incompatible old database fails clearly rather than
         being migrated.
         """
         for table, create in _SCHEMA.items():
-            existing = {row["name"] for row in db.execute(f"PRAGMA table_info({table})").fetchall()}
-            if not existing:
+            row = db.execute("SELECT sql FROM sqlite_schema WHERE type='table' AND name=?", (table,)).fetchone()
+            if row is None:
                 db.executescript(f"BEGIN IMMEDIATE;{create}COMMIT;")
-            elif existing != set(_TABLE_COLUMNS[table]):
+            elif _schema_sql(row["sql"]) != _schema_sql(create):
                 raise ValueError(
                     f"admin database table {table!r} does not match the current schema; this build "
                     "does not migrate an older database — delete it and restart"
                 )
+        name = "consumption_history_intervals_interval_start_idx"
+        row = db.execute("SELECT sql FROM sqlite_schema WHERE type='index' AND name=?", (name,)).fetchone()
+        if row is None:
+            db.execute(_CONSUMPTION_PRUNE_INDEX)
+            db.execute("PRAGMA optimize")
+        elif row["sql"] is None or _schema_sql(row["sql"]) != _schema_sql(_CONSUMPTION_PRUNE_INDEX):
+            raise ValueError(f"admin database index {name!r} does not match the current schema")
 
     def initialize(self) -> str | None:
         """Create schema and return a one-time bootstrap password, if needed."""
@@ -151,9 +240,11 @@ class AdminStore:
             # Persistent; readers no longer block the writer, so autosaves and last-used updates can overlap.
             if db.execute("PRAGMA journal_mode = WAL").fetchone()[0].lower() != "wal":
                 log.warning("SQLite WAL mode is unavailable (network file system?); using the default journal")
+            else:
+                db.execute("PRAGMA synchronous = NORMAL")
             # The application is unreleased: there is no deployed database to migrate. Create the
             # current baseline schema directly. A normal restart finds the tables already present
-            # with the expected columns and does nothing; an incompatible old dev database (a table
+            # with the expected definitions and does nothing; an incompatible old dev database (a table
             # with a different shape) fails clearly instead of being silently upgraded, so the
             # developer must delete it before start — there is no migration path.
             self._create_baseline_schema(db)
@@ -179,7 +270,7 @@ class AdminStore:
                       expires_at: datetime | None) -> tuple[dict, str]:
         if not 1 <= len(name) <= 64 or any(ord(char) < 32 for char in name):
             raise ValueError("invalid token name")
-        if role not in ("read", "read/write"):
+        if role not in (TokenRole.READ, TokenRole.READ_WRITE):
             raise ValueError("invalid token role")
         if expires_at is not None and expires_at.tzinfo is None:
             expires_at = expires_at.replace(tzinfo=UTC)
@@ -226,6 +317,11 @@ class AdminStore:
             return None
         return self._decode(key, row["encrypted"])
 
+    def get_refresh_status(self, key: str):
+        """Read a background-refresh status record; a dedicated accessor so a dashboard projection
+        can annotate data with a refresh error without being counted as a data-cache read."""
+        return self.get(key)
+
     def put(self, key: str, value) -> None:
         encrypted = self._encode(key, value)
         with self.connect() as db:
@@ -241,6 +337,337 @@ class AdminStore:
         """Remove a stored value; a missing key is not an error (idempotent reset-to-default)."""
         with self.connect() as db:
             db.execute("DELETE FROM settings WHERE key=?", (key,))
+
+    def replace_spot_market_intervals(self, rows: list[dict]) -> None:
+        """Atomically replace the bounded spot-price window; this table never contains history."""
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            db.execute("DELETE FROM spot_market_intervals")
+            db.executemany(
+                "INSERT INTO spot_market_intervals "
+                "(config_key, local_date, interval_start, interval_end, price_eur_per_kwh, timezone, fetched_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                [(
+                    row["config_key"], row["local_date"], row["interval_start"], row["interval_end"],
+                    row["price_eur_per_kwh"], row["timezone"], row["fetched_at"],
+                ) for row in rows],
+            )
+
+    def get_spot_market_intervals(
+        self, config_key: str, first_date: str | None = None, last_date: str | None = None
+    ) -> list[dict]:
+        with self.connect() as db:
+            if first_date is not None and last_date is not None:
+                rows = db.execute(
+                    "SELECT config_key, local_date, interval_start, interval_end, price_eur_per_kwh, timezone, fetched_at "
+                    "FROM spot_market_intervals WHERE config_key=? AND local_date BETWEEN ? AND ? "
+                    "ORDER BY interval_start",
+                    (config_key, first_date, last_date),
+                ).fetchall()
+            else:
+                rows = db.execute(
+                    "SELECT config_key, local_date, interval_start, interval_end, price_eur_per_kwh, timezone, fetched_at "
+                    "FROM spot_market_intervals WHERE config_key=? ORDER BY interval_start", (config_key,)
+                ).fetchall()
+        return [dict(row) for row in rows]
+
+    def clear_spot_market_intervals(self) -> None:
+        with self.connect() as db:
+            db.execute("DELETE FROM spot_market_intervals")
+
+    def prune_spot_market_intervals(self, config_key: str, first_date: str, last_date: str) -> None:
+        with self.connect() as db:
+            db.execute(
+                "DELETE FROM spot_market_intervals WHERE config_key=? AND (local_date < ? OR local_date > ?)",
+                (config_key, first_date, last_date),
+            )
+
+    def replace_solar_forecast_intervals(self, rows: list[dict]) -> None:
+        """Atomically replace the bounded solar forecast window; no prior forecast is retained."""
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            db.execute("DELETE FROM solar_forecast_intervals")
+            db.executemany(
+                "INSERT INTO solar_forecast_intervals "
+                "(config_key, local_date, interval_start, interval_end, energy_wh, timezone, fetched_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                [(
+                    row["config_key"], row["local_date"], row["interval_start"], row["interval_end"],
+                    row["energy_wh"], row["timezone"], row["fetched_at"],
+                ) for row in rows],
+            )
+
+    def get_solar_forecast_intervals(self, config_key: str, first_date: str, last_date: str) -> list[dict]:
+        with self.connect() as db:
+            rows = db.execute(
+                "SELECT local_date, interval_start, interval_end, energy_wh, timezone, fetched_at "
+                "FROM solar_forecast_intervals WHERE config_key=? AND local_date BETWEEN ? AND ? "
+                "ORDER BY interval_start",
+                (config_key, first_date, last_date),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def clear_solar_forecast_intervals(self) -> None:
+        with self.connect() as db:
+            db.execute("DELETE FROM solar_forecast_intervals")
+
+    def prune_solar_forecast_intervals(self, config_key: str, first_date: str, last_date: str) -> None:
+        with self.connect() as db:
+            db.execute(
+                "DELETE FROM solar_forecast_intervals WHERE config_key=? AND (local_date < ? OR local_date > ?)",
+                (config_key, first_date, last_date),
+            )
+
+    def upsert_consumption_intervals(
+        self,
+        device_id: str,
+        buckets: list[dict],
+        batch_id: str | None = None,
+        meter_buckets: Sequence[dict] = (),
+        counter_readings: Sequence[tuple[str, str, float]] = (),
+        counter_state: Sequence[tuple[str, str, float]] = (),
+    ) -> bool:
+        """Accumulate one device's aggregated consumption data in ONE transaction; ``False`` if skipped.
+
+        Power buckets carry the energy, sample count and covered seconds the drain computed since
+        the last write; a bucket may be written more than once (still being filled), so the write
+        ADDS to any existing row for the same (device, bucket start); coverage is clamped to the 900 s
+        a bucket holds. ``meter_buckets`` are the counter-based equivalents (measured and estimated
+        parts), ``counter_readings`` thinned ``(metric, measured_at, value_wh)`` rows and
+        ``counter_state`` the newest reading per counter. With a ``batch_id`` the write is idempotent:
+        a batch already applied (a retry after an ambiguous failure) changes nothing and returns False.
+        """
+        batch_time = max(
+            [b["interval_start"] for b in buckets] + [b["interval_start"] for b in meter_buckets]
+            + [at for _, at, _ in counter_state] or [""]
+        )
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            if batch_id is not None:
+                marked = db.execute(
+                    "INSERT OR IGNORE INTO consumption_applied_batches (device_id, batch_id, batch_time) "
+                    "VALUES (?, ?, ?)",
+                    (device_id, batch_id, batch_time),
+                )
+                if marked.rowcount == 0:
+                    return False
+            db.executemany(
+                "INSERT INTO consumption_history_intervals "
+                "(device_id, interval_start, interval_end, energy_wh, sample_count, coverage_seconds) "
+                "VALUES (:device_id, :interval_start, :interval_end, :energy_wh, :sample_count, :coverage_seconds) "
+                "ON CONFLICT(device_id, interval_start) DO UPDATE SET "
+                "energy_wh = energy_wh + excluded.energy_wh, "
+                "sample_count = sample_count + excluded.sample_count, "
+                "coverage_seconds = MIN(900.0, coverage_seconds + excluded.coverage_seconds)",
+                [
+                    {
+                        "device_id": device_id,
+                        "interval_start": bucket["interval_start"],
+                        "interval_end": bucket["interval_end"],
+                        "energy_wh": bucket["energy_wh"],
+                        "sample_count": bucket["sample_count"],
+                        "coverage_seconds": bucket["coverage_seconds"],
+                    }
+                    for bucket in buckets
+                ],
+            )
+            db.executemany(
+                "INSERT INTO consumption_meter_intervals "
+                "(device_id, interval_start, interval_end, measured_wh, measured_seconds, "
+                "estimated_wh, estimated_seconds) "
+                "VALUES (:device_id, :interval_start, :interval_end, :measured_wh, :measured_seconds, "
+                ":estimated_wh, :estimated_seconds) "
+                "ON CONFLICT(device_id, interval_start) DO UPDATE SET "
+                "measured_wh = measured_wh + excluded.measured_wh, "
+                "measured_seconds = MIN(900.0, measured_seconds + excluded.measured_seconds), "
+                "estimated_wh = estimated_wh + excluded.estimated_wh, "
+                "estimated_seconds = MIN(900.0, estimated_seconds + excluded.estimated_seconds)",
+                [
+                    {
+                        "device_id": device_id,
+                        "interval_start": bucket["interval_start"],
+                        "interval_end": bucket["interval_end"],
+                        "measured_wh": bucket["measured_wh"],
+                        "measured_seconds": bucket["measured_seconds"],
+                        "estimated_wh": bucket["estimated_wh"],
+                        "estimated_seconds": bucket["estimated_seconds"],
+                    }
+                    for bucket in meter_buckets
+                ],
+            )
+            db.executemany(
+                "INSERT OR IGNORE INTO consumption_counter_readings (device_id, metric, measured_at, value_wh) "
+                "VALUES (?, ?, ?, ?)",
+                [(device_id, metric, at, value) for metric, at, value in counter_readings],
+            )
+            db.executemany(
+                "INSERT INTO consumption_counter_state (device_id, metric, measured_at, value_wh) "
+                "VALUES (?, ?, ?, ?) ON CONFLICT(device_id, metric) DO UPDATE SET "
+                "measured_at = excluded.measured_at, value_wh = excluded.value_wh "
+                "WHERE excluded.measured_at > measured_at",
+                [(device_id, metric, at, value) for metric, at, value in counter_state],
+            )
+        return True
+
+    def get_consumption_meter_intervals(
+        self, device_id: str, first_start: str, last_start: str
+    ) -> list[dict]:
+        with self.connect() as db:
+            rows = db.execute(
+                "SELECT interval_start, interval_end, measured_wh, measured_seconds, estimated_wh, "
+                "estimated_seconds FROM consumption_meter_intervals "
+                "WHERE device_id=? AND interval_start BETWEEN ? AND ? ORDER BY interval_start",
+                (device_id, first_start, last_start),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_consumption_counter_state(self, device_id: str) -> dict[str, tuple[str, float]]:
+        """The newest stored reading per counter metric: ``{metric: (measured_at, value_wh)}``."""
+        with self.connect() as db:
+            rows = db.execute(
+                "SELECT metric, measured_at, value_wh FROM consumption_counter_state WHERE device_id=?",
+                (device_id,),
+            ).fetchall()
+        return {row["metric"]: (row["measured_at"], row["value_wh"]) for row in rows}
+
+    def get_consumption_counter_readings(
+        self, device_id: str, metric: str, first: str, last: str
+    ) -> list[tuple[str, float]]:
+        with self.connect() as db:
+            rows = db.execute(
+                "SELECT measured_at, value_wh FROM consumption_counter_readings "
+                "WHERE device_id=? AND metric=? AND measured_at BETWEEN ? AND ? ORDER BY measured_at",
+                (device_id, metric, first, last),
+            ).fetchall()
+        return [(row["measured_at"], row["value_wh"]) for row in rows]
+
+    def record_consumption_forecast(
+        self, device_id: str, created_at: str, target_date: str, method: str, explanation: str,
+        values: Sequence[tuple[str, float]],
+    ) -> bool:
+        """Store one timestamped forecast run (idempotent per device, creation instant and method)."""
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            added = db.execute(
+                "INSERT OR IGNORE INTO consumption_forecast_runs "
+                "(device_id, created_at, target_date, method, explanation) VALUES (?, ?, ?, ?, ?)",
+                (device_id, created_at, target_date, method, explanation),
+            )
+            if added.rowcount == 0:
+                return False
+            db.executemany(
+                "INSERT OR IGNORE INTO consumption_forecast_values "
+                "(device_id, created_at, method, interval_start, energy_wh) VALUES (?, ?, ?, ?, ?)",
+                [(device_id, created_at, method, start, energy) for start, energy in values],
+            )
+        return True
+
+    def get_consumption_forecast_runs(self, device_id: str, first_created: str, last_created: str) -> list[dict]:
+        """Forecast runs created in the window, each with its quarter-hour ``values`` list."""
+        with self.connect() as db:
+            runs = db.execute(
+                "SELECT created_at, target_date, method, explanation FROM consumption_forecast_runs "
+                "WHERE device_id=? AND created_at BETWEEN ? AND ? ORDER BY created_at, method",
+                (device_id, first_created, last_created),
+            ).fetchall()
+            result = []
+            for run in runs:
+                values = db.execute(
+                    "SELECT interval_start, energy_wh FROM consumption_forecast_values "
+                    "WHERE device_id=? AND created_at=? AND method=? ORDER BY interval_start",
+                    (device_id, run["created_at"], run["method"]),
+                ).fetchall()
+                result.append({**dict(run), "values": [(v["interval_start"], v["energy_wh"]) for v in values]})
+        return result
+
+    def has_consumption_forecast_run(self, device_id: str, target_date: str, method: str) -> bool:
+        with self.connect() as db:
+            row = db.execute(
+                "SELECT 1 FROM consumption_forecast_runs WHERE device_id=? AND target_date=? AND method=? LIMIT 1",
+                (device_id, target_date, method),
+            ).fetchone()
+        return row is not None
+
+    def get_consumption_intervals(
+        self, device_id: str, first_start: str | None = None, last_start: str | None = None
+    ) -> list[dict]:
+        """One device's consumption buckets, ordered by start; optionally bounded to a start window.
+
+        ``first_start``/``last_start`` are inclusive UTC ISO-8601 bucket-start bounds; both or
+        neither are given.
+        """
+        with self.connect() as db:
+            if first_start is not None and last_start is not None:
+                rows = db.execute(
+                    "SELECT device_id, interval_start, interval_end, energy_wh, sample_count, coverage_seconds "
+                    "FROM consumption_history_intervals WHERE device_id=? AND interval_start BETWEEN ? AND ? "
+                    "ORDER BY interval_start",
+                    (device_id, first_start, last_start),
+                ).fetchall()
+            else:
+                rows = db.execute(
+                    "SELECT device_id, interval_start, interval_end, energy_wh, sample_count, coverage_seconds "
+                    "FROM consumption_history_intervals WHERE device_id=? ORDER BY interval_start",
+                    (device_id,),
+                ).fetchall()
+        return [dict(row) for row in rows]
+
+    def first_consumption_measurement(self, device_id: str) -> str | None:
+        """Start of the device's earliest local consumption bucket (UTC ISO 8601), or None."""
+        with self.connect() as db:
+            row = db.execute(
+                "SELECT MIN(start) FROM ("
+                "SELECT MIN(interval_start) AS start FROM consumption_history_intervals WHERE device_id=? "
+                "UNION ALL SELECT MIN(interval_start) FROM consumption_meter_intervals WHERE device_id=?)",
+                (device_id, device_id),
+            ).fetchone()
+        return row[0] if row else None
+
+    def upsert_consumption_daily(self, device_id: str, rows: list[dict]) -> None:
+        """Store completed-day totals (``local_date``, ``energy_wh``, ``source``, ``timezone``, ``fetched_at``)."""
+        if not rows:
+            return
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            db.executemany(
+                "INSERT INTO consumption_daily_history (device_id, local_date, energy_wh, source, timezone, fetched_at) "
+                "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(device_id, local_date) DO UPDATE SET "
+                "energy_wh=excluded.energy_wh, source=excluded.source, timezone=excluded.timezone, "
+                "fetched_at=excluded.fetched_at",
+                [
+                    (device_id, r["local_date"], r["energy_wh"], r["source"], r["timezone"], r["fetched_at"])
+                    for r in rows
+                ],
+            )
+
+    def get_consumption_daily(self, device_id: str, first_date: str, last_date: str) -> list[dict]:
+        """Day totals with ``first_date <= local_date <= last_date`` (ISO dates), oldest first."""
+        with self.connect() as db:
+            rows = db.execute(
+                "SELECT local_date, energy_wh, source, timezone FROM consumption_daily_history "
+                "WHERE device_id=? AND local_date BETWEEN ? AND ? ORDER BY local_date",
+                (device_id, first_date, last_date),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def prune_consumption_daily(self, cutoff_date: str) -> None:
+        """Drop day totals older than the ISO local date ``cutoff_date``."""
+        with self.connect() as db:
+            db.execute("DELETE FROM consumption_daily_history WHERE local_date < ?", (cutoff_date,))
+
+    def prune_consumption_intervals(self, cutoff_start: str) -> None:
+        """Drop consumption data older than ``cutoff_start`` (inclusive-exclusive at the cutoff).
+
+        Scoped to the consumption tables only, so retention never touches price or solar-forecast
+        rows. ``cutoff_start`` is a UTC ISO-8601 instant.
+        """
+        with self.connect() as db:
+            db.execute("DELETE FROM consumption_history_intervals WHERE interval_start < ?", (cutoff_start,))
+            db.execute("DELETE FROM consumption_meter_intervals WHERE interval_start < ?", (cutoff_start,))
+            db.execute("DELETE FROM consumption_counter_readings WHERE measured_at < ?", (cutoff_start,))
+            db.execute("DELETE FROM consumption_applied_batches WHERE batch_time < ?", (cutoff_start,))
+            db.execute("DELETE FROM consumption_forecast_values WHERE created_at < ?", (cutoff_start,))
+            db.execute("DELETE FROM consumption_forecast_runs WHERE created_at < ?", (cutoff_start,))
 
     def merge_operator_settings(self, current, changes: dict):
         with self.connect() as db:

@@ -15,16 +15,16 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from app.allowlist import Allowlist, AllowlistEntry
 from app.config import DeviceKey, EndpointKey
 from app.errors import DeviceTimeout, WriteRejected
 from app.protocol.frames import Frame, encode_frame
 from app.protocol.stream import StreamParser
 from app.protocol.types import WRITE_COMMANDS, Command, DataType, FrameKind
+from app.security.allowlist import Allowlist, AllowlistEntry
 from app.transport.counters import EndpointCounters
 from app.transport.demux import Demultiplexer, PendingTransaction
 from app.transport.endpoint import EndpointConfig, TransportEndpoint
-from app.transport.receiver import ArrivalLedger, Receiver
+from app.transport.receiver import ArrivalLedger, Receiver, ReceiverExit
 from app.transport.types import TransactionOrigin, TransactionRequest
 from tests.api_helpers import (
     ACTION_NAME,
@@ -37,7 +37,7 @@ from tests.api_helpers import (
     write_fixtures,
 )
 from tests.conftest import AutoClock
-from tests.fakes import FakeNetwork
+from tests.fakes import FakeNetwork, response_to
 
 KEY = EndpointKey("10.0.0.5", 8899)
 
@@ -47,10 +47,10 @@ def _endpoint(net: FakeNetwork, clock: AutoClock) -> TransportEndpoint:
     return TransportEndpoint("e", KEY, cfg, clock, connector=net.connect)
 
 
-def _request(command: Command) -> TransactionRequest:
+def _request(command: Command, object_id: int = 0x1234) -> TransactionRequest:
     kind = "write" if command is Command.WRITE else "read"
     return TransactionRequest(
-        DeviceKey(KEY), Frame(command, 0x1234, b"\x00\x00\x00\x07"), TransactionOrigin.CALLER, kind
+        DeviceKey(KEY), Frame(command, object_id, b"\x00\x00\x00\x07"), TransactionOrigin.CALLER, kind
     )
 
 
@@ -139,14 +139,102 @@ async def test_frame_received_before_the_send_cannot_answer_the_transaction() ->
     assert future.result() is frame
 
 
-async def test_read_timeout_still_drops_the_connection() -> None:
+async def test_a_single_read_timeout_keeps_the_connection_and_a_second_in_a_row_drops_it() -> None:
     clock = AutoClock()
     net = FakeNetwork(clock)
     net.behavior = lambda frame: "ignore"
     endpoint = _endpoint(net, clock)
-    result = await endpoint.execute(_request(Command.READ), response_timeout=0.05)
-    assert isinstance(result.error, DeviceTimeout)
+    first = await endpoint.execute(_request(Command.READ, 0x1), response_timeout=0.05)
+    assert isinstance(first.error, DeviceTimeout)
+    assert net.open_now == 1 and endpoint.connection_epoch == 1  # one lost answer is not a dead link
+    second = await endpoint.execute(_request(Command.READ, 0x2), response_timeout=0.05)
+    assert isinstance(second.error, DeviceTimeout)
     assert net.open_now == 0
+    await endpoint.close()
+
+
+async def test_an_answered_read_resets_the_unanswered_count() -> None:
+    clock = AutoClock()
+    net = FakeNetwork(clock)
+    endpoint = _endpoint(net, clock)
+    net.behavior = lambda frame: "ignore"
+    await endpoint.execute(_request(Command.READ, 0x1), response_timeout=0.05)
+    net.behavior = lambda frame: "respond"
+    assert (await endpoint.execute(_request(Command.READ, 0x2))).ok
+    net.behavior = lambda frame: "ignore"
+    await endpoint.execute(_request(Command.READ, 0x3), response_timeout=0.05)
+    assert net.open_now == 1 and endpoint.connection_epoch == 1
+    await endpoint.close()
+
+
+async def test_reads_of_other_objects_keep_the_connection_after_one_miss() -> None:
+    clock = AutoClock()
+    net = FakeNetwork(clock)
+    net.behavior = lambda frame: "ignore" if frame.object_id == 0x1 else "respond"
+    endpoint = _endpoint(net, clock)
+    await endpoint.execute(_request(Command.READ, 0x1), response_timeout=0.05)
+    for object_id in (0x2, 0x3):
+        assert (await endpoint.execute(_request(Command.READ, object_id))).ok
+    assert endpoint.connection_epoch == 1 and net.connects == 1
+    await endpoint.close()
+
+
+async def test_a_late_answer_of_a_missed_read_cannot_answer_the_retry_of_the_same_object() -> None:
+    """The protocol has no transaction id: answer #1 arriving after request #2 was sent would
+    satisfy #2. The same object is therefore re-read only on a new connection."""
+    clock = AutoClock()
+    net = FakeNetwork(clock)
+    late = b"\x00\x00\x00\x2a"
+    first_writer = None
+
+    def behavior(frame: Frame) -> str:
+        # Once request #2 is on the wire, the old connection delivers the answer to #1 (if still open).
+        if len(net.frames) == 2 and not first_writer.closed:
+            first_writer.deliver(encode_frame(response_to(frame, late)))
+        return "ignore"
+
+    net.behavior = behavior
+    endpoint = _endpoint(net, clock)
+    first = await endpoint.execute(_request(Command.READ), response_timeout=0.05)
+    assert isinstance(first.error, DeviceTimeout)
+    first_writer = net.writers[0]
+    second = await endpoint.execute(_request(Command.READ), response_timeout=0.05)
+    assert not second.ok and isinstance(second.error, DeviceTimeout)
+    assert endpoint.connection_epoch == 2 and first_writer.closed
+    await endpoint.close()
+
+
+async def test_a_late_answer_for_a_missed_periodic_object_is_not_cached_as_a_push() -> None:
+    clock = AutoClock()
+    net = FakeNetwork(clock)
+    net.behavior = lambda frame: "ignore" if frame.object_id == 0x1 else "respond"
+    seen: list[int] = []
+    endpoint = TransportEndpoint(
+        "e", KEY, EndpointConfig(response_timeout_seconds=1.0, min_interval=timedelta(0)), clock,
+        connector=net.connect, on_value=lambda frame, _kind: seen.append(frame.object_id),
+    )
+    assert (await endpoint.execute(_request(Command.READ, 0x2))).ok
+    seen.clear()
+    endpoint.register_periodic(DeviceKey(KEY), 0x1)
+    endpoint.register_periodic(DeviceKey(KEY), 0x2)
+    await endpoint.execute(_request(Command.READ, 0x1), response_timeout=0.05)
+    net.push(Frame(Command.RESPONSE, 0x1, b"\x00\x00\x00\x2a"))  # late answer, no pending transaction
+    net.push(Frame(Command.RESPONSE, 0x2, b"\x00\x00\x00\x2b"))  # an unrelated push is unaffected
+    await asyncio.sleep(0.01)
+    assert seen == [0x2]
+    await endpoint.close()
+
+
+async def test_a_write_after_an_unanswered_read_starts_on_a_fresh_connection() -> None:
+    """The late answer to the missed read must not be taken as the write's acknowledgement."""
+    clock = AutoClock()
+    net = FakeNetwork(clock)
+    net.behavior = lambda frame: "ignore"
+    endpoint = _endpoint(net, clock)
+    await endpoint.execute(_request(Command.READ), response_timeout=0.05)
+    net.behavior = lambda frame: "respond"
+    await endpoint.execute(_request(Command.WRITE))
+    assert endpoint.connection_epoch == 2
     await endpoint.close()
 
 
@@ -183,6 +271,101 @@ async def test_receiver_credits_a_frame_with_its_real_arrival_not_the_later_read
     # satisfy the pending transaction sent at the same instant.
     assert not future.done()
     assert counters.unexpected_frames == 1
+
+
+class _ManualClock:
+    """Monotonic source the test advances by hand, so arrival instants are exact, not measured."""
+
+    def __init__(self, now: float = 0.0) -> None:
+        self.now = now
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def _receive_path(clock: _ManualClock) -> tuple[Receiver, StreamParser, Demultiplexer, EndpointCounters]:
+    counters = EndpointCounters()
+    demux = Demultiplexer(counters, clock)
+    parser = StreamParser()
+    receiver = Receiver(
+        parser=parser,
+        demux=demux,
+        counters=counters,
+        monotonic=clock,
+        now=lambda: datetime(2026, 1, 1, tzinfo=UTC),
+        max_frame_bytes=4096,
+        unexpected_limit=50,
+        unexpected_window_seconds=60,
+        on_bootloader=lambda: None,
+    )
+    return receiver, parser, demux, counters
+
+
+PERIODIC_OBJECT_ID = 0x5678
+
+
+def _periodic_push(value: int) -> bytes:
+    return encode_frame(Frame(Command.RESPONSE, PERIODIC_OBJECT_ID, value.to_bytes(4, "big")))
+
+
+async def test_a_stale_periodic_push_in_the_same_read_does_not_age_the_real_response() -> None:
+    """One read() may drain a periodic push that arrived before the send together with the answer.
+
+    The answer is dated by its own last byte, so the older bytes in the batch cannot push it
+    below the Commit_Point and leave the transaction waiting for a response that did arrive.
+    """
+    clock = _ManualClock(1.0)
+    receiver, _, demux, counters = _receive_path(clock)
+    reader = asyncio.StreamReader()
+    ledger = ArrivalLedger(reader, clock)
+    demux.register_periodic(DeviceKey(KEY), PERIODIC_OBJECT_ID)
+    reader.feed_data(_periodic_push(1))  # still unprocessed when the request goes out
+    clock.now = 2.0
+    future: asyncio.Future[Frame] = asyncio.get_running_loop().create_future()
+    demux.pending = PendingTransaction(0x1234, None, clock.now, future)
+    clock.now = 3.0
+    reader.feed_data(encode_frame(Frame(Command.RESPONSE, 0x1234, b"\x00\x00\x00\x07")))
+    reader.feed_eof()
+
+    assert await receiver.run(reader, ledger) is ReceiverExit.EOF
+    assert future.result().payload == b"\x00\x00\x00\x07"
+    assert counters.unexpected_frames == 0
+
+
+async def test_a_frame_split_across_two_reads_does_not_age_the_response_behind_it() -> None:
+    """A TCP segment boundary inside a frame is enough to reproduce this; no event loop stall.
+
+    The split frame's own tail arrives after the send, but it answers another object, so only
+    the real response may satisfy the transaction - and it must, with the connection kept.
+    """
+    clock = _ManualClock(1.0)
+    receiver, parser, demux, counters = _receive_path(clock)
+    reader = asyncio.StreamReader()
+    ledger = ArrivalLedger(reader, clock)
+    demux.register_periodic(DeviceKey(KEY), PERIODIC_OBJECT_ID)
+    split = _periodic_push(2)
+    reader.feed_data(split[:4])  # first read ends mid-frame, before the Commit_Point
+    task = asyncio.create_task(receiver.run(reader, ledger))
+    for _ in range(1000):
+        if parser.buffered_bytes == 4:
+            break
+        await asyncio.sleep(0)
+    else:  # pragma: no cover - the receiver always gets its first read in well before this
+        task.cancel()
+        raise AssertionError("receiver never consumed the partial frame")
+
+    clock.now = 2.0
+    future: asyncio.Future[Frame] = asyncio.get_running_loop().create_future()
+    demux.pending = PendingTransaction(0x1234, None, clock.now, future)
+    clock.now = 3.0
+    reader.feed_data(split[4:])
+    clock.now = 4.0
+    reader.feed_data(encode_frame(Frame(Command.RESPONSE, 0x1234, b"\x00\x00\x00\x07")))
+    reader.feed_eof()
+
+    assert await task is ReceiverExit.EOF
+    assert future.result().payload == b"\x00\x00\x00\x07"
+    assert counters.unexpected_frames == 0
 
 
 async def test_put_without_write_answer_is_confirmed_by_readback_on_the_same_connection(tmp_path) -> None:
@@ -304,12 +487,12 @@ async def test_bool_body_is_never_scaled(value, expected) -> None:
 def test_bool_on_a_scaled_register_stays_a_bool_in_the_encoder() -> None:
     """Directly on the encoder, because no shipped register is both scaled and t_bool: a bool must
     not be divided, which for t_float means it is rejected as a type mismatch, not silently scaled."""
-    from app.allowlist import Allowlist
-    from app.cache import MemoryCache
     from app.catalog.registry import RegistryCatalog
     from app.clock import SystemClock
     from app.errors import WriteRejected
+    from app.gateway.cache import MemoryCache
     from app.gateway.rct import RctGateway
+    from app.security.allowlist import Allowlist
 
     catalog = RegistryCatalog.from_file(ROOT / "app/catalog/objects.json")
     gateway = RctGateway(catalog, MemoryCache(30, 30), SystemClock(), Allowlist({}, catalog))

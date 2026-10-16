@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 
 ADMIN = Path(__file__).resolve().parents[1] / "app" / "admin" / "static"
-CSS_PATH, JS_PATH = ADMIN / "css" / "admin.css", ADMIN / "js" / "admin.js"
+CSS_PATH = ADMIN / "css" / "admin.css"
 BOOTSTRAP = ADMIN / "vendor" / "bootstrap.min.css"
 TONES = ("success", "neutral", "warning", "danger")
 
@@ -136,7 +136,9 @@ def rule_tone_contrast(css: str) -> list[str]:
 
 
 CSS = CSS_PATH.read_text(encoding="utf-8")
-JS = JS_PATH.read_text(encoding="utf-8")
+base = (ADMIN.parent / "templates" / "base.html").read_text(encoding="utf-8")
+ADMIN_SCRIPT_NAMES = re.findall(r'<script src="/admin/static/js/(admin(?:-[\w-]+)?\.js)" defer></script>', base)
+JS = "\n".join((ADMIN / "js" / name).read_text(encoding="utf-8") for name in ADMIN_SCRIPT_NAMES)
 
 
 def test_tones_are_defined_and_use_design_tokens_only():

@@ -60,6 +60,20 @@ def test_presets_and_effective_raw_days() -> None:
     assert effective_raw_days("low", None, 0) == 30
 
 
+def test_explicit_raw_above_total_is_clamped_and_logged(caplog: pytest.LogCaptureFixture) -> None:
+    """An explicit preset raw value above total is clamped to total, and the clamp is observable."""
+    with caplog.at_level("WARNING", logger="app.export.questdb_admin"):
+        assert effective_raw_days("medium", 200, 90) == 90  # raw never exceeds total
+    assert any(
+        record.levelname == "WARNING" and "clamping raw retention" in record.getMessage() for record in caplog.records
+    )
+    # An explicit value at or below total keeps its value and emits no clamp warning.
+    caplog.clear()
+    with caplog.at_level("WARNING", logger="app.export.questdb_admin"):
+        assert effective_raw_days("medium", 20, 90) == 20
+    assert not caplog.records
+
+
 def test_rollup_ddl() -> None:
     ddl = rollup_ddl("rct", PRESETS["medium"], COLUMNS, rollup_view_name("rct", PRESETS["medium"], _HASH))
     assert f'CREATE MATERIALIZED VIEW IF NOT EXISTS "rct_rollup_1m_v{_HASH}" WITH BASE "rct" REFRESH IMMEDIATE' in ddl

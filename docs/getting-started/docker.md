@@ -5,9 +5,8 @@ The repository ships `docker/Dockerfile`, `docker/compose.yaml` and
 `linux/arm64`) to Docker Hub as
 [`giiibates/rct-manager`](https://hub.docker.com/r/giiibates/rct-manager), with
 Trivy scanning, an SBOM and provenance attestation (`.github/workflows/release.yml`).
-`docker/compose.yaml` defaults to the private registry `docker.cirrio.de/rct-api`
-for a self-hosted mirror; point `RCT_API_TAG`/the `image:` key at
-`giiibates/rct-manager` instead to run the published release image.
+`docker/compose.yaml` defaults to the published Docker Hub image
+`giiibates/rct-manager`; set `RCT_API_TAG` to the release you want to run.
 `docker/build.sh` is a separate, manual local-build path: it always builds
 `linux/amd64` only and pushes the `:dev` tag to `giiibates/rct-manager` on
 Docker Hub by default (set `IMAGE=` to push elsewhere).
@@ -17,10 +16,23 @@ Docker Hub by default (set `IMAGE=` to push elsewhere).
 ```sh
 cp settings.env.example settings.env      # then edit it
 openssl rand -base64 32   # put the result in HMAC_SECRET
-docker compose -f docker/compose.yaml up -d
-docker compose -f docker/compose.yaml logs rct-api
-docker compose -f docker/compose.yaml run --rm rct-api validate
+RCT_API_TAG=latest docker compose -f docker/compose.yaml up -d
+RCT_API_TAG=latest docker compose -f docker/compose.yaml logs rct-api
+RCT_API_TAG=latest docker compose -f docker/compose.yaml run --rm rct-api validate
 ```
+
+This pulls the published release image from Docker Hub; `RCT_API_TAG` selects
+the version (for example `latest` or `1.2.1`).
+
+!!! note "Self-hosted mirror or local build"
+    To run from a private registry mirror or a manual local build instead of
+    Docker Hub, override the image repository with `RCT_API_IMAGE`, keeping the
+    required `RCT_API_TAG`:
+
+    ```sh
+    RCT_API_IMAGE=docker.cirrio.de/rct-api RCT_API_TAG=latest \
+      docker compose -f docker/compose.yaml up -d
+    ```
 
 Compose reads `../settings.env` relative to `docker/compose.yaml`. See
 [Configuration](configuration.md) for all environment variables. The image

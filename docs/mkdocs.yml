@@ -94,16 +94,32 @@ markdown_extensions:
       toc_depth: 3
   - pymdownx.betterem:
       smart_enable: all
+  - pymdownx.caret
   - pymdownx.details
+  - pymdownx.emoji:
+      # Material and Simple Icons shortcodes such as :material-api: and :simple-docker:.
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
   - pymdownx.highlight:
       anchor_linenums: true
       line_spans: __span
       pygments_lang_class: true
   - pymdownx.inlinehilite
   - pymdownx.keys
-  - pymdownx.superfences
+  - pymdownx.mark
+  - pymdownx.smartsymbols
+  - pymdownx.superfences:
+      custom_fences:
+        # Hand a ```mermaid block to Material's bundled Mermaid renderer instead of the
+        # highlighter, so flow diagrams render as graphics in both colour schemes.
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
   - pymdownx.tabbed:
       alternate_style: true
+  - pymdownx.tasklist:
+      custom_checkbox: true
+  - pymdownx.tilde
 
 extra:
   generator: false
@@ -113,6 +129,11 @@ extra:
 
 extra_css:
   - stylesheets/extra.css
+
+# Material fetches Mermaid from unpkg.com at view time unless a global `mermaid` already exists, so
+# a blocked or offline CDN leaves diagrams as plain code. Self-hosting (pinned 11.4.1) avoids that.
+extra_javascript:
+  - javascripts/mermaid.min.js
 
 nav:
   - Home: index.md

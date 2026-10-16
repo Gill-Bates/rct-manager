@@ -51,7 +51,7 @@ class RegistryEntry(BaseModel):
 
     name: str
     object_id: int = Field(ge=0, le=2**32 - 1)  # JSON carries "0x..." strings
-    data_type: DataType
+    data_type: DataType  # the REQUEST type; the reply type differs only when response_type is set
     unit: str
     value_type: NeutralValueType
     idempotent_write: bool
@@ -59,6 +59,8 @@ class RegistryEntry(BaseModel):
     is_action: bool = False
     preselected: bool = False
     struct: StructKind | None = None
+    # Compound reply of a logger object (request INT32, reply TIMESERIES). None: the reply type is data_type.
+    response_type: DataType | None = None
     byte_width: int | None = None
     enum_labels: dict[int, str] = Field(default_factory=dict)
     prometheus_name: str | None = None
@@ -95,9 +97,13 @@ class RegistryEntry(BaseModel):
             raise ValueError("struct is only allowed for t_struct")
         if is_struct and (self.byte_width is not None or self.writable or self.is_action):
             raise ValueError("t_struct has a fixed layout and is neither writable nor an action")
+        if self.response_type is not None:
+            self._check_compound_response()
         if self.byte_width is not None:
             self._check_width()
         allowed = _NEUTRAL_TYPES.get(self.data_type, _INTEGERISH)
+        if self.response_type in (DataType.TIMESERIES, DataType.EVENT_TABLE):
+            allowed = frozenset({NeutralValueType.OBJECT})
         if self.value_type not in allowed:
             raise ValueError(f"value_type {self.value_type.value} does not fit {self.data_type.value}")
         if self.is_action and not self.writable:
@@ -113,6 +119,24 @@ class RegistryEntry(BaseModel):
         if self.scale == 0.0:
             raise ValueError("scale must not be zero")
         return self
+
+    def _check_compound_response(self) -> None:
+        if self.response_type not in (DataType.TIMESERIES, DataType.EVENT_TABLE):
+            raise ValueError("response_type may only be t_timeseries or t_event_table")
+        if self.data_type is not DataType.INT32:
+            raise ValueError(f"a {self.response_type.value} reply is requested with a t_int32 timestamp")
+        if self.writable or self.is_action or self.scale != 1.0:
+            raise ValueError(f"a {self.response_type.value} object is a read-only history query, not a writable setting")
+
+    @property
+    def reply_type(self) -> DataType:
+        """The type the reply payload is decoded as; equal to the request type for a normal object."""
+        return self.response_type or self.data_type
+
+    @property
+    def is_compound(self) -> bool:
+        """True for objects whose reply is not a scalar; they stay off the neutral metric surface."""
+        return self.data_type is DataType.STRUCT or self.response_type is not None
 
     def _check_enum_label_codes(self) -> None:
         """Label codes must fit the metric's own encoded width, matching the exporter's StateSet use."""
@@ -213,7 +237,7 @@ class RegistryCatalog:
 
     def _neutral(self, name: str) -> RegistryEntry:
         entry = self._by_name.get(name)
-        if entry is None or entry.data_type is DataType.STRUCT:  # structures are diagnostics-only
+        if entry is None or entry.is_compound:  # structures and time series are diagnostics-only
             raise UnknownMetric(name=name)
         return entry
 
@@ -230,14 +254,14 @@ class RegistryCatalog:
         )
 
     def names(self) -> Sequence[str]:
-        return [n for n, e in self._by_name.items() if e.data_type is not DataType.STRUCT]
+        return [n for n, e in self._by_name.items() if not e.is_compound]
 
     def preselected(self) -> Sequence[str]:
         return [n for n in self.names() if self._by_name[n].preselected]
 
     def exists(self, name: str) -> bool:
         entry = self._by_name.get(name)
-        return entry is not None and entry.data_type is not DataType.STRUCT
+        return entry is not None and not entry.is_compound
 
     def object_entry(self, name: str) -> RegistryEntry:
         entry = self._by_name.get(name)

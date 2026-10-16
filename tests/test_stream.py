@@ -577,3 +577,56 @@ def test_crc_valid_prefix_at_a_read_boundary_is_not_delivered_early(follower: by
     assert parser.feed(data[:PREFIX_CUT]) == []
     frames = parser.feed(data[PREFIX_CUT:])
     assert [f.payload for f in frames] == [PREFIX_COLLISION_PAYLOAD] + ([TRAILER_PAYLOAD] if follower else [])
+
+
+def _unsolicited_demux(clock):
+    from app.config import DeviceKey, EndpointKey
+    from app.transport.counters import EndpointCounters
+    from app.transport.demux import Demultiplexer
+
+    demux = Demultiplexer(EndpointCounters(), lambda: clock[0])
+    demux.register_periodic(DeviceKey(EndpointKey("device", 8899), None), 0x1AC87AA0)
+    return demux
+
+
+def _unsolicited_lines(caplog) -> list[str]:
+    return [r.getMessage() for r in caplog.records if "Unsolicited response" in r.getMessage()]
+
+
+def test_unsolicited_burst_logs_one_start_line_then_one_summary_per_window(caplog) -> None:
+    """Requested and periodic frames stay silent; a burst of many objects is not one line per object."""
+    from app.protocol.types import FrameKind
+    from app.transport.types import make_frame
+
+    clock = [10.0]
+    demux = _unsolicited_demux(clock)
+    periodic = make_frame(None, Command.RESPONSE, 0x1AC87AA0, b"\x00" * 4)
+    with caplog.at_level("DEBUG", logger="app.transport.demux"):
+        assert demux.dispatch(periodic, clock[0]) is FrameKind.PERIODIC_VALUE
+        assert not _unsolicited_lines(caplog)
+        for oid in range(0x1000, 0x1000 + 26):
+            frame = make_frame(None, Command.RESPONSE, oid, b"\x00" * 4)
+            assert demux.dispatch(frame, clock[0]) is FrameKind.UNEXPECTED
+        lines = _unsolicited_lines(caplog)
+        assert len(lines) == 1 and "burst started" in lines[0] and "object_id=0x00001000" in lines[0]
+        clock[0] += 61.0  # the first frame after the window writes its summary and starts a new burst
+        assert demux.dispatch(make_frame(None, Command.RESPONSE, 0x1000, b"\x00" * 4), clock[0]) is FrameKind.UNEXPECTED
+    lines = _unsolicited_lines(caplog)
+    assert len(lines) == 3
+    assert "burst summary" in lines[1] and "26 frame(s), 26 object(s)" in lines[1]
+    assert "burst started" in lines[2]
+
+
+def test_single_unsolicited_burst_without_later_frame_is_visible_and_flushable(caplog) -> None:
+    from app.transport.types import make_frame
+
+    clock = [10.0]
+    demux = _unsolicited_demux(clock)
+    with caplog.at_level("DEBUG", logger="app.transport.demux"):
+        for _ in range(3):
+            demux.dispatch(make_frame(None, Command.RESPONSE, 0x16A1F844, b"\x00" * 4), clock[0])
+        assert len(_unsolicited_lines(caplog)) == 1  # visible without any later frame
+        clock[0] += 5.0
+        demux.flush_unsolicited_log()  # connection end
+    lines = _unsolicited_lines(caplog)
+    assert len(lines) == 2 and "3 frame(s), 1 object(s)" in lines[1]

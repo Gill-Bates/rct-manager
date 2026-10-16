@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 #
-# app/logging_setup.py
+# app/observability/logging_setup.py
 # Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
 #
 

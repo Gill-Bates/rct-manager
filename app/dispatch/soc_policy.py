@@ -27,6 +27,10 @@ from enum import StrEnum
 
 from app.dispatch.models import NOTE_MAX_LENGTH, check_printable_ascii
 
+# Single source for the below-current-SoC margin bound. The admin input model (app.admin.energy_api)
+# imports it so its 422 Field() limit and this dataclass invariant cannot drift apart.
+BELOW_MARGIN_PERCENT_MAX = 50.0
+
 
 class SocTargetMode(StrEnum):
     BUSINESS_TARGET = "business_target"  # shipped default: the stop goal is written as-is
@@ -52,7 +56,10 @@ class SocTargetPolicy:
         # target, so it is enforced here and not only in the admin API: a NaN/Infinity would
         # survive every clamp in RctSocTargetConvention, and a negative or oversized margin would
         # push the register target away from the operator's stop goal. Bounds match the admin API.
-        if not math.isfinite(self.below_margin_percent) or not 0.0 <= self.below_margin_percent <= 50.0:
+        if (
+            not math.isfinite(self.below_margin_percent)
+            or not 0.0 <= self.below_margin_percent <= BELOW_MARGIN_PERCENT_MAX
+        ):
             raise ValueError("below_margin_percent must be finite and within 0..50")
 
 

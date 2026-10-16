@@ -4,39 +4,35 @@
 # Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
 #
 
-"""Cache-first bidding-zone metadata for the Spot Market tab.
+"""Database-first bidding-zone metadata for the Spot Market tab.
 
-Opening the Spot Market form must not trigger an external request every time: Energy-Charts rate
-limits its API (roughly two requests per minute, bursts of two) and explicitly recommends
-client-side caching. This cache holds the last successful :class:`BiddingZoneCatalog` and serves it
-without a network call while it is fresh. A stale entry is refreshed on demand; if the refresh
-fails, the last good list is returned, flagged ``stale``, rather than fabricated or dropped.
+The form never triggers an external request: it reads the last good :class:`BiddingZoneCatalog`
+from memory, or from the admin database after a restart. Only :meth:`BiddingZoneMetadataCache.refresh`
+talks to the provider; the daily spot-price retrieval calls it (Energy-Charts rate limits to roughly
+two requests per minute and recommends client-side caching). A failed refresh keeps the stored list
+and flags it ``stale`` instead of dropping or fabricating it.
 
 The cache is read off the event loop (via ``asyncio.to_thread``) from the admin route, so it guards
-its own state with a lock. The clock is injected so tests control freshness without real time.
+its own state with a lock. The clock is injected so tests control timestamps without real time.
 """
 
 import logging
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import datetime
 
 from app.spotmarket.base import SpotMarketError
 from app.spotmarket.models import BiddingZoneCatalog
 
 log = logging.getLogger(__name__)
 
-# How long a fetched catalog is served without a refresh. The zone set changes rarely, and the rate
-# limit makes a long TTL the right default; a form open inside this window costs no network call.
-DEFAULT_TTL = timedelta(hours=6)
-
 
 @dataclass(frozen=True, slots=True)
 class ZoneListing:
     """What the admin route needs: the zones, the default, whether the data is stale, and when it
-    was last fetched. ``stale`` is True when the served catalog is older than the TTL (a refresh was
-    attempted and failed) so the UI can mark the list as potentially out of date.
+    was last fetched. ``stale`` is True when the latest refresh failed, so the UI can mark the list
+    as potentially out of date.
     """
 
     zones: tuple[str, ...]
@@ -46,43 +42,74 @@ class ZoneListing:
 
 
 class BiddingZoneMetadataCache:
-    """A single-flight, cache-first store for the provider's bidding-zone catalog."""
+    """A database-backed store for the provider's bidding-zone catalog; only ``refresh`` fetches."""
 
     def __init__(
         self,
         fetch: Callable[[], BiddingZoneCatalog],
         *,
-        ttl: timedelta = DEFAULT_TTL,
-        now: Callable[[], datetime] | None = None,
+        load: Callable[[], BiddingZoneCatalog | None] | None = None,
+        save: Callable[[BiddingZoneCatalog], None] | None = None,
     ) -> None:
         self._fetch = fetch
-        self._ttl = ttl
-        self._now = now if now is not None else (lambda: datetime.now(UTC))
+        self._load = load
+        self._save = save
+        self._loaded = load is None
         self._lock = threading.Lock()
         self._cached: BiddingZoneCatalog | None = None
+        self._refresh_failed = False
 
     def get(self) -> ZoneListing:
-        """Return the zone listing, cache-first.
+        """Return the stored zone listing without any network call.
 
-        A fresh cached catalog is returned without any network call. A missing or stale catalog
-        triggers one refresh; if that refresh fails and a previous catalog exists, the previous one
-        is returned flagged ``stale`` instead of raising, so a transient provider failure never
-        blanks the form. Only a failure with no catalog at all propagates.
+        Raises :class:`SpotMarketError` only when no catalog was ever stored.
         """
         with self._lock:
-            now = self._now()
-            if self._cached is not None and now - self._cached.fetched_at < self._ttl:
-                return self._listing(self._cached, stale=False)
+            self._ensure_loaded()
+            if self._cached is None:
+                raise SpotMarketError("No bidding-zone list is stored yet")
+            return self._listing(self._cached, stale=self._refresh_failed)
+
+    def refresh(self) -> ZoneListing:
+        """Fetch the catalog from the provider and store it; a failure keeps the stored list as stale.
+
+        Raises :class:`SpotMarketError` when the fetch fails and no catalog is stored at all.
+        """
+        with self._lock:
+            self._ensure_loaded()
             try:
-                self._cached = self._fetch()
-                return self._listing(self._cached, stale=False)
-            except SpotMarketError:
+                catalog = self._fetch()
+            except SpotMarketError as exc:
+                self._refresh_failed = True
                 if self._cached is None:
                     raise
-                # A refresh failed but a last-good catalog exists: serve it, clearly stale. Price
-                # data is never faked, but a slightly old zone *list* is safe to keep showing.
-                log.info("Bidding-zone metadata refresh failed; serving the last known list as stale")
+                log.warning("Bidding-zone list refresh failed (%s); keeping the stored list", exc)
                 return self._listing(self._cached, stale=True)
+            self._cached = catalog
+            self._refresh_failed = False
+            self._persist(catalog)
+            return self._listing(catalog, stale=False)
+
+    def _ensure_loaded(self) -> None:
+        if not self._loaded:
+            self._loaded = True
+            self._cached = self._load_persisted()
+
+    def _load_persisted(self) -> BiddingZoneCatalog | None:
+        try:
+            return self._load()
+        except Exception:
+            # A damaged stored copy must not block the refresh; it is simply not used.
+            log.warning("Stored bidding-zone catalog could not be read", exc_info=True)
+            return None
+
+    def _persist(self, catalog: BiddingZoneCatalog) -> None:
+        if self._save is None:
+            return
+        try:
+            self._save(catalog)
+        except Exception:
+            log.warning("Bidding-zone catalog could not be stored", exc_info=True)
 
     @staticmethod
     def _listing(catalog: BiddingZoneCatalog, *, stale: bool) -> ZoneListing:
@@ -92,3 +119,27 @@ class BiddingZoneMetadataCache:
             stale=stale,
             last_update=catalog.fetched_at,
         )
+
+
+ZONE_CATALOG_KEY = "spotmarket_zone_catalog"
+
+
+def zone_catalog_persistence(store) -> tuple[
+    Callable[[], BiddingZoneCatalog | None], Callable[[BiddingZoneCatalog], None]
+]:
+    """``load``/``save`` hooks that keep the last good catalog in the admin settings store."""
+
+    def load() -> BiddingZoneCatalog | None:
+        data = store.get(ZONE_CATALOG_KEY)
+        if data is None:
+            return None
+        return BiddingZoneCatalog(
+            zones=tuple(data["zones"]), default=data["default"], fetched_at=datetime.fromisoformat(data["fetched_at"])
+        )
+
+    def save(catalog: BiddingZoneCatalog) -> None:
+        store.put(ZONE_CATALOG_KEY, {
+            "zones": list(catalog.zones), "default": catalog.default, "fetched_at": catalog.fetched_at.isoformat(),
+        })
+
+    return load, save

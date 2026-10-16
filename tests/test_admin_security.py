@@ -7,6 +7,7 @@
 """Security and persistence regressions of the administration backend."""
 
 import logging
+import os
 import re
 import stat
 import threading
@@ -299,7 +300,7 @@ def test_hmac_secret_bootstrap_permissions(tmp_path, monkeypatch, caplog):
     env.chmod(0o640)
     with caplog.at_level("WARNING", logger="app"):
         _ensure_hmac_secret(env)
-    # P3-3: an already-existing secret file with loose permissions is repaired to 0600, not just
+    # An existing secret file with loose permissions is repaired to 0600, not just
     # warned about, using the same O_NOFOLLOW/FD-based check as creation.
     assert stat.S_IMODE(env.stat().st_mode) == 0o600
     assert "permissions corrected" in caplog.text
@@ -311,19 +312,59 @@ def test_hmac_secret_bootstrap_permissions(tmp_path, monkeypatch, caplog):
         _ensure_hmac_secret(link)
 
 
-def test_existing_secret_file_behind_a_symlink_is_not_chmodded_through_it(tmp_path, caplog):
-    """A symlink swapped in for the secret file must not have its target's permissions changed."""
+def test_existing_secret_file_behind_a_symlink_fails_closed_without_touching_the_target(tmp_path, monkeypatch):
+    """P2-1 (corrected contract): a symlink standing in for the secret file is now rejected with a
+    ConfigError instead of being read path-based and warned about. The secret guards the admin and
+    dispatch stores, so an existing file that is not a regular file opened under O_NOFOLLOW must
+    fail the start, and the symlink target's permissions must stay untouched (no chmod through it).
+    """
     from app.__main__ import _ensure_hmac_secret
+    from app.errors import ConfigError
 
+    monkeypatch.delenv("HMAC_SECRET", raising=False)
+    monkeypatch.delenv("ADMIN_SECRET", raising=False)
     target = tmp_path / "target.env"
     target.write_text("HMAC_SECRET=" + "x" * 44 + "\n")
     target.chmod(0o644)
     link = tmp_path / "settings.env"
     link.symlink_to(target)
-    with caplog.at_level("WARNING", logger="app"):
+    with pytest.raises(ConfigError):
         _ensure_hmac_secret(link)
     assert stat.S_IMODE(target.stat().st_mode) == 0o644  # untouched: the open() refused to follow the link
-    assert "could not be reopened to fix it" in caplog.text
+
+
+def test_existing_secret_file_that_is_not_regular_fails_closed(tmp_path, monkeypatch):
+    """P2-1: a non-regular secret file (here a FIFO) is rejected rather than read, so the secret is
+    never sourced from something whose content a reader could control or that blocks the open."""
+    from app.__main__ import _ensure_hmac_secret
+    from app.errors import ConfigError
+
+    monkeypatch.delenv("HMAC_SECRET", raising=False)
+    monkeypatch.delenv("ADMIN_SECRET", raising=False)
+    fifo = tmp_path / "settings.env"
+    os.mkfifo(fifo)
+    with pytest.raises(ConfigError):
+        _ensure_hmac_secret(fifo)
+
+
+def test_too_open_secret_file_that_cannot_be_hardened_fails_closed(tmp_path, monkeypatch):
+    """P2-1: if a genuinely too-open secret file cannot be hardened to 0600, the start fails closed
+    rather than warning and continuing with the secret still exposed."""
+    from app.__main__ import _ensure_hmac_secret
+    from app.errors import ConfigError
+
+    monkeypatch.delenv("HMAC_SECRET", raising=False)
+    monkeypatch.delenv("ADMIN_SECRET", raising=False)
+    env = tmp_path / "settings.env"
+    env.write_text("HMAC_SECRET=" + "x" * 44 + "\n")
+    env.chmod(0o644)
+
+    def _refuse(_fd, _mode):
+        raise OSError("fchmod refused")
+
+    monkeypatch.setattr(os, "fchmod", _refuse)
+    with pytest.raises(ConfigError):
+        _ensure_hmac_secret(env)
 
 
 @pytest.mark.asyncio

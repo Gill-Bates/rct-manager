@@ -16,9 +16,9 @@ import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from app.cache import MemoryCache
 from app.catalog.registry import RegistryCatalog
 from app.errors import ConfigError
+from app.gateway.cache import MemoryCache
 from app.observability.exporter import DeviceView, EndpointView, MetricsExporter
 from app.observability.names import build_metric_names, metric_help
 from app.observability.stats import Histogram, ServiceCounters

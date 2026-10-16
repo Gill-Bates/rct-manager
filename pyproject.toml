@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rct-manager"
-version = "1.2.0"
+version = "1.2.1"
 description = "Your REST gateway for RCT Power inverters"
 requires-python = ">=3.13"
 authors = [{ name = "Gill-Bates" }]
@@ -15,7 +15,7 @@ dependencies = [
     "cryptography>=50.0.2",
     "fastapi>=0.139",
     "jinja2>=3.1.6",
-    "markdown==3.11",
+    "markdown==3.11.1",
     "nh3==0.3.7",
     "pydantic>=2.13",
     "pydantic-settings>=2.14",
@@ -74,8 +74,11 @@ extend-ignore = ["EXE001", "S101"]
 # them to SpotMarketResponseError. TRY004 would force TypeError and break that single-error contract.
 "app/spotmarket/models.py" = ["TRY004"]
 # The optimizer domain follows the same single-error contract: invalid values and runtime-passed
-# wrong types both surface as ValueError from its self-validating public dataclasses.
+# wrong types both surface as ValueError from its self-validating public dataclasses and the pure
+# helpers/optimizer that consume them.
 "app/optimizer/models.py" = ["TRY004"]
+"app/optimizer/align.py" = ["TRY004"]
+"app/optimizer/greedy.py" = ["TRY004"]
 # Every interpolated value goes through literal()/ident() or int() (defined in this module), so
 # S608 is a reviewed false positive here.
 "app/export/questdb_admin.py" = ["S608"]

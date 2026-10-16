@@ -31,7 +31,7 @@ import contextlib
 import itertools
 from collections import deque
 from collections.abc import AsyncIterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 
 
@@ -68,8 +68,6 @@ class Event:
 @dataclass(eq=False)  # identity hashing: subscribers live in a set and each one is distinct
 class _Subscriber:
     queue: asyncio.Queue[Event]
-    # Per-type drop decision is cheap to look up here so _publish stays non-blocking.
-    policies: dict[str, DropPolicy] = field(default_factory=dict)
 
 
 # Per-subscriber live buffer size; bounded so a slow browser never grows memory without limit.
@@ -161,8 +159,7 @@ class EventHub:
         ``event_types`` scopes which types' backlog is replayed; the live queue still receives every
         published type (the SSE endpoint streams all types over one connection).
         """
-        policies = {t: self._policy(t).drop for t in self._policies}
-        sub = _Subscriber(queue=asyncio.Queue(maxsize=self._queue_size), policies=policies)
+        sub = _Subscriber(queue=asyncio.Queue(maxsize=self._queue_size))
         snapshot = self.backlog(*event_types)
         self._subscribers.add(sub)
         try:

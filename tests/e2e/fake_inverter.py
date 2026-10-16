@@ -46,14 +46,14 @@ INT_VALUES = {"inverter_state": 13, "battery_status2": 2304, "battery_cycles": 1
               # "Balancing active" so a card that reuses the first tower's status is visible.
               "battery_placeholder_0_status2": 2}
 # Two simulated towers with different module counts, so the dashboard has to render each tower from
-# its own data: tower 1 has 5 modules (a Power Battery 9.6), tower 2 has 4 (a 7.6); each tower also reports one extra populated serial slot for its base/top part. The remaining
+# its own data: tower 1 has 5 modules (a Power Battery 9.6), tower 2 has 4 (a 7.6), one populated serial slot per module. The remaining
 # module_sn slots of each tower stay unmodeled and answer with a t_string zero value, i.e. the empty
-# string an unpopulated slot really returns - so the derived counts are 5 and 4 (6 and 5 populated slots minus one). Seven slots
+# string an unpopulated slot really returns - so the derived counts are 5 and 4. Seven slots
 # exist in the catalog; at most 6 modules exist in the documented hardware.
 STRING_VALUES = {
     "android_description": "RCT Power DC 10.0 SIM", "inverter_serial": "SIM1234567", "svnversion": "2.3.5687",
-    **{f"battery_module_sn_{i}": f"SIM-{i:03d}" for i in range(6)},
-    **{f"battery_placeholder_0_module_sn_{i}": f"SIM-B{i:03d}" for i in range(5)},
+    **{f"battery_module_sn_{i}": f"SIM-{i:03d}" for i in range(5)},
+    **{f"battery_placeholder_0_module_sn_{i}": f"SIM-B{i:03d}" for i in range(4)},
 }
 
 
@@ -92,7 +92,7 @@ def _by_object_id() -> tuple[dict[int, bytes], dict[int, RegistryEntry]]:
 async def _serve(port: int, overrides_file: Path | None = None) -> None:
     values, entries = _by_object_id()
     stored: dict[int, bytes] = {}
-    ids = {name: object_id for object_id, entry in entries.items() for name in [entry.name]}
+    ids = {entry.name: object_id for object_id, entry in entries.items()}
     battery_power_id, grid_power_id, strategy_id, extern_id = (
         ids["battery_power"], ids["grid_power"], ids["power_mng_soc_strategy"],
         ids["power_mng_battery_power_extern"])

@@ -20,8 +20,8 @@ from pathlib import Path
 
 import pytest
 
-from app.allowlist import Allowlist
 from app.catalog.registry import RegistryCatalog
+from app.security.allowlist import Allowlist
 
 ROOT = Path(__file__).resolve().parents[1]
 

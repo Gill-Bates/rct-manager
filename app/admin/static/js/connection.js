@@ -68,6 +68,7 @@
     if (loginRedirected) return;
     if (!window.location.pathname.startsWith('/login')) {
       loginRedirected = true;
+      clearDashboardSnapshot();
       window.location.replace('/login');
     }
   }

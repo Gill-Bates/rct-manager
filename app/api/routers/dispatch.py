@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from app.api.problems import ErrorCode, ProblemError, problem_responses
 from app.api.runtime import RuntimeDep
+from app.clock import is_aware
 from app.dispatch.models import (
     DispatchCommand,
     DispatchMode,
@@ -79,7 +80,7 @@ class DispatchBody(BaseModel):
     @field_validator("valid_until")
     @classmethod
     def _aware_until(cls, value: datetime) -> datetime:
-        if value.tzinfo is None or value.utcoffset() is None:
+        if not is_aware(value):
             raise ValueError("valid_until must include a timezone offset")
         return value
 

@@ -233,3 +233,9 @@
     content: "·";
     margin-inline: .35rem;
 }
+
+/* Charging schedule widget: same series colours as the Energy Manager chart. */
+.dashboard-grid [data-widget-id="charging-schedule"] {
+    --plan-power: #0d6efd;
+    --plan-soc: #fd7e14;
+}

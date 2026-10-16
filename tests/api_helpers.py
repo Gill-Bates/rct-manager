@@ -43,6 +43,7 @@ READ_TOKEN = _fixed_pat("ReadToken")
 WRITE_TOKEN = _fixed_pat("WriteToken")
 
 
+ROOT_CATALOG = Path(__file__).resolve().parents[1] / "app" / "catalog" / "objects.json"
 REGISTRY_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "objects.json"
 
 

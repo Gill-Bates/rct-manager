@@ -8,7 +8,7 @@
 
 This is the first (Phase 1) producer wired into the domain-agnostic :class:`app.observability.
 event_hub.EventHub`. A :class:`TsdbLogHandler` is attached to the root logger *in addition* to the
-stdout handler installed by :func:`app.logging_setup.setup_logging`; it never replaces that handler
+stdout handler installed by :func:`app.observability.logging_setup.setup_logging`; it never replaces that handler
 and never logs itself, so there is no feedback loop. The handler taps the same
 :class:`logging.LogRecord` objects already going to stdout, keeps only the TSDB-relevant ones
 (filtered by logger-name prefix, see :data:`TSDB_LOGGER_PREFIXES`), formats a small plain-dict

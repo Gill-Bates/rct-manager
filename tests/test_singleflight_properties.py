@@ -58,7 +58,7 @@ def test_n_callers_share_one_read(n: int, cancelled: set[int], cancel_first: boo
         doomed_results = [r for i, r in enumerate(results) if i in doomed]
         assert all(r == 42 for r in survivors)
         # Every cancelled caller must actually observe its own cancellation, never a swallowed
-        # cancellation that returns the shared result instead (Finding 8). This also makes the
+        # cancellation that returns the shared result instead. This also makes the
         # n == len(doomed) case non-vacuous: survivors being empty no longer lets `all(...)` pass
         # for free, because this loop still runs over doomed_results.
         assert len(doomed_results) == len(doomed)

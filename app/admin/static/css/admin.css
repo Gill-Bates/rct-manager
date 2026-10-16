@@ -56,11 +56,16 @@
     /* Focus ring: at least 3:1 against the page and card backgrounds of its theme. */
     --rct-focus-ring: #88171a;
     --rct-auth-card-shadow: 0 .25rem .75rem rgba(0, 0, 0, .08);
+    /* Off-state switch outline and knob: at least 3:1 (WCAG 1.4.11) against page, card and track. */
+    --rct-switch-off: #6c757d;
+    --rct-switch-knob-off: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='-4 -4 8 8'%3e%3ccircle r='3' fill='%236c757d'/%3e%3c/svg%3e");
 }
 
 [data-bs-theme="dark"] {
     --rct-sidebar: #171a20;
     --rct-line: #363b45;
+    --rct-switch-off: #868e96;
+    --rct-switch-knob-off: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='-4 -4 8 8'%3e%3ccircle r='3' fill='%23868e96'/%3e%3c/svg%3e");
     --rct-focus-ring: #f2878a;
     --rct-auth-card-shadow: 0 .25rem .75rem rgba(0, 0, 0, .35);
 }
@@ -351,6 +356,35 @@ body {
     --bs-btn-hover-border-color: var(--rct-brand);
 }
 
+/* Bootstrap's #6c757d label is 3.3:1 on the dark surfaces; the border keeps its default colour
+   (3:1 non-text is met) and hover, active and disabled keep Bootstrap's own values. */
+[data-bs-theme="dark"] .btn-outline-secondary {
+    --bs-btn-color: var(--bs-secondary-color);
+}
+
+/* Bootstrap's link blue is 4.27:1 on the light tab bar; its own hover blue clears 4.5:1. Only the
+   idle tab colour changes: hover, active and focus keep Bootstrap's values. */
+[data-bs-theme="light"] .energy-tabs {
+    --bs-nav-link-color: var(--bs-link-hover-color);
+}
+
+/* Bootstrap's off-state switch outline (#dee2e6 / #495057) and knob are 1.2-2.3:1 against their
+   surroundings. The checked state keeps Bootstrap's own look. */
+.form-switch .form-check-input:not(:checked) {
+    border-color: var(--rct-switch-off);
+    --bs-form-switch-bg: var(--rct-switch-knob-off);
+}
+
+/* Dark theme only: Bootstrap ships a higher-specificity rule
+   `[data-bs-theme=dark] .form-switch .form-check-input:not(:checked):not(:focus)` that resets the
+   knob to its own translucent white (rgba(255,255,255,.25) = 2.3:1 on the card, below WCAG 1.4.11).
+   The rule above loses to it in the unfocused off state, so the measured knob was Bootstrap's, not
+   the theme's. Match that selector's specificity so the off-state knob token actually wins; the
+   value is unchanged (the same --rct-switch-knob-off already used in the focus and light states). */
+[data-bs-theme="dark"] .form-switch .form-check-input:not(:checked):not(:focus) {
+    --bs-form-switch-bg: var(--rct-switch-knob-off);
+}
+
 .text-primary {
     color: var(--rct-brand) !important;
 }
@@ -455,8 +489,18 @@ body {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    flex-wrap: wrap;
     gap: .35rem .5rem;
+}
+
+/* One header row at any width: the title shrinks and wraps its text (h3 has overflow-wrap) so the
+   badge and the delete button never drop to a second row on narrow cards. */
+.device-head-main > h3 {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+.device-head-main > .status-badge {
+    flex-shrink: 0;
 }
 
 .device-head-meta {
@@ -662,10 +706,71 @@ body {
     border-top: 1px solid var(--rct-line);
 }
 
-/* On a phone the badges wrap to two rows with live text but fit one row as n/a; keep the row height. */
+/* On a phone the four tiles share one row (equal columns, shrinkable); long state text wraps
+   inside its pill and the leading dot is dropped, since the tone and the text carry the state. */
 @media (max-width: 575.98px) {
     .device-flow-graphic .flow-badges {
-        min-height: 9.4rem;
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        align-items: start;
+        gap: .5rem .25rem;
+        min-height: 5.6rem;
+    }
+
+    .device-flow-graphic .flow-badge {
+        min-width: 0;
+    }
+
+    .device-flow-graphic .flow-badge[hidden] {
+        display: none;
+    }
+
+    .device-flow-graphic .flow-badge-caption {
+        max-width: 100%;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        font-size: .65rem;
+    }
+
+    .device-flow-graphic .flow-badge-state {
+        max-width: 100%;
+        justify-content: center;
+        padding: .1rem .15rem;
+        font-size: .62rem;
+        font-weight: 500;
+        letter-spacing: -.02em;
+        line-height: 1.25;
+        text-align: center;
+        white-space: normal;
+        overflow-wrap: anywhere;
+    }
+
+    .device-flow-graphic .flow-badge-state::before {
+        display: none;
+    }
+}
+
+/* Very narrow phones (320px): tiles are about 60px wide, so shrink type, pill padding, and the
+   graphic's side padding to keep the longest state text unbroken. */
+@media (max-width: 359.98px) {
+    .device-flow-graphic {
+        padding-inline: .4rem;
+    }
+
+    .device-flow-graphic .flow-badges {
+        column-gap: 0;
+    }
+
+    .device-flow-graphic .flow-badge-caption {
+        font-size: .58rem;
+        letter-spacing: -.03em;
+    }
+
+    .device-flow-graphic .flow-badge-state {
+        padding: .1rem .1rem;
+        font-size: .58rem;
+        font-weight: 500;
+        letter-spacing: -.03em;
     }
 }
 
@@ -1372,12 +1477,12 @@ body {
     padding-top: .3rem;
 }
 
-/* Energy Manager tabs: the Inverter head keeps the expert switch to the right of its intro text,
-   as it sat in the page heading before the tabs were introduced. */
+/* Energy Manager tabs: the Inverter head right-aligns the expert switch, as it sat in the page
+   heading before the tabs were introduced. */
 .energy-inverter-head {
     display: flex;
     flex-wrap: wrap;
-    justify-content: space-between;
+    justify-content: flex-end;
     gap: 1rem;
     align-items: flex-start;
 }
@@ -1386,12 +1491,130 @@ body {
     padding: .55rem 0;
 }
 
+/* Weather follows the Spot Market pattern: one top-level settings card with compact groups.
+   The content stays naturally sized; no inner form scrollbar is introduced. */
+.weather-settings-card {
+    min-width: 0;
+}
+
+.weather-coordinate-grid,
+.weather-config-tiles,
+#weather-pv-fields {
+    display: grid;
+    gap: .65rem .8rem;
+}
+
+.weather-coordinate-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+/* Sits in the Spot Market highlight grid next to the Next 24 h tile, so its two rows stack. */
+.weather-highlights {
+    margin: .75rem 0 1rem;
+}
+
+.weather-next24:empty {
+    display: none;
+}
+
+.weather-config-tiles {
+    grid-template-columns: minmax(11rem, .65fr) minmax(0, 1.65fr);
+    margin-top: .75rem;
+}
+
+.weather-config-tile {
+    min-width: 0;
+    padding: .7rem .75rem;
+    background: var(--bs-tertiary-bg);
+    border: 1px solid var(--rct-line);
+    border-radius: .6rem;
+}
+
+.weather-config-tile .setting-row,
+.weather-coordinate-grid .setting-row {
+    padding: .35rem 0;
+}
+
+.weather-config-tile .setting-row {
+    border-top: 0;
+}
+
+.spot-market-highlight-when[hidden] {
+    display: none;
+}
+
+#weather-pv-fields {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+@media (max-width: 1399.98px) {
+    .weather-config-tiles {
+        grid-template-columns: 1fr;
+    }
+}
+
+@media (max-width: 767.98px) {
+
+    .weather-coordinate-grid,
+    #weather-pv-fields {
+        grid-template-columns: 1fr;
+    }
+}
+
 .spot-market-actions {
     display: flex;
     flex-wrap: wrap;
     align-items: center;
     gap: .5rem;
     margin-top: 1rem;
+}
+
+/* The results overlay the controls below the search instead of shifting the form. */
+.weather-location {
+    position: relative;
+}
+
+.weather-location-spinner {
+    vertical-align: -.125em;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .weather-location-spinner {
+        animation: none;
+    }
+}
+
+.weather-location-results {
+    position: absolute;
+    top: 100%;
+    left: 0;
+    right: 0;
+    z-index: 1056;
+    margin-top: .125rem;
+    max-height: 16rem;
+    overflow-y: auto;
+    background: var(--bs-body-bg);
+    border: 1px solid var(--rct-line);
+    border-radius: var(--bs-border-radius, .375rem);
+    box-shadow: var(--rct-auth-card-shadow);
+}
+
+/* Each option: a flat button that highlights on hover and when keyboard navigation marks it
+   active (.active is toggled in lockstep with aria-activedescendant). */
+.weather-location-results .list-group-item-action {
+    cursor: pointer;
+    border-left: 0;
+    border-right: 0;
+}
+
+.weather-location-results .list-group-item-action:first-child {
+    border-top: 0;
+}
+
+.weather-location-results .list-group-item-action:hover,
+.weather-location-results .list-group-item-action.active {
+    background: var(--bs-tertiary-bg);
+    color: var(--bs-body-color);
 }
 
 /* Read-only provider metadata: a compact info line with a lock icon, not an input-looking field. */
@@ -1450,6 +1673,10 @@ body {
     }
 }
 
+.plan-loading {
+    min-height: 8rem;
+}
+
 .spot-market-chart-box {
     position: relative;
     min-height: 18rem;
@@ -1459,17 +1686,37 @@ body {
     position: absolute;
 }
 
-.spot-market-preview-header {
+/* Household consumption bars on the charging plan tab, coloured by data source. */
+#energy-consumption {
+    --consumption-measured: #198754;
+    --consumption-history: #0d6efd;
+}
+
+/* Charging schedule: time-series chart colours. */
+#energy-plan-schedule {
+    --plan-power: #0d6efd;
+    --plan-soc: #fd7e14;
+}
+
+/* Title and status badge share one row; the fixed height keeps it from shifting when the badge
+   appears, changes or is absent (e.g. an unsaved weather form). */
+.spot-market-preview-title-row {
     display: flex;
     flex-wrap: wrap;
     align-items: center;
     justify-content: space-between;
-    gap: .5rem;
+    gap: .25rem .5rem;
+    min-height: 1.75rem;
+    margin-bottom: .5rem;
 }
 
-.spot-market-preview-updated {
-    color: var(--bs-secondary-color);
-    font-size: .8rem;
+.spot-market-preview-title-row .card-title {
+    margin-bottom: 0;
+}
+
+.spot-market-preview-status {
+    margin-left: auto;
+    min-width: 0;
 }
 
 .spot-market-preview-context {
@@ -1483,6 +1730,10 @@ body {
     font-size: .85rem;
 }
 
+.spot-market-preview > .spot-market-preview-context:first-child {
+    margin-top: 0;
+}
+
 /* Two side-by-side highlight blocks that fill the right card instead of leaving whitespace. */
 .spot-market-highlights {
     display: grid;
@@ -1490,14 +1741,36 @@ body {
     gap: .75rem;
 }
 
+@media (max-width: 575.98px) {
+    .spot-market-highlights {
+        grid-template-columns: minmax(0, 1fr);
+    }
+}
+
 .spot-market-highlight {
-    display: flex;
-    flex-direction: column;
-    gap: .15rem;
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    align-items: center;
+    column-gap: .9rem;
+    row-gap: .15rem;
     padding: .75rem .9rem;
     border: 1px solid var(--rct-line);
     border-radius: .6rem;
     background: var(--bs-tertiary-bg);
+}
+
+/* The leading KPI glyph mirrors the dashboard kpi-card icon: a muted, theme-aware Material Icon
+   like the dashboard tiles. It sits left of the text, vertically centered; the color comes from a
+   Bootstrap text-* class on the element. */
+.spot-market-highlight-icon {
+    grid-column: 1;
+    grid-row: 1 / span 3;
+    font-size: 2.1rem;
+    line-height: 1;
+}
+
+.spot-market-highlight>:not(.spot-market-highlight-icon) {
+    grid-column: 2;
 }
 
 .spot-market-highlight-caption {
@@ -1525,6 +1798,19 @@ body {
     font-size: .8rem;
 }
 
+/* The "tomorrow not published yet" note is a warning callout, not muted text: the leading triangle
+   uses the theme-aware Bootstrap warning token so it reads on light and dark panels. */
+.spot-market-notice-warning {
+    display: flex;
+    align-items: center;
+    gap: .4rem;
+}
+
+.spot-market-notice-icon {
+    color: var(--bs-warning-text-emphasis);
+    font-size: 1.1rem;
+}
+
 .energy-actions {
     display: grid;
     grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -1535,6 +1821,15 @@ body {
     background: var(--rct-brand);
     border-color: var(--rct-brand);
     color: #fff;
+}
+
+/* Keep unavailable battery actions visible without making them look actionable. This local
+   variant leaves the disabled appearance of primary buttons elsewhere unchanged. */
+.energy-actions .btn:disabled {
+    --bs-btn-disabled-color: var(--bs-secondary-color);
+    --bs-btn-disabled-bg: var(--bs-secondary-bg);
+    --bs-btn-disabled-border-color: var(--bs-border-color);
+    --bs-btn-disabled-opacity: 1;
 }
 
 .energy-target {
@@ -2031,26 +2326,37 @@ samp,
 }
 
 /* Per-level colours via the data-level hook (no new class, so R1 stays console-scoped). The
-   message colour is set on the line; the timestamp and logger keep their own dimmed tone below. */
+   console background is a fixed terminal near-black in BOTH themes, so the foregrounds are fixed
+   light-on-dark hex too (R8 allow-list): a theme-adaptive --bs-* token assumes the theme's own
+   background and turns dark/unreadable here in the light theme. Each tone meets WCAG AA (>=4.5:1)
+   against the #0b0e11 console background. */
 .tsdb-console-line[data-level="ERROR"] {
-    color: var(--bs-danger);
+    color: #ff8a8a;
 }
 
 .tsdb-console-line[data-level="WARNING"] {
-    color: var(--bs-warning);
+    color: #ffcc66;
 }
 
 .tsdb-console-line[data-level="DEBUG"] {
-    color: var(--bs-secondary-color);
+    color: #9fb2c4;
 }
 
 .tsdb-console-time {
-    color: #7f93a6;
+    color: #93a7bb;
 }
 
-/* The logger name is the dimmed accent column; a token keeps it compliant with R8. */
+/* The logger name is the dimmed accent column: a fixed light-on-dark tone, legible in both themes. */
 .tsdb-console-line>span[data-role="logger"] {
-    color: var(--bs-secondary-color);
+    color: #9fb2c4;
+}
+
+/* The console is a tabbable scroll region (role="log", tabindex), so a keyboard user must see where
+   focus is. A high-contrast ring inside the border, not a theme token, so it stays visible on the
+   fixed dark background in both themes. */
+.tsdb-console:focus-visible {
+    outline: 2px solid #4da3ff;
+    outline-offset: -2px;
 }
 
 @media (forced-colors: active) {

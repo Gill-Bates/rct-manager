@@ -11,6 +11,8 @@ import path from 'node:path';
 import { check, engine, freePort, NEW_PASSWORD, OUT, results, sleep, spawnPy } from './harness.mjs';
 
 const problems = [];
+// Must match the key written by toggleTheme() in app/admin/static/js/admin-core.js.
+const THEME_KEY = 'rct-admin-theme';
 
 // Remove only errors produced by the current deliberate fault, never earlier failures.
 const scrubExpected = (start, matches, sink = problems) => {
@@ -19,10 +21,16 @@ const scrubExpected = (start, matches, sink = problems) => {
 };
 // One collector for every page: console errors/warnings, script errors, failed requests, HTTP >= 400.
 function trackProblems(pg, sink) {
-  pg.on('console', (m) => { if (['error', 'warning'].includes(m.type())) sink.push(`console ${m.type()}: ${m.text()} @ ${m.location().url}`); });
-  pg.on('pageerror', (e) => sink.push(`pageerror: ${e.message}`));
+  // WebKit-only noise that also appears on /login and so is not tied to any page feature.
+  const webkitNoise = (text) => process.env.BROWSER === 'webkit'
+    && /^Refused to apply a stylesheet because its hash, its nonce, or 'unsafe-inline'|\/health due to access control checks|Blocked by Web Inspector/.test(text);
+  pg.on('console', (m) => { if (webkitNoise(m.text())) return; if (['error', 'warning'].includes(m.type())) sink.push(`console ${m.type()}: ${m.text()} @ ${m.location().url}`); });
+  pg.on('pageerror', (e) => { if (!webkitNoise(e.message)) sink.push(`pageerror: ${e.message}`); });
   // WebKit reports in-flight loads dropped by a navigation as failed; Chromium does not, so real aborts still show.
-  pg.on('requestfailed', (r) => { if (r.failure()?.errorText === 'Load request cancelled') return; sink.push(`requestfailed: ${r.method()} ${r.url()} (${r.failure()?.errorText || 'unknown'})`); });
+  // Chromium aborts in-flight health probes, the SSE stream and the energy status poll when a navigation or reload replaces the page.
+  const navigationAbort = (r) => r.failure()?.errorText === 'net::ERR_ABORTED' && r.method() === 'GET'
+    && /\/(health|admin\/api\/events|admin\/api\/energy\/devices)$/.test(new URL(r.url()).pathname);
+  pg.on('requestfailed', (r) => { if (r.failure()?.errorText === 'Load request cancelled' || navigationAbort(r) || webkitNoise(r.failure()?.errorText || '')) return; sink.push(`requestfailed: ${r.method()} ${r.url()} (${r.failure()?.errorText || 'unknown'})`); });
   pg.on('response', (r) => { if (r.status() >= 400) sink.push(`http ${r.status()}: ${r.request().method()} ${r.url()}`); });
 }
 // A deliberate HTTP error shows up twice: as the response and as the browser's console line.
@@ -42,14 +50,17 @@ const expectedRestartProblem = (problem, baseUrl) => problem.includes(`${baseUrl
   || problem.startsWith('http 503: GET ')
   || /^console error: Failed to load resource: the server responded with a status of 503/.test(problem)
 );
-async function startServer(db, httpPort, devicePort, tag) {
-  const server = spawnPy(['tests.e2e.run_server', db, String(httpPort), String(devicePort)], path.join(OUT, `server-${tag}.log`));
+// Polls /health; on timeout the child is stopped here so a failed start leaks no process.
+async function waitForHealth(server, httpPort) {
   for (let i = 0; i < 100; i++) {
     try { if ((await fetch(`http://127.0.0.1:${httpPort}/health`)).ok) return server; } catch { /* not up yet */ }
     await sleep(200);
   }
-  throw new Error('server did not start');
+  await stop(server).catch(() => { });
+  throw new Error(`server on port ${httpPort} did not start`);
 }
+const startServer = (db, httpPort, devicePort, tag) => waitForHealth(
+  spawnPy(['tests.e2e.run_server', db, String(httpPort), String(devicePort)], path.join(OUT, `server-${tag}.log`)), httpPort);
 async function stop(server) {
   const proc = server.proc;
   if (proc.exitCode !== null || proc.signalCode !== null) return;
@@ -74,14 +85,17 @@ const httpPort = await freePort();
 const devicePort = await freePort();
 const base = `http://127.0.0.1:${httpPort}`;
 const fake = spawnPy(['tests.e2e.fake_inverter', String(devicePort)], path.join(OUT, 'fake.log'));
-await sleep(1500);
-let server = await startServer(db, httpPort, devicePort, 'first');
+let server = null;
+let browser = null;
+try {
+await waitForPort(devicePort);
+server = await startServer(db, httpPort, devicePort, 'first');
 // The one-time password is printed directly in the first-start banner on the console.
 const initial = firstStartPassword(server.output());
 check('initial password read from the first-start banner', Boolean(initial));
 check('no admin token printed at first start', !/Initial admin token/.test(server.output()));
 
-const browser = await engine.launch();
+browser = await engine.launch();
 const context = await browser.newContext({
   viewport: { width: Number(process.env.VIEWPORT_WIDTH || 1280), height: 800 }, locale: 'en-GB',
   colorScheme: process.env.COLOR_SCHEME || 'light',
@@ -90,16 +104,16 @@ const page = await context.newPage();
 trackProblems(page, problems);
 const external = new Set();
 page.on('request', (r) => { if (!r.url().startsWith(base) && !r.url().startsWith('data:')) external.add(r.url()); });
-// Native dialogs are answered by script; the inverter dialog uses the themed confirm modal instead.
-const dialogs = [];
-let dialogAnswer = true;
-page.on('dialog', (d) => { dialogs.push(d.message()); return dialogAnswer ? d.accept() : d.dismiss(); });
+// The GUI uses themed modals, so any native dialog is unexpected: dismiss it and fail the run.
+page.on('dialog', (d) => { problems.push(`unexpected native ${d.type()} dialog: ${d.message()}`); return d.dismiss(); });
 // Every request that sends the device list; the add and delete contract is asserted against this.
 const devicePuts = [];
 page.on('request', (r) => {
   if (r.method() !== 'PUT' || !r.url().endsWith('/admin/api/settings')) return;
   try { const body = JSON.parse(r.postData() || '{}'); if (Object.hasOwn(body, 'devices')) devicePuts.push(body); } catch { /* not JSON */ }
 });
+// Two animation frames let a resize or navigation reflow finish before geometry is measured.
+const layoutSettled = () => page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
 const shot = (name) => page.screenshot({ path: path.join(OUT, `${name}.png`), fullPage: true });
 const toastText = async () => (await page.locator('#toast-region').innerText()).trim();
 const overflow = async () => page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
@@ -132,7 +146,7 @@ const badgeInfo = await page.evaluate(() => {
   const badgeRect = badge.getBoundingClientRect();
   return {
     text: badge.textContent.trim(),
-    nearTopRight: badgeRect.top - cardRect.top < 40 && cardRect.right - badgeRect.right < 40,
+    nearTopRight: badgeRect.top - cardRect.top < 40 && cardRect.right - badgeRect.right < 100,  // the remove button sits right of the badge
     hasDot: getComputedStyle(badge, '::before').content !== 'none',
   };
 });
@@ -251,7 +265,7 @@ await page.evaluate(() => window.RCTAdmin.api('dashboard-layout', { method: 'DEL
 await page.reload();
 
 // The inverter image sits beside the power card's readings; each battery tower is a stack of
-// top + N middle + bottom slices (app/admin/static/img/battery_{top,middle,bottom}.svg).
+// top + (N-1) middle + bottom slices (app/admin/static/img/battery_{top,middle,bottom}.svg).
 await page.waitForFunction(() => {
   const images = [...document.querySelectorAll('.device-visual img')];
   return images.length >= 3 && images.every((image) => image.complete);
@@ -367,6 +381,7 @@ await page.route('**/admin/api/devices', async (route) => {
 await page.reload();
 await page.waitForFunction(() => document.getElementById('grid-power')?.textContent.includes('250')
   && [...document.querySelectorAll('.device-subcard-head .status-badge')].some((badge) => badge.textContent.trim().length > 0));
+for (let i = 0; i < 100 && staleReadings === 0; i += 1) await page.waitForTimeout(100);  // route must have served the page
 const staleUi = await page.locator('#dashboard-grid, .device-visual').evaluateAll((nodes) =>
   nodes.map((node) => `${node.textContent} ${[...node.querySelectorAll('[title]')].map((child) => child.title).join(' ')}`).join(' '));
 check('stale API readings display values without stale labels or titles', staleReadings > 0 && !/\bstale\b/i.test(staleUi), `stale readings: ${staleReadings}; UI: ${staleUi}`);
@@ -376,7 +391,11 @@ await page.unroute('**/admin/api/devices');
 // per battery tower.
 // Module detection needs several consecutive stable reads (the pending state renders no tower), so
 // the second tower appears a few polls after the first paint; wait for it instead of sampling once.
-await page.waitForFunction(() => document.querySelectorAll('.device-subcard-battery').length >= 2, null, { timeout: 30000 }).catch(() => { /* reported by the checks below */ });
+await page.waitForFunction(() => {
+  const cards = [...document.querySelectorAll('.device-subcard-battery')];
+  return cards.length >= 2 && cards.every((card) => /\d/.test(card.querySelector('.device-charge-value')?.textContent || '')
+    && (card.querySelector('.device-subcard-head .status-badge')?.textContent.trim() || '').length > 0);
+}, null, { timeout: 45000 }).catch(() => { /* reported by the checks below */ });
 const readLayout = () => page.evaluate(() => {
   const text = (node) => (node ? node.textContent.trim() : null);
   const box = (node) => {
@@ -455,8 +474,8 @@ check('each tower shows its own status (balancing active vs synchronizing), not 
   /balancing active/i.test(layout.towers[0].chip || '') && /synchroniz/i.test(layout.towers[1].chip || '')
   && layout.towers[0].chip !== layout.towers[1].chip,
   JSON.stringify(layout.towers.map((tower) => tower.chip)));
-check('each tower renders its own module count (5 and 4 middle slices)',
-  layout.towers[0].middles === 5 && layout.towers[1].middles === 4
+check('each tower renders its own module count (5 and 4 modules: 4 and 3 middle slices)',
+  layout.towers[0].middles === 4 && layout.towers[1].middles === 3
   && layout.towers.every((tower) => tower.slices === tower.middles + 2),
   JSON.stringify(layout.towers.map((tower) => ({ middles: tower.middles, slices: tower.slices }))));
 // ITEM 3, device-wide values: battery_cycles, battery_soc_target and power_mng_bat_next_calib_date
@@ -520,15 +539,14 @@ const freshDashboardView = async () => {
   await page.reload();
   await page.waitForSelector('.device-item .device-battery-stack, .device-item .device-subcard');
 };
-// Graphic contract (owner-mandated): the drawn tower is 1 top cap + 1..BATTERY_TOWER_MAX_SEGMENTS
-// (5) battery segments + 1 bottom cap. 2..5 modules render every module; the hardware maximum of
-// 6 modules (RCT_MAX_MODULES_PER_TOWER) is drawn with 5 segments and the note keeps the true count.
-for (const modules of [2, 3, 4, 5]) {
+// Graphic contract (owner-mandated): the bottom slice is itself a module, so N modules are drawn
+// as 1 top cap + N-1 middle segments + 1 bottom; every count up to the hardware maximum of 6.
+for (const modules of [2, 3, 4, 5, 6]) {
   await trustModuleCount(modules);
   const towers = await towerGeometry();
   await page.unroute('**/admin/api/devices');
   check(`a ${modules}-module tower stays within the ${TOWER_HEIGHT_CAP}px height cap and shows all its modules`,
-    towers.length > 0 && towers.every((tower) => tower.middles === modules
+    towers.length > 0 && towers.every((tower) => tower.middles === modules - 1
       && tower.stack.height <= TOWER_HEIGHT_CAP + 1 && tower.stack.height > 0
       && tower.stack.width > 0 && tower.stack.width <= 80),
     JSON.stringify(towers.map((tower) => ({ middles: tower.middles, height: tower.stack.height, width: tower.stack.width }))));
@@ -536,13 +554,13 @@ for (const modules of [2, 3, 4, 5]) {
 await trustModuleCount(6);
 const sixModuleTowers = await towerGeometry();
 await page.unroute('**/admin/api/devices');
-check('a trusted 6-module tower is drawn with 5 middle segments and still says "6 modules"',
+check('a trusted 6-module tower is drawn as top + 5 middles + bottom with no capping note',
   sixModuleTowers.length > 0 && sixModuleTowers.every((tower) => tower.middles === 5 && tower.slices === 7
-    && tower.noteHidden === false && /\b6 modules\b/.test(tower.noteText || '')
+    && tower.noteHidden === true
     && tower.stack.height <= TOWER_HEIGHT_CAP + 1),
   JSON.stringify(sixModuleTowers.map((tower) => ({ middles: tower.middles, slices: tower.slices, noteText: tower.noteText, height: tower.stack.height }))));
 // Taller towers must get narrower rather than taller: that is what keeps the cap without dropping
-// modules from the drawing. Both widths are within the graphic's 5-segment ceiling.
+// modules from the drawing.
 const widthAt = async (modules) => {
   await trustModuleCount(modules);
   const towers = await towerGeometry();
@@ -655,6 +673,9 @@ for (const width of [390, 320]) {
 const MIN_FOOTER_GAP = 8;
 for (const width of [390, 320]) {
   await page.setViewportSize({ width, height: 844 });
+  await page.waitForTimeout(400);
+  // WebKit applies the resized layout late, so scroll again once it settled.
+  await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
   await page.waitForTimeout(400);
   await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
   const bottom = await page.evaluate(() => {
@@ -775,7 +796,7 @@ await page.waitForFunction(() => document.querySelector('#toast-region .alert-da
 check('no stale-data banner element exists on the page', (await page.locator('#dashboard-staleness').count()) === 0);
 // 350ms, not 150ms: the slide-in transition itself takes 300ms (admin.css), and the transform
 // assertion below must land after it settles, not mid-transition.
-await page.waitForTimeout(350);
+await page.waitForTimeout(700);
 const dupToasts = await page.$$eval('#toast-region .alert-danger', (nodes) => nodes.filter((n) => n.textContent.includes('rate or the failed-authentication limit')).length);
 check('a failed poll produces exactly one toast', dupToasts === 1, String(dupToasts));
 const toastAnim = await page.evaluate(() => {
@@ -873,6 +894,11 @@ scrubExpected(probeFailureStart, (p) => p.includes(`${base}/health`) && (
   || p.startsWith('console error: Failed to load resource: net::ERR_FAILED')
 ));
 
+// The About page asks GitHub through the server; offline that call hangs and 'networkidle' never settles.
+await context.route('**/admin/api/check-updates*', (route) => route.fulfill({ json: {
+  current_version: '1.2.1', latest_version: '1.2.1', update_available: false, release_url: null, published_at: null, error: null,
+} }));
+
 // 3. layouts
 async function layouts(label, urls) {
   for (const [w, h] of [[1280, 800], [390, 844], [320, 640]]) {
@@ -880,7 +906,7 @@ async function layouts(label, urls) {
     for (const url of urls) {
       await page.goto(base + url);
       await page.waitForLoadState('networkidle');
-      await sleep(300);
+      await layoutSettled();
       const extra = await overflow();
       check(`no horizontal overflow ${label} ${url} @${w}`, extra <= 0, `overflow=${extra}`);
       await shot(`${label}-${url.replace(/\W+/g, '_')}-${w}`);
@@ -894,11 +920,12 @@ const beforeDarkRestart = problems.length;
 await stop(server);
 server = await startServer(db, httpPort, devicePort, 'before-dark-layouts');
 scrubExpected(beforeDarkRestart, (p) => expectedRestartProblem(p, base));
-await page.evaluate(() => { localStorage.setItem('theme', 'dark'); });
+await page.evaluate((key) => { localStorage.setItem(key, 'dark'); }, THEME_KEY);
 await page.goto(base + '/ui/dashboard');
+const themeBefore = await page.evaluate(() => document.documentElement.getAttribute('data-bs-theme'));
 await page.click('#theme-toggle');
 const theme = await page.evaluate(() => document.documentElement.getAttribute('data-bs-theme'));
-check('theme toggle switches data-bs-theme', ['dark', 'light'].includes(theme), theme);
+check('theme toggle switches data-bs-theme', ['dark', 'light'].includes(theme) && theme !== themeBefore, `${themeBefore} -> ${theme}`);
 if (theme !== 'dark') await page.click('#theme-toggle');
 check('dark mode active', (await page.evaluate(() => document.documentElement.getAttribute('data-bs-theme'))) === 'dark');
 await layouts('dark', pages);
@@ -951,7 +978,7 @@ const openParamTable = async (url, prefix) => {
   await page.goto(base + url);
   await page.waitForSelector(`#${prefix}-list tr`, { state: 'attached' });
   await page.waitForLoadState('networkidle');
-  await sleep(300);
+  await layoutSettled();
 };
 async function stackedGeometry() {
   return page.evaluate(() => {
@@ -965,7 +992,7 @@ async function stackedGeometry() {
     const visible = (node) => { const r = node.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
     const heading = main.querySelector('.page-heading');
     const container = heading.parentElement;
-    const blocks = [...container.children].filter((node) => node.matches('.card, .settings-grid, .energy-grid, #export-actions, .about-top-row, .prometheus-dependent-settings') && visible(node));
+    const blocks = [...container.children].filter((node) => node.matches('.card, .settings-grid, .energy-grid, .energy-tabs, #export-actions, .about-top-row, .prometheus-dependent-settings') && visible(node));
     // The About row is spaced from its heading by its own mt-1, not by the sibling rule.
     const chain = blocks[0]?.matches('.about-top-row') ? blocks : [heading, ...blocks];
     const gaps = [];
@@ -987,7 +1014,7 @@ async function stackedGeometry() {
 }
 const stackedLoopStart = problems.length;
 for (const scheme of ['light', 'dark']) {
-  await page.evaluate((value) => localStorage.setItem('rct-admin-theme', value), scheme);
+  await page.evaluate(({ key, value }) => localStorage.setItem(key, value), { key: THEME_KEY, value: scheme });
   for (const width of [1280, 390]) {
     await page.setViewportSize({ width, height: 844 });
     for (const [url, ready] of STACKED_PAGES) {
@@ -995,7 +1022,7 @@ for (const scheme of ['light', 'dark']) {
       await page.goto(base + url);
       await page.waitForSelector(ready, { state: 'attached' });
       await page.waitForLoadState('networkidle');
-      await sleep(300);
+      await layoutSettled();
       const geometry = await stackedGeometry();
       if (url === '/ui/prometheus' && width === 1280) {
         check(`theme ${scheme} is active for the layout contract`, (await page.evaluate(() => document.documentElement.getAttribute('data-bs-theme'))) === scheme);
@@ -1099,7 +1126,7 @@ await page.evaluate(() => { document.adoptedStyleSheets = document.adoptedStyleS
 const restoredGap = await stackedGeometry();
 check('card gap measurement passes after the mutation is removed',
   restoredGap.gaps.length > 0 && restoredGap.gaps.every(({ gap }) => Math.abs(gap - restoredGap.token) <= GAP_TOLERANCE), JSON.stringify(restoredGap.gaps));
-await page.evaluate(() => localStorage.setItem('rct-admin-theme', 'light'));
+await page.evaluate((key) => localStorage.setItem(key, 'light'), THEME_KEY);
 await page.setViewportSize({ width: 1280, height: 800 });
 
 // 4. PAT create / use / revoke
@@ -1109,7 +1136,7 @@ server = await startServer(db, httpPort, devicePort, 'after-layouts');
 scrubExpected(afterLayoutsRestart, (p) => expectedRestartProblem(p, base));
 await page.goto(base + '/ui/tokens');
 await page.waitForSelector('#tokens-list tr');
-check('token table has the six columns', JSON.stringify(await page.locator('.token-table thead th').evaluateAll((n) => n.map((e) => e.textContent.trim()))) === JSON.stringify(['Name', 'Permission', 'Created', 'Last used', 'Expires', 'Actions']));
+check('token table has the seven columns', JSON.stringify(await page.locator('.token-table thead th').evaluateAll((n) => n.map((e) => e.textContent.trim()))) === JSON.stringify(['Name', 'Permission', 'Token', 'Created', 'Last used', 'Expires', 'Actions']));
 check('Add token button is shown and the form is not permanently on the page', (await page.locator('#open-add-token').isVisible()) && !(await page.locator('#token-form').isVisible()));
 await page.click('#open-add-token');
 await page.waitForSelector('#add-token-modal.show #token-name', { state: 'visible' });
@@ -1170,7 +1197,7 @@ await page.waitForSelector('#confirm-modal.show');
 await page.click('#confirm-accept');
 await page.waitForFunction(() => !document.getElementById('tokens-list').textContent.includes('e2e-monitor'));
 check('revoked PAT is rejected', (await call()) === 401);
-check('empty state returns after the last token is revoked', (await page.locator('#tokens-list td[colspan="6"]').count()) === 1);
+check('empty state returns after the last token is revoked', (await page.locator('#tokens-list td[colspan="7"]').count()) === 1);
 
 // 5. settings toggle + invalid autosave
 await page.goto(base + '/ui/settings');
@@ -1613,6 +1640,13 @@ await page.goto(base + '/ui/inverters');
 await page.waitForFunction(() => document.getElementById('writable-range')?.textContent.trim());
 check('Inverters pager shows its original range after the restore', (await page.locator('#writable-range').innerText()).trim() === initialRange, initialRange);
 await page.goto(base + '/ui/tsdb');
+// Export is off by default and the dependent fields are hidden then; switch it on first.
+await page.waitForSelector('#setting-metrics_export_enabled');
+if (!(await page.locator('#setting-metrics_export_enabled').isChecked())) {
+  const enabled = page.waitForResponse((r) => r.request().method() === 'PUT' && r.url().endsWith('/admin/api/settings'));
+  await page.locator('#setting-metrics_export_enabled').click({ force: true });
+  await enabled;
+}
 await page.waitForSelector('#setting-db_type');
 let exportToggleAnswer = page.waitForResponse((response) => response.request().method() === 'PUT'
   && response.url().endsWith('/admin/api/settings'));
@@ -1868,10 +1902,7 @@ await shot('prometheus-master-toggle-on');
   try {
     await waitForPort(energyDevicePort);
     const energyBase = `http://127.0.0.1:${energyPort}`;
-    for (let i = 0; i < 100; i++) {
-      try { if ((await fetch(`${energyBase}/health`)).ok) break; } catch { /* not up yet */ }
-      await sleep(200);
-    }
+    await waitForHealth(spawned, energyPort);
     const energyPassword = firstStartPassword(spawned.output());
     const energyContext = await browser.newContext({ viewport: { width: 1280, height: 900 }, locale: 'en-GB' });
     const ep = await energyContext.newPage();
@@ -2084,15 +2115,16 @@ await shot('prometheus-master-toggle-on');
         && (await dialog.getByRole('button', { name: /^The battery is idle \(neither charging nor discharging\)/ }).count()) === 1, questionText.slice(0, 400));
       check('the fallback question has no "I can\'t tell" option', !/can.t tell/i.test(questionText));
       const optionStyles = [];
+      await ep.mouse.move(0, 0); // a pointer resting on an answer would measure its :hover colour
       for (let i = 0; i < 3; i++) optionStyles.push(await variantStyle(options.nth(i), 'btn btn-primary'));
       check('every answer button is the canonical filled primary button',
-        optionStyles.every((item) => item.own === item.canonical && !/rgba\(0, 0, 0, 0\)/.test(item.fill)), JSON.stringify(optionStyles[0]));
+        optionStyles.every((item) => item.own === item.canonical && !/rgba\(0, 0, 0, 0\)/.test(item.fill)), JSON.stringify(optionStyles.find((item) => item.own !== item.canonical) || optionStyles[0]));
       await ep.screenshot({ path: path.join(OUT, 'assistant-question.png') });
       await dialog.getByRole('button', { name: /^The battery is idle/ }).click();
       await dialog.getByText(/is not idle right now/).waitFor({ timeout: 20000 });
       check('an idle statement that contradicts the live reading is refused and proves nothing',
         (await dialog.getByRole('heading', { name: 'Battery direction?' }).count()) === 1);
-      const fallbackTest = ep.waitForResponse((response) => response.url().endsWith('/verification-assistant/control-test'));
+      const fallbackTest = ep.waitForResponse((response) => response.url().endsWith('/verification-assistant/control-test'), { timeout: 90000 });  // ~35 paced device sends take ~25 s
       await dialog.getByRole('button', { name: /^The battery is discharging/ }).click();
       check('the control test runs after battery confirmation and before the grid question',
         (await fallbackTest).ok());
@@ -2169,7 +2201,7 @@ await shot('prometheus-master-toggle-on');
       await dialog.waitFor({ timeout: 5000 });
       await dialog.getByRole('button', { name: 'Start verification' }).click();
       await dialog.getByRole('heading', { name: 'Battery direction?' }).waitFor({ timeout: 15000 });
-      const controlResponse = ep.waitForResponse((response) => response.url().endsWith('/verification-assistant/control-test'));
+      const controlResponse = ep.waitForResponse((response) => response.url().endsWith('/verification-assistant/control-test'), { timeout: 90000 });  // ~35 paced device sends take ~25 s
       await dialog.getByRole('button', { name: /^The battery is discharging/ }).click();
       const tested = await controlResponse;
       await dialog.getByRole('heading', { name: 'Waiting for grid power' }).waitFor({ timeout: 15000 });
@@ -2292,7 +2324,8 @@ await shot('prometheus-master-toggle-on');
       (await ep.locator('.energy-mode-switch[role=radiogroup]').count()) === 1
       && (await radios.allInnerTexts()).map((text) => text.replace(/\s+/g, ' ').trim().replace(/^\S+ /, '')).join('|') === 'Off|Manual|External',
       JSON.stringify(await radios.allInnerTexts()));
-    check('initially no mode is selected while Off is the tab stop', !await checkedMode(),
+    // An earlier step already recorded Off, so Off is the selected radio and the tab stop.
+    check('the recorded Off mode is the selected radio and the tab stop', /Off$/.test(await checkedMode()),
       String(await checkedMode()));
     check('roving tabindex: exactly one radio is tabbable', (await ep.locator('.energy-mode-switch [role=radio][tabindex="0"]').count()) === 1);
     check('every radio has an aria-label that starts with its visible text',
@@ -2313,7 +2346,7 @@ await shot('prometheus-master-toggle-on');
     await radios.first().focus();
     await ep.keyboard.press('ArrowRight');
     check('ArrowRight moves the focus to Manual without selecting it',
-      (await ep.evaluate(() => document.activeElement?.textContent.trim().endsWith('Manual'))) && modeCalls.length === 0 && !await checkedMode());
+      (await ep.evaluate(() => document.activeElement?.textContent.trim().endsWith('Manual'))) && modeCalls.length === 0 && /Off$/.test(await checkedMode()));
     await switchMode(() => ep.keyboard.press('Space'), 'Manual');
     check('Space selects Manual and the focus stays on the control',
       /Manual$/.test(await checkedMode()) && modeCalls.length === 1 && modeCalls[0].mode === 'manual'
@@ -2367,9 +2400,9 @@ await shot('prometheus-master-toggle-on');
       && /Off$/.test(await checkedMode()) && (await states()).every(Boolean), JSON.stringify(modeCalls));
     hardwareStrategy = { ...hardwareStrategy, code: 1, label: 'Constant' };
     await ep.reload();
-    await ep.waitForFunction(() => /Off is unconfirmed/.test(document.querySelector('.energy-mode-evidence')?.textContent || ''));
-    check('an external change to Constant removes the confirmed Off indication',
-      (await ep.locator('.energy-mode-option[aria-checked="true"]').count()) === 0);
+    await ep.waitForFunction(() => /Off is recorded, but the inverter reports SOC strategy/.test(document.querySelector('.energy-mode-evidence')?.textContent || ''));
+    check('an external change to Constant raises the mismatch warning while Off stays recorded',
+      (await ep.locator('.energy-mode-option[aria-checked="true"]').count()) === 1);
     hardwareStrategy = { ...hardwareStrategy, code: 4, label: 'Internal' };
     await ep.reload();
     await ep.waitForFunction(() => !!document.querySelector('.energy-mode-option[aria-checked="true"]'));
@@ -2448,6 +2481,160 @@ await shot('prometheus-master-toggle-on');
       /Maximum charging power/.test(noLimitsText) && !/Engineering mode/.test(noLimitsText), noLimitsText.slice(0, 400));
     mockNoLimits = false;
 
+    // Charts of the energy page: charging-plan schedule, household consumption, spot market, weather.
+    // All data is stubbed, so the checks exercise the shipped rendering only; waits are explicit.
+    {
+      const slot = (start, end, action, watts, soc, reason) => ({ start, end, action, max_power_w: watts, target_soc_percent: soc, reason });
+      const plan = {
+        device_id: 'sim', status: 'ok', detail: null, created_at: '2026-10-16T11:00:00+00:00', valid_until: '2026-10-17T14:00:00+00:00',
+        horizon_hours: 26, preview_only: true, window: {}, forecast_basis: 'stored history', forecast_confidence: 'high',
+        slots: [
+          slot('2026-10-16T12:00:00+00:00', '2026-10-16T15:15:00+00:00', 'idle', null, null, 'forecast PV covers demand'),
+          slot('2026-10-16T15:15:00+00:00', '2026-10-16T17:15:00+00:00', 'charge', 3000, 62, 'forecast deficit, charged as late as permitted'),
+          slot('2026-10-16T17:15:00+00:00', '2026-10-17T01:00:00+00:00', 'idle', null, null, 'battery reserve covers demand'),
+          slot('2026-10-17T01:00:00+00:00', '2026-10-17T03:30:00+00:00', 'charge', 4200, 90, 'negative spot price, forecast deficit'),
+          slot('2026-10-17T03:30:00+00:00', '2026-10-17T13:45:00+00:00', 'idle', null, null, 'battery reserve covers demand'),
+        ],
+      };
+      const day = new Date(); day.setUTCHours(0, 0, 0, 0);
+      const consumptionDays = () => [4, 3, 2, 1].map((back, index) => ({
+        date: new Date(day.getTime() - back * 86400000).toISOString().slice(0, 10),
+        energy_wh: 9000 + index * 500, source: index % 2 ? 'inverter_history' : 'local_measured',
+      }));
+      let consumption = { days: consumptionDays(), recording_since: '2026-10-01T00:00:00+00:00', inverter_import_enabled: true };
+      let consumptionGate = null;
+      let planStatus = 'ok';
+      let planRequests = 0;
+      await ep.route('**/admin/api/energy/devices/*/dynamic-plan', (route) => {
+        planRequests += 1;
+        return route.fulfill({ json: planStatus === 'ok' ? plan : { status: planStatus, slots: [], detail: null } });
+      });
+      await ep.route('**/admin/api/energy/devices/*/consumption-history', async (route) => {
+        if (consumptionGate) await consumptionGate;
+        await route.fulfill({ json: consumption });
+      });
+      const hourly = (field, value) => Array.from({ length: 24 }, (_, hour) => ({
+        start: new Date(day.getTime() + hour * 3600000).toISOString(), end: new Date(day.getTime() + (hour + 1) * 3600000).toISOString(),
+        [field]: value(hour),
+      }));
+      await ep.route('**/admin/api/energy/spot-market/preview', (route) => route.fulfill({ json: {
+        status: 'connected', provider: 'awattar', bidding_zone: 'DE-LU', currency: 'EUR', timezone: 'UTC', stale: false,
+        min_price_eur_per_kwh: 0.05, min_price_at: day.toISOString(), max_price_eur_per_kwh: 0.3, max_price_at: day.toISOString(),
+        yesterday_intervals: [], today_intervals: hourly('price_eur_per_kwh', (hour) => 0.05 + hour * 0.01), next_day_intervals: [],
+      } }));
+      await ep.route('**/admin/api/energy/weather/preview', (route) => route.fulfill({ json: {
+        status: 'connected', source: 'Open-Meteo', timezone: 'UTC', stale: false, energy_next_24h_kwh: 12.3,
+        covered_until: new Date(day.getTime() + 86400000).toISOString(),
+        yesterday_intervals: [], today_intervals: hourly('power_kw', (hour) => Math.max(0, 4 - Math.abs(hour - 12) * 0.5)), next_day_intervals: [],
+      } }));
+      const expectRequests = async (n) => { for (let i = 0; i < 50 && planRequests < n; i += 1) await sleep(100); };
+      const chartsIn = (selector) => ep.evaluate((sel) => Object.values(window.Chart.instances).filter((chart) => chart.canvas.closest(sel)).length, selector);
+      const pageOverflow = () => ep.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+      const planChartState = () => ep.evaluate(() => {
+        const canvas = document.querySelector('#energy-plan-schedule canvas');
+        return canvas && { role: canvas.getAttribute('role'), label: canvas.getAttribute('aria-label'), w: canvas.clientWidth, h: canvas.clientHeight,
+          tick: window.Chart.getChart(canvas).options.scales.x.ticks.color };
+      });
+
+      await ep.goto(`${energyBase}/ui/energy`);
+      await ep.locator('#energy-tab-plan').click();
+      await ep.waitForSelector('#energy-plan-schedule canvas');
+      await ep.waitForSelector('#energy-consumption canvas');
+      for (const width of [1280, 390]) {
+        await ep.setViewportSize({ width, height: 844 });
+        // Chart.js resizes through a ResizeObserver, so wait until the canvas follows the viewport.
+        await ep.waitForFunction((w) => { const c = document.querySelector('#energy-plan-schedule canvas').clientWidth; return c > 100 && c <= w; }, width);
+        const state = await planChartState();
+        check(`plan chart renders with an accessible name at ${width}px`, state.role === 'img' && state.label.length > 10 && state.w > 100 && state.h > 100, JSON.stringify(state));
+        check(`plan chart page has no horizontal scroll at ${width}px`, (await pageOverflow()) <= 0, String(await pageOverflow()));
+      }
+      await ep.setViewportSize({ width: 1280, height: 844 });
+      check('plan schedule is the chart only: no table or details, charge slots listed for screen readers',
+        (await ep.locator('#energy-plan-schedule table, #energy-plan-schedule details').count()) === 0
+        && (await ep.locator('#energy-plan-schedule ul.visually-hidden li').count()) === 2);
+      const hero = await ep.locator('#energy-plan-result .spot-market-highlights .spot-market-highlight-caption').allInnerTexts();
+      check('next grid charge shows Target SoC, Charge power and Total plan grid energy as hero metrics',
+        hero.map((t) => t.toLowerCase()).join('|') === 'target soc|charge power|total plan grid energy' || (hero.length === 2 && /target soc/i.test(hero[0])), hero.join('|'));
+      await Promise.all([ep.waitForResponse((r) => r.url().includes('/dynamic-plan')), ep.locator('#energy-plan-load').click()]);
+      await ep.waitForFunction(() => !document.querySelector('#energy-plan-load').disabled);
+      check('plan chart: exactly one Chart instance after Refresh', (await chartsIn('#energy-plan-schedule')) === 1);
+      await ep.locator('#energy-plan-schedule canvas').scrollIntoViewIfNeeded();
+      const box = await ep.locator('#energy-plan-schedule canvas').boundingBox();
+      await ep.mouse.move(box.x + box.width * 0.3, box.y + box.height * 0.5);
+      await ep.waitForFunction(() => window.Chart.getChart(document.querySelector('#energy-plan-schedule canvas')).tooltip.opacity > 0);
+      const tooltip = await ep.evaluate(() => window.Chart.getChart(document.querySelector('#energy-plan-schedule canvas')).tooltip.body.flatMap((b) => b.lines).join(' | '));
+      check('plan chart tooltip names the slot reason in plain language', /Reason: (Solar forecast|Battery charge|Expected shortfall|Negative spot)/.test(tooltip), tooltip);
+      const tickBefore = (await planChartState()).tick;
+      await ep.locator('#theme-toggle').click();
+      await ep.waitForFunction((before) => window.Chart.getChart(document.querySelector('#energy-plan-schedule canvas')).options.scales.x.ticks.color !== before, tickBefore);
+      check('theme toggle changes the plan chart tick colour', (await planChartState()).tick !== tickBefore);
+      await ep.locator('#theme-toggle').click();
+
+      // Pending inputs show a spinner and re-request the plan; configuration states keep their text.
+      await ep.clock.install();
+      const spinnerShown = () => ep.locator('#energy-plan-result .spinner-border').count();
+      planStatus = 'battery_state_unavailable';
+      await ep.locator('#energy-plan-load').click();
+      await ep.waitForSelector('#energy-plan-result [role="status"] .spinner-border, #energy-plan-result .spinner-border');
+      const waitText = await ep.locator('#energy-plan-result [role="status"]').first().innerText();
+      check('a pending plan shows only a "Please wait" spinner in Basic mode',
+        /Please wait/.test(waitText) && !(await ep.getByText('Usable battery capacity').first().isVisible()), waitText);
+      let before = planRequests;
+      await ep.clock.runFor(10_000);
+      await expectRequests(before + 1);
+      check('a pending plan is re-requested automatically after 10 s', planRequests === before + 1, String(planRequests - before));
+      await ep.clock.runFor(10_000);
+      await expectRequests(before + 2);
+      check('polling never stacks timers: one request per interval', planRequests === before + 2, String(planRequests - before));
+      planStatus = 'ok';
+      await ep.locator('#energy-plan-device').dispatchEvent('change');
+      await ep.waitForSelector('#energy-plan-schedule canvas');
+      before = planRequests;
+      await ep.clock.runFor(60_000);
+      check('polling stops on a device change and once the plan is ok', planRequests === before, String(planRequests - before));
+      planStatus = 'spot_disabled';
+      await ep.locator('#energy-plan-load').click();
+      await ep.waitForFunction(() => /The spot market integration is disabled/.test(document.querySelector('#energy-plan-result').textContent));
+      before = planRequests;
+      await ep.clock.runFor(60_000);
+      check('a configuration state shows text without a spinner and is never polled',
+        (await spinnerShown()) === 0 && planRequests === before);
+      planStatus = 'ok';
+      await ep.locator('#energy-plan-load').click();
+      await ep.waitForSelector('#energy-plan-schedule canvas');
+
+      // Household consumption: chart with badge, no stale chart while loading, empty state.
+      check('consumption chart renders with the daily average badge',
+        (await chartsIn('#energy-consumption')) === 1 && /kWh\/day/.test(await ep.locator('#energy-consumption-status').innerText()));
+      let releaseConsumption;
+      consumptionGate = new Promise((resolve) => { releaseConsumption = resolve; });
+      await ep.locator('#energy-plan-load').click();
+      await ep.waitForFunction(() => document.querySelector('#energy-consumption-section').hidden);
+      check('consumption section and chart are gone while the next history loads',
+        (await chartsIn('#energy-consumption')) === 0 && (await ep.locator('#energy-consumption canvas').count()) === 0);
+      consumptionGate = null;
+      releaseConsumption();
+      await ep.waitForSelector('#energy-consumption canvas');
+      check('consumption chart is drawn once after a reload', (await chartsIn('#energy-consumption')) === 1);
+      consumption = { days: [], recording_since: null, inverter_import_enabled: false };
+      await ep.locator('#energy-plan-load').click();
+      await ep.waitForFunction(() => window.Chart && !document.querySelector('#energy-plan-load').disabled);
+      check('without consumption data the whole section is hidden: no heading, no explanation',
+        (await ep.locator('#energy-consumption-section').isHidden()) && (await chartsIn('#energy-consumption')) === 0
+        && !/Recording locally|Importing daily totals|No consumption/.test(await ep.locator('#energy-tab-content').innerText()));
+
+      // Spot market and weather previews: one canvas and one Chart instance each.
+      await ep.locator('#energy-tab-spot-market').click();
+      await ep.waitForSelector('#spot-market-chart');
+      await ep.waitForFunction(() => window.Chart.getChart(document.querySelector('#spot-market-chart')));
+      check('spot market preview draws exactly one chart', (await chartsIn('#energy-pane-spot-market')) === 1);
+      await ep.locator('#energy-tab-weather').click();
+      await ep.waitForSelector('#weather-chart');
+      await ep.waitForFunction(() => window.Chart.getChart(document.querySelector('#weather-chart')));
+      check('weather preview draws exactly one chart', (await chartsIn('#energy-pane-weather')) === 1);
+      await ep.locator('#energy-tab-plan').click();
+    }
+
     await ep.setViewportSize({ width: 390, height: 844 });
     await sleep(300);
     const energyOverflow = await ep.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
@@ -2455,8 +2642,8 @@ await shot('prometheus-master-toggle-on');
     check('energy page raised no console, network or script errors', energyProblems.length === 0, energyProblems.join('; '));
     await energyContext.close();
   } finally {
-    spawned.proc.kill('SIGTERM');
-    energyFake.proc.kill('SIGTERM');
+    await stop(spawned).catch(() => { });
+    await stop(energyFake).catch(() => { });
   }
 }
 
@@ -2507,10 +2694,13 @@ check('Done saves the moved/resized layout via PUT /admin/api/dashboard-layout',
     w.id === 'pv-power' && w.x === movedPosition.x && w.y === movedPosition.y
     && w.w === movedPosition.w && w.h === movedPosition.h),
   JSON.stringify({ movedPosition, dashboardLayoutPut }));
+await page.waitForFunction(() => document.querySelector('#toast-region')?.innerText.includes('Dashboard layout saved.'));
 check('Done shows the "Dashboard layout saved." toast once', (await toastText()).includes('Dashboard layout saved.'));
 
-await page.reload();
+await Promise.all([page.waitForResponse((r) => r.url().endsWith('/admin/api/dashboard-layout') && r.request().method() === 'GET'), page.reload()]);
 await pvWidgetReady();
+// The stored layout is applied after its GET answered; wait for the settled position.
+await page.waitForFunction((p) => { const n = document.querySelector('.grid-stack-item[data-widget-id="pv-power"]').gridstackNode; return n.x === p.x && n.y === p.y; }, movedPosition, { timeout: 5000 }).catch(() => { });
 const afterReload = await pvPosition();
 check('the moved/resized position persists after a browser reload',
   afterReload.x === movedPosition.x && afterReload.y === movedPosition.y
@@ -2523,6 +2713,8 @@ await freshContext.addCookies(await context.cookies());
 const freshPage = await freshContext.newPage();
 await freshPage.goto(base + '/ui/dashboard');
 await freshPage.waitForFunction(() => document.querySelector('.grid-stack-item[data-widget-id="pv-power"]')?.gridstackNode);
+// The stored layout is applied after its GET answered; wait for the settled position.
+await freshPage.waitForFunction((p) => { const n = document.querySelector('.grid-stack-item[data-widget-id="pv-power"]').gridstackNode; return n.x === p.x && n.y === p.y; }, movedPosition, { timeout: 5000 }).catch(() => { });
 const freshPosition = await freshPage.evaluate(() => {
   const node = document.querySelector('.grid-stack-item[data-widget-id="pv-power"]').gridstackNode;
   return { x: node.x, y: node.y, w: node.w, h: node.h };
@@ -2600,11 +2792,14 @@ check('logout ends the session', page.url().endsWith('/login'));
 const relevant = [...problems];
 console.log('console/network problems:', JSON.stringify(relevant, null, 1));
 check('browser console and network clean', relevant.length === 0);
+check('no external requests (whole run)', external.size === 0, [...external].join(','));
 fs.writeFileSync(path.join(OUT, 'results.json'), JSON.stringify({ results, problems, relevant }, null, 2));
-await browser.close();
-await stop(server);
-fake.proc.kill('SIGTERM');
-fs.rmSync(dbDir, { recursive: true, force: true });
+} finally {
+  await browser?.close().catch(() => { });
+  if (server) await stop(server).catch(() => { });
+  await stop(fake).catch(() => { });
+  fs.rmSync(dbDir, { recursive: true, force: true });
+}
 const failed = results.filter((r) => !r.ok);
 console.log(`${results.length - failed.length}/${results.length} checks passed`);
 process.exit(failed.length ? 1 : 0);

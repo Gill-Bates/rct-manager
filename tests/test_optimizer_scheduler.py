@@ -87,7 +87,9 @@ def test_optimizer_modules_are_isolated_from_hardware_execution() -> None:
     root = Path(__file__).resolve().parents[1] / "app" / "optimizer"
     forbidden = ("app.energy.", "app.dispatch.controller", "app.dispatch.store", "app.gateway", "EnergyCommand")
 
-    for filename in ("models.py", "base.py", "scheduler.py"):
+    # The pure algorithm and the pure history/forecast live here and must stay hardware-free. The
+    # impure data adapters (adapters.py) deliberately read stores/cache and are NOT on this list.
+    for filename in ("models.py", "base.py", "scheduler.py", "planner.py", "consumption.py"):
         source = (root / filename).read_text()
         for name in forbidden:
             assert name not in source, f"{filename} must not name {name}"

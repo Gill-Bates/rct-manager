@@ -13,8 +13,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.allowlist import Allowlist
-from app.cache import MemoryCache
 from app.catalog.registry import RegistryCatalog
 from app.config import (
     SYSTEM_READBACK_TIMEOUT_SECONDS,
@@ -22,7 +20,8 @@ from app.config import (
     DeviceKey,
     EndpointKey,
 )
-from app.errors import BudgetExhausted, DeviceApiError, QueueFullError, QueueTimeout
+from app.errors import BudgetExhausted, DeviceApiError, DeviceUnreachable, QueueFullError, QueueTimeout
+from app.gateway.cache import MemoryCache
 from app.gateway.rct import DeviceBinding, RctGateway
 from app.gateway.vendor import SlaveDiscovery
 from app.protocol.frames import Frame
@@ -31,6 +30,7 @@ from app.scheduling.budget import WorkBudget
 from app.scheduling.heartbeat import Heartbeat, LivenessSource
 from app.scheduling.retry import RetryConfig, execute_read
 from app.scheduling.serializer import AccessSerializer
+from app.security.allowlist import Allowlist
 from app.transport.counters import DeviceCounters
 from app.transport.endpoint import EndpointConfig, TransportEndpoint
 from app.transport.types import (
@@ -382,6 +382,56 @@ def test_replace_devices_clears_device_keyed_state_but_keeps_the_locks() -> None
     assert resolved == "inv1"  # the rebuilt binding is addressable again
 
 
+def test_replace_devices_drops_value_cache_for_removed_or_readdressed_devices_only() -> None:
+    """A re-addressed or removed device must not keep its old hardware's cached register values:
+    replace_devices() invalidates the value cache for every device_id that is gone or whose endpoint
+    changed, while a device kept at the SAME key keeps its cache (like its serializer/locks). Without
+    this a later read would serve a stale value for a device that now answers at that id, or no
+    longer exists at all.
+    """
+    from datetime import UTC, datetime
+
+    async def scenario() -> tuple[bool, bool, bool]:
+        gateway, binding, _budget, _net, _catalog = await _gateway(5)
+        # Three devices with cached values: one kept at the same key, one re-addressed to a new
+        # host, one removed entirely from the new device set.
+        kept = binding.entry  # inv1 @ 10.0.0.5
+        moved = DeviceEntry(device_id="inv2", host="10.0.0.6")
+        removed = DeviceEntry(device_id="inv3", host="10.0.0.7")
+        for entry in (moved, removed):
+            ep = TransportEndpoint(
+                f"ep-{entry.device_id}", entry.key.endpoint,
+                EndpointConfig(response_timeout_seconds=0.01, min_interval=timedelta(0)),
+                gateway._clock, connector=_net.connect,
+            )
+            gateway.add_device(DeviceBinding(entry, ep, binding.serializer))
+        now = datetime(2026, 1, 1, tzinfo=UTC)
+        for device_id in ("inv1", "inv2", "inv3"):
+            gateway._cache.put((device_id, "battery_power"), 1.0, measured_at=now, received_monotonic=0.0, origin="transaction")
+        # inv1 kept at its key; inv2 re-addressed to a different host; inv3 dropped.
+        moved_again = DeviceEntry(device_id="inv2", host="10.0.0.99")
+        moved_ep = TransportEndpoint(
+            "ep-inv2b", moved_again.key.endpoint,
+            EndpointConfig(response_timeout_seconds=0.01, min_interval=timedelta(0)),
+            gateway._clock, connector=_net.connect,
+        )
+        gateway.replace_devices([
+            DeviceBinding(kept, binding.endpoint, binding.serializer),
+            DeviceBinding(moved_again, moved_ep, binding.serializer),
+        ])
+        await binding.serializer.stop()
+        return (
+            gateway._cache.get(("inv1", "battery_power")) is not None,  # kept
+            gateway._cache.get(("inv2", "battery_power")) is not None,  # re-addressed -> dropped
+            gateway._cache.get(("inv3", "battery_power")) is not None,  # removed -> dropped
+        )
+
+    kept, readdressed, removed = asyncio.run(scenario())
+    assert kept is True  # the unchanged device keeps its cached values
+    assert readdressed is False  # a re-addressed device cannot inherit the old hardware's values
+    assert removed is False  # a removed device's values are dropped
+
+
 def test_invalidated_cache_after_skip_costs_exactly_one_unit() -> None:
     async def scenario() -> tuple[int, int]:
         gateway, binding, budget, net, _ = await _gateway(5)
@@ -420,7 +470,7 @@ def test_unsent_readback_unit_is_refunded() -> None:
     async def scenario() -> int:
         gateway, binding, budget, _, catalog = await _gateway(4, fail_connects=1000)
         entry = next(iter(catalog.entries()))
-        with pytest.raises(Exception):  # noqa: B017 - any device error: the write never left
+        with pytest.raises(DeviceUnreachable):
             await gateway._write(binding, entry, ("inv1", entry.name), b"\x00\x00\x00\x01")
         await binding.serializer.stop()
         return budget.remaining()
@@ -450,7 +500,7 @@ def test_failed_transaction_is_counted_once() -> None:
 
     async def scenario() -> tuple[int, int]:
         gateway, binding, _, _, _ = await _gateway(5, fail_connects=1000)
-        with pytest.raises(Exception):  # noqa: B017 - any device error: the connect never succeeds
+        with pytest.raises(DeviceUnreachable):
             await gateway.read_metric("inv1", "battery_power", fresh=True)
         await binding.serializer.stop()
         return binding.errors, binding.durations.count
@@ -538,7 +588,7 @@ async def test_cancelled_read_cancels_the_endpoint_call() -> None:
     assert cancelled.is_set()
 
 
-# --- FIX 1: static module serials are read by a bounded inventory pass, not the periodic set ---
+# Static module serials are read by a bounded inventory pass, not the periodic set.
 
 _SHIPPED_REGISTRY = Path(__file__).resolve().parents[1] / "app" / "catalog" / "objects.json"
 
@@ -584,8 +634,8 @@ _INVENTORY_NAMES = tuple(f"battery_module_sn_{i}" for i in range(7))
 def test_inventory_read_feeds_devices_module_count_without_touching_the_periodic_set() -> None:
     """read_module_inventory() lands the module serials in the cache so admin's devices() can still
     derive a populated tower's module count from cached_reading(), even though the slots are no
-    longer periodically registered. A five-module tower reports six populated slots (five modules
-    plus the base/top part)."""
+    longer periodically registered. A six-module tower (Power Battery 11.5) reports six populated
+    slots."""
 
     async def scenario():
         populated = {f"battery_module_sn_{i}": b"SN-%d" % i for i in range(6)}  # slots 0..5 populated
@@ -643,3 +693,47 @@ def test_inventory_marks_an_unanswered_slot_as_read_failed_for_devices() -> None
     failed, populated_ok = asyncio.run(scenario())
     assert failed is True  # the empty slot is confirmed unanswered
     assert populated_ok is False  # a populated slot is never marked failed
+
+
+def test_history_query_is_a_read_through_the_device_serializer_without_write_support(caplog) -> None:
+    """The WRITE-shaped logger query needs no allowlist or write gate and uses the existing queue."""
+    import struct
+    from datetime import UTC, datetime
+
+    from app.protocol.types import WRITE_COMMANDS
+
+    root = Path(__file__).resolve().parent.parent
+
+    async def scenario():
+        clock = AutoClock()
+        net = FakeNetwork(clock)
+        net.answer_writes = True
+        net.freeze_writes = True  # the fake would otherwise store the request as the reply
+        catalog = RegistryCatalog.from_file(root / "app" / "catalog" / "objects.json")
+        gateway = RctGateway(
+            catalog, MemoryCache(30, 30), clock, Allowlist({}, catalog), retry=RetryConfig(response_timeout_seconds=0.5)
+        )
+        device = DeviceEntry(device_id="inv1", host="10.0.0.5")
+        cfg = EndpointConfig(response_timeout_seconds=0.5, min_interval=timedelta(0))
+        endpoint = TransportEndpoint("endpoint-1", device.key.endpoint, cfg, clock, connector=net.connect)
+        serializer = AccessSerializer(endpoint, gateway.handler(endpoint), cache_hit=gateway.cache_hit)
+        serializer.start()
+        gateway.add_device(DeviceBinding(device, endpoint, serializer))
+        before = datetime(2026, 10, 15, tzinfo=UTC)
+        query = int(before.timestamp())
+        entry = catalog.object_entry("logger_day_eload_log_ts")
+        net.payloads[entry.object_id] = struct.pack(">I", query) + struct.pack(">If", query - 3600, 12450.0)
+        points = await gateway.query_history_series("inv1", "logger_day_eload_log_ts", before)
+        sent = [f for _, f in net.frames if f.object_id == entry.object_id]
+        await serializer.stop()
+        return points, sent, query
+
+    with caplog.at_level("DEBUG", logger="app.gateway.rct"):
+        points, sent, query = asyncio.run(scenario())
+    assert [p.value for p in points] == [12450.0]
+    traces = [r.getMessage() for r in caplog.records if "Outgoing history query" in r.getMessage()]
+    assert len(traces) == 1  # the origin trace names the request without its payload
+    assert "metric=logger_day_eload_log_ts" in traces[0] and "device=inv1" in traces[0]
+    assert "origin=SYSTEM_READ" in traces[0] and f"object_id=0x{sent[0].object_id:08x}" in traces[0]
+    assert len(sent) == 1 and sent[0].command in WRITE_COMMANDS
+    assert int.from_bytes(sent[0].payload, "big") == query

@@ -61,31 +61,44 @@
         byId.set(widget.id, widget); // unknown ids are dropped below: only DEFAULT_LAYOUT ids are read
       }
     }
-    return separateOverlaps(DEFAULT_LAYOUT.map((def) => {
+    const merged = DEFAULT_LAYOUT.map((def) => {
       const saved = byId.get(def.id);
       if (!saved) return defaultEntry(def);
       const inRange = (value, max) => Number.isInteger(value) && value >= 0 && value <= max;
+      // A widget must fit fully within the vertical bound (y + h <= MAX_Y), matching the server's
+      // dashboard-layout check in app/admin/api.py; otherwise a single bottom-pinned tile would pass
+      // the resolver unchanged and still cross MAX_Y.
       const valid = inRange(saved.x, 11) && inRange(saved.y, MAX_Y) &&
         Number.isInteger(saved.w) && saved.w >= 1 && saved.w <= 12 &&
-        Number.isInteger(saved.h) && saved.h >= 1 && saved.h <= 100 && saved.x + saved.w <= 12;
+        Number.isInteger(saved.h) && saved.h >= 1 && saved.h <= 100 &&
+        saved.x + saved.w <= 12 && saved.y + saved.h <= MAX_Y;
       if (!valid) return defaultEntry(def);
       return { id: def.id, x: saved.x, y: saved.y, w: saved.w, h: saved.h, visible: saved.visible !== false };
-    }));
+    });
+    // separateOverlaps returns null when the overlaps cannot be resolved within the vertical bound.
+    // A broken saved layout must never leave the dashboard unusable, so fall back to the known-good
+    // default, which has no overlaps and therefore always separates.
+    const resolved = separateOverlaps(merged);
+    return resolved || separateOverlaps(DEFAULT_LAYOUT.map(defaultEntry)) || DEFAULT_LAYOUT.map(defaultEntry);
   }
 
   // A stored layout can hold overlapping boxes (e.g. a stale push). Applying it widget by widget
   // would let the last one shove the earlier ones below it, so the upper/left box keeps its place
-  // and the later one moves down instead.
+  // and the later one moves down instead. Returns the resolved layout, or null when an overlap
+  // cannot be pushed down without crossing MAX_Y: an unresolvable layout is reported, never looped.
   function separateOverlaps(layout) {
     const placed = [];
     const overlaps = (a, b) => a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
     const byPosition = layout.filter((entry) => entry.visible).sort((a, b) => a.y - b.y || a.x - b.x);
     for (const entry of byPosition) {
       let blocker;
-      // Clamp to the server's y maximum (MAX_Y, matching the layout validation above) so stacking
-      // many overlapping boxes cannot push a widget past the bound the server would reject (JS-03).
       while ((blocker = placed.find((other) => overlaps(entry, other)))) {
-        entry.y = Math.min(blocker.y + blocker.h, MAX_Y);
+        // Each shuffle must move the box strictly down and stay within the server's y bound. If the
+        // next position makes no forward progress or would cross MAX_Y, the layout is unresolvable:
+        // bail out so the caller can discard it, instead of spinning the while loop forever (JS-03).
+        const nextY = blocker.y + blocker.h;
+        if (nextY <= entry.y || nextY > MAX_Y) return null;
+        entry.y = nextY;
       }
       placed.push(entry);
     }
@@ -371,13 +384,15 @@
     });
     document.addEventListener('keydown', (event) => {
       if (!editingNow || event.key !== 'Escape' || event.isComposing ||
-          event.ctrlKey || event.metaKey || event.altKey || event.shiftKey ||
-          (event.target instanceof Element && event.target.closest('input, textarea, [contenteditable]')) ||
-          document.querySelector('.modal.show')) return;
+        event.ctrlKey || event.metaKey || event.altKey || event.shiftKey ||
+        (event.target instanceof Element && event.target.closest('input, textarea, [contenteditable]')) ||
+        document.querySelector('.modal.show')) return;
       cancelEditing();
     });
-    // Positions are ignored by the stacked phone layout, so editing ends when the viewport shrinks to it.
-    window.matchMedia(MOBILE_QUERY).addEventListener('change', (event) => { if (event.matches && editingNow) setEditing(false); });
+    // Positions are ignored by the stacked phone layout, so editing ends when the viewport shrinks
+    // to it. Cancel like Escape (restore savedLayout) rather than just leaving editing: an unsaved
+    // drag/resize must not stay visually in place after editing has ended.
+    window.matchMedia(MOBILE_QUERY).addEventListener('change', (event) => { if (event.matches && editingNow) cancelEditing(); });
     // Deep link from the Inverters page.
     if (new URLSearchParams(location.search).get('manage') === 'inverters') {
       window.bootstrap.Modal.getOrCreateInstance($('inverters-modal')).show();

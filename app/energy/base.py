@@ -9,6 +9,7 @@ typing its ``energy`` field against this protocol instead of importing ``EnergyM
 can therefore be tested against a stub manager.
 """
 
+from contextlib import AbstractAsyncContextManager
 from typing import Protocol
 
 from app.dispatch.capabilities import GateDecision
@@ -30,6 +31,7 @@ class EnergyManagerPort(Protocol):
         self, device_id: str, mode: EnergyMode, *, actor: str | None
     ) -> EnergyDeviceStatus: ...
     def mode(self, device_id: str) -> EnergyMode: ...
+    def guard_raw_write(self, device_id: str) -> AbstractAsyncContextManager[None]: ...
 
 
 class EnergyAdminPort(EnergyManagerPort, Protocol):

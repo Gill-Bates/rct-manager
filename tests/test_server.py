@@ -87,7 +87,7 @@ def _fake_device(result: dict, slow_object: int, ready: threading.Event, slow_hi
 
     async def main() -> None:
         # Bind on port 0 directly and read back the actually-assigned port: no separate
-        # free-port probe that could race another process for the same port (Finding 1).
+        # free-port probe that could race another process for the same port.
         server = await asyncio.start_server(handle, "127.0.0.1", 0)
         result["port"] = server.sockets[0].getsockname()[1]
         result["server"] = server
@@ -126,7 +126,7 @@ def _wait_for_status(base: str, token: str | None, expected: int, deadline: floa
 # OBJECT_REGISTRY_PATH is not operator-settable, so the child swaps in the fixture after loading the settings.
 # RCT_API_BOUND_FD, when set, makes the server bind on a socket inherited from the parent instead
 # of binding BIND_PORT itself (see app/__main__.py); the harness below relies on this to avoid a
-# bind-probe-then-rebind race for the HTTP port (Finding 1).
+# Avoid a bind-probe-then-rebind race for the HTTP port.
 _BOOT = (
     "import sys, pathlib, app.__main__ as m; path = pathlib.Path(sys.argv.pop(1)); load = m.load_settings; "
     "m.load_settings = lambda f: load(f).model_copy(update={'object_registry_path': path, "
@@ -193,7 +193,7 @@ def test_sigterm_drains_answers_503_and_exits_cleanly(tmp_path) -> None:
         )
         worker.start()
         # Wait for the slow frame to actually reach the fake device before sending SIGTERM, instead
-        # of guessing with a fixed sleep (Finding 2).
+        # instead of guessing with a fixed sleep.
         assert slow_hit.wait(5), "the slow request never reached the fake device"
         started = time.monotonic()
         proc.send_signal(signal.SIGTERM)
@@ -232,10 +232,18 @@ def test_sigterm_drains_answers_503_and_exits_cleanly(tmp_path) -> None:
         ("POST", "/admin/api/change-password", 200, logging.INFO),
         ("PUT", "/admin/api/settings", 200, logging.INFO),
         ("DELETE", "/admin/api/tokens/abc", 200, logging.INFO),
+        # Auto-refreshed read-only previews are GUI polls: DEBUG on success, still escalating on failure.
+        ("POST", "/admin/api/energy/spot-market/preview", 200, logging.DEBUG),
+        ("POST", "/admin/api/energy/weather/preview", 200, logging.DEBUG),
+        ("POST", "/admin/api/energy/weather/preview", 422, logging.WARNING),
+        ("POST", "/admin/api/energy/spot-market/preview", 502, logging.ERROR),
         ("GET", "/api/v1/devices", 200, logging.INFO),
         ("GET", "/metrics", 200, logging.DEBUG),
         ("GET", "/metrics", 401, logging.WARNING),
-        ("GET", "/health", 200, logging.INFO),
+        # A successful liveness poll is DEBUG (fires every few seconds); a failing one still escalates
+        # (503 during shutdown/not-ready is >= 500, so it classifies as ERROR before the path check).
+        ("GET", "/health", 200, logging.DEBUG),
+        ("GET", "/health", 503, logging.ERROR),
         ("POST", "/admin/api/login", 401, logging.WARNING),
         ("GET", "/admin/static/missing.js", 404, logging.WARNING),
         ("GET", "/api/v1/devices", 500, logging.ERROR),
@@ -356,7 +364,22 @@ def _states(app):
 
 
 @pytest.mark.asyncio
-async def test_jobs_wait_for_password_change_then_start(tmp_path, caplog):
+async def test_jobs_wait_for_password_change_then_start(tmp_path, caplog, monkeypatch):
+    from app.api import app_factory
+
+    spot_started = asyncio.Event()
+    solar_started = asyncio.Event()
+
+    async def spot_loop(*args):
+        spot_started.set()
+        await asyncio.Future()
+
+    async def solar_loop(*args):
+        solar_started.set()
+        await asyncio.Future()
+
+    monkeypatch.setattr(app_factory, "run_spot_market_refresh_loop", spot_loop)
+    monkeypatch.setattr(app_factory, "run_solar_refresh_loop", solar_loop)
     settings = _gate_settings(tmp_path)
     caplog.set_level(logging.WARNING)
     async with running_app(settings, settle=False, authorize=False) as harness:
@@ -366,10 +389,12 @@ async def test_jobs_wait_for_password_change_then_start(tmp_path, caplog):
         # yields: the warning log line and the STARTING state are both already settled by this
         # point, not something a fixed sleep could prove any more reliably (minor note).
         assert _states(harness.app) == {DeviceState.STARTING}  # no heartbeat while the bootstrap password stands
+        assert not spot_started.is_set() and not solar_started.is_set()
         assert "Initial admin password not changed yet" in caplog.text
         assert (await harness.client.get("/login")).status_code == 200  # the admin UI stays reachable
         assert harness.app.state.admin_store.change_password(password, NEW_PASSWORD)
         await wait_settled(harness.app, timeout=8)
+        await asyncio.wait_for(asyncio.gather(spot_started.wait(), solar_started.wait()), timeout=8)
         assert DeviceState.STARTING not in _states(harness.app)
 
 

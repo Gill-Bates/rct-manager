@@ -1,7 +1,7 @@
 # .github/workflows/gate.yml
 # Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
 #
-# Reusable: ruff, pytest, workflow lint, Dockerfile check and manifest
+# Reusable: Ruff, pytest, Node unit tests, workflow lint, Dockerfile check and manifest
 # invariants. Called by ci.yml for every push/PR and by release.yml before a
 # tag is allowed to publish, so a release can prove the exact commit it
 # builds passed this gate - not merely that the commit is reachable from
@@ -37,6 +37,11 @@ jobs:
           cache: pip
           cache-dependency-path: pyproject.toml
 
+      - name: Set up Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: '24'
+
       # The tests import app/, so the runtime dependencies come along with dev.
       - name: Install dependencies
         run: |
@@ -50,6 +55,9 @@ jobs:
       # No settings.env on purpose: the tests build their own settings.
       - name: pytest
         run: python -m pytest -q
+
+      - name: JavaScript unit tests
+        run: node --test tests/js/*.test.js
 
   actions:
     name: Workflow lint

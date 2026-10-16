@@ -21,6 +21,7 @@ from app.config import (
     warn_ignored_settings,
 )
 from app.errors import ConfigError
+from app.limits import MAX_POWER_W
 
 TOKEN = "t" * 40
 
@@ -59,6 +60,19 @@ def test_valid_defaults_load() -> None:
     assert settings.behind_reverse_proxy is False
     assert settings.allow_non_loopback_bind is False
     assert settings.docs_public is False
+    assert settings.dispatch_live_charge_limit_max_age_seconds == 5.0
+
+
+@pytest.mark.parametrize("value", [0.9, 15.1])
+def test_live_charge_limit_freshness_rejects_out_of_range_values(value: float) -> None:
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, dispatch_live_charge_limit_max_age_seconds=value)
+
+
+@pytest.mark.parametrize("value", [1.0, 15.0])
+def test_live_charge_limit_freshness_accepts_boundary_values(value: float) -> None:
+    settings = Settings(_env_file=None, dispatch_live_charge_limit_max_age_seconds=value)
+    assert settings.dispatch_live_charge_limit_max_age_seconds == value
 
 
 @pytest.mark.parametrize(("raw", "expected"), [("true", True), ("false", False)])
@@ -254,6 +268,27 @@ def test_ignored_settings_never_log_their_values(monkeypatch, tmp_path, caplog) 
         assert value not in whole_log
 
 
+@pytest.mark.parametrize("field", ["hmac_secret", "admin_secret", "influxdb_token", "questdb_password"])
+def test_validation_error_on_a_secret_field_never_echoes_the_input(field) -> None:
+    """P3-6: format_validation_error promises it never echoes a secret input. A non-string value
+    for any SecretStr field must therefore name the field and its constraint but not the rejected
+    value, since that value is the secret the admin tried to set."""
+    sentinel = 1234567890123456789  # a non-string the SecretStr validator rejects; stands in for a secret
+    with pytest.raises(ValidationError) as info:
+        Settings(_env_file=None, **{field: sentinel})
+    detail = format_validation_error(info.value)
+    assert field.upper() in detail
+    assert "rejected value" not in detail
+    assert str(sentinel) not in detail
+
+
+def test_validation_error_on_a_non_secret_field_still_echoes_the_input() -> None:
+    """The echo guard is scoped to secret fields: an ordinary field keeps its rejected value in the
+    message, so this stays a targeted redaction and not a blanket removal."""
+    detail = _fail_init(bind_port=70000)
+    assert "BIND_PORT" in detail and "rejected value: 70000" in detail
+
+
 @pytest.mark.parametrize(
     "name",
     [
@@ -289,6 +324,14 @@ def test_engineering_ttl_cap_must_not_exceed_the_normal_cap() -> None:
 def test_cache_grace_shorter_than_ttl_is_allowed() -> None:
     settings = Settings(devices="a=h:1", cache_ttl_seconds=60, cache_grace_seconds=10)
     assert settings.cache_grace_seconds == 10
+
+
+@pytest.mark.parametrize("field", ["dispatch_max_charge_power_w", "dispatch_max_discharge_power_w"])
+def test_dispatch_power_settings_share_the_energy_manager_ceiling(field: str) -> None:
+    settings = Settings(devices="a=h:1", **{field: MAX_POWER_W})
+    assert getattr(settings, field) == MAX_POWER_W
+    with pytest.raises(ValidationError):
+        Settings(devices="a=h:1", **{field: MAX_POWER_W + 0.01})
 
 
 def test_effective_config_hides_token_values() -> None:

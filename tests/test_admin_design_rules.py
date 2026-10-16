@@ -219,6 +219,12 @@ def _read(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
+def _admin_js() -> str:
+    base = _read(TEMPLATES / "base.html")
+    names = re.findall(r'<script src="/admin/static/js/(admin(?:-[\w-]+)?\.js)" defer></script>', base)
+    return "\n".join(_read(JS_DIR / name) for name in names)
+
+
 def _tsdb_render(js: str) -> str:
     return js[js.index("function renderExportSettings("):js.index("// Mirrors the server-side host plausibility")]
 
@@ -230,14 +236,14 @@ def test_r1_tsdb_has_no_own_layout_or_typography_css() -> None:
 
 def test_r2_section_titles_are_h5_and_sentence_case() -> None:
     templates = {path.name: _read(path) for path in TEMPLATES.glob("*.html")}
-    js = _read(JS_DIR / "admin.js")
+    js = _admin_js()
     assert check_r2_titles(templates, js) == []
     assert check_r2_titles({"x.html": '<h2 class="h6">Title</h2>'}, "")
     assert check_r2_titles({}, "card('x', 'Target Database Settings', [])")
 
 
 def test_r3_tsdb_has_no_icons_and_no_banner() -> None:
-    js = _read(JS_DIR / "admin.js")
+    js = _admin_js()
     assert check_r3_tsdb_markup(_tsdb_render(js), _read(TEMPLATES / "tsdb.html")) == []
     assert check_r3_tsdb_markup("body.append(element('span', 'material-icons', 'link'))", "")
     assert check_r3_tsdb_markup("", '<div class="alert alert-warning">')
@@ -250,7 +256,7 @@ def test_r4_no_native_leave_page_dialog() -> None:
 
 
 def test_r5_tsdb_apply_bar_is_one_primary_button() -> None:
-    js = _read(JS_DIR / "admin.js")
+    js = _admin_js()
     template = _read(TEMPLATES / "tsdb.html")
     assert check_r5_apply_bar(js, template) == []
     broken = js.replace("element('button', 'btn btn-primary', applyLabel)", "element('button', 'btn btn-info', applyLabel)")
@@ -275,7 +281,7 @@ def test_r8_colours_come_from_tokens() -> None:
 
 
 def test_r9_tsdb_fields_use_the_shared_field_builder() -> None:
-    js = _read(JS_DIR / "admin.js")
+    js = _admin_js()
     assert check_r9_shared_fields(js) == []
     broken = js.replace("buildFieldControl(field, settingsDraft[field.key]);\n    // The shared", "buildOtherControl();\n    // The shared", 1)
     if broken != js:
@@ -283,7 +289,7 @@ def test_r9_tsdb_fields_use_the_shared_field_builder() -> None:
 
 
 def test_r10_energy_step_buttons_use_the_shared_button() -> None:
-    js = _read(JS_DIR / "admin.js")
+    js = _admin_js()
     assert check_r10_energy_step_buttons(js, _read(CSS_FILE)) == []
     assert check_r10_energy_step_buttons(js.replace("'btn btn-primary energy-step-link'", "'btn btn-sm btn-primary energy-step-link'"), "")
     assert check_r10_energy_step_buttons(js, ".energy-step-link { min-height: 44px; }")

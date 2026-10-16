@@ -70,6 +70,7 @@ class StreamParser:
         self._stats = ParseStats()
         self._tail = b""
         self._magic = False
+        self._consumed = 0
 
     @property
     def stats(self) -> ParseStats:
@@ -80,13 +81,26 @@ class StreamParser:
         return len(self._buf)
 
     @property
+    def consumed_bytes(self) -> int:
+        """Bytes taken off the front of the buffer since this parser was created."""
+        return self._consumed
+
+    @property
     def bootloader_magic_seen(self) -> bool:
         return self._magic
 
     def feed(self, chunk: bytes) -> list[Frame]:
         """Append bytes and return all frames completed by them, in receive order."""
+        return [frame for frame, _ in self.feed_located(chunk)]
+
+    def feed_located(self, chunk: bytes) -> list[tuple[Frame, int]]:
+        """Like ``feed``, but each frame carries the stream offset just past its last byte.
+
+        A frame has arrived when its last byte has, so only that offset lets a caller with a
+        per-byte arrival record date the frame itself instead of the read that drained it.
+        """
         self._buf += chunk
-        frames: list[Frame] = []
+        frames: list[tuple[Frame, int]] = []
         while True:
             start = self._buf.find(START_BYTE)
             if start < 0:
@@ -113,8 +127,9 @@ class StreamParser:
                 self._discard(max(exc.pos, 1))
                 continue
             if frame is not None:
-                frames.append(frame)
+                frames.append((frame, self._consumed + end))
             del self._buf[:end]
+            self._consumed += end
 
     def _scan_unframed(self, data: bytes) -> None:
         """Search the magic only outside frames; a valid payload may carry the same byte sequence."""
@@ -129,6 +144,7 @@ class StreamParser:
         if count > 0:
             self._stats.discarded_bytes += count
             del self._buf[:count]
+            self._consumed += count
 
     def _take(self, pos: int, count: int) -> tuple[bytes, int]:
         """Read ``count`` unescaped bytes from raw offset ``pos``; return them and the new offset."""
@@ -401,9 +417,10 @@ class StreamParser:
                 # storm (the exact symptom this rate limit removes). The parser only counts and
                 # logs the per-frame detail; the receiver decides when a sustained CRC-error RATE
                 # is worth a WARNING. A real CRC failure is still never accepted as a valid frame.
-                # NOTE: recovery of the remaining mis-declared long-frame variants is still pending
-                # a raw frame captured from a currently-failing production case (new fixture in
-                # tests/fixtures/device_long_frames.hex); the recovery heuristics are unchanged here.
+                # The mis-declared long-frame variants captured so far are covered by the
+                # regression vectors in tests/fixtures/device_long_frames.hex (see
+                # tests/test_stream.py); a bad CRC that none of the recovery heuristics above can
+                # reconcile is dropped here and never accepted.
                 log.debug(
                     "Discarding frame with CRC mismatch: command=0x%02x declared_length=%d "
                     "object_id=0x%08x expected_crc=0x%04x received_crc=0x%04x",

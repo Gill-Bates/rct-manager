@@ -36,13 +36,14 @@ import time
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
-from email.utils import parsedate_to_datetime
 from itertools import pairwise
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
-from urllib.request import HTTPRedirectHandler, Request, build_opener
+from urllib.request import Request, build_opener
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from app.clock import is_aware, is_valid_iana_zone
+from app.net import SameOriginRedirectHandler, retry_after_seconds
 from app.spotmarket.base import SpotMarketConnectionError, SpotMarketNotAvailableYet, SpotMarketResponseError
 from app.spotmarket.models import (
     DEFAULT_BIDDING_ZONE,
@@ -73,7 +74,6 @@ _NEXT_DAY_PATH = urlsplit(ENERGY_CHARTS_URL).path
 # A tight retry budget for a transient 429/5xx: a few attempts, never an unbounded loop. The caller
 # runs in a thread, so a bounded sleep for Retry-After is acceptable and must stay small.
 _MAX_ATTEMPTS = 3
-_MAX_RETRY_AFTER_SECONDS = 30
 # The day-ahead feed is strictly 15-minute resolution. Every adjacent timestamp pair must be exactly
 # this far apart; a gap, a duplicate or a different resolution is a response error, never patched.
 EXPECTED_INTERVAL_SECONDS = 900
@@ -91,21 +91,8 @@ _TO_EUR_PER_KWH = {
 }
 
 
-class _SameOriginRedirectHandler(HTTPRedirectHandler):
-    """A redirect handler that refuses to leave the provider's origin.
-
-    ``urllib`` follows 30x responses by default, so even the fixed trusted URL could be bounced to
-    ``http://127.0.0.1`` or an internal host. A redirect is allowed only when the target keeps the
-    same scheme, host and port as the request; anything else (an https->http downgrade, a different
-    host or port) raises, so a redirect cannot reach an internal target.
-    """
-
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        source = urlsplit(req.full_url)
-        target = urlsplit(newurl)
-        if (target.scheme, target.hostname, target.port) != (source.scheme, source.hostname, source.port):
-            raise HTTPError(req.full_url, code, "Energy-Charts redirected to a different origin", headers, fp)
-        return super().redirect_request(req, fp, code, msg, headers, newurl)
+class _SameOriginRedirectHandler(SameOriginRedirectHandler):
+    provider_label = "Energy-Charts"
 
 
 # One opener for the whole process: it refuses cross-origin redirects and is the only path the
@@ -208,10 +195,8 @@ class EnergyChartsProvider:
             return None
         if not isinstance(value, str):
             raise SpotMarketResponseError("Energy-Charts timezone is malformed")
-        try:
-            ZoneInfo(value)
-        except (ValueError, ZoneInfoNotFoundError) as exc:
-            raise SpotMarketResponseError("Energy-Charts timezone is invalid") from exc
+        if not is_valid_iana_zone(value):
+            raise SpotMarketResponseError("Energy-Charts timezone is invalid")
         return value
 
     @staticmethod
@@ -225,7 +210,7 @@ class EnergyChartsProvider:
             moment = datetime.fromisoformat(value)
         except ValueError as exc:
             raise SpotMarketResponseError(f"Energy-Charts {field} is invalid") from exc
-        if moment.tzinfo is None or moment.tzinfo.utcoffset(moment) is None:
+        if not is_aware(moment):
             raise SpotMarketResponseError(f"Energy-Charts {field} is not timezone-aware")
         return moment
 
@@ -274,7 +259,7 @@ class EnergyChartsProvider:
                     raise SpotMarketNotAvailableYet("Energy-Charts next-day prices are not published yet") from exc
                 if exc.code == 429 or 500 <= exc.code < 600:
                     if attempt < _MAX_ATTEMPTS:
-                        self._sleep(self._retry_after_seconds(exc))
+                        self._sleep(retry_after_seconds(exc.headers.get("Retry-After") if exc.headers is not None else None))
                         continue
                     # Retry budget exhausted: a transient server/limit condition that did not clear
                     # is "temporarily no data", a connection-class failure, never fabricated prices.
@@ -287,28 +272,6 @@ class EnergyChartsProvider:
                 raise SpotMarketConnectionError(f"Energy-Charts is unreachable: {reason}") from exc
         # Unreachable: the loop either returns or raises, but keep the type checker and intent clear.
         raise SpotMarketConnectionError("Energy-Charts is unavailable")  # pragma: no cover
-
-    def _retry_after_seconds(self, exc: HTTPError) -> float:
-        """Parse a ``Retry-After`` header (delta-seconds or HTTP date), clamped to a sane bound.
-
-        A missing or unparseable value falls back to one second; an over-long or negative value is
-        clamped into ``[0, _MAX_RETRY_AFTER_SECONDS]`` so a hostile header cannot stall the thread.
-        """
-        header = exc.headers.get("Retry-After") if exc.headers is not None else None
-        if header is None:
-            return 1.0
-        header = header.strip()
-        try:
-            seconds = float(int(header))
-        except ValueError:
-            try:
-                when = parsedate_to_datetime(header)
-            except (TypeError, ValueError):
-                return 1.0
-            if when.tzinfo is None:
-                when = when.replace(tzinfo=UTC)
-            seconds = (when - datetime.now(UTC)).total_seconds()
-        return max(0.0, min(seconds, float(_MAX_RETRY_AFTER_SECONDS)))
 
     @staticmethod
     def _with_zone(
@@ -462,7 +425,7 @@ class EnergyChartsProvider:
                 moment = datetime.fromisoformat(raw)
             except ValueError as exc:
                 raise SpotMarketResponseError("Energy-Charts timestamp is not a valid ISO 8601 value") from exc
-            if moment.tzinfo is None or moment.tzinfo.utcoffset(moment) is None:
+            if not is_aware(moment):
                 raise SpotMarketResponseError("Energy-Charts timestamp is not timezone-aware")
             # Normalise to UTC so interval starts are comparable regardless of the envelope zone;
             # the instant is preserved, only the offset representation changes.

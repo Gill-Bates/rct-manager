@@ -31,6 +31,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.errors import ConfigError
 from app.export.endpoint import Endpoint, resolve_endpoint
+from app.hostnames import strip_ipv6_brackets
+from app.limits import MAX_POWER_W
+from app.weather.geocoding import GeocodingProvider
 
 log = logging.getLogger(__name__)
 _WARNED: set[str] = set()
@@ -48,8 +51,10 @@ MAX_PERIODIC_METRICS = 64
 DISPATCH_RESTORE_WRITES = 5
 SYSTEM_READBACK_TIMEOUT_SECONDS = 2.0  # readback bound while the shutdown restore runs
 DISPLAY_NAME_MAX = 64
-_DEVICE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
-_SECRET_FIELDS = frozenset({"influxdb_token", "questdb_password"})
+DEVICE_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
+_SECRET_FIELDS = frozenset(
+    {"hmac_secret", "admin_secret", "influxdb_token", "questdb_password"}
+)
 _MEASUREMENT = r"^[A-Za-z_][A-Za-z0-9_]{0,63}$"
 _PROJECT_DIR = Path(__file__).resolve().parent.parent
 
@@ -123,18 +128,16 @@ class DeviceEntry(BaseModel):
     @field_validator("device_id")
     @classmethod
     def _check_id(cls, value: str) -> str:
-        if not _DEVICE_ID.fullmatch(value):
+        if not DEVICE_ID_PATTERN.fullmatch(value):
             raise ValueError("device id must match [A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
         return value
 
     @field_validator("host")
     @classmethod
     def _check_host(cls, value: str) -> str:
-        value = value.strip()
-        if value.startswith("[") and value.endswith("]"):
-            # Brackets are URL syntax for an IPv6 literal, not part of the socket host; strip them
-            # here so text and structured/admin config agree on one canonical value.
-            value = value[1:-1]
+        # Brackets are URL syntax for an IPv6 literal, not part of the socket host; strip them so
+        # text and structured/admin config agree on one canonical value.
+        value = strip_ipv6_brackets(value)
         if not value or any(c.isspace() for c in value):
             raise ValueError("host must not be empty or contain whitespace")
         return value
@@ -241,6 +244,9 @@ OPERATOR_FIELDS = frozenset(
         "dispatch_db_path",
         "dispatch_max_charge_power_w",
         "dispatch_max_discharge_power_w",
+        "dispatch_usable_battery_capacity_wh",
+        "dispatch_live_charge_limit_max_age_seconds",
+        "geocoding_provider",
         "db_type",
         "metrics_export_enabled",
         "metrics_export_interval_seconds",
@@ -365,6 +371,9 @@ class Settings(BaseSettings):
     max_fresh_metrics_per_request: int = Field(8, ge=1, le=64)
     fresh_periodic_mode: FreshPeriodicMode = FreshPeriodicMode.OBSERVE
     enable_vendor_diagnostics: bool = False
+    # Inverter day-history backfill: unit and day semantics of logger.day_eload_log_ts are unverified
+    # on hardware, so it stays off until verified. Internal switch, not an operator setting.
+    consumption_daily_backfill_enabled: bool = False
     problem_type_base_uri: str = "urn:device-api:problem"
     correlation_id_header: str = "X-Request-Id"
     foreign_access_frame_threshold: int = Field(10, ge=1, le=10_000)
@@ -376,8 +385,18 @@ class Settings(BaseSettings):
     # Battery dispatch. Hardware-dependent values have no guessed default and fail closed: the
     # sign conventions and the external-control strategy code are no longer settings but fields of
     # a per-device capability record, verified on that very device (app/dispatch/capabilities.py).
-    dispatch_max_charge_power_w: float | None = Field(None, gt=0, le=50_000)
-    dispatch_max_discharge_power_w: float | None = Field(None, gt=0, le=50_000)
+    dispatch_max_charge_power_w: float | None = Field(None, gt=0, le=MAX_POWER_W)
+    dispatch_max_discharge_power_w: float | None = Field(None, gt=0, le=MAX_POWER_W)
+    # Usable battery capacity in watt-hours, needed by the Dry-Run optimizer to translate SoC into
+    # energy. There is no reliable usable-capacity register on this hardware, so there is NO guessed
+    # default: without a capacity the Dry-Run plan reports battery_state_unavailable rather than
+    # inventing one. It does not affect battery dispatch, which never reads it.
+    # DEPRECATED as a source of truth (P2-8): capacity is now PER-DEVICE (DeviceLimits.usable_capacity_wh,
+    # set via the dispatch API) because an install may run several batteries with different usable
+    # capacities. This global survives ONLY as a one-time startup seed for a device that has no
+    # per-device capacity yet (see _seed_limits); the per-device value is authoritative from then on
+    # and a device with neither still fails closed. Do not rely on it for multi-device installs.
+    dispatch_usable_battery_capacity_wh: float | None = Field(None, gt=0, le=1_000_000)
     dispatch_min_soc: float = Field(5.0, ge=0, le=100)
     dispatch_max_soc: float = Field(95.0, ge=0, le=100)
     dispatch_grid_import_reserve_w: float = Field(100.0, ge=0, le=500)
@@ -388,6 +407,12 @@ class Settings(BaseSettings):
     dispatch_telemetry_timeout_seconds: float = Field(15.0, ge=5, le=120)
     dispatch_control_telemetry_max_age_seconds: float = Field(5.0, ge=1, le=15)
     dispatch_soc_telemetry_max_age_seconds: float = Field(15.0, ge=5, le=60)
+    # Maximum age of a live charge-power limit before it is treated as absent and the configured
+    # static device limit governs again. The Live Charge Envelope's RCT producer IS wired in
+    # app_factory but is unconditionally inert on this build (it returns no limit until a per-device
+    # register verification exists), so this knob is operator-tunable now and takes effect only once
+    # a producer actually emits a verified+fresh limit.
+    dispatch_live_charge_limit_max_age_seconds: float = Field(5.0, ge=1, le=15)
     dispatch_max_operation_duration_seconds: float = Field(21_600.0, ge=60, le=86_400)
     # The shorter cap, in force only while a device's engineering mode is *active*, i.e. while
     # dispatch runs on hardware that is not verified for the requested mode.
@@ -399,6 +424,28 @@ class Settings(BaseSettings):
     periodic_metrics: list[str] = Field(default_factory=list, max_length=MAX_PERIODIC_METRICS)
     periodic_interval_seconds: int = Field(30, ge=1, le=3600)
 
+    # Charging strategy (dynamic charging plan). Code switches only, NOT in OPERATOR_FIELDS: these
+    # are set programmatically, never via environment, following the enable_periodic_reads
+    # precedent above. The optimizer and planning service consume these; automatic dispatch to the
+    # Energy Manager command path stays OFF until an explicit, separate release.
+    plan_horizon_hours: float = Field(24.0, gt=0, le=48)
+    plan_recompute_interval_seconds: float = Field(300.0, ge=30, le=3600)
+    plan_ttl_seconds: float = Field(900.0, gt=0, le=86_400)
+    # spot_max_age_seconds / solar_max_age_seconds no longer gate plan availability: persisted
+    # spot and solar forecasts are judged by horizon coverage in PlanningService._stale_or_missing.
+    # These values remain a defensive upper bound that clamps a plan's valid_until via _with_expiry.
+    spot_max_age_seconds: float = Field(3600.0, gt=0, le=86_400)
+    solar_max_age_seconds: float = Field(3600.0, gt=0, le=86_400)
+    consumption_max_age_seconds: float = Field(3600.0, gt=0, le=86_400)
+    battery_max_age_seconds: float = Field(300.0, gt=0, le=86_400)
+    cheap_percentile: float = Field(25.0, ge=0, le=100)
+    expensive_percentile: float = Field(75.0, ge=0, le=100)
+    baseline_household_load_w: float = Field(400.0, ge=0, le=50_000)
+    battery_usable_capacity_wh: float = Field(10_000.0, gt=0, le=1_000_000)
+    # Automatic hardware dispatch gate: default OFF. Must never be enabled without a separate
+    # release and the full real-device verification checklist.
+    enable_automatic_dispatch: bool = False
+
     # Metrics endpoint
     # Factory default off: a fresh install persists this on first bootstrap, so /metrics answers 404
     # and the GUI toggle shows off until an operator opts in. An existing persisted value is kept.
@@ -408,6 +455,11 @@ class Settings(BaseSettings):
     metrics_exposed_names: list[str] = Field(default_factory=list, max_length=256)
     metrics_rate_limit_requests: int = Field(120, ge=1, le=10_000)
     metrics_rate_limit_window_seconds: int = Field(60, ge=1, le=3600)
+
+    # Which source resolves Weather-tab location searches. Photon (OpenStreetMap, no key, no
+    # registration) is the default international search; Open-Meteo is a legacy/alternative general
+    # place search. Neither needs a secret, so there is no geocoding credential here.
+    geocoding_provider: GeocodingProvider = GeocodingProvider.PHOTON
 
     # Push export (InfluxDB 2 / QuestDB OSS); disabled while DB_TYPE is unset, or while this is False
     db_type: DbType | None = None
@@ -511,6 +563,11 @@ class Settings(BaseSettings):
             )
         if self.dispatch_min_soc >= self.dispatch_max_soc:
             raise ValueError("DISPATCH_MIN_SOC must be smaller than DISPATCH_MAX_SOC")
+        if self.cheap_percentile >= self.expensive_percentile:
+            raise ValueError(
+                f"CHEAP_PERCENTILE ({self.cheap_percentile}) must be smaller than "
+                f"EXPENSIVE_PERCENTILE ({self.expensive_percentile})"
+            )
         if self.dispatch_max_operation_duration_engineering_seconds > self.dispatch_max_operation_duration_seconds:
             raise ValueError(
                 f"DISPATCH_MAX_OPERATION_DURATION_ENGINEERING_SECONDS "
@@ -637,7 +694,7 @@ class Settings(BaseSettings):
 
     def effective(self) -> dict[str, Any]:
         """Loggable view of the configuration."""
-        return self.model_dump(mode="json", exclude=_SECRET_FIELDS | {"hmac_secret", "admin_secret"})
+        return self.model_dump(mode="json", exclude=set(_SECRET_FIELDS))
 
 
 def format_validation_error(exc: ValidationError) -> str:
@@ -656,21 +713,34 @@ def format_validation_error(exc: ValidationError) -> str:
     return "\n".join(lines)
 
 
+def parse_env_text(text: str) -> dict[str, str]:
+    """Parse simple key=value format from text; skip blank lines and comments."""
+    result = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" in line:
+            key, _, value = line.partition("=")
+            result[key.strip()] = value.strip()
+    return result
+
+
+# A key=value settings file is tiny; this cap is generous but bounds a hostile or runaway file so a
+# single read cannot exhaust memory (mirrors _MAX_RESPONSE_BYTES in app/weather/open_meteo.py).
+_MAX_ENV_FILE_BYTES = 1 * 1024 * 1024
+
+
 def parse_env_file(path: Path) -> dict[str, str]:
     """Parse simple key=value format from a file; skip blank lines and comments."""
-    result = {}
     try:
         with open(path, encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith("#"):
-                    continue
-                if "=" in line:
-                    key, _, value = line.partition("=")
-                    result[key.strip()] = value.strip()
+            text = f.read(_MAX_ENV_FILE_BYTES + 1)
+        if len(text) > _MAX_ENV_FILE_BYTES:
+            return {}  # an over-cap file cannot be a valid settings file; same fail-soft as an OSError
+        return parse_env_text(text)
     except (OSError, UnicodeError):
-        pass
-    return result
+        return {}
 
 
 def warn_ignored_settings(env_file: Path | str | None = None, environ: Mapping[str, str] | None = None) -> None:

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 #
-# app/allowlist.py
+# app/security/allowlist.py
 # Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
 #
 
@@ -43,7 +43,7 @@ class AllowlistEntry(BaseModel):
 
     @model_validator(mode="after")
     def _check_range(self) -> Self:
-        if self.data_type is DataType.STRUCT:
+        if self.data_type in (DataType.STRUCT, DataType.TIMESERIES):
             raise ValueError(f"{self.data_type.value} cannot be approved for writing")
         if (
             self.data_type not in (DataType.BOOL, DataType.STRING)
@@ -125,7 +125,8 @@ class Allowlist:
         if reg.data_type is not entry.data_type:
             problems.append(f"{where}: data_type differs from the object registry")
         if not reg.writable:
-            problems.append(f"{where}: metric is not writable in the object registry")
+            hint = "; it is a read-only history series, remove it from the allowlist" if reg.is_compound else ""
+            problems.append(f"{where}: metric is not writable in the object registry{hint}")
         if reg.is_action and (not entry.allowed_values or entry.minimum is not None or entry.maximum is not None):
             problems.append(f"{where}: an action variable needs an explicit list of allowed_values and no range")
         return problems

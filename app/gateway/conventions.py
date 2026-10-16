@@ -42,6 +42,25 @@ class RctGridPowerConvention:
 
 SocUnit = Literal["ratio", "percent"]
 
+# The object catalog declares battery_soc as a ratio; both reading adapters convert by this unit
+# (pinned by tests/test_energy_readings.py).
+BATTERY_SOC_UNIT: SocUnit = "ratio"
+
+
+def finite_sample_value(value: object) -> float | None:
+    """A cached sample value as float, or ``None`` when not a finite non-bool number."""
+    if isinstance(value, bool) or not isinstance(value, int | float) or not math.isfinite(value):
+        return None
+    return float(value)
+
+
+def battery_business_watts(convention: RctBatteryPowerConvention, raw_watts: float) -> float:
+    """Business convention: positive discharges, negative charges, zero rests."""
+    setpoint = convention.setpoint(raw_watts)
+    return {PowerDirection.DISCHARGE: setpoint.watts, PowerDirection.CHARGE: -setpoint.watts}.get(
+        setpoint.direction, 0.0
+    )
+
 
 def soc_percent(value: float, unit: SocUnit) -> float:
     """Convert a battery-SoC reading to percent using the catalog-declared unit, never magnitude.

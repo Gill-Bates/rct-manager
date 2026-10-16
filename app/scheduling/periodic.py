@@ -50,6 +50,7 @@ class PeriodicManager:
         self._serializer = serializer
         self._key = device_key
         self._object_ids = list(dict.fromkeys(object_ids))  # one request per object id
+        self._pending_ids: list[int] = []  # added at runtime; merged by the next setup round
         self._interval = interval_seconds
         self._clock = clock
         self._epoch = -1
@@ -103,6 +104,22 @@ class PeriodicManager:
     def object_ids(self) -> tuple[int, ...]:
         return tuple(self._object_ids)
 
+    def add_object_ids(self, object_ids: Sequence[int]) -> bool:
+        """Queue more objects for registration; True when any were new (room permitting).
+
+        The next ensure() runs a full setup round on the current connection, so the rollback
+        semantics of that round apply to the added objects as well.
+        """
+        known = set(self._object_ids) | set(self._pending_ids)
+        new = [o for o in dict.fromkeys(object_ids) if o not in known]
+        room = MAX_PERIODIC_PER_DEVICE - len(known)
+        if len(new) > room:
+            log.warning("Periodic set is full (%d); %d added object(s) not registered", MAX_PERIODIC_PER_DEVICE,
+                        len(new) - max(room, 0))
+            new = new[: max(room, 0)]
+        self._pending_ids.extend(new)
+        return bool(new)
+
     def _pas_write(self, seconds: int, origin: TransactionOrigin) -> TransactionRequest:
         payload = encode_value(DataType.UINT32, seconds)
         frame = make_frame(self._key.network_id, Command.WRITE, PAS_PERIOD_OBJECT_ID, payload)
@@ -114,6 +131,7 @@ class PeriodicManager:
         """(Re-)register when the connection changed since the last setup."""
         if (
             self.available
+            and not self._pending_ids
             and self._endpoint.state is EndpointState.CONNECTED
             and self._endpoint.connection_epoch == self._epoch
         ):
@@ -188,6 +206,9 @@ class PeriodicManager:
         self.available = False
 
     async def setup(self) -> bool:
+        if self._pending_ids:
+            self._object_ids.extend(self._pending_ids)
+            self._pending_ids.clear()
         self._endpoint.unregister_all_periodic(self._key)
         self.available, self.registrations = False, 0
         self._registered.clear()
@@ -222,9 +243,7 @@ class PeriodicManager:
                 if self._endpoint.connection_epoch != epoch:
                     # The connection was replaced mid-registration: registrations already made on it
                     # are gone, and any made here belong to the old epoch, not the live one.
-                    self._endpoint.unregister_all_periodic(self._key)
-                    self._registered.clear()
-                    self.registrations = 0
+                    self._rollback_registrations()
                     self.last_failure = "connection replaced during registration"
                     return False
                 # Success means a value frame for this object id was actually observed: the device
@@ -238,9 +257,7 @@ class PeriodicManager:
                         # back now: every registration made on this (now dead) connection is gone,
                         # and the round must restart from scratch on a fresh epoch, never mixing
                         # registrations across TCP epochs.
-                        self._endpoint.unregister_all_periodic(self._key)
-                        self._registered.clear()
-                        self.registrations = 0
+                        self._rollback_registrations()
                         self.last_failure = "connection lost during registration"
                         return False
                     log.warning("Periodic registration failed: no value frame for object 0x%08x", object_id)

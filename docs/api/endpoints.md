@@ -17,6 +17,7 @@
 | DELETE | `/api/v1/devices/{device_id}/battery/dispatch` | read/write | Stop dispatch and restore the previous inverter settings |
 | GET | `/api/v1/devices/{device_id}/energy` | read/write | Energy Manager state, readings, target window and action availability |
 | POST | `/api/v1/devices/{device_id}/energy/command` | read/write | One business action: charge, discharge, hold, auto |
+| GET | `/api/v1/devices/{device_id}/plan` | yes | Current read-only charging plan; `available=false` when none is valid |
 | GET | `/api/v1/vendor/rct/objects`, `/transports`, `/devices/{device_id}/slaves` | read/write | RCT diagnostics |
 
 `/metrics` (Prometheus) and `/api/v1/metrics` (metric list) are different on
@@ -27,6 +28,25 @@ purpose.
     `ENABLE_VENDOR_DIAGNOSTICS` defaults to off and is not an operator
     setting. Likewise the write, dispatch and Energy Manager routes answer 404 `write_disabled`
     while write access is off in the GUI; switching it takes effect at once.
+
+## Charging plan
+
+`GET /api/v1/devices/{device_id}/plan` never sends a command. Besides the slots and `data_age`,
+a plan carries two optional, stable enum fields that tell a consumer how far the consumption
+input can be trusted. Both are absent when the plan has no such information, and new values
+would be additive.
+
+| Field | Value | Meaning |
+| --- | --- | --- |
+| `forecast_basis` | `bootstrap_baseline` | No usable consumption history; a configured flat baseline load |
+| | `history_fallback` | Thin history; a median of the stored history |
+| | `adaptive_history` | Sufficient history; the adaptive profile |
+| `forecast_confidence` | `low` | Baseline or fallback forecast (`bootstrap_baseline`, `history_fallback`) |
+| | `normal` | Sufficient, well-covered history (`adaptive_history`) |
+
+```json
+{"available": true, "forecast_basis": "history_fallback", "forecast_confidence": "low", "...": "..."}
+```
 
 ## Reading values
 
@@ -130,3 +150,12 @@ curl -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/jso
 - The status carries `mode` and `accepts_commands_from`; `armed` is derived (`mode != "off"`). The expert
   endpoint `/battery/dispatch` above needs no mode.
 - `409 energy_action_unavailable` - the action is not available right now, for example after its register approvals were revoked.
+
+## Daily consumption
+
+`GET /api/v1/devices/{device_id}/consumption/day?date=YYYY-MM-DD` and
+`GET /api/v1/devices/{device_id}/consumption/days?from=YYYY-MM-DD&to=YYYY-MM-DD` (at most 60 days)
+return the resolved consumption per local calendar day of the site time zone (reported as `timezone`).
+They read the local store only and never access the device. `source` is `local_measured`
+(15-minute profile available), `inverter_history` (day total only, `profile_available` false) or
+`unavailable` (`energy_wh` is null; the running day is always unavailable).

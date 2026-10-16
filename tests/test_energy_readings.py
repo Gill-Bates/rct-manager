@@ -16,16 +16,16 @@ from pathlib import Path
 
 import pytest
 
-from app.allowlist import Allowlist
-from app.cache import CacheFreshness, MemoryCache
 from app.catalog.registry import RegistryCatalog
 from app.dispatch.capabilities import (
     CapabilityName,
     CapabilityRecord,
     CapabilityRegistry,
 )
+from app.gateway.cache import CacheFreshness, MemoryCache
 from app.gateway.energy_readings import RctEnergyReadings
 from app.gateway.rct import RctGateway
+from app.security.allowlist import Allowlist
 from tests.conftest import ManualClock
 
 CATALOG = RegistryCatalog.from_file(
@@ -311,3 +311,30 @@ def test_a_resting_battery_reads_as_zero() -> None:
     rct = CountingGateway(ManualClock())
     rct.put("battery_power", 0.0)
     assert readings(rct, battery_discharge_positive=False).readings("main").battery_power_w.value == 0.0
+
+
+@pytest.mark.parametrize("bad", [True, float("inf"), float("-inf"), float("nan"), "0.5"])
+def test_an_unusable_soc_cache_value_is_absent(bad: object) -> None:
+    rct = CountingGateway(ManualClock())
+    rct.put("battery_soc", bad)
+    assert readings(rct).readings("main").battery_soc_percent.value is None
+
+
+@pytest.mark.parametrize(
+    ("discharge_positive", "raw", "expected"),
+    [(True, 5.0, 5.0), (True, -5.0, -5.0), (False, 5.0, -5.0), (False, -5.0, 5.0), (True, 0.0, 0.0), (False, 0.0, 0.0)],
+)
+def test_battery_business_watts_is_discharge_positive(discharge_positive: bool, raw: float, expected: float) -> None:
+    from app.gateway.conventions import RctBatteryPowerConvention, battery_business_watts
+
+    assert battery_business_watts(RctBatteryPowerConvention(discharge_positive), raw) == expected
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [(1, 1.0), (2.5, 2.5), (True, None), (float("nan"), None), (float("inf"), None), ("1", None), (None, None)],
+)
+def test_finite_sample_value_accepts_only_finite_numbers(value: object, expected: float | None) -> None:
+    from app.gateway.conventions import finite_sample_value
+
+    assert finite_sample_value(value) == expected

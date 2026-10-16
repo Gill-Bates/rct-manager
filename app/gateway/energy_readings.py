@@ -16,24 +16,20 @@ entry yields ``DeviceReading(None, None, stale=True)``: these figures are adviso
 must not be able to block a stop command.
 """
 
-import math
-
-from app.cache import CacheFreshness
 from app.dispatch.capabilities import CapabilityName, CapabilityRegistry
-from app.dispatch.models import PowerDirection
 from app.energy.readings import ABSENT, DeviceReading, EnergyReadings
+from app.gateway.cache import CacheFreshness
 from app.gateway.conventions import (
+    BATTERY_SOC_UNIT,
     RctBatteryPowerConvention,
     RctGridPowerConvention,
+    battery_business_watts,
+    finite_sample_value,
     soc_percent,
 )
 from app.gateway.rct import RctGateway
 
 _BATTERY_SOC = "battery_soc"
-# The object catalog declares battery_soc's unit as "ratio"; soc_percent converts by this declared
-# unit instead of guessing from magnitude. A catalog change to this register's unit must be
-# mirrored here (pinned by tests/test_energy_readings.py).
-_BATTERY_SOC_UNIT = "ratio"
 _GRID_POWER = "grid_power"
 _SOLAR_POWER = ("solar_a_power", "solar_b_power")
 _HOUSE_LOAD = "household_load_power"
@@ -65,10 +61,11 @@ class RctEnergyReadings:
         if sample is None:
             return ABSENT
         value, age, freshness = sample
-        if isinstance(value, bool) or not isinstance(value, int | float) or not math.isfinite(value):
+        number = finite_sample_value(value)
+        if number is None:
             return ABSENT
         # GRACE is a usable but ageing figure, and the published age says how ageing it is.
-        return DeviceReading(float(value), age, freshness is not CacheFreshness.FRESH)
+        return DeviceReading(number, age, freshness is not CacheFreshness.FRESH)
 
     def _soc(self, device_id: str) -> DeviceReading:
         reading = self._sample(device_id, _BATTERY_SOC)
@@ -78,7 +75,7 @@ class RctEnergyReadings:
         # declared unit, not the value's magnitude. An unexpected unit yields an absent advisory
         # figure rather than an exception, because this status path must never raise.
         try:
-            percent = soc_percent(reading.value, _BATTERY_SOC_UNIT)
+            percent = soc_percent(reading.value, BATTERY_SOC_UNIT)
         except ValueError:
             return ABSENT
         return DeviceReading(percent, reading.age_seconds, reading.stale)
@@ -96,11 +93,7 @@ class RctEnergyReadings:
         if reading.value is None:
             return reading
         record = self._capabilities.record(device_id, CapabilityName.BATTERY_POWER_SIGN)
-        setpoint = RctBatteryPowerConvention(record.battery_discharge_positive).setpoint(reading.value)
-        # Business convention: positive discharges, negative charges, zero rests.
-        watts = {PowerDirection.DISCHARGE: setpoint.watts, PowerDirection.CHARGE: -setpoint.watts}.get(
-            setpoint.direction, 0.0
-        )
+        watts = battery_business_watts(RctBatteryPowerConvention(record.battery_discharge_positive), reading.value)
         return DeviceReading(watts, reading.age_seconds, reading.stale)
 
     def _pv(self, device_id: str) -> DeviceReading:

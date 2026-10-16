@@ -4,10 +4,11 @@
 # Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
 #
 
-"""``create_app``: the only place where ports are bound to adapters (design document, section "Lebenszyklus")."""
+"""``create_app``: the only place where ports are bound to adapters (design document, lifecycle section)."""
 
 import asyncio
 import contextlib
+import functools
 import logging
 from collections.abc import AsyncIterator, Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass, field, replace
@@ -15,7 +16,6 @@ from datetime import timedelta
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, Request
-from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.security import HTTPBearer
 from fastapi.staticfiles import StaticFiles
@@ -23,25 +23,27 @@ from fastapi.staticfiles import StaticFiles
 from app import __version__
 from app.admin.api import (
     DEVICE_CARD_METRIC_NAMES,
-    RCT_MODULE_SN_SLOTS,
+    SECOND_TOWER_METRIC_NAMES,
     _settings_persisted,
+    second_tower_confirmed,
 )
 from app.admin.api import router as admin_router
 from app.admin.dispatch_api import router as admin_dispatch_router
 from app.admin.energy_api import router as admin_energy_router
 from app.admin.energy_verification import router as admin_energy_verification_router
+from app.admin.forecast_refresh import drain_store_threads, run_solar_refresh_loop, run_spot_market_refresh_loop
 from app.admin.store import AdminStore
 from app.admin.ui import install_ui
-from app.allowlist import Allowlist
 from app.api.body_limit import BodyLimitMiddleware
-from app.api.docs_nav import DOCS_STATIC_ROOT, SIDEBAR_HTML
+from app.api.docs_nav import DOCS_PAGE, DOCS_STATIC_ROOT
 from app.api.middleware import RequestContextMiddleware
 from app.api.problems import ErrorCode, ProblemError, register_handlers
 from app.api.restart import BackgroundRestart
 from app.api.routers import catalog as catalog_router
+from app.api.routers import consumption as consumption_router
 from app.api.routers import dispatch, energy, health, metrics, values, vendor, writes
-from app.api.runtime import Runtime
-from app.cache import MemoryCache
+from app.api.routers import plan as plan_router
+from app.api.runtime import READY_STATES, Runtime
 from app.catalog.base import is_numeric
 from app.catalog.registry import RegistryCatalog
 from app.clock import Clock, SystemClock
@@ -57,7 +59,10 @@ from app.dispatch.store import DispatchStore
 from app.energy.manager import EnergyManager
 from app.energy.models import EnergyMode, ModeRecord
 from app.errors import ConfigError, DeviceApiError, ReconfigurationBuildError
+from app.gateway.battery_inventory import RCT_MODULE_SN_SLOTS, ModuleCountVerifiedCapacity
+from app.gateway.cache import MemoryCache
 from app.gateway.energy_readings import RctEnergyReadings
+from app.gateway.live_charge_limit import RctLiveChargeLimitProvider
 from app.gateway.rct import DeviceBinding, RctGateway
 from app.gateway.rct_dispatch import RctDispatchGateway
 from app.observability.event_hub import EventHub
@@ -65,6 +70,7 @@ from app.observability.exporter import DeviceView, EndpointView, MetricsExporter
 from app.observability.log_stream import TsdbLogHandler, register_tsdb_log_type
 from app.observability.names import build_metric_names, metric_help
 from app.observability.stats import ServiceCounters
+from app.optimizer.runtime_sources import build_runtime_planning_service
 from app.protocol.types import StructKind
 from app.scheduling.budget import WorkBudget
 from app.scheduling.heartbeat import Heartbeat
@@ -72,6 +78,7 @@ from app.scheduling.periodic import MAX_PERIODIC_PER_DEVICE, PeriodicManager
 from app.scheduling.retry import RetryConfig
 from app.scheduling.serializer import AccessSerializer
 from app.scheduling.shutdown import ShutdownCoordinator
+from app.security.allowlist import Allowlist
 from app.security.client_ip import ClientIpResolver
 from app.security.dependencies import (
     SecurityContext,
@@ -81,15 +88,18 @@ from app.security.dependencies import (
 from app.security.ratelimit import RateLimiter
 from app.security.tokens import TokenStore
 from app.spotmarket.energy_charts import EnergyChartsProvider
-from app.spotmarket.metadata import BiddingZoneMetadataCache
+from app.spotmarket.metadata import BiddingZoneMetadataCache, zone_catalog_persistence
 from app.spotmarket.models import SpotMarketConfig
-from app.spotmarket.snapshot_cache import SpotSnapshotCache
 from app.transport.endpoint import (
     Connector,
     EndpointConfig,
     EndpointState,
     TransportEndpoint,
 )
+from app.weather.geocoding import GeocodingProvider, OpenMeteoGeocoder, PhotonGeocoder
+from app.weather.models import WeatherConfig
+from app.weather.open_meteo import OpenMeteoProvider
+from app.weather.timezone import TimezoneResolver
 
 log = logging.getLogger(__name__)
 _PERIODIC_CHECK_SECONDS = 10.0
@@ -448,9 +458,12 @@ def _build(
 # are static, so they are read instead by a separate, bounded, long-cached inventory read
 # (RctGateway.read_module_inventory, driven from _inventory_loop) that feeds the SAME cache
 # devices() reads via cached_reading()/read_failed(). This keeps the periodic default at ~46 reads.
-_DASHBOARD_METRIC_NAMES = (
-    *DEVICE_CARD_METRIC_NAMES,
-)
+#
+# The second tower's live metrics (SECOND_TOWER_METRIC_NAMES) are not pinned here either: a
+# single-tower inverter may not answer them, and an unanswered READ drops the connection. They join
+# the periodic set at runtime via _activate_second_tower once the stabilized module inventory
+# confirms the tower.
+_DASHBOARD_METRIC_NAMES = tuple(n for n in DEVICE_CARD_METRIC_NAMES if n not in SECOND_TOWER_METRIC_NAMES)
 
 # The module_sn slots read out-of-band by the inventory loop. Seven slots is the catalog array size
 # (RCT_MODULE_SN_SLOTS), not a module limit; both tower prefixes are read so devices() can classify
@@ -478,6 +491,9 @@ _ENERGY_METRIC_NAMES = (
     "battery_soc", "grid_power", "solar_a_power", "solar_b_power", "household_load_power",
     "battery_power",
 )  # fmt: skip
+# Cumulative load counters: the consumption historian differences them to recover the energy used
+# while this application was stopped, so they keep being polled when the selection narrows.
+_CONSUMPTION_COUNTER_NAMES = ("energy_e_load_total", "energy_e_load_day")
 
 
 def _with_energy_metric_names(periodic_names: list[str], catalog: RegistryCatalog) -> list[str]:
@@ -490,7 +506,9 @@ def _with_energy_metric_names(periodic_names: list[str], catalog: RegistryCatalo
     """
     if not periodic_names:
         return periodic_names
-    extra = [n for n in _ENERGY_METRIC_NAMES if catalog.exists(n) and n not in periodic_names]
+    extra = [
+        n for n in (*_ENERGY_METRIC_NAMES, *_CONSUMPTION_COUNTER_NAMES) if catalog.exists(n) and n not in periodic_names
+    ]
     shortfall = len(periodic_names) + len(extra) - MAX_PERIODIC_PER_DEVICE
     names = list(periodic_names)
     if shortfall > 0:
@@ -541,13 +559,37 @@ def _effective_periodic_names(
 
 
 def _seed_limits(settings: Settings, stored: dict[str, DeviceLimits]) -> dict[str, DeviceLimits]:
-    """Stored operator limits win; the environment only seeds a device that has no record yet."""
+    """Stored operator limits win; the environment only seeds a device that has no record yet.
+
+    Usable capacity is per-device (P2-8): an install may run several batteries with different usable
+    capacities, so a single global capacity cannot be the long-term source of truth. The legacy
+    global ``dispatch_usable_battery_capacity_wh`` is kept ONLY as a one-time seed: a device that has
+    no per-device capacity yet is seeded from it (logged) so an existing single-device install keeps
+    working without reconfiguration; from then on the per-device value is authoritative and wins. A
+    device whose stored record already carries a capacity is never overwritten, and the global is
+    never applied on top of a device that already has a different per-device capacity set.
+    """
+    legacy_capacity = settings.dispatch_usable_battery_capacity_wh
     if settings.dispatch_max_charge_power_w is not None and settings.dispatch_max_discharge_power_w is not None:
         for device in settings.devices:
             stored.setdefault(
                 device.device_id,
-                DeviceLimits(settings.dispatch_max_charge_power_w, settings.dispatch_max_discharge_power_w),
+                DeviceLimits(
+                    settings.dispatch_max_charge_power_w,
+                    settings.dispatch_max_discharge_power_w,
+                    usable_capacity_wh=legacy_capacity,
+                ),
             )
+    if legacy_capacity is not None:
+        for device_id, limits in stored.items():
+            if limits.usable_capacity_wh is None:
+                log.warning(
+                    "Seeding per-device usable battery capacity for %s from the legacy global "
+                    "DISPATCH_USABLE_BATTERY_CAPACITY_WH=%s; set it per device via the dispatch API, "
+                    "the per-device value is authoritative from then on",
+                    device_id, legacy_capacity,
+                )
+                stored[device_id] = replace(limits, usable_capacity_wh=legacy_capacity)
     return stored
 
 
@@ -637,7 +679,22 @@ async def _refresh_loop(gateway: RctGateway, device_id: str, clock: Clock) -> No
             log.exception("Periodic value refresh failed")
 
 
-async def _inventory_loop(gateway: RctGateway, device_id: str, clock: Clock) -> None:
+def _activate_second_tower(runtime: Runtime, manager: PeriodicManager, device_id: str) -> bool:
+    """Add the second tower's live metrics to the periodic set once its topology is confirmed.
+
+    Returns True when the tower is confirmed (the caller then stops asking), False while it is not.
+    """
+    if not second_tower_confirmed(runtime, device_id):
+        return False
+    ids = [runtime.catalog.object_entry(n).object_id for n in SECOND_TOWER_METRIC_NAMES if runtime.catalog.exists(n)]
+    if manager.add_object_ids(ids):
+        log.info("Second battery tower confirmed on %s: registering its live metrics", device_id)
+    return True
+
+
+async def _inventory_loop(
+    gateway: RctGateway, device_id: str, clock: Clock, activate_second_tower: Callable[[], bool] | None = None
+) -> None:
     """Drive the bounded initial discovery of the static module-serial inventory, then idle.
 
     Module serials are static, so read_module_inventory() settles each slot exactly once (answered
@@ -653,6 +710,12 @@ async def _inventory_loop(gateway: RctGateway, device_id: str, clock: Clock) -> 
             await gateway.read_module_inventory(device_id, _MODULE_INVENTORY_NAMES)
         except Exception:
             log.exception("Module inventory read failed")
+        if activate_second_tower is not None:
+            try:
+                if activate_second_tower():
+                    activate_second_tower = None  # one-way: the periodic set keeps the metrics
+            except Exception:
+                log.exception("Second-tower detection failed")
         await clock.sleep(_INVENTORY_CHECK_SECONDS)
 
 
@@ -693,6 +756,7 @@ def _lifespan(
         periodic_tasks: list[asyncio.Task] = []
         refresh_tasks: list[asyncio.Task] = []
         dispatch_tasks: list[asyncio.Task] = []
+        planning_tasks: list[asyncio.Task] = []
         connects: dict[int, asyncio.Task] = {}
         # Set first thing in the teardown: runtime.shutting_down() only turns true once the shutdown
         # coordinator runs, and a reconfiguration must stop starting work before that as well.
@@ -731,7 +795,7 @@ def _lifespan(
 
         def start_export_task() -> None:
             nonlocal export_task
-            if runtime.shutting_down():
+            if is_closing():
                 return
             if (
                 runtime.settings.db_type is not None
@@ -751,25 +815,81 @@ def _lifespan(
                 task = asyncio.create_task(_periodic_loop(manager, runtime.clock))
                 periodic_tasks.append(task)
                 tasks.append(task)
-            for device_id in parts.refresh_devices:
+            for device_id, manager in zip(parts.refresh_devices, parts.periodic, strict=True):
                 task = asyncio.create_task(_refresh_loop(gateway, device_id, runtime.clock))
                 refresh_tasks.append(task)
                 tasks.append(task)
-                inv_task = asyncio.create_task(_inventory_loop(gateway, device_id, runtime.clock))
+                inv_task = asyncio.create_task(_inventory_loop(
+                    gateway, device_id, runtime.clock,
+                    functools.partial(_activate_second_tower, runtime, manager, device_id),
+                ))
                 refresh_tasks.append(inv_task)  # same per-device lifecycle as the refresh loop
                 tasks.append(inv_task)
+
+        def start_planning_tasks() -> None:
+            if store is None:
+                app.state.planning_services = {}
+                return
+            services = {
+                device_id: build_runtime_planning_service(
+                    runtime, store, device_id,
+                    lambda: app.state.spotmarket_config,
+                    lambda: app.state.weather_config,
+                )
+                for device_id in runtime.devices
+            }
+            app.state.planning_services = services
+            for service in services.values():
+                task = asyncio.create_task(service.run())
+                planning_tasks.append(task)
+                tasks.append(task)
 
         async def _recover_dispatch() -> None:
             """Await the startup recovery sweep before any dispatch loop starts, and fold its
             outcome into readiness: a green readiness must never precede recovery (C2).
+
+            A sweep that raises outright (not a per-device restore the controller already tracks)
+            is otherwise swallowed by the shutdown ``gather(return_exceptions=True)``: surface it on
+            ``runtime.dispatch_recovery_failed`` so readiness reports not-ready, log it, and start no
+            dispatch loop, rather than leaving the loops down while readiness looks healthy.
             """
-            await runtime.dispatch.recover()
+            try:
+                await runtime.dispatch.recover()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                runtime.dispatch_recovery_failed = True
+                log.exception("Battery dispatch recovery failed")
+                return
+            runtime.dispatch_recovery_failed = False
             start_dispatch_tasks(runtime.devices)
 
         def start_device_jobs() -> None:
-            if runtime.shutting_down():
+            if is_closing():
                 return  # a late password change must not re-register periodic reads after their teardown
+            if store is not None:
+                tasks.append(asyncio.create_task(run_spot_market_refresh_loop(
+                    store, app.state.spotmarket_provider, app, app.state.spotmarket_refresh_event
+                )))
+                tasks.append(asyncio.create_task(run_solar_refresh_loop(
+                    store, app.state.solar_forecast_provider, app, app.state.weather_refresh_event
+                )))
+            historian = getattr(app.state, "consumption_historian", None)
+            if historian is not None:
+                # Drains the household-load buffer into 15-minute SQLite buckets off the receiver path.
+                tasks.append(asyncio.create_task(historian.run()))
+            if historian is not None and store is not None and runtime.settings.consumption_daily_backfill_enabled:
+                from app.admin.consumption_backfill import ConsumptionHistoryBackfillService
+                from app.gateway.rct_history import RctDailyConsumptionHistory
+
+                site_timezone = lambda: getattr(getattr(app.state, "weather_config", None), "timezone", None) or "UTC"
+                tasks.append(asyncio.create_task(ConsumptionHistoryBackfillService(
+                    RctDailyConsumptionHistory(gateway, site_timezone), store, runtime.clock, site_timezone,
+                    lambda: list(runtime.devices),
+                    lambda device_id: gateway.device_status(device_id).state in READY_STATES,
+                ).run()))
             start_polling_tasks()
+            start_planning_tasks()
             if runtime.dispatch is not None:
                 tasks.append(asyncio.create_task(_recover_dispatch()))
             start_export_task()
@@ -787,9 +907,11 @@ def _lifespan(
             orphan the task); the lock plus a stable local reference rule that out.
             """
             nonlocal export_task
-            if runtime.shutting_down():
+            if is_closing():
                 return
             async with export_restart_lock:
+                if is_closing():
+                    return  # teardown began while awaiting the lock: register no fresh export task
                 old_task = export_task
                 if old_task is not None:
                     old_task.cancel()
@@ -924,6 +1046,7 @@ def _lifespan(
         async def _swap_graph(graph: _DeviceGraph, target: Settings) -> None:
             old_tasks = [
                 *connect_tasks, *startup_tasks, *heartbeat_tasks, *periodic_tasks, *refresh_tasks, *dispatch_tasks,
+                *planning_tasks,
             ]
             for task in old_tasks:
                 task.cancel()
@@ -931,8 +1054,10 @@ def _lifespan(
             tasks[:] = [t for t in tasks if t not in old_tasks]  # drop the dead references
             for group in (
                 connect_tasks, startup_tasks, heartbeat_tasks, periodic_tasks, refresh_tasks, dispatch_tasks,
+                planning_tasks,
             ):
                 group.clear()
+            app.state.planning_services = {}
             connects.clear()
 
             stop_results = await asyncio.gather(*(s.stop() for s in parts.serializers), return_exceptions=True)
@@ -981,6 +1106,7 @@ def _lifespan(
                 if is_closing():
                     return
                 start_polling_tasks()
+                start_planning_tasks()
                 # Not recover(): that is a one-time startup sweep over every persisted record and
                 # would re-run its (heavier) fault handling for devices that were never touched by
                 # this reconfiguration. Every device affected by this change was already driven to a
@@ -1081,6 +1207,10 @@ def _lifespan(
         app.state.reconfigure_devices = reconfigure_devices
         app.state.loop = asyncio.get_running_loop()  # lets a sync admin route schedule restart_export
 
+        if store is not None:
+            app.state.spotmarket_refresh_event = asyncio.Event()
+            app.state.weather_refresh_event = asyncio.Event()
+
         # Capture this app's own TSDB-relevant log records as ``tsdb.log`` events on the hub. Additive:
         # the stdout handler from setup_logging stays untouched. Bind the running loop so a record
         # emitted on any thread reaches subscriber queues on the loop thread, then attach the handler
@@ -1120,7 +1250,10 @@ def _lifespan(
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
-            if store is not None:  # after the tasks: nothing writes any more, so the WAL can be folded in
+            if store is not None:
+                # Cancelling a task does not stop a store call it already handed to a thread, so wait
+                # for those (bounded) before closing; then nothing writes and the WAL can be folded in.
+                await drain_store_threads()
                 await asyncio.to_thread(store.close)
             dispatch_store = getattr(app.state, "dispatch_store", None)
             if dispatch_store is not None:
@@ -1160,25 +1293,10 @@ def _add_docs(app: FastAPI, settings: Settings) -> None:
 
     @app.get("/docs", include_in_schema=False, dependencies=[Depends(guard)])
     async def swagger_ui() -> HTMLResponse:
-        page = get_swagger_ui_html(
-            openapi_url="/openapi.json",
-            title="RCT Manager",
-            swagger_js_url="/docs-static/swagger-ui-bundle.js",
-            swagger_css_url="/docs-static/swagger-ui.css",
-            swagger_favicon_url="/favicon.ico",
-            swagger_ui_parameters={
-                "tryItOutEnabled": True,
-                "docExpansion": "list",
-                "filter": True,
-                "deepLinking": True,
-                "tagsSorter": "alpha",
-                "operationsSorter": "alpha",
-                "defaultModelsExpandDepth": -1,
-                "displayRequestDuration": True,
-            },
-        )
-        body = bytes(page.body).decode().replace("</body>", SIDEBAR_HTML + "</body>", 1)
-        return HTMLResponse(body, headers=_DOCS_HEADERS)
+        # Built here (not via get_swagger_ui_html) so the page carries no inline bootstrap <script>:
+        # the SwaggerUIBundle initialization lives in the same-origin /docs-assets/docs-init.js, so
+        # the restrictive default-src 'self' CSP needs no 'unsafe-inline' or per-response nonce.
+        return HTMLResponse(DOCS_PAGE, headers=_DOCS_HEADERS)
 
     if settings.docs_public:
         log.info("API documentation: http://%s:%d/docs (OpenAPI: /openapi.json)",
@@ -1237,6 +1355,14 @@ def _create_dispatch(runtime: Runtime, config: DispatchConfig) -> "_DispatchBund
         limits,
         capabilities=dispatch_capabilities,
         soc_target_policies=soc_target_policies,
+        # Live Charge Envelope: a verification-gated RCT producer that is INERT (returns None for
+        # every device) until its backing register is confirmed. No read-only max-charge-power
+        # register is verified on this build; the only path would be a battery_voltage x
+        # maximum_charge_current derivation whose operands carry "not specified by the protocol"
+        # catalog caveats, so no production limit is emitted and dispatch falls back to the
+        # configured static DeviceLimits.max_charge_power_w. The seam stays honest and testable
+        # (AC-11): flip the producer's gate only once the register semantics are confirmed.
+        live_charge_limit=RctLiveChargeLimitProvider(gateway),
     )
     return _DispatchBundle(
         store=dispatch_store, controller=controller, energy_readings=energy_readings, energy_modes=energy_modes
@@ -1296,6 +1422,30 @@ def _load_spotmarket_config(admin_store: AdminStore | None) -> SpotMarketConfig:
         return SpotMarketConfig()
 
 
+def _load_weather_config(admin_store: AdminStore | None) -> WeatherConfig:
+    """The persisted weather/solar configuration, or the defaults when none is stored or it is
+    unreadable. Weather settings live in their own admin-store key (``weather_config``), a
+    user-editable domain that is deliberately not an environment/operator setting.
+
+    A stored value that no longer validates (an older or tampered record) falls back to defaults
+    with a warning rather than failing boot: the weather domain, like the spot-market one, must
+    never be able to stop the service that also controls the inverter.
+    """
+    if admin_store is None:
+        return WeatherConfig()
+    try:
+        # AdminStore.get() decodes the record and can raise ValueError on a corrupt/undecryptable
+        # row, so it has to be inside the try as well: a damaged weather record must fall back to
+        # defaults, never stop the service that also controls the inverter.
+        stored = admin_store.get("weather_config")
+        if stored is None:
+            return WeatherConfig()
+        return WeatherConfig.model_validate(stored)
+    except ValueError:
+        log.warning("Stored weather configuration is invalid; using defaults", exc_info=True)
+        return WeatherConfig()
+
+
 def create_app(settings: Settings, *, clock: Clock | None = None, connector: Connector | None = None) -> FastAPI:
     clock = clock or SystemClock()
     admin_store = AdminStore(settings.admin_db_path, settings.hmac_secret.get_secret_value()) if settings.hmac_secret else None
@@ -1320,6 +1470,7 @@ def create_app(settings: Settings, *, clock: Clock | None = None, connector: Con
             admin_store.put("write_names", selected_writes)
     gateway, catalog, parts, coordinator = _build(settings, clock, connector, selected_writes, selected_exposed)
     spotmarket_config = _load_spotmarket_config(admin_store)
+    weather_config = _load_weather_config(admin_store)
     if admin_store is not None and selected_exposed is None:
         admin_store.put("exposed_names", settings.metrics_exposed_names or catalog.preselected())
     runtime = Runtime(
@@ -1335,6 +1486,7 @@ def create_app(settings: Settings, *, clock: Clock | None = None, connector: Con
         gateway,
     )
     runtime.dispatch_control_registers = frozenset(RctDispatchGateway.REQUIRED_WRITES)
+    runtime.battery_capacity = ModuleCountVerifiedCapacity(runtime)
     # Built unconditionally and shared with the Energy Manager: it publishes the effective target
     # window from the same bounds the controller validates against, with or without dispatch.
     dispatch_config = DispatchConfig(
@@ -1348,6 +1500,7 @@ def create_app(settings: Settings, *, clock: Clock | None = None, connector: Con
         telemetry_timeout_seconds=settings.dispatch_telemetry_timeout_seconds,
         control_telemetry_max_age_seconds=settings.dispatch_control_telemetry_max_age_seconds,
         soc_telemetry_max_age_seconds=settings.dispatch_soc_telemetry_max_age_seconds,
+        live_charge_limit_max_age_seconds=settings.dispatch_live_charge_limit_max_age_seconds,
         max_operation_duration_seconds=settings.dispatch_max_operation_duration_seconds,
         max_operation_duration_engineering_seconds=(
             settings.dispatch_max_operation_duration_engineering_seconds
@@ -1377,18 +1530,54 @@ def create_app(settings: Settings, *, clock: Clock | None = None, connector: Con
     app.state.runtime = runtime
     app.state.admin_desired_settings = settings
     app.state.admin_store = admin_store
+    # Local household-consumption historian: a passive observer of the periodic household_load_power
+    # value plus a loop-owned SQLite drain. It is the optimizer's data source and is independent of
+    # the TSDB exporter. Built only when an admin store exists (its SQLite persistence); the sink is
+    # attached to the gateway so value_sink() notifies it after filling the cache, and its drain task
+    # is started with the other device jobs. No additional inverter read is ever caused by it.
+    consumption_historian = None
+    if admin_store is not None:
+        from app.admin.consumption import ConsumptionHistorian
+
+        consumption_historian = ConsumptionHistorian(
+            admin_store, clock,
+            timezone=lambda: getattr(getattr(app.state, "weather_config", None), "timezone", None) or "UTC",
+        )
+        gateway.set_sample_sink(consumption_historian.sink)
+    app.state.consumption_historian = consumption_historian
+    # A service can be registered per device when charging plans are wired into app startup.
+    app.state.planning_services = {}
     # Spot-market configuration is a separate domain from inverter dispatch: a provider is only a
     # data source for a later tariff engine and never touches the gateway, so the config lives on
     # app.state next to the admin store, not in the dispatch/runtime graph.
     app.state.spotmarket_config = spotmarket_config
     spotmarket_provider = EnergyChartsProvider()
     app.state.spotmarket_provider = spotmarket_provider
-    app.state.spotmarket_snapshot_cache = SpotSnapshotCache(spotmarket_provider.fetch_day_ahead)
-    app.state.spotmarket_current_cache = SpotSnapshotCache(spotmarket_provider.fetch_current, refresh_seconds=5 * 60)
     # Cache-first bidding-zone metadata: the form reads the zone list from here, so opening it does
     # not hit the rate-limited Energy-Charts API on every open. A failed refresh keeps serving the
     # last good list as stale; it never touches dispatch or inverter control.
-    app.state.spotmarket_zone_cache = BiddingZoneMetadataCache(spotmarket_provider.fetch_bidding_zones)
+    # The last good list is also kept in the admin database, so it survives a restart and an outage.
+    zone_load, zone_save = zone_catalog_persistence(admin_store)
+    app.state.spotmarket_zone_cache = BiddingZoneMetadataCache(
+        spotmarket_provider.fetch_bidding_zones, load=zone_load, save=zone_save
+    )
+    # Weather/solar forecast is a separate read-only domain and never touches the gateway. Its
+    # configured provider refreshes solar_forecast_intervals in the background; previews and
+    # dashboard projections read that SQLite table only.
+    app.state.weather_config = weather_config
+    solar_forecast_provider = OpenMeteoProvider()
+    app.state.solar_forecast_provider = solar_forecast_provider
+    # Resolve Weather-tab locations server-side; the browser never calls a geocoding provider
+    # directly. Photon (OpenStreetMap, no key) is the default; Open-Meteo is the legacy alternative.
+    app.state.solar_geocoder = (
+        OpenMeteoGeocoder()
+        if settings.geocoding_provider is GeocodingProvider.OPEN_METEO
+        else PhotonGeocoder()
+    )
+    # Resolve a site's IANA timezone from its coordinates, provider-independent: the default Photon
+    # geocoder carries no zone, so the zone is derived server-side off the event loop (never in the
+    # browser) through the same hardened transport the forecast uses. No new network path or key.
+    app.state.solar_timezone_resolver = TimezoneResolver()
     # Domain-agnostic in-process pub/sub hub behind the admin SSE endpoint (GET /admin/api/events).
     # Phase 1 wires exactly one producer/type through it: ``tsdb.log`` (fed by the filtering logging
     # handler attached to the root logger in _lifespan, torn down with the app instance). Adding a
@@ -1522,7 +1711,7 @@ def create_app(settings: Settings, *, clock: Clock | None = None, connector: Con
         app.include_router(admin_energy_verification_router)
         install_ui(app)
     read_auth = [Depends(_bearer)]
-    for router in (health.business, catalog_router.router, values.router):
+    for router in (health.business, catalog_router.router, values.router, plan_router.router, consumption_router.router):
         app.include_router(router, dependencies=read_auth)
     # Declared in OpenAPI only; _bearer uses auto_error=False, so the handler keeps the trusted-source exception.
     app.include_router(metrics.router, dependencies=read_auth if settings.metrics_require_token else [])

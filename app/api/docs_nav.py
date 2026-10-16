@@ -23,4 +23,21 @@ SIDEBAR_HTML = (
     '<script src="/docs-assets/docs-nav.js"></script>'
 )
 
+# Full Swagger UI page, assembled from same-origin assets only. The SwaggerUIBundle bootstrap lives
+# in /docs-assets/docs-init.js rather than an inline <script>, so FastAPI's default inline
+# initialization (blocked by default-src 'self') is avoided and the page needs no CSP exception.
+DOCS_PAGE = (
+    "<!DOCTYPE html>"
+    '<html><head><meta charset="utf-8">'
+    '<meta name="viewport" content="width=device-width, initial-scale=1.0">'
+    '<link type="text/css" rel="stylesheet" href="/docs-static/swagger-ui.css">'
+    '<link rel="shortcut icon" href="/favicon.ico">'
+    "<title>RCT Manager</title></head>"
+    '<body><div id="swagger-ui"></div>'
+    '<script src="/docs-static/swagger-ui-bundle.js"></script>'
+    '<script src="/docs-assets/docs-init.js"></script>'
+    + SIDEBAR_HTML
+    + "</body></html>"
+)
+
 

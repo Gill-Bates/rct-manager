@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 
+from app import limits as _limits
 from app.dispatch.models import (
     DispatchMode,
     DispatchState,
@@ -28,8 +29,9 @@ from app.dispatch.models import (
 )
 from app.energy.readings import EnergyReadings
 
-TARGET_SOC_MIN_PERCENT = 7.0  # hard bound of the product's target range
-TARGET_SOC_MAX_PERCENT = 97.0
+TARGET_SOC_MIN_PERCENT = _limits.TARGET_SOC_MIN_PERCENT
+TARGET_SOC_MAX_PERCENT = _limits.TARGET_SOC_MAX_PERCENT
+
 # Server-set lifetime of one manual command. A code constant, not an operator setting: it is a
 # safety bound, and the operator-tunable cap already exists one layer down (DispatchConfig).
 COMMAND_TTL_SECONDS = 3600.0

@@ -16,9 +16,10 @@ guarantee below holds for both.
 """
 
 import asyncio
+import contextlib
 import logging
 import math
-from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping, Sequence
 from datetime import timedelta
 
 from app.clock import Clock
@@ -57,7 +58,9 @@ from app.energy.models import (
     TargetSocWindow,
 )
 from app.energy.readings import EnergyReadingsPort, absent_readings
+from app.energy.soc_window import effective_target_window
 from app.errors import UnknownDevice
+from app.limits import MAX_POWER_W
 
 log = logging.getLogger(__name__)
 
@@ -68,10 +71,6 @@ _MODE_FOR_ACTION: dict[EnergyAction, DispatchMode] = {
     EnergyAction.DISCHARGE: DispatchMode.DISCHARGE_TO_LOAD,
     EnergyAction.HOLD: DispatchMode.HOLD,
 }
-# Hard upper bound of an explicitly requested power, before the per-device limit clamps it down.
-MAX_POWER_W = 50_000.0
-
-
 def _actor_name(actor: str | None) -> str | None:
     """A caller-supplied name reduced to what ``ModeRecord`` accepts: printable ASCII, bounded.
 
@@ -149,6 +148,12 @@ class EnergyManager:
 
     def _lock(self, device_id: str) -> asyncio.Lock:
         return self._locks.setdefault(device_id, asyncio.Lock())
+
+    @contextlib.asynccontextmanager
+    async def guard_raw_write(self, device_id: str) -> AsyncIterator[None]:
+        """Hold the mode lock across a control-register write and its dispatch guard."""
+        async with self._lock(device_id):
+            yield
 
     def _entry(self, device_id: str) -> DeviceEntry:
         entry = self._devices.get(device_id)
@@ -510,7 +515,7 @@ class EnergyManager:
                         log.error("Off failed and write approval for %s remains (device=%s)", name, device_id)
                 raise
         self._mode_states[device_id] = record
-        log.warning("Energy Manager switched off: device=%s (write approvals left untouched)", device_id)
+        log.info("Energy Manager switched off: device=%s (write approvals left untouched)", device_id)
 
 
     async def status(self, device_id: str) -> EnergyDeviceStatus:
@@ -519,10 +524,8 @@ class EnergyManager:
         return await self._project(device_id, status)
 
     def _window(self) -> TargetSocWindow:
-        return TargetSocWindow(
-            min=max(TARGET_SOC_MIN_PERCENT, self._config.min_soc),
-            max=min(TARGET_SOC_MAX_PERCENT, self._config.max_soc),
-        )
+        lower, upper = effective_target_window(self._config.min_soc, self._config.max_soc)
+        return TargetSocWindow(min=lower, max=upper)
 
     def _gate(self, device_id: str, mode: DispatchMode, limits: DeviceLimits):
         """A throwaway read-only capability snapshot per preflight: the controller stays the single

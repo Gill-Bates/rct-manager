@@ -11,5 +11,8 @@
   "days-to-calibration",
   "spot-price-current",
   "spot-market-status",
-  "spot-price-curve"
+  "spot-price-curve",
+  "solar-forecast-status",
+  "pv-forecast-curve",
+  "charging-schedule"
 ]

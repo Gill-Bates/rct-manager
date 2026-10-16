@@ -7,11 +7,36 @@
 """Shared test doubles."""
 
 import asyncio
+from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 
 import pytest
 
 from app.config import _REMOVED_ENV_NAMES, Settings
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _use_test_argon2_cost() -> Iterator[None]:
+    """Use a cheaper Argon2 profile for temporary test databases only.
+
+    Many integration/property examples bootstrap an AdminStore and change its password even when
+    the assertion is unrelated to password security. Production keeps PasswordHasher's defaults;
+    security behavior is still exercised with Argon2, but the test-only hashes use less work.
+    """
+    from argon2 import PasswordHasher
+
+    import app.admin.store as admin_store
+
+    production_hasher = admin_store._PASSWORDS
+    production_dummy_hash = admin_store._DUMMY_PASSWORD_HASH
+    test_hasher = PasswordHasher(time_cost=1, memory_cost=8 * 1024, parallelism=1)
+    admin_store._PASSWORDS = test_hasher
+    admin_store._DUMMY_PASSWORD_HASH = test_hasher.hash("unused-admin-password")
+    try:
+        yield
+    finally:
+        admin_store._PASSWORDS = production_hasher
+        admin_store._DUMMY_PASSWORD_HASH = production_dummy_hash
 
 
 def settings_env_names() -> list[str]:

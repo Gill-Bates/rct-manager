@@ -19,6 +19,7 @@ from urllib.error import HTTPError
 
 import pytest
 
+from app.net import MAX_RETRY_AFTER_SECONDS
 from app.spotmarket import energy_charts
 from app.spotmarket.base import SpotMarketConnectionError, SpotMarketNotAvailableYet, SpotMarketResponseError
 from app.spotmarket.energy_charts import EnergyChartsProvider
@@ -138,7 +139,7 @@ def test_configured_zone_is_sent_to_the_v2_next_day_endpoint(monkeypatch):
     EnergyChartsProvider().fetch_day_ahead(SpotMarketConfig(bidding_zone="AT"))
     assert "bzn=AT" in capture["url"]
     assert capture["timeout"] == energy_charts._REQUEST_TIMEOUT_SECONDS
-    # Finding 1: the request targets the v2 next-day endpoint, not the legacy /price (today).
+    # The request targets the v2 next-day endpoint, not the legacy /price endpoint for today.
     assert capture["url"].startswith(energy_charts.ENERGY_CHARTS_URL)
     assert "/v2/price_next_day" in capture["url"]
 
@@ -213,7 +214,7 @@ def test_config_defaults_match_energy_charts_de_lu():
 
 
 def test_config_has_no_editable_api_url_field():
-    # Finding 1 (SSRF): the operator cannot aim the provider at an arbitrary network target. The
+    # The operator cannot aim the provider at an arbitrary network target. The
     # endpoint is a provider-owned constant, not a config field, so posting one is a hard error.
     assert "api_url" not in SpotMarketConfig.model_fields
     with pytest.raises(ValueError):
@@ -221,7 +222,7 @@ def test_config_has_no_editable_api_url_field():
 
 
 def test_config_has_no_operator_owned_currency_or_price_unit():
-    # Finding 2: currency and price unit are provider metadata, not operator input. They must not be
+    # Currency and price unit are provider metadata, not operator input. They must not be
     # config fields, and smuggling one in through the model is a hard error (extra="forbid").
     assert "currency" not in SpotMarketConfig.model_fields
     assert "price_unit" not in SpotMarketConfig.model_fields
@@ -250,7 +251,7 @@ def test_fee_region_and_bidding_zone_are_separate_fields():
 
 
 def test_spot_price_interval_is_frozen():
-    # Finding 4: a frozen dataclass raises FrozenInstanceError on attribute assignment; assert that
+    # A frozen dataclass raises FrozenInstanceError on attribute assignment; assert that
     # concrete error rather than a catch-all Exception.
     start = datetime.now(UTC)
     interval = SpotPriceInterval(start=start, end=start + timedelta(minutes=15), price_eur_per_kwh=Decimal("0.1"))
@@ -694,7 +695,7 @@ def test_a_hostile_retry_after_is_clamped(monkeypatch):
 
     monkeypatch.setattr(energy_charts._OPENER, "open", fake_open)
     EnergyChartsProvider(sleep=slept.append).fetch_day_ahead(SpotMarketConfig())
-    assert slept == [float(energy_charts._MAX_RETRY_AFTER_SECONDS)]
+    assert slept == [float(MAX_RETRY_AFTER_SECONDS)]
 
 
 def test_a_404_is_not_retried(monkeypatch):
@@ -723,65 +724,72 @@ def _catalog(zones=("DE-LU", "AT"), default="DE-LU", fetched_at=_CACHE_T0):
     return BiddingZoneCatalog(zones=zones, default=default, fetched_at=fetched_at)
 
 
-def test_cache_serves_a_fresh_entry_without_a_second_fetch():
+def test_cache_get_never_fetches_and_refresh_stores_the_catalog():
     calls = {"n": 0}
 
     def fetch():
         calls["n"] += 1
         return _catalog(fetched_at=_CACHE_T0)
 
-    clock = {"now": _CACHE_T0}
-    cache = BiddingZoneMetadataCache(fetch, now=lambda: clock["now"])
-    first = cache.get()
-    assert first.zones == ("DE-LU", "AT")
-    assert first.stale is False
-    # A second get well within the TTL must not trigger another network fetch (rate-limit safety).
-    clock["now"] = _CACHE_T0 + timedelta(minutes=5)
-    cache.get()
+    cache = BiddingZoneMetadataCache(fetch)
+    with pytest.raises(SpotMarketError):
+        cache.get()  # nothing stored yet: no provider request is made to fill the gap
+    assert calls["n"] == 0
+    refreshed = cache.refresh()
+    assert refreshed.zones == ("DE-LU", "AT") and refreshed.stale is False
+    for _ in range(3):
+        assert cache.get().zones == ("DE-LU", "AT")
     assert calls["n"] == 1
 
 
-def test_cache_refreshes_after_the_ttl_expires():
-    calls = {"n": 0}
-
-    def fetch():
-        calls["n"] += 1
-        return _catalog(fetched_at=clock["now"])
-
-    clock = {"now": _CACHE_T0}
-    cache = BiddingZoneMetadataCache(fetch, ttl=timedelta(hours=1), now=lambda: clock["now"])
-    cache.get()
-    clock["now"] = _CACHE_T0 + timedelta(hours=2)
-    cache.get()
-    assert calls["n"] == 2
-
-
-def test_cache_serves_the_last_good_list_as_stale_when_a_refresh_fails():
+def test_cache_keeps_the_last_good_list_as_stale_when_a_refresh_fails():
     state = {"first": True}
 
     def fetch():
         if state["first"]:
             state["first"] = False
-            return _catalog(fetched_at=clock["now"])
+            return _catalog(fetched_at=_CACHE_T0)
         raise SpotMarketError("rate limited")
 
-    clock = {"now": _CACHE_T0}
-    cache = BiddingZoneMetadataCache(fetch, ttl=timedelta(hours=1), now=lambda: clock["now"])
-    good = cache.get()
+    cache = BiddingZoneMetadataCache(fetch)
+    good = cache.refresh()
     assert good.stale is False
-    clock["now"] = _CACHE_T0 + timedelta(hours=2)  # force a refresh that will fail
-    stale = cache.get()
-    assert stale.stale is True
+    stale = cache.refresh()
+    assert stale.stale is True and cache.get().stale is True
     assert stale.zones == good.zones  # the last good list is kept, never fabricated or blanked
 
 
-def test_cache_propagates_a_failure_when_nothing_was_ever_cached():
+def test_cache_refresh_propagates_a_failure_when_nothing_was_ever_stored():
     def fetch():
         raise SpotMarketError("down")
 
-    cache = BiddingZoneMetadataCache(fetch, now=lambda: _CACHE_T0)
     with pytest.raises(SpotMarketError):
-        cache.get()
+        BiddingZoneMetadataCache(fetch).refresh()
+
+
+def test_zone_list_survives_a_restart_through_the_admin_database(tmp_path):
+    from app.admin.store import AdminStore
+    from app.spotmarket.metadata import zone_catalog_persistence
+
+    def open_store():
+        store = AdminStore(tmp_path / "admin.db", "f" * 48)
+        store.initialize()
+        return store
+
+    store = open_store()
+    load, save = zone_catalog_persistence(store)
+    BiddingZoneMetadataCache(lambda: _catalog(fetched_at=_CACHE_T0), load=load, save=save).refresh()
+    store.close()
+
+    def unreachable():
+        raise AssertionError("a restarted cache must not fetch")
+
+    store = open_store()
+    load, save = zone_catalog_persistence(store)
+    restarted = BiddingZoneMetadataCache(unreachable, load=load, save=save)
+    listing = restarted.get()
+    assert listing.zones == ("DE-LU", "AT") and listing.stale is False and listing.last_update == _CACHE_T0
+    store.close()
 
 
 def test_bidding_zone_catalog_rejects_a_default_not_in_the_list():

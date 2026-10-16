@@ -7,6 +7,7 @@
 """JSON API for the local browser administration interface."""
 
 import asyncio
+import contextlib
 import hmac
 import json
 import logging
@@ -26,15 +27,21 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from app.admin.store import SESSION_SECONDS
 from app.admin.updates import check_for_updates
 from app.api.restart import in_container, probe_listener
-from app.cache import CacheFreshness
 from app.catalog.base import is_numeric
-from app.config import DISPLAY_NAME_MAX, Settings
+from app.config import DEVICE_ID_PATTERN, DISPLAY_NAME_MAX, MAX_DEVICES, Settings, TokenRole
 from app.dispatch.controller import ReconfigurationRejected
 from app.dispatch.models import DispatchState
 from app.energy.models import EnergyMode
 from app.energy.readings import EnergyReadings, absent_readings
 from app.errors import ConfigError, ReconfigurationBuildError
+from app.gateway.battery_inventory import (
+    _BATTERY_TOWER_PREFIXES,
+    _battery_module_report,
+    _battery_tower_present,
+)
+from app.gateway.cache import CacheFreshness
 from app.gateway.rct_dispatch import RctDispatchGateway
+from app.hostnames import strip_ipv6_brackets
 from app.security.client_ip import ClientIpResolver
 from app.security.dependencies import source_address
 
@@ -95,6 +102,8 @@ _EDITABLE = frozenset({
     "trusted_proxies", "forwarded_header",
     "metrics_require_token", "metrics_trusted_sources",
     "metrics_rate_limit_requests", "metrics_rate_limit_window_seconds",
+    # Live Charge Envelope freshness, applied on restart (the DispatchConfig is built at startup).
+    "dispatch_live_charge_limit_max_age_seconds",
 }) | _EXPORT_RESTART_KEYS
 # The device/endpoint/scheduling graph is rebuilt in place by reconfigure_devices(), so a saved
 # devices list is applied by that targeted rebuild.
@@ -132,6 +141,14 @@ _RECONFIGURE_TIMEOUT_SECONDS = 120.0
 _EXPORT_RESTART_TIMEOUT_SECONDS = 30.0
 # Guards the "one live transition at a time" check-and-schedule in _run_on_loop.
 _TRANSITION_GUARD = threading.Lock()
+# Serializes transition-bearing admin requests across the whole check -> persist -> apply span, so a
+# request that will hit a busy transition is rejected (409) BEFORE it writes anything, instead of
+# persisting its desired state and only then failing with _TransitionBusy at scheduling time. It is
+# an OUTER, request-level lock: handlers take it first, then the existing inner locks
+# (_SETTINGS_LOCK / _RECONFIGURE_LOCK / _PARAMETERS_LOCK) and finally _TRANSITION_GUARD inside
+# _run_on_loop. No path acquires _LIVE_CHANGE_LOCK while holding any inner lock, so the nesting
+# order is fixed and deadlock-free.
+_LIVE_CHANGE_LOCK = threading.Lock()
 # Settings keys whose change needs a live transition on the event loop.
 _TRANSITION_KEYS = _EXPORT_RESTART_KEYS | _DEVICE_LIVE_KEYS | {"enable_write_support"}
 log = logging.getLogger(__name__)
@@ -238,7 +255,7 @@ def _bearer_admin(request: Request, privileged: bool) -> bool:
     # Tokens stay inert until the first-login password change completed.
     if store.password_change_pending():
         raise HTTPException(403, "Password change required")
-    if privileged and entry.role != "read/write":
+    if privileged and entry.role != TokenRole.READ_WRITE:
         raise HTTPException(403, "Read/write token required")
     return True
 
@@ -468,11 +485,6 @@ def get_settings(request: Request) -> dict:
     }
 
 
-# Mirrors app.config._DEVICE_ID (DeviceEntry._check_id): validated here too so a bad device_id
-# gets a field-specific 400 instead of surfacing as the generic "Invalid setting" from the
-# downstream model validation (PY-01). Keep this pattern in step with app.config._DEVICE_ID.
-_DEVICE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
-
 # This is a plausibility check for an address-shaped value, not DNS or full IP validation.
 _HOST = re.compile(
     r"^(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,62})(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,62}))*|\[[0-9A-Fa-f:.]+\]|[0-9A-Fa-f:.]+)$"
@@ -491,9 +503,7 @@ def _network_id(item: dict[str, Any]) -> int | None:
 
 def _normalize_host(host: str) -> str:
     """Brackets are URL syntax, not part of the host: the transport needs the bare address."""
-    if host.startswith("[") and host.endswith("]"):
-        return host[1:-1]
-    return host
+    return strip_ipv6_brackets(host)
 
 
 def _display_name(value: Any) -> str | None:
@@ -506,8 +516,8 @@ def _display_name(value: Any) -> str | None:
 
 def _normalize_devices(raw: Any) -> list[dict[str, Any]]:
     """Complete a host+port list: keep sent ids and names, assign stable ids to new devices."""
-    if not isinstance(raw, list) or len(raw) > 32:
-        raise HTTPException(400, "Devices must be a list of at most 32 inverters")
+    if not isinstance(raw, list) or len(raw) > MAX_DEVICES:
+        raise HTTPException(400, f"Devices must be a list of at most {MAX_DEVICES} inverters")
     seen_addresses: set[tuple[str, int, int | None]] = set()
     result: list[dict[str, Any]] = []
     for item in raw:
@@ -528,7 +538,7 @@ def _normalize_devices(raw: Any) -> list[dict[str, Any]]:
         device_id = item.get("device_id") or None
         if device_id is not None and not isinstance(device_id, str):
             raise HTTPException(400, "The device id must be text")
-        if device_id is not None and not _DEVICE_ID.fullmatch(device_id):
+        if device_id is not None and not DEVICE_ID_PATTERN.fullmatch(device_id):
             raise HTTPException(
                 400,
                 "The device id must start with a letter or digit and use only letters, digits, "
@@ -670,9 +680,24 @@ def put_settings(body: dict[str, Any], request: Request) -> dict:
         body["devices"] = _normalize_devices(body["devices"])
     if session is None and _changed_session_only(request, body):
         raise HTTPException(403, "Administration session required")
-    # Refused before anything is persisted: a transition that outlived its wait is still running.
-    if _TRANSITION_KEYS & set(body) and _transition_running(request):
-        raise HTTPException(409, _BUSY_DETAIL)
+    needs_transition = bool(_TRANSITION_KEYS & set(body))
+    # A transition-bearing request holds _LIVE_CHANGE_LOCK across the whole check -> persist -> apply
+    # span: the 409 re-check inside the lock refuses a busy transition before anything is persisted,
+    # closing the window where two parallel requests both pass an early check, one persists its
+    # desired state and then still fails with _TransitionBusy at scheduling time. Non-transition
+    # requests skip the lock so autosaves of unrelated fields are not serialized behind a 120 s
+    # device reconfiguration.
+    with contextlib.ExitStack() as _live_change:
+        if needs_transition:
+            _live_change.enter_context(_LIVE_CHANGE_LOCK)
+            # Refused before anything is persisted: a transition that outlived its wait is still
+            # running. This is the early 409, now re-checked under the serialization lock.
+            if _transition_running(request):
+                raise HTTPException(409, _BUSY_DETAIL)
+        return _put_settings_locked(body, request, session)
+
+
+def _put_settings_locked(body: dict[str, Any], request: Request, session: dict | None) -> dict:
     runtime = request.app.state.runtime
     if _LISTENER_KEYS & set(body):
         _check_listener(runtime.settings, request.app.state.admin_desired_settings, body)
@@ -1049,22 +1074,6 @@ def _device_card_label(catalog, name: str, value: Any) -> str | None:
     return _humanize_enum_label(label) if label else None
 
 
-# Prefixes of the per-tower module_sn string slots (app/catalog/objects.json). Each prefix is one
-# physical battery tower that could share the inverter. The registry carries entries for both
-# prefixes unconditionally, so catalog presence alone cannot tell whether a given tower actually
-# exists on this device; _battery_tower_present answers that from readings.
-_BATTERY_TOWER_PREFIXES = ("battery", "battery_placeholder_0")
-
-# RCT_MAX_MODULES_PER_TOWER is hardware (2 to 6 modules per tower, per RCT docs).
-# RCT_MODULE_SN_SLOTS is the protocol array size (indices 0-6), not an installable module count.
-# The device has no module-count register; counting and hardware validation stay separate, see _battery_module_report.
-RCT_MAX_MODULES_PER_TOWER = 6
-RCT_MODULE_SN_SLOTS = 7
-# One populated serial slot per tower belongs to the tower's base/top part, not to a battery module
-# (observed: a 5-module tower reports six populated slots), so module_count is populated slots
-# minus this. 6 modules + 1 = the 7 slots of the array.
-RCT_NON_MODULE_SLOTS = 1
-
 # Card roles that exist once per tower, with the catalog suffix that carries them.
 _BATTERY_TOWER_METRIC_SUFFIXES = {"soc": "soc", "temperature": "temperature", "status": "status2"}
 # Card roles with no per-tower equivalent in the catalog: battery_placeholder_0_cycles and
@@ -1076,221 +1085,6 @@ _BATTERY_DEVICE_METRIC_NAMES = {
     "soc_target": "battery_soc_target",
     "next_calibration": "power_mng_bat_next_calib_date",
 }
-# A plain numeric/status reading alone does not prove the *placeholder* tower is real: a device
-# answers a periodically-registered read with some value even for a register nothing is wired to
-# (an unpopulated numeric register reads back as 0, not as "no reading"), so soc/temperature/
-# cycles/status2 are only a presence signal for the primary tower, which every single-battery
-# device has always had (keeps compatibility with registries that carry no module_sn slots at
-# all). A placeholder tower is only real when it has at least one populated module serial — the
-# one signal a device cannot answer for a slot nothing is plugged into.
-_BATTERY_PRESENCE_SUFFIXES = ("soc", "temperature", "cycles", "status2")
-
-
-def _battery_tower_present(runtime, device_id: str, prefix: str, trusted_module_slots: list[int]) -> bool:
-    """`trusted_module_slots` must be the STABILIZED report's populated_module_slots (see
-    _battery_module_report), never the current poll's raw _battery_populated_module_slots() - a
-    transient missing/incomplete serial read must not make an established second tower vanish."""
-    if trusted_module_slots:
-        return True
-    if prefix != "battery":
-        return False  # a placeholder tower with no module serials is not installed
-    for suffix in _BATTERY_PRESENCE_SUFFIXES:
-        name = f"{prefix}_{suffix}"
-        if runtime.catalog.exists(name) and runtime.gateway.cached_reading(device_id, name) is not None:
-            return True
-    return False
-
-
-def _clean_module_serial(value: str) -> str:
-    """Strip control characters (not just whitespace) that an unpopulated t_string register can
-    decode to on real hardware - e.g. a slot full of non-NUL control bytes that str.strip() leaves
-    untouched because strip() only removes whitespace by default. What is left is what a real
-    serial number actually looks like: printable characters."""
-    return re.sub(r"[\x00-\x1f\x7f]", "", value).strip()
-
-
-# A slot's cached_reading() answer distinguishes three states, not two. cached_reading() returns
-# None for a slot that has never been read (or whose cache entry expired) - that is UNKNOWN, not
-# "empty". Only a slot that WAS read and decoded to a blank/garbage string is EMPTY. The periodic
-# loop fills all seven module_sn slots over several poll cycles (see _battery_module_report's
-# docstring), so a mid-scan snapshot has some slots at one of these states and the rest still
-# UNKNOWN; conflating UNKNOWN with EMPTY is exactly what let a 3-of-6-read tower be accepted as a
-# genuine 3-module tower before the rest had been read.
-_SLOT_UNKNOWN = "unknown"
-_SLOT_EMPTY = "empty"
-_SLOT_POPULATED = "populated"
-
-
-def _battery_module_slot_states(runtime, device_id: str, prefix: str) -> list[str]:
-    """One of _SLOT_UNKNOWN/_SLOT_EMPTY/_SLOT_POPULATED per protocol slot (index = slot number). A
-    slot the catalog does not carry at all can never resolve to anything else, so it is EMPTY
-    rather than UNKNOWN - it must not block a registry without module_sn slots from ever being
-    judged "complete"."""
-    states = []
-    for i in range(RCT_MODULE_SN_SLOTS):
-        name = f"{prefix}_module_sn_{i}"
-        if not runtime.catalog.exists(name):
-            states.append(_SLOT_EMPTY)
-            continue
-        reading = runtime.gateway.cached_reading(device_id, name)
-        if reading is None:
-            # A register the device repeatedly leaves unanswered (e.g. slot 6 on a 6-module tower)
-            # is never going to be cached; counting it UNKNOWN would hold "pending" forever.
-            read_failed = getattr(runtime.gateway, "read_failed", None)
-            unanswered = read_failed is not None and read_failed(device_id, name)
-            states.append(_SLOT_EMPTY if unanswered else _SLOT_UNKNOWN)
-            continue
-        value = reading[0]
-        if isinstance(value, str) and _clean_module_serial(value):
-            states.append(_SLOT_POPULATED)
-        else:
-            states.append(_SLOT_EMPTY)
-    return states
-
-
-def _battery_populated_module_slots(states: list[str]) -> list[int]:
-    """Indices of the slots classified POPULATED in a slot-state snapshot."""
-    return [i for i, state in enumerate(states) if state == _SLOT_POPULATED]
-
-
-def _raw_battery_module_report(states: list[str]) -> dict:
-    """Pure classification of one read's slot-state snapshot - no memory of any previous read.
-
-    Completeness gates everything else: while any slot is still UNKNOWN, the snapshot is a
-    mid-scan read and no topology may be derived from it at all, no matter how clean the slots that
-    HAVE been read look - a 3-module tower mid-scan looks identical to a genuine 3-module tower
-    that finished scanning first. Only once every slot has been read (none UNKNOWN left) does the
-    populated-slot pattern get interpreted: a contiguous run 0..n-1 with the rest empty is
-    unambiguous and is trusted; anything else - a gap in the middle, or more populated slots than
-    the documented hardware takes - is a data anomaly and not a taller tower.
-
-    `module_count_status` tells the client which case it is looking at:
-      "ok"      - complete snapshot, trusted count, render that many modules
-      "pending" - either the snapshot is still incomplete (slots arrive over several poll cycles,
-                  the normal startup state), or it is complete but genuinely empty
-      "anomaly" - complete snapshot whose populated slots cannot describe a documented tower
-
-    The internal "_complete" key drives `_stabilize_battery_module_report`'s last-known-good hold
-    and is stripped before a report reaches a caller outside this module (see
-    `_battery_module_report`).
-    """
-    complete = _SLOT_UNKNOWN not in states
-    populated = _battery_populated_module_slots(states)
-    if not complete:
-        return {"module_count": None, "module_count_status": "pending",
-                "populated_module_slots": populated, "_complete": False}
-    if not populated:
-        return {"module_count": None, "module_count_status": "pending",
-                "populated_module_slots": [], "_complete": True}
-    contiguous = populated == list(range(len(populated)))
-    if contiguous and len(populated) - RCT_NON_MODULE_SLOTS <= RCT_MAX_MODULES_PER_TOWER:
-        # A count of 1 is below the documented minimum of 2, but that is a legitimate complete
-        # read (e.g. a tower stripped down to one module for service), not a mid-scan artifact -
-        # the completeness gate above already ruled the mid-scan case out.
-        return {"module_count": len(populated) - RCT_NON_MODULE_SLOTS, "module_count_status": "ok",
-                "populated_module_slots": populated, "_complete": True}
-    return {"module_count": None, "module_count_status": "anomaly",
-            "populated_module_slots": populated, "_complete": True}
-
-
-# A changed module count must be read twice in a row before it replaces the trusted one, because
-# cache expiry and staggered refreshes can flip cached_reading() between calls.
-_BATTERY_MODULE_STABILITY_READS = 2
-
-_battery_module_lock = threading.Lock()
-# Attribute name under which the stability state lives on runtime.gateway. Storing it there instead
-# of in module-level state keyed by device id/prefix means a reconfigured or test-created gateway
-# starts from a clean slate instead of inheriting another instance's history, and the state is
-# garbage-collected along with the gateway it belongs to - no separate cleanup needed.
-_BATTERY_MODULE_STATE_ATTR = "_battery_module_stability"
-
-
-def _battery_report_signature(report: dict) -> tuple:
-    return (report["module_count_status"], report["module_count"], tuple(report["populated_module_slots"]))
-
-
-def _stabilize_battery_module_report(runtime, device_id: str, prefix: str, raw: dict) -> dict:
-    """Holds the last-known-good topology against two things that must never flip it: a mid-scan
-    (incomplete) snapshot, and a single changed-but-complete read that has not repeated yet.
-
-    An incomplete `raw` (`raw["_complete"] is False`) can never become trusted and never even
-    starts a candidate - the scan that produced it has not finished, so there is nothing yet to
-    debounce. Only a COMPLETE snapshot may start or advance a candidate, and - same as before -
-    it must repeat `_BATTERY_MODULE_STABILITY_READS` times before replacing the trusted topology,
-    so a single flaky complete-looking read is not enough either.
-    """
-    key = (device_id, prefix)
-    with _battery_module_lock:
-        per_gateway = getattr(runtime.gateway, _BATTERY_MODULE_STATE_ATTR, None)
-        if per_gateway is None:
-            per_gateway = {}
-            setattr(runtime.gateway, _BATTERY_MODULE_STATE_ATTR, per_gateway)
-        state = per_gateway.get(key)
-        if state is None:
-            # Nothing established yet - even an incomplete read becomes the initial state, since
-            # there is no better answer to show while the first scan is still in progress.
-            per_gateway[key] = {"trusted": raw, "candidate": None, "candidate_count": 0}
-            return raw
-        trusted = state["trusted"]
-        if not raw["_complete"]:
-            # Mid-scan snapshot: hold last-known-good and drop any in-progress candidate, because
-            # the scan behind that candidate has not finished either.
-            state["candidate"] = None
-            state["candidate_count"] = 0
-            return trusted
-        if _battery_report_signature(raw) == _battery_report_signature(trusted):
-            state["candidate"] = None
-            state["candidate_count"] = 0
-            return trusted
-        if (state["candidate"] is not None
-                and _battery_report_signature(raw) == _battery_report_signature(state["candidate"])):
-            state["candidate_count"] += 1
-        else:
-            state["candidate"] = raw
-            state["candidate_count"] = 1
-        if state["candidate_count"] < _BATTERY_MODULE_STABILITY_READS:
-            return trusted
-        state["trusted"] = raw
-        state["candidate"] = None
-        state["candidate_count"] = 0
-        return raw
-
-
-_PENDING_LOG_INTERVAL_SECONDS = 60.0
-_pending_log_last: dict[tuple[str, str], float] = {}
-
-
-def _log_pending_slots(device_id: str, prefix: str, states: list[str]) -> None:
-    """Rate-limited diagnosis of slots that stay UNKNOWN, i.e. keep the tower on "Detecting modules"."""
-    unknown = [i for i, state in enumerate(states) if state == _SLOT_UNKNOWN]
-    if not unknown:
-        return
-    now = time.monotonic()
-    key = (device_id, prefix)
-    with _battery_module_lock:
-        if now - _pending_log_last.get(key, -_PENDING_LOG_INTERVAL_SECONDS) < _PENDING_LOG_INTERVAL_SECONDS:
-            return
-        _pending_log_last[key] = now
-    log.debug("%s on %s: module serial slots %s never read yet (states: %s)", prefix, device_id, unknown, states)
-
-
-def _battery_module_report(runtime, device_id: str, prefix: str) -> dict:
-    """Trusted module-count report for one tower: captures the current slot-state snapshot (see
-    `_battery_module_slot_states`), classifies it (`_raw_battery_module_report`), and runs it
-    through the last-known-good stabilizer so neither a mid-scan nor a single flaky complete read
-    can override an already-established topology (see `_stabilize_battery_module_report`)."""
-    states = _battery_module_slot_states(runtime, device_id, prefix)
-    raw = _raw_battery_module_report(states)
-    _log_pending_slots(device_id, prefix, states)
-    report = _stabilize_battery_module_report(runtime, device_id, prefix, raw)
-    if report is raw and report["module_count_status"] == "anomaly":
-        log.warning(
-            "%s on %s reports module serials in slots %s: not a contiguous run of at most %d slots, so no "
-            "module count is derived from it (catalog carries %d slots; documented hardware takes %d modules)",
-            prefix, device_id, report["populated_module_slots"], RCT_MAX_MODULES_PER_TOWER, RCT_MODULE_SN_SLOTS,
-            RCT_MAX_MODULES_PER_TOWER,
-        )
-    return {k: v for k, v in report.items() if k != "_complete"}
 
 
 def _battery_metric_names(runtime, prefix: str, *, include_device_wide: bool) -> dict[str, str]:
@@ -1316,6 +1110,23 @@ DEVICE_CARD_METRIC_NAMES = (
     # shared values to show and repeated the first tower's numbers.
     "battery_placeholder_0_soc", "battery_placeholder_0_temperature",
 )
+# Live readings of the optional second tower. A single-tower device may leave these registers
+# unanswered, and an unanswered periodic/refresh READ drops the whole TCP connection, so they are
+# polled only after the module-serial topology has confirmed the tower (see second_tower_confirmed).
+SECOND_TOWER_METRIC_NAMES = (
+    "battery_placeholder_0_status2", "battery_placeholder_0_soc", "battery_placeholder_0_temperature",
+)
+_SECOND_TOWER_PREFIX = "battery_placeholder_0"
+
+
+def second_tower_confirmed(runtime, device_id: str) -> bool:
+    """True once the stabilized module-serial topology shows a second battery tower.
+
+    Same decision the dashboard uses (trusted last-known-good report, never a raw mid-scan read), so
+    a transient or incomplete inventory cannot activate second-tower polling.
+    """
+    report = _battery_module_report(runtime, device_id, _SECOND_TOWER_PREFIX)
+    return _battery_tower_present(runtime, device_id, _SECOND_TOWER_PREFIX, report["populated_module_slots"])
 
 
 def _energy_flow_view(readings: EnergyReadings | None) -> dict:
@@ -1450,9 +1261,6 @@ def put_parameters(body: ParameterSelection, request: Request) -> dict:
     store = _store(request)
     before = list(_exposed_names(runtime, store))
     selection_changed = list(body.exposed_names) != before
-    # Refused before anything is persisted: a transition that outlived its wait is still running.
-    if selection_changed and _transition_running(request):
-        raise HTTPException(409, _BUSY_DETAIL)
 
     def _mutate(current: list[str]) -> list[str]:
         # The in-use check and the revoke must not be separated by another save: both run inside
@@ -1472,16 +1280,29 @@ def put_parameters(body: ParameterSelection, request: Request) -> dict:
         if runtime.exporter is not None:
             runtime.exporter.set_exposed(body.exposed_names)
 
-    update_write_names(
-        store,
-        runtime.gateway,
-        request.app.state.build_write_allowlist,
-        _mutate,
-        extra={"exposed_names": body.exposed_names},
-        after_persist=_after,
-    )
-    if selection_changed:
-        _apply_exposed_names(request, before)
+    # A selection change is a live transition: hold _LIVE_CHANGE_LOCK across the 409 re-check,
+    # the persist (update_write_names stores exposed_names), and the apply (_apply_exposed_names ->
+    # _reconfigure_devices), so a request that will hit a busy transition is refused before it
+    # persists. The lock is the same OUTER lock put_settings uses; its busy rejection in
+    # _apply_exposed_names runs with rollback=False, which is exactly why no persistence may happen
+    # on a busy transition. Non-changing saves skip the lock.
+    with contextlib.ExitStack() as _live_change:
+        if selection_changed:
+            _live_change.enter_context(_LIVE_CHANGE_LOCK)
+            # Refused before anything is persisted: a transition that outlived its wait is still
+            # running. This is the early 409, now re-checked under the serialization lock.
+            if _transition_running(request):
+                raise HTTPException(409, _BUSY_DETAIL)
+        update_write_names(
+            store,
+            runtime.gateway,
+            request.app.state.build_write_allowlist,
+            _mutate,
+            extra={"exposed_names": body.exposed_names},
+            after_persist=_after,
+        )
+        if selection_changed:
+            _apply_exposed_names(request, before)
     return _parameter_view(request)
 
 
@@ -1535,8 +1356,13 @@ _DASHBOARD_WIDGETS = frozenset({
     "device-count", "connected-count", "metric-count", "pv-power", "house-power",
     "grid-power", "battery-soc", "days-to-calibration", "tsdb-status", "devices",
     "spot-price-current", "spot-market-status", "spot-price-curve",
+    "solar-forecast-status", "pv-forecast-curve", "charging-schedule",
 })
 _DASHBOARD_LAYOUT_KEY = "dashboard_layout"
+# The dashboard grid's vertical bound in rows, mirroring MAX_Y in dashboard.js. A widget must fit
+# within it (y + h <= limit): a layout that cannot be resolved below this bound is rejected here,
+# exactly as the client's overlap resolver refuses to push a box past it.
+_DASHBOARD_MAX_Y = 1000
 
 
 class DashboardWidgetLayout(BaseModel):
@@ -1544,7 +1370,7 @@ class DashboardWidgetLayout(BaseModel):
 
     id: str = Field(min_length=1, max_length=64)
     x: int = Field(ge=0, le=11)
-    y: int = Field(ge=0, le=1000)
+    y: int = Field(ge=0, le=_DASHBOARD_MAX_Y)
     w: int = Field(ge=1, le=12)
     h: int = Field(ge=1, le=100)
     visible: bool = True
@@ -1567,6 +1393,8 @@ def _validate_dashboard_layout(body: DashboardLayout) -> None:
     for widget in body.widgets:
         if widget.x + widget.w > 12:
             raise HTTPException(422, f"Widget {widget.id} extends past the 12-column grid")
+        if widget.y + widget.h > _DASHBOARD_MAX_Y:
+            raise HTTPException(422, f"Widget {widget.id} extends past the {_DASHBOARD_MAX_Y}-row vertical bound")
 
 
 @router.get("/dashboard-layout")

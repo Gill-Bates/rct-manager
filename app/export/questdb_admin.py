@@ -58,7 +58,17 @@ def effective_raw_days(downsampling: str, raw_days: int | None, total_days: int)
     if preset is None:
         return None
     days = raw_days if raw_days is not None else preset.raw_retention_days
-    return min(days, total_days) if total_days > 0 else days  # an explicit raw value is validated against total
+    if total_days <= 0:
+        return days
+    if raw_days is not None and raw_days > total_days:
+        # Raw retention can never exceed total; the clamp stays, but an explicit operator value
+        # losing to it is otherwise invisible, so make the effective retention observable.
+        log.warning(
+            "QuestDB raw retention of %d day(s) exceeds total retention of %d day(s); "
+            "clamping raw retention to %d day(s)",
+            raw_days, total_days, total_days,
+        )
+    return min(days, total_days)
 
 
 def _split_columns(columns: dict[str, str]) -> tuple[list[str], list[str]]:

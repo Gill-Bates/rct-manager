@@ -5,15 +5,16 @@
 #
 
 """Full PDF catalog, scalar write coverage and variable-length writes."""
+import json
 from pathlib import Path
 
 import pytest
 
-from app.allowlist import Allowlist
 from app.catalog.registry import RegistryCatalog
 from app.errors import WriteRejected
 from app.protocol.frames import encode_frame
 from app.protocol.types import Command
+from app.security.allowlist import Allowlist
 from app.transport.types import make_frame
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -23,10 +24,10 @@ def test_shipped_catalog_covers_protocol_and_scalar_writes():
     catalog = RegistryCatalog.from_file(ROOT / "app/catalog/objects.json")
     allowed = Allowlist.load(ROOT / "app/catalog/default_write_allowlist.json", catalog)
     assert len(catalog.entries()) == 894
-    assert len(allowed) == 893
+    assert len(allowed) == 848  # 45 logger history queries are read-only, not writable
     for entry in catalog.entries():
         if not entry.writable:
-            assert entry.name == 'net_slave_data'
+            assert entry.name == 'net_slave_data' or entry.response_type is not None
             continue
         sample = {'t_string': 'new name', 't_bool': True}.get(entry.data_type.value, 0)
         allowed.check(entry.name, sample, action=entry.is_action)
@@ -130,3 +131,58 @@ def test_all_shipped_enums_use_reference_byte_width():
         assert entry.byte_width == 1
         with pytest.raises(WriteRejected):
             allowed.check(entry.name, 256, action=entry.is_action)
+
+
+def test_day_eload_logger_has_separate_request_and_response_contract():
+    from app.errors import UnknownMetric
+    from app.protocol.types import DataType
+
+    catalog = RegistryCatalog.from_file(ROOT / "app/catalog/objects.json")
+    entry = catalog.object_entry("logger_day_eload_log_ts")
+    assert (entry.data_type, entry.reply_type) == (DataType.INT32, DataType.TIMESERIES)
+    assert not entry.writable and entry.is_compound
+    # A normal object replies in its request type.
+    assert catalog.object_entry("energy_e_load_total").reply_type is DataType.FLOAT
+    # The scalar metric surface does not know the compound object.
+    assert not catalog.exists("logger_day_eload_log_ts")
+    assert "logger_day_eload_log_ts" not in catalog.names()
+    with pytest.raises(UnknownMetric):
+        catalog.describe("logger_day_eload_log_ts")
+
+
+def test_custom_allowlist_with_a_history_series_fails_closed_and_names_the_metric(tmp_path):
+    from app.errors import ConfigError
+
+    catalog = RegistryCatalog.from_file(ROOT / "app/catalog/objects.json")
+    custom = tmp_path / "write_allowlist.json"
+    custom.write_text(
+        json.dumps({"version": 1, "entries": [
+            {"name": "logger_day_eload_log_ts", "data_type": "t_int32", "minimum": 0, "maximum": 2**31 - 1}
+        ]}),
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError) as excinfo:
+        Allowlist.load(custom, catalog)
+    assert excinfo.value.code == "invalid_write_allowlist"
+    detail = str(excinfo.value.context["detail"])
+    assert "logger_day_eload_log_ts" in detail
+    assert "read-only history series" in detail and "remove it from the allowlist" in detail
+
+
+def test_error_log_time_stamp_is_a_read_only_event_table_off_the_write_surface():
+    from app.errors import UnknownMetric
+    from app.protocol.types import DataType
+
+    catalog = RegistryCatalog.from_file(ROOT / "app/catalog/objects.json")
+    entry = catalog.object_entry("logger_error_log_time_stamp")
+    # Request timestamp is t_int32, the reply is a response-only compound event table (not decoded).
+    assert (entry.data_type, entry.reply_type) == (DataType.INT32, DataType.EVENT_TABLE)
+    assert not entry.writable and entry.is_compound
+    # It stays off the scalar metric surface, exactly like the TIMESERIES loggers.
+    assert not catalog.exists("logger_error_log_time_stamp")
+    assert "logger_error_log_time_stamp" not in catalog.names()
+    with pytest.raises(UnknownMetric):
+        catalog.describe("logger_error_log_time_stamp")
+    # And it is no longer an approved write target.
+    allowed = Allowlist.load(ROOT / "app/catalog/default_write_allowlist.json", catalog)
+    assert allowed.entry("logger_error_log_time_stamp") is None

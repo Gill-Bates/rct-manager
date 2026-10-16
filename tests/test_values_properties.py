@@ -15,17 +15,17 @@ import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from app.allowlist import Allowlist
-from app.cache import MemoryCache
 from app.catalog.registry import RegistryCatalog
 from app.config import DeviceEntry
 from app.errors import DecodeLengthMismatch, DeviceUnreachable
 from app.gateway.base import StaleReason
+from app.gateway.cache import MemoryCache
 from app.gateway.rct import DeviceBinding, RctGateway
 from app.protocol.types import DataType
 from app.protocol.values import decode_value, encode_value
 from app.scheduling.retry import RetryConfig
 from app.scheduling.serializer import AccessSerializer
+from app.security.allowlist import Allowlist
 from app.transport.endpoint import EndpointConfig, TransportEndpoint
 from tests.conftest import AutoClock
 from tests.fakes import FakeNetwork

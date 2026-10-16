@@ -9,6 +9,8 @@
 from collections.abc import Mapping, Sequence
 from ipaddress import IPv4Network, IPv6Network, ip_address
 
+from app.hostnames import strip_ipv6_brackets
+
 type Network = IPv4Network | IPv6Network
 
 # Shared bucket for addresses that cannot be determined: the strictest limit applies to all of them.
@@ -17,9 +19,7 @@ UNKNOWN_ADDRESS = "unknown"
 
 def _parse(text: str) -> str | None:
     try:
-        text = text.strip()
-        if text.startswith("[") and text.endswith("]"):
-            text = text[1:-1]
+        text = strip_ipv6_brackets(text)
         if "[" in text or "]" in text:
             return None
         return str(ip_address(text))

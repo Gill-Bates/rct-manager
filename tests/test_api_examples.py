@@ -179,8 +179,14 @@ async def test_documentation_when_enabled_declares_the_bearer_scheme() -> None:
     async with running_app(make_settings(docs_public=True)) as h:
         docs = await h.client.get("/docs")
         assert docs.status_code == 200
-        assert '"tryItOutEnabled": true' in docs.text
-        assert '"docExpansion": "list"' in docs.text
+        # The SwaggerUIBundle bootstrap is a same-origin static script, not inline, so the page's
+        # default-src 'self' CSP has no inline <script> to block (P3-4). The parameters moved with
+        # it into /docs-assets/docs-init.js.
+        assert "SwaggerUIBundle(" not in docs.text
+        assert '/docs-assets/docs-init.js' in docs.text
+        init = await h.client.get("/docs-assets/docs-init.js")
+        assert init.status_code == 200
+        assert "tryItOutEnabled: true" in init.text and 'docExpansion: "list"' in init.text
         # The nav/theme-toggle markup is served as self-hosted assets (CSP default-src 'self'),
         # not inline, so /docs references them by URL instead of embedding nav-side/theme-toggle.
         assert '/docs-assets/docs-nav.css' in docs.text and '/docs-assets/docs-nav.js' in docs.text
@@ -349,3 +355,132 @@ async def test_cached_value_stays_distinguishable_by_timestamp_age_stale_and_sou
         assert second["timestamp"] == first["timestamp"]  # the device observation time, not the reply time
         assert second["age_seconds"] > first["age_seconds"]
         assert second["stale_reason"] == "device_timeout"
+
+
+async def test_plan_response_example_carries_both_forecast_enum_fields() -> None:
+    """Example response: the runtime plan surfaces both forecast enum contract fields with valid
+    wire values. The resolved consumption quality is published as the shared public StrEnum members
+    (here the documented `history_fallback`/`low` pair), never as the free-form assumptions text."""
+    from datetime import timedelta
+    from decimal import Decimal
+
+    from app.optimizer.consumption import BaselineConsumptionForecastProvider
+    from app.optimizer.models import (
+        BatteryState,
+        ForecastBasis,
+        ForecastConfidence,
+        SolarForecast,
+        SolarForecastInterval,
+    )
+    from app.optimizer.planner import DynamicChargeOptimizer, PlanParameters, planning_start
+    from app.optimizer.scheduler import InMemoryPlanScheduler
+    from app.optimizer.service import PlanningService
+    from app.spotmarket.models import SpotMarketProvider, SpotPriceInterval, SpotPriceSnapshot
+
+    class _Prices:
+        def __init__(self, snapshot):
+            self._snapshot = snapshot
+
+        def snapshot(self):
+            return self._snapshot
+
+    class _Solar:
+        def __init__(self, forecast):
+            self._forecast = forecast
+
+        def forecast(self, now, horizon):
+            return self._forecast
+
+    class _Battery:
+        def __init__(self, state):
+            self._state = state
+
+        def current(self, device_id):
+            return self._state
+
+    async with running_app() as h:
+        clock = h.runtime.clock
+        now = clock.now()
+        start = planning_start(now)
+        prices = SpotPriceSnapshot(
+            provider=SpotMarketProvider.ENERGY_CHARTS,
+            bidding_zone="DE-LU",
+            currency="EUR",
+            fetched_at=now,
+            intervals=tuple(
+                SpotPriceInterval(
+                    start + timedelta(minutes=15 * i),
+                    start + timedelta(minutes=15 * (i + 1)),
+                    Decimal("0.05") if i == 0 else Decimal("0.30"),
+                )
+                for i in range(4)
+            ),
+        )
+        solar = SolarForecast(
+            created_at=now,
+            intervals=tuple(
+                SolarForecastInterval(
+                    start + timedelta(minutes=15 * i), start + timedelta(minutes=15 * (i + 1)), 50.0
+                )
+                for i in range(4)
+            ),
+        )
+        battery = BatteryState(
+            soc_percent=50.0,
+            usable_capacity_wh=10_000.0,
+            max_charge_power_w=3000.0,
+            max_discharge_power_w=3000.0,
+            measured_at=now,
+        )
+        service = PlanningService(
+            device_id="main",
+            clock=clock,
+            optimizer=DynamicChargeOptimizer(PlanParameters()),
+            scheduler=InMemoryPlanScheduler(),
+            prices=_Prices(prices),
+            solar=_Solar(solar),
+            consumption=BaselineConsumptionForecastProvider(400.0),
+            battery=_Battery(battery),
+            horizon=timedelta(hours=1),
+            plan_ttl=timedelta(minutes=30),
+            recompute_interval_seconds=300.0,
+            spot_max_age_seconds=3600.0,
+            solar_max_age_seconds=3600.0,
+            consumption_max_age_seconds=3600.0,
+            battery_max_age_seconds=300.0,
+        )
+        await service.recompute()
+        # The resolved consumption quality drives the two contract fields (same mechanism as the
+        # live PlanningService.current_view); set a representative pair for the example response.
+        service._forecast_quality = (ForecastBasis.HISTORY_FALLBACK, ForecastConfidence.LOW)
+        h.app.state.planning_services = {"main": service}
+
+        body = (await h.client.get("/api/v1/devices/main/plan")).json()
+        assert body["available"] is True
+        assert body["forecast_basis"] in {m.value for m in ForecastBasis}
+        assert body["forecast_confidence"] in {m.value for m in ForecastConfidence}
+        assert (body["forecast_basis"], body["forecast_confidence"]) == ("history_fallback", "low")
+
+
+def test_daily_consumption_api_validates_the_range_and_starts_no_device_io(tmp_path) -> None:
+    from app.admin.store import AdminStore
+
+    async def scenario() -> None:
+        async with running_app(make_settings(), authorize=False) as h:
+            store = AdminStore(tmp_path / "daily.db", "s" * 48)
+            store.initialize()
+            h.app.state.admin_store = store
+            base = "/api/v1/devices/main/consumption"
+            frames_before = len(h.net.frames)
+            too_long = await h.client.get(f"{base}/days", params={"from": "2026-01-01", "to": "2026-03-15"}, headers=BEARER)
+            assert_problem(too_long, 422, "invalid_parameter")
+            backwards = await h.client.get(f"{base}/days", params={"from": "2026-03-02", "to": "2026-03-01"}, headers=BEARER)
+            assert_problem(backwards, 422, "invalid_parameter")
+            ok = await h.client.get(f"{base}/days", params={"from": "2026-01-01", "to": "2026-01-03"}, headers=BEARER)
+            assert ok.status_code == 200
+            body = ok.json()
+            assert [d["source"] for d in body["days"]] == ["unavailable"] * 3 and body["timezone"]
+            assert (await h.client.get(f"{base}/day", params={"date": "2026-01-01"}, headers=BEARER)).status_code == 200
+            assert len(h.net.frames) == frames_before
+
+    asyncio.run(scenario())

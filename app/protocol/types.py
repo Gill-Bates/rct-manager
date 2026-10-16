@@ -44,6 +44,8 @@ class DataType(StrEnum):
     ENUM = "t_enum"
     STRING = "t_string"
     STRUCT = "t_struct"
+    TIMESERIES = "t_timeseries"  # response-only compound of the logger objects
+    EVENT_TABLE = "t_event_table"  # response-only compound logger reply (error log); classification only, not decoded
 
 
 class StructKind(StrEnum):

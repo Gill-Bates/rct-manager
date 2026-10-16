@@ -17,7 +17,21 @@ from app.catalog.registry import RegistryCatalog, RegistryEntry
 from app.config import Settings
 
 ROOT = Path(__file__).resolve().parents[1]
-ADMIN_JS = ROOT / "app" / "admin" / "static" / "js" / "admin.js"
+ADMIN_JS_DIR = ROOT / "app" / "admin" / "static" / "js"
+
+
+def _admin_js() -> str:
+    """The admin JS as the browser sees it: every ``admin*.js`` fragment concatenated in the order
+    ``base.html`` loads it. The former single ``admin.js`` monolith was split across fragments, so a
+    contract assertion must read the whole concatenation, not one file (same approach as
+    ``tests/test_admin_ui.py``)."""
+    base = (ROOT / "app" / "admin" / "templates" / "base.html").read_text(encoding="utf-8")
+    names = re.findall(r'<script src="/admin/static/js/(admin(?:-[\w-]+)?\.js)" defer></script>', base)
+    assert names[-1] == "admin.js"
+    assert set(names) == {path.name for path in ADMIN_JS_DIR.glob("admin-*.js")} | {"admin.js"}
+    return "\n".join((ADMIN_JS_DIR / name).read_text(encoding="utf-8") for name in names)
+
+
 # Documented in docs/operation.md, the catalog's own enum labels and the shipped allowlist.
 DOCUMENTED = "com_service"
 # Carries only its vendor object path, so the catalog cannot explain what it stands for.
@@ -79,7 +93,7 @@ async def test_admin_parameters_carry_the_explanation_for_the_gui(tmp_path):
 
 def test_writable_rows_render_the_explanation_as_text_tied_to_the_row_menu():
     """Visible text, not a tooltip, and described-by so the row menu announces it; nothing when empty."""
-    js = ADMIN_JS.read_text(encoding="utf-8")
+    js = _admin_js()
     assert "if (parameter.help_text) {" in js
     assert "element('small', 'parameter-help d-block mt-1', parameter.help_text)" in js
     assert "help.id = `write-help-${parameter.name}`" in js

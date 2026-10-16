@@ -10,6 +10,7 @@ Allowlist and value range are checked inside the gateway before the access seria
 so every 403, 404, 409 and 422 leaves the device without a transaction.
 """
 
+import contextlib
 import logging
 from typing import Annotated
 
@@ -19,7 +20,6 @@ from pydantic import BaseModel, ConfigDict
 from app.api.models import ActionResult, WriteResult
 from app.api.problems import ErrorCode, problem_responses
 from app.api.runtime import Runtime, RuntimeDep
-from app.dispatch.models import DispatchState
 from app.energy.models import EnergyMode
 from app.errors import DeviceApiError
 from app.protocol.values import ScalarValue
@@ -30,22 +30,16 @@ log = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/devices/{device_id}", tags=["writes"])
 
 
-async def _dispatch_owns_register(runtime: Runtime, device_id: str, metric_name: str) -> bool:
-    """True when the metric is a dispatch-control register and this device is not switched off/idle.
+def _energy_owns_register(runtime: Runtime, device_id: str, metric_name: str) -> bool:
+    """True when the metric is a dispatch-control register and the Energy Manager mode is not OFF.
 
-    Fail-closed ownership check for the generic write path: an energy mode other than OFF, or any
-    dispatch state that is not a clean IDLE (including a pending restore), means the dispatch layer
-    owns these registers and a parallel raw write must be refused. The register set is the one the
-    energy allowlist and the admin revoke guard use (Runtime.dispatch_control_registers).
+    Fail-closed configuration-level ownership: an energy mode other than OFF means the dispatch
+    layer governs these registers. The caller holds the Energy Manager lock while checking this
+    mode, then acquires the dispatch lock for dispatch-state ownership and the device write.
     """
     if metric_name not in runtime.dispatch_control_registers:
         return False
-    if runtime.energy is not None and runtime.energy.mode(device_id) is not EnergyMode.OFF:
-        return True
-    if runtime.dispatch is None:
-        return False
-    status = await runtime.dispatch.status(device_id)
-    return status.state is not DispatchState.IDLE or status.restore_required or status.operation_id is not None
+    return runtime.energy is not None and runtime.energy.mode(device_id) is not EnergyMode.OFF
 
 ACTION_NOTE = (
     "The command was sent to the device. The device reports no execution result; check the effect on the device."
@@ -97,17 +91,28 @@ async def put_metric(
     runtime.device(device_id)
     runtime.metric(metric_name)
     runtime.ensure_accepting()
-    if await _dispatch_owns_register(runtime, device_id, metric_name):
-        log.warning(
-            "Write refused: dispatch owns register token=%s device=%s metric=%s",
-            principal.token_id,
-            device_id,
-            metric_name,
-        )
-        raise DeviceApiError("dispatch_register_locked", device_id=device_id, name=metric_name)
-    log.info("Write request: token=%s device=%s metric=%s", principal.token_id, device_id, metric_name)
+    control_register = metric_name in runtime.dispatch_control_registers
+    energy_guard = (
+        runtime.energy.guard_raw_write(device_id)
+        if runtime.energy is not None and control_register
+        else contextlib.nullcontext()
+    )
+    dispatch_guard = (
+        runtime.dispatch.guard_raw_write(device_id)
+        if runtime.dispatch is not None and control_register
+        else contextlib.nullcontext()
+    )
     try:
-        outcome = await runtime.gateway.write_metric(device_id, metric_name, body.value)
+        async with energy_guard:
+            if _energy_owns_register(runtime, device_id, metric_name):
+                log.warning(
+                    "Write refused: dispatch owns register token=%s device=%s metric=%s",
+                    principal.token_id, device_id, metric_name,
+                )
+                raise DeviceApiError("dispatch_register_locked", device_id=device_id, name=metric_name)
+            log.info("Write request: token=%s device=%s metric=%s", principal.token_id, device_id, metric_name)
+            async with dispatch_guard:
+                outcome = await runtime.gateway.write_metric(device_id, metric_name, body.value)
     except DeviceApiError as exc:
         log.warning(
             "Write failed: token=%s device=%s metric=%s code=%s", principal.token_id, device_id, metric_name, exc.code

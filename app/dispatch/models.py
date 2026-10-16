@@ -192,12 +192,19 @@ class DeviceLimits:
     max_charge_power_w: float
     max_discharge_power_w: float
     engineering_mode: bool = False
+    # Persisted per-device expert override for usable capacity in Wh. Missing capacity leaves
+    # planning unavailable until a verified source or an override supplies it.
+    usable_capacity_wh: float | None = None
 
     def __post_init__(self) -> None:
         for name in ("max_charge_power_w", "max_discharge_power_w"):
             value = getattr(self, name)
             if not math.isfinite(value) or value <= 0:
                 raise ValueError(f"{name} must be finite and positive")
+        if self.usable_capacity_wh is not None and (
+            not math.isfinite(self.usable_capacity_wh) or self.usable_capacity_wh <= 0
+        ):
+            raise ValueError("usable_capacity_wh must be finite and positive when set")
 
 
 @dataclass(frozen=True, slots=True)
@@ -212,6 +219,10 @@ class DispatchConfig:
     telemetry_timeout_seconds: float = 15.0
     control_telemetry_max_age_seconds: float = 5.0
     soc_telemetry_max_age_seconds: float = 15.0
+    # Maximum age of a live charge-power limit measurement before it is treated as absent and the
+    # configured static device limit governs again. Conservative by default, in line with
+    # control_telemetry_max_age_seconds: a stale ceiling must never keep constraining dispatch.
+    live_charge_limit_max_age_seconds: float = 5.0
     max_operation_duration_seconds: float = 21600.0
     # Applies only while a device's engineering mode is *active*, i.e. while dispatch runs on
     # hardware that is not verified for the requested mode.
@@ -225,8 +236,8 @@ class DispatchConfig:
             "min_soc", "max_soc", "grid_import_reserve_w", "grid_control_deadband_w",
             "power_write_deadband_w", "min_write_interval_seconds", "cycle_interval_seconds",
             "telemetry_timeout_seconds", "control_telemetry_max_age_seconds",
-            "soc_telemetry_max_age_seconds", "max_operation_duration_seconds",
-            "max_operation_duration_engineering_seconds",
+            "soc_telemetry_max_age_seconds", "live_charge_limit_max_age_seconds",
+            "max_operation_duration_seconds", "max_operation_duration_engineering_seconds",
         )  # fmt: skip
         for name in numeric_fields:
             if not math.isfinite(getattr(self, name)):
@@ -238,6 +249,7 @@ class DispatchConfig:
             "grid_import_reserve_w", "grid_control_deadband_w", "power_write_deadband_w",
             "min_write_interval_seconds", "telemetry_timeout_seconds",
             "control_telemetry_max_age_seconds", "soc_telemetry_max_age_seconds",
+            "live_charge_limit_max_age_seconds",
         )  # fmt: skip
         for name in non_negative_fields:
             if getattr(self, name) < 0:
@@ -263,7 +275,7 @@ class DispatchConfig:
             raise ValueError("power_write_deadband_w must not exceed grid_control_deadband_w")
 
 
-def _strict_bool(value: object, field_name: str) -> bool:
+def strict_persisted_bool(value: object, field_name: str) -> bool:
     if not isinstance(value, bool):
         raise TypeError(f"{field_name} must be a bool, got {type(value).__name__}")
     return value
@@ -323,11 +335,11 @@ def _snapshot_from_dict(snapshot_data: dict) -> DeviceControlSnapshot:
         ),
         soc_target_ratio=_strict_number(snapshot_data["soc_target_ratio"], "soc_target_ratio", float),
         soc_strategy_code=_strict_number(snapshot_data["soc_strategy_code"], "soc_strategy_code", int),
-        grid_charge_enabled=_strict_bool(snapshot_data["grid_charge_enabled"], "grid_charge_enabled"),
+        grid_charge_enabled=strict_persisted_bool(snapshot_data["grid_charge_enabled"], "grid_charge_enabled"),
         read_at=_tz_aware(datetime.fromisoformat(snapshot_data["read_at"]), "snapshot.read_at"),
         # Fail-closed (D5): a snapshot with no freshness information on record is not assumed
         # fresh. The real adapter (app/gateway/rct_dispatch.py) can and does return False.
-        all_fresh=_strict_bool(snapshot_data.get("all_fresh", False), "all_fresh"),
+        all_fresh=strict_persisted_bool(snapshot_data.get("all_fresh", False), "all_fresh"),
         # Legacy snapshots (P2-02) carry no raw wire value: absent/null stays None and the restore
         # path falls back to the current convention; a present value must still be a real number.
         battery_power_raw=_optional_number(snapshot_data.get("battery_power_raw"), "battery_power_raw"),
@@ -424,7 +436,7 @@ class DispatchRecord:
             raise DispatchRecordCorrupt("dispatch record is missing state or restore_required")
         try:
             state = DispatchState(data["state"])
-            restore_required = _strict_bool(data["restore_required"], "restore_required")
+            restore_required = strict_persisted_bool(data["restore_required"], "restore_required")
             intent_data = data.get("intent")
             intent = _intent_from_dict(intent_data) if intent_data else None
             snapshot_data = data.get("snapshot")

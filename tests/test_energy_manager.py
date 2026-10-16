@@ -11,6 +11,8 @@ or stop reason added later must fail a test here rather than leak an internal na
 into a public response.
 """
 
+import logging
+
 import pytest
 
 from app.dispatch.models import DispatchCommand, DispatchMode, DispatchState, StopReason
@@ -593,7 +595,9 @@ async def test_switching_off_removes_no_write_approval() -> None:
     assert store.records[-1].armed is False
 
 
-async def test_switching_off_records_when_and_by_whom_the_mode_changed() -> None:
+async def test_switching_off_records_when_and_by_whom_the_mode_changed(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """P3: switching off is a mode change, so the OFF record carries changed_at and the actor.
 
     The off record used to leave both at None (and dropped the actor), which contradicts
@@ -602,11 +606,15 @@ async def test_switching_off_records_when_and_by_whom_the_mode_changed() -> None
     store = RecordingStore()
     service = manager(SpyPort(), mode=EnergyMode.OFF, store=store)
     await service.set_mode("main", EnergyMode.MANUAL, actor="armed-by")
-    await service.set_mode("main", EnergyMode.OFF, actor="switched-off-by")
+    with caplog.at_level(logging.INFO, logger="app.energy.manager"):
+        await service.set_mode("main", EnergyMode.OFF, actor="switched-off-by")
     off_record = store.records[-1]
     assert off_record.mode is EnergyMode.OFF
     assert off_record.changed_by == "switched-off-by"
     assert off_record.changed_at is not None
+    off_logs = [record for record in caplog.records if "Energy Manager switched off" in record.getMessage()]
+    assert len(off_logs) == 1
+    assert off_logs[0].levelno == logging.INFO
 
 
 async def test_changed_by_is_truncated_and_cleaned_instead_of_raising() -> None:

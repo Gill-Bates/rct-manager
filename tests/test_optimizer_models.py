@@ -6,7 +6,7 @@
 
 """Invariant coverage for the pure energy-optimizer contracts."""
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, tzinfo
 from decimal import Decimal
 
 import pytest
@@ -261,3 +261,43 @@ def test_energy_plan_allows_empty_slots_but_rejects_invalid_time_or_overlap() ->
         EnergyPlan(NOW, NOW, ())
     with pytest.raises(ValueError):
         EnergyPlan(NOW, NOW + timedelta(hours=3), (_slot(), _slot(start=NOW + timedelta(minutes=30))))
+
+
+class _NoOffset(tzinfo):
+    def utcoffset(self, dt):
+        return None
+
+    def dst(self, dt):
+        return None
+
+
+@pytest.mark.parametrize("module", ["app.optimizer.models", "app.spotmarket.models"])
+def test_require_aware_rejects_naive_offsetless_and_non_datetime_values(module: str) -> None:
+    import importlib
+
+    require = importlib.import_module(module)._require_aware
+    require(datetime(2026, 1, 1, tzinfo=UTC), "start")
+    with pytest.raises(ValueError, match="^start must be timezone-aware$"):
+        require(datetime(2026, 1, 1), "start")  # noqa: DTZ001
+    with pytest.raises(ValueError, match="^start must be timezone-aware$"):
+        require(datetime(2026, 1, 1, tzinfo=_NoOffset()), "start")
+    with pytest.raises(ValueError, match="^start must be a datetime$"):
+        require("2026-01-01", "start")  # type: ignore[arg-type]
+
+
+def test_is_aware_matches_the_strict_rule() -> None:
+    from app.clock import is_aware
+
+    assert is_aware(datetime(2026, 1, 1, tzinfo=UTC))
+    assert not is_aware(datetime(2026, 1, 1))  # noqa: DTZ001
+    assert not is_aware(datetime(2026, 1, 1, tzinfo=_NoOffset()))
+
+
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [("Europe/Berlin", True), ("UTC", True), ("Not/AZone", False), ("", False), ("../etc/passwd", False)],
+)
+def test_is_valid_iana_zone(name: str, expected: bool) -> None:
+    from app.clock import is_valid_iana_zone
+
+    assert is_valid_iana_zone(name) is expected

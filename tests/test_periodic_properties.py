@@ -26,7 +26,7 @@ from app.scheduling.periodic import (
 from app.scheduling.serializer import AccessSerializer
 from app.transport.endpoint import EndpointConfig, TransportEndpoint
 from app.transport.types import SendOutcome, TransactionOrigin, TransactionRequest, TransactionResult, make_frame
-from tests.api_helpers import make_settings, running_app
+from tests.api_helpers import ROOT_CATALOG, make_settings, running_app
 from tests.conftest import AutoClock
 from tests.fakes import FakeNetwork
 
@@ -75,16 +75,18 @@ def test_partial_registration_leaves_available_false_until_retried() -> None:
     first, second, registrations_after_partial, failure = asyncio.run(scenario())
     assert first is False
     assert failure is not None  # the retry warning must name a reason
-    # The timeout on the failing object drops the connection (Requirement 9.18), so the next
-    # object in this same setup round reconnects on a new epoch. A setup round belongs to one
-    # epoch: the mid-round reconnect discards every registration made so far
-    # instead of keeping ones made on the now-dead connection.
-    assert registrations_after_partial == 0
+    # A single unanswered registration keeps the connection (one lost answer is not a dead link),
+    # so the round continues on the same epoch and only the failing object stays unregistered.
+    assert registrations_after_partial == 2
     assert second is True
 
 
+SECOND_FAILING_OBJECT_ID = 0x2223
+
+
 def test_setup_aborts_immediately_when_a_failed_request_dropped_the_connection() -> None:
-    """A registration whose timeout drops the TCP connection must roll the round back and return
+    """A registration whose timeout drops the TCP connection (the second unanswered request in a
+    row) must roll the round back and return
     False at once, without sending the remaining objects' requests or forcing an extra reconnect.
 
     Before this guard the loop ran on to the next object, whose request reconnected (bumping the
@@ -97,8 +99,8 @@ def test_setup_aborts_immediately_when_a_failed_request_dropped_the_connection()
         key = EndpointKey("10.0.0.5", 8899)
 
         def behavior(frame):
-            # The second object is never answered: its request times out and drops the connection.
-            return "ignore" if frame.object_id == FAILING_OBJECT_ID else "respond"
+            # Two objects in a row are never answered: the second miss in a row drops the connection.
+            return "ignore" if frame.object_id in (FAILING_OBJECT_ID, SECOND_FAILING_OBJECT_ID) else "respond"
 
         net = FakeNetwork(clock, behavior=behavior)
         cfg = EndpointConfig(response_timeout_seconds=0.01, min_interval=timedelta(0))
@@ -110,7 +112,9 @@ def test_setup_aborts_immediately_when_a_failed_request_dropped_the_connection()
         serializer = AccessSerializer(endpoint, handler, queue_max_length=10, queue_max_wait_seconds=10)
         serializer.start()
         device = DeviceKey(key)
-        manager = PeriodicManager(endpoint, serializer, device, [0x1111, FAILING_OBJECT_ID, 0x3333], 30, clock)
+        manager = PeriodicManager(
+            endpoint, serializer, device, [0x1111, FAILING_OBJECT_ID, SECOND_FAILING_OBJECT_ID, 0x3333], 30, clock
+        )
 
         ok = await manager.setup()
         connects = net.connects
@@ -604,3 +608,122 @@ def test_setup_during_shutdown_is_not_a_warning_with_traceback(caplog: pytest.Lo
     ok, failure = asyncio.run(scenario())
     assert ok is False and failure == "device access is shutting down"
     assert not [r for r in caplog.records if r.levelname == "WARNING" or r.exc_info]
+
+
+def test_objects_added_at_runtime_are_registered_by_the_next_ensure_and_respect_the_cap() -> None:
+    async def scenario() -> tuple[bool, tuple[int, ...], bool, bool, int]:
+        clock = AutoClock()
+        key = EndpointKey("10.0.0.5", 8899)
+        net = FakeNetwork(clock)
+        cfg = EndpointConfig(response_timeout_seconds=0.01, min_interval=timedelta(0))
+        endpoint = TransportEndpoint("endpoint-1", key, cfg, clock, connector=net.connect)
+        serializer = AccessSerializer(endpoint, lambda r: endpoint.execute(r), queue_max_length=10, queue_max_wait_seconds=10)
+        serializer.start()
+        manager = PeriodicManager(endpoint, serializer, DeviceKey(key), [0x1111], 30, clock)
+        try:
+            assert await manager.ensure() is True
+            added = manager.add_object_ids([0x1111, 0x4444])  # a known id is not new
+            again = manager.add_object_ids([0x4444])
+            ok = await manager.ensure()
+            return ok, manager.object_ids, added, again, manager.registrations
+        finally:
+            await serializer.stop()
+
+    ok, ids, added, again, registrations = asyncio.run(scenario())
+    assert ok is True
+    assert ids == (0x1111, 0x4444)
+    assert added is True
+    assert again is False
+    assert registrations == 2
+
+
+#
+# Item 2 HARD ACCEPTANCE CRITERION (FEAT-002): the optional second battery tower's live metrics
+# (SECOND_TOWER_METRIC_NAMES = battery_placeholder_0_status2/_soc/_temperature) must stay OUT of the
+# periodic set on a single-tower inverter, because an unanswered READ of such an optional register
+# drops the whole TCP connection. A single-tower device must therefore NEVER register/read those
+# object ids and must NEVER get a timeout/reconnect because of them. The stabilized module-serial
+# inventory - not a raw numeric placeholder value - is the only thing that may ever activate them.
+#
+# These run the real application against the SHIPPED catalog (the test fixture does not carry the
+# battery_placeholder_0_* registers), so they exercise the production _effective_periodic_names
+# gating and the live PeriodicManager, not a hand-built one.
+
+
+def _single_tower_settings():
+    # The shipped catalog carries the battery_placeholder_0_* live registers and the module_sn
+    # slots; the test fixture does not. A real browser-visible single-tower install is exactly a
+    # device that answers its preselected metrics but never answers any placeholder register.
+    return make_settings(
+        object_registry_path=ROOT_CATALOG,
+        write_allowlist_path=ROOT_CATALOG.parent / "default_write_allowlist.json",
+    )
+
+
+async def test_single_tower_never_registers_the_second_tower_live_metrics() -> None:
+    """A single-tower device must never have battery_placeholder_0_soc/_temperature/_status2 in its
+    registered periodic set, and the gate must refuse to activate them from a device that simply
+    does not answer those registers (no stabilized second-tower topology)."""
+    from app.admin.api import SECOND_TOWER_METRIC_NAMES, second_tower_confirmed
+    from app.api.app_factory import _activate_second_tower
+
+    settings = _single_tower_settings()
+    catalog = RegistryCatalog.from_file(settings.object_registry_path)
+    second_tower_ids = {catalog.object_entry(n).object_id for n in SECOND_TOWER_METRIC_NAMES}
+
+    async with running_app(settings) as h:
+        await _registered(h)
+        runtime = h.runtime
+        binding = runtime.gateway._device("main")
+        manager = binding.periodic
+
+        # Not in the startup/registered set: the whole point of the exclusion from the dashboard set.
+        assert not second_tower_ids & set(manager.object_ids)
+        assert not second_tower_ids & set(manager.registered_object_ids)
+
+        # The device never answered any placeholder serial, so the stabilized topology shows no
+        # second tower and the activation gate refuses - no add_object_ids, nothing registered.
+        assert second_tower_confirmed(runtime, "main") is False
+        assert _activate_second_tower(runtime, manager, "main") is False
+        assert not second_tower_ids & set(manager.object_ids)
+        assert not second_tower_ids & set(manager.registered_object_ids)
+
+
+async def test_a_silent_second_tower_register_never_reconnects_a_single_tower_device() -> None:
+    """The hard no-reconnect property: because the optional second-tower registers are never in the
+    periodic set of a single-tower device, nothing ever issues a READ the device would leave
+    unanswered. The connection epoch stays put and periodic_available stays True across repeated
+    refresh cycles - the exact failure mode (an unanswered optional read dropping the connection)
+    cannot occur."""
+    from app.admin.api import SECOND_TOWER_METRIC_NAMES
+
+    settings = _single_tower_settings()
+    catalog = RegistryCatalog.from_file(settings.object_registry_path)
+    placeholder_soc = catalog.object_entry("battery_placeholder_0_soc")
+
+    # The device answers everything EXCEPT any battery_placeholder_0_* register: a single-tower
+    # inverter that would drop the connection if any such optional register were ever read.
+    def single_tower(frame):
+        return "ignore" if frame.object_id in {catalog.object_entry(n).object_id
+                                               for n in SECOND_TOWER_METRIC_NAMES} else "respond"
+
+    async with running_app(settings, behavior=single_tower) as h:
+        await _registered(h)
+        gateway = h.runtime.gateway
+        binding = gateway._device("main")
+        epoch_before = binding.endpoint.connection_epoch
+        assert gateway.device_status("main").periodic_available is True
+
+        # The device pushes an unsolicited placeholder value (a wired-but-unconfirmed register can
+        # answer): a raw numeric value must NOT activate the tower and must NOT cause a read of the
+        # other placeholder registers that would then time out and drop the connection.
+        h.net.push(Frame(Command.RESPONSE, placeholder_soc.object_id, encode_value(DataType.FLOAT, 0.5)))
+        for _ in range(3):
+            assert await gateway.refresh_stale_periodic("main", limit=64) >= 0
+            await asyncio.sleep(0.02)
+
+        # No reconnect happened and the periodic registration is intact: no placeholder read was
+        # ever issued, so the unanswered-optional-read drop simply cannot occur.
+        assert binding.endpoint.connection_epoch == epoch_before
+        assert gateway.device_status("main").periodic_available is True
+        assert not {placeholder_soc.object_id} & set(binding.periodic.registered_object_ids)

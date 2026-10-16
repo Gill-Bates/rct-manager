@@ -3,11 +3,16 @@
 // Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
 //
 
-// Dashboard widget registry: the single source of truth for widget identity, replacing the
-// three hand-synced hardcode sites (the dashboard.html data-widget-id blocks, DEFAULT_LAYOUT in
-// dashboard.js, and _DASHBOARD_WIDGETS in app/admin/api.py). dashboard.js derives DEFAULT_LAYOUT
-// from this array (same seven-key {id,x,y,w,h,visible,label} shape as before), so the migration
-// is a no-op by construction. The values below are copied verbatim from today's DEFAULT_LAYOUT.
+// Dashboard widget registry: the single JS source for widget identity, layout and order.
+// dashboard.js derives DEFAULT_LAYOUT from this array (same seven-key {id,x,y,w,h,visible,label}
+// shape as before), so the migration is a no-op by construction, and dashboard.html's
+// data-widget-id blocks follow it. The values below are copied verbatim from today's DEFAULT_LAYOUT.
+//
+// This is NOT the only place a widget id lives: the Python allowlist _DASHBOARD_WIDGETS in
+// app/admin/api.py stays the backend authority (a hand-written frozenset, no import-time IO), and
+// app/admin/widget_ids.json is a shared id manifest. The three id sets are kept from drifting by
+// tests/test_dashboard_widget_registry.py, not by runtime derivation, so a new widget id must still
+// be added in each place; the anti-drift test fails if they diverge.
 //
 // The original ten entries retain their identity, size and factory placement. Spot widgets
 // extend the catalog and remain opt-in for existing dashboards.
@@ -45,6 +50,9 @@
     Object.freeze({ id: 'spot-price-current', label: 'Spot price', kind: 'kpi', defaultSize: Object.freeze({ w: 2, h: 2 }), defaultVisible: false, defaultX: 0, defaultY: 10 }),
     Object.freeze({ id: 'spot-market-status', label: 'Day-ahead', kind: 'kpi', defaultSize: Object.freeze({ w: 2, h: 2 }), defaultVisible: false, defaultX: 2, defaultY: 10 }),
     Object.freeze({ id: 'spot-price-curve', label: 'Day-ahead prices', kind: 'chart', defaultSize: Object.freeze({ w: 6, h: 4 }), defaultVisible: false, defaultX: 0, defaultY: 12 }),
+    Object.freeze({ id: 'solar-forecast-status', label: 'Solar forecast', kind: 'kpi', defaultSize: Object.freeze({ w: 2, h: 2 }), defaultVisible: false, defaultX: 4, defaultY: 10 }),
+    Object.freeze({ id: 'pv-forecast-curve', label: 'PV forecast', kind: 'chart', defaultSize: Object.freeze({ w: 6, h: 4 }), defaultVisible: false, defaultX: 6, defaultY: 12 }),
+    Object.freeze({ id: 'charging-schedule', label: 'Charging schedule', kind: 'chart', defaultSize: Object.freeze({ w: 6, h: 4 }), defaultVisible: false, defaultX: 0, defaultY: 16 }),
   ]);
 
   // Browser path: expose the frozen registry as a global, consumed by dashboard.js (loaded after

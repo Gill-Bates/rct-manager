@@ -101,6 +101,10 @@ class DeviceGateway(Protocol):
         self, device_id: str, name: str, *, fresh: bool, charge: BudgetHandle | None = None
     ) -> MetricReading: ...
 
+    def cached_metric(self, device_id: str, name: str) -> MetricReading | None:
+        """Return a fresh cached reading only; never start device I/O."""
+        ...
+
     async def write_metric(
         self, device_id: str, name: str, value: ScalarValue, *, system: bool = False
     ) -> WriteOutcome: ...

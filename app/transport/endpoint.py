@@ -25,7 +25,7 @@ from app.errors import (
 )
 from app.protocol.frames import Frame, encode_frame
 from app.protocol.stream import StreamParser
-from app.protocol.types import WRITE_COMMANDS, FrameKind
+from app.protocol.types import WRITE_COMMANDS, Command, FrameKind
 from app.transport.counters import DeviceCounters, EndpointCounters
 from app.transport.demux import Demultiplexer, PendingTransaction
 from app.transport.noise import CrcLogRateLimiter
@@ -34,6 +34,10 @@ from app.transport.send_gate import SendGate
 from app.transport.types import SendOutcome, TransactionRequest, TransactionResult
 
 log = logging.getLogger(__name__)
+
+# Plain value reads. A periodic registration is excluded: its answer is the first push of the
+# object, so a late one is the same value and tracking it would reconnect on every setup round.
+_VALUE_READ_COMMANDS = frozenset({Command.READ, Command.READ_M})
 
 type Connector = Callable[[str, int], Awaitable[tuple[asyncio.StreamReader, asyncio.StreamWriter]]]
 
@@ -54,6 +58,10 @@ class LockReason(StrEnum):
 class EndpointConfig:
     connect_timeout_seconds: float = 3.0
     response_timeout_seconds: float = 5.0
+    # Unanswered reads in a row that end the connection. A single miss keeps it for other objects:
+    # responses are matched by object id and plant address, so a late answer cannot satisfy another
+    # object's read. The missed object itself is re-read only on a new connection.
+    read_timeouts_before_reconnect: int = 2
     # The device does not answer WRITE at all (device test 2026-10-02), so writes wait only briefly.
     write_response_timeout_seconds: float = 0.3
     # After an unanswered WRITE the lock is held this long, so a late echo is read as an
@@ -107,6 +115,8 @@ class TransportEndpoint:
         self._gate = SendGate(config.min_interval, clock, config.send_timeout_seconds)
         self._writer: asyncio.StreamWriter | None = None
         self._receiver_task: asyncio.Task[None] | None = None
+        self._parser: StreamParser | None = None
+        self._read_timeouts_in_a_row = 0
         self._connect_lock = asyncio.Lock()
         self._tx_lock = asyncio.Lock()
         self._epoch = 0
@@ -228,6 +238,8 @@ class TransportEndpoint:
             self._writer = writer
             self._epoch += 1
             parser = StreamParser(max_frame_bytes=self._cfg.max_frame_bytes)
+            self._parser = parser
+            self._read_timeouts_in_a_row = 0
             receiver = Receiver(
                 parser=parser,
                 demux=self._demux,
@@ -292,6 +304,8 @@ class TransportEndpoint:
     async def _drop_connection(self, error: DeviceApiError) -> None:
         writer, self._writer = self._writer, None
         self._demux.clear_periodic()
+        self._demux.clear_ambiguous()
+        self._demux.flush_unsolicited_log()
         self._fail_pending(error)
         task = self._receiver_task
         if task is not None and task is not asyncio.current_task():
@@ -301,6 +315,16 @@ class TransportEndpoint:
             writer.close()
             with contextlib.suppress(OSError, TimeoutError, asyncio.CancelledError):
                 await asyncio.wait_for(writer.wait_closed(), 1.0)
+
+    def _timeout_diagnostics(self) -> str:
+        """Parser state at a response timeout: tells a held/discarded answer from one never sent."""
+        buffered = self._parser.buffered_bytes if self._parser is not None else 0
+        last = self.counters.last_frame_at
+        age = f"{(self._clock.now() - last).total_seconds():.1f} s" if last is not None else "never"
+        return (
+            f"buffered={buffered} B, last frame {age} ago, "
+            f"crc_errors={self.counters.crc_errors}, framing_errors={self.counters.framing_errors}"
+        )
 
     def _on_bootloader(self) -> None:
         self._lock_reason = LockReason.BOOTLOADER_MAGIC
@@ -341,10 +365,26 @@ class TransportEndpoint:
             await self._ensure_connected()
         except DeviceApiError as exc:
             return self._fail(request, exc)
+        if self._read_timeouts_in_a_row and request.frame.command in WRITE_COMMANDS:
+            # A write is acknowledged by any response for its object; a late answer to the missed
+            # read must not count as that acknowledgement, so the write starts on a fresh connection.
+            await self._drop_connection(DeviceUnreachable("unanswered_read_before_write"))
+            try:
+                await self._ensure_connected()
+            except DeviceApiError as exc:
+                return self._fail(request, exc)
+        frame = request.frame
+        if frame.command in _VALUE_READ_COMMANDS and self._demux.is_ambiguous(frame.plant_address, frame.object_id):
+            # The protocol has no transaction id: a late answer to the earlier unanswered read of
+            # this object would satisfy this one and be cached as fresh. Only a new connection isolates it.
+            await self._drop_connection(DeviceUnreachable("unanswered_read_of_same_object"))
+            try:
+                await self._ensure_connected()
+            except DeviceApiError as exc:
+                return self._fail(request, exc)
         writer = self._writer
         assert writer is not None
         future: asyncio.Future[Frame] = asyncio.get_running_loop().create_future()
-        frame = request.frame
 
         def on_commit(_sent_at: datetime, sent_monotonic: float) -> None:
             self._demux.pending = PendingTransaction(frame.object_id, frame.plant_address, sent_monotonic, future)
@@ -374,11 +414,24 @@ class TransportEndpoint:
                     self._demux.pending = None
                     await self._clock.sleep(self._cfg.write_quiet_window_seconds)
                     return TransactionResult(outcome)
-                # The response is still in flight and carries no transaction id, so only a new
-                # connection keeps it from answering the next transaction.
+                self._read_timeouts_in_a_row += 1
+                diagnostics = self._timeout_diagnostics()
+                if not is_write and self._read_timeouts_in_a_row < self._cfg.read_timeouts_before_reconnect:
+                    if frame.command in _VALUE_READ_COMMANDS:
+                        self._demux.mark_ambiguous(frame.plant_address, frame.object_id)
+                    log.info(
+                        "No response from %s to object 0x%08x within %.1f s (command=0x%02x origin=%s, %s); "
+                        "keeping the connection for other objects, another miss in a row reconnects",
+                        self.endpoint_id, frame.object_id, timeout, frame.command, request.origin.name, diagnostics,
+                    )
+                    return self._fail(request, error, outcome)
+                # Repeated misses: the stream is not trustworthy any more, and a response still in
+                # flight carries no transaction id, so only a new connection isolates the next one.
                 log.info(
-                    "Connection to %s dropped: no response to object 0x%08x within %.1f s; reconnecting",
-                    self.endpoint_id, frame.object_id, timeout,
+                    "Connection to %s dropped: no response to object 0x%08x within %.1f s "
+                    "(command=0x%02x origin=%s, %d unanswered in a row, %s); reconnecting",
+                    self.endpoint_id, frame.object_id, timeout, frame.command, request.origin.name,
+                    self._read_timeouts_in_a_row, diagnostics,
                 )
                 await self._drop_connection(error)
                 return self._fail(request, error, outcome)
@@ -395,6 +448,7 @@ class TransportEndpoint:
                 future.cancel()
             elif not future.cancelled():
                 future.exception()  # mark retrieved
+        self._read_timeouts_in_a_row = 0
         self.counters.transactions += 1
         self.counters.last_success_at = self._clock.now()
         self.counters.last_success_monotonic = self._clock.monotonic()

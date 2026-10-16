@@ -79,7 +79,6 @@ def test_at_most_one_write_frame_after_commit(
         # No failure injected anywhere (a "connect" fault with 0 failures injects none either):
         # every case here must commit exactly one WRITE frame, regardless of idempotent/is_action.
         # A write that silently sends zero frames must fail this, not slip through as "<= 1"
-        # (Finding 4).
         assert committed is True
         assert len(writes) == 1
     elif idempotent and not is_action and fault in ("connect", "none") and connect_failures <= 2:

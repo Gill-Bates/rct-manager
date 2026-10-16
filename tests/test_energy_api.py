@@ -32,6 +32,7 @@ from app.api.problems import _is_write_path
 from app.catalog.base import is_numeric
 from app.catalog.registry import RegistryCatalog
 from app.energy.models import EnergyMode
+from app.protocol.types import WRITE_COMMANDS
 from app.protocol.values import encode_value
 from app.scheduling.shutdown import ShutdownPlan
 from tests.api_helpers import (
@@ -94,6 +95,21 @@ def energy_settings(tmp_path: Path, *, unpinned: bool = True, **overrides):
         "write_response_timeout_ms": 50,
     }
     return make_settings(**{**base, **paths, **overrides})
+
+
+def characterization_settings(tmp_path: Path, **overrides):
+    settings = energy_settings(tmp_path, **overrides)
+    path = Path(settings.object_registry_path)
+    registry = json.loads(path.read_text(encoding="utf-8"))
+    production = json.loads((ROOT / "app/catalog/objects.json").read_text(encoding="utf-8"))
+    names = {"power_mng_battery_type", "battery_ah_capacity", "battery_voltage", "battery_placeholder_0_ah_capacity",
+             "battery_placeholder_0_maximum_charge_current"}
+    present = {entry["name"] for entry in registry["entries"]}
+    registry["entries"].extend(
+        entry for entry in production["entries"] if entry["name"] in names - present
+    )
+    path.write_text(json.dumps(registry), encoding="utf-8")
+    return settings
 
 
 def seed_payloads(harness) -> None:
@@ -328,32 +344,182 @@ async def test_without_write_support_the_public_router_is_absent_and_the_admin_s
 
 
 @pytest.mark.parametrize(
-    ("payload", "expected_code", "expected_label"),
-    # label stays null while the strategy-code meaning is unverified (V-06): the shared catalog
-    # carries no enum_labels for power_mng_soc_strategy, so the endpoint returns the numeric code
-    # alone. Once V-06 is proven the label can be populated again without a contract change.
-    [(b"\x01", 1, None), (b"\x7f", 127, None), (None, None, None)],
+    ("payload", "expected_code"),
+    [(b"\x01", 1), (b"\x7f", 127), (None, None)],
 )
-async def test_hardware_soc_strategy_is_read_only_and_available_without_dispatch(
-    tmp_path: Path, payload: bytes | None, expected_code: int | None, expected_label: str | None
+async def test_hardware_soc_strategy_is_cache_only_and_available_without_dispatch(
+    tmp_path: Path, payload: bytes | None, expected_code: int | None
 ) -> None:
     async with running_app(energy_settings(tmp_path, enable_write_support=False)) as harness:
         seed_payloads(harness)
         headers = await admin_session(harness)
-        strategy_id = RegistryCatalog.from_file(
-            harness.runtime.settings.object_registry_path
-        ).object_entry("power_mng_soc_strategy").object_id
-        if payload is None:
-            harness.net.behavior = lambda frame: "drop" if frame.object_id == strategy_id else "respond"
-        else:
+        gateway = harness.runtime.gateway
+        if payload is not None:
+            strategy_id = RegistryCatalog.from_file(
+                harness.runtime.settings.object_registry_path
+            ).object_entry("power_mng_soc_strategy").object_id
             harness.net.payloads[strategy_id] = payload
+            # An explicit read warms the cache. The UI endpoint itself must not perform this read.
+            await gateway.read_metric("main", "power_mng_soc_strategy", fresh=False)
+        before = gateway.device_status("main").transactions
+
         response = await harness.client.get("/admin/api/energy/hardware-strategies", headers=headers)
+
         assert response.status_code == 200, response.text
         main = next(item for item in response.json() if item["device_id"] == "main")
         assert main["code"] == expected_code
-        assert main["label"] == expected_label
+        assert main["label"] is None
+        assert gateway.device_status("main").transactions == before
         assert harness.runtime.dispatch is None
         assert harness.runtime.energy.mode("main") is EnergyMode.OFF
+
+
+async def test_hardware_soc_strategy_stale_cache_is_na_without_device_read(tmp_path: Path) -> None:
+    async with running_app(
+        energy_settings(tmp_path, enable_write_support=False, cache_ttl_seconds=0.0)
+    ) as harness:
+        seed_payloads(harness)
+        headers = await admin_session(harness)
+        gateway = harness.runtime.gateway
+        await gateway.read_metric("main", "power_mng_soc_strategy", fresh=False)
+        await asyncio.sleep(0.01)  # ttl=0: cached value is stale/grace, not fresh
+        before = gateway.device_status("main").transactions
+
+        response = await harness.client.get("/admin/api/energy/hardware-strategies", headers=headers)
+
+        assert response.status_code == 200, response.text
+        main = next(item for item in response.json() if item["device_id"] == "main")
+        assert main["code"] is None
+        assert main["label"] is None
+        assert gateway.device_status("main").transactions == before
+
+
+async def test_battery_characterization_is_authorized_cache_only_and_never_derives_wh(tmp_path: Path) -> None:
+    async with running_app(characterization_settings(tmp_path, enable_write_support=False, enable_periodic_reads=False)) as harness:
+        path = "/admin/api/energy/devices/main/battery-characterization"
+        denied = await harness.client.get(path)
+        assert denied.status_code == 401
+        headers = await admin_session(harness)
+        before = harness.runtime.gateway.device_status("main").transactions
+        frames = len(harness.net.frames)
+
+        response = await harness.client.get(path, headers=headers)
+
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["device_id"] == "main"
+        assert "usable_capacity_wh" not in body
+        metrics = {item["name"]: item for item in body["metrics"]}
+        assert set(metrics) == {
+            "power_mng_n_batteries", "power_mng_battery_type", "power_mng_amp_hours_measured",
+            "battery_ah_capacity", "battery_placeholder_0_ah_capacity", "battery_soh", "battery_voltage",
+            "battery_maximum_charge_current", "battery_maximum_discharge_current",
+            "battery_placeholder_0_current", "battery_placeholder_0_maximum_charge_current",
+            "battery_placeholder_0_maximum_discharge_current",
+        }
+        assert metrics["battery_ah_capacity"] == {
+            "name": "battery_ah_capacity", "value": None, "unit": "Ah", "age_seconds": None,
+            "status": "unavailable",
+        }
+        assert metrics["battery_placeholder_0_maximum_charge_current"]["unit"] == "A"
+        assert [tower["id"] for tower in body["towers"]] == ["battery", "battery_placeholder_0"]
+        assert all(tower["module_count_status"] == "pending" for tower in body["towers"])
+        assert harness.runtime.gateway.device_status("main").transactions == before
+        assert len(harness.net.frames) == frames
+
+
+async def test_battery_characterization_refresh_is_bounded_to_requested_numeric_reads(tmp_path: Path) -> None:
+    async with running_app(characterization_settings(tmp_path, enable_write_support=False, enable_periodic_reads=False)) as harness:
+        path = "/admin/api/energy/devices/main/battery-characterization"
+        catalog = RegistryCatalog.from_file(harness.runtime.settings.object_registry_path)
+        harness.net.payloads[catalog.object_entry("power_mng_battery_type").object_id] = b"\x02"
+        harness.net.payloads[catalog.object_entry("battery_ah_capacity").object_id] = float_payload(180.0)
+        harness.net.payloads[catalog.object_entry("battery_voltage").object_id] = float_payload(52.0)
+        read_pat = harness.app.state.admin_store.create_token("diagnostics", "read", None)[1]
+        pat_response = await harness.client.post(
+            f"{path}/refresh", headers={"Authorization": f"Bearer {read_pat}"},
+            json={"names": ["power_mng_battery_type"]},
+        )
+        assert pat_response.status_code == 200, pat_response.text
+        pat_metrics = {item["name"]: item for item in pat_response.json()["metrics"]}
+        assert pat_metrics["power_mng_battery_type"]["value"] == 2
+        headers = await admin_session(harness)
+        before_denied = harness.runtime.gateway.device_status("main").transactions
+        csrf_denied = await harness.client.post(
+            f"{path}/refresh", headers={"X-CSRF-Token": "invalid"}, json={"names": ["battery_voltage"]}
+        )
+        assert csrf_denied.status_code == 403
+        assert harness.runtime.gateway.device_status("main").transactions == before_denied
+        before = harness.runtime.gateway.device_status("main").transactions
+        frames = len(harness.net.frames)
+
+        response = await harness.client.post(
+            f"{path}/refresh", headers=headers,
+            json={"names": ["battery_ah_capacity", "battery_voltage"]},
+        )
+
+        assert response.status_code == 200, response.text
+        metrics = {item["name"]: item for item in response.json()["metrics"]}
+        assert metrics["power_mng_battery_type"]["value"] == 2
+        assert metrics["power_mng_battery_type"]["status"] == "fresh"
+        assert metrics["battery_ah_capacity"]["value"] == pytest.approx(180.0)
+        assert metrics["battery_ah_capacity"]["status"] == "fresh"
+        assert metrics["battery_ah_capacity"]["age_seconds"] is not None
+        assert metrics["battery_voltage"]["value"] == pytest.approx(52.0)
+        assert harness.runtime.gateway.device_status("main").transactions - before <= 2
+        cached = await harness.client.get(path, headers=headers)
+        assert cached.status_code == 200, cached.text
+        cached_metrics = {item["name"]: item for item in cached.json()["metrics"]}
+        assert cached_metrics["power_mng_battery_type"]["value"] == 2
+        assert not any(frame.command in WRITE_COMMANDS for _, frame in harness.net.frames[frames:])
+        refused = await harness.client.post(f"{path}/refresh", headers=headers, json={"names": ["battery_module_sn_0"]})
+        assert refused.status_code == 422
+        too_many = await harness.client.post(f"{path}/refresh", headers=headers, json={
+            "names": ["battery_voltage", "battery_ah_capacity", "battery_soh",
+                      "battery_maximum_charge_current", "battery_maximum_discharge_current"],
+        })
+        assert too_many.status_code == 422
+        assert not any(frame.command in WRITE_COMMANDS for _, frame in harness.net.frames[frames:])
+
+
+async def test_battery_characterization_reports_stale_age_without_refreshing(tmp_path: Path) -> None:
+    async with running_app(characterization_settings(
+        tmp_path, enable_write_support=False, enable_periodic_reads=False, cache_ttl_seconds=0.0
+    )) as harness:
+        path = "/admin/api/energy/devices/main/battery-characterization"
+        catalog = RegistryCatalog.from_file(harness.runtime.settings.object_registry_path)
+        harness.net.payloads[catalog.object_entry("battery_voltage").object_id] = float_payload(52.0)
+        await harness.runtime.gateway.read_metric("main", "battery_voltage", fresh=False)
+        await asyncio.sleep(0.01)
+        headers = await admin_session(harness)
+        before = harness.runtime.gateway.device_status("main").transactions
+
+        response = await harness.client.get(path, headers=headers)
+
+        assert response.status_code == 200, response.text
+        metric = next(item for item in response.json()["metrics"] if item["name"] == "battery_voltage")
+        assert metric["value"] == pytest.approx(52.0)
+        assert metric["status"] == "stale"
+        assert metric["age_seconds"] > 0
+        assert harness.runtime.gateway.device_status("main").transactions == before
+
+
+async def test_battery_characterization_refresh_never_probes_unconfirmed_second_tower(tmp_path: Path) -> None:
+    async with running_app(characterization_settings(tmp_path, enable_write_support=False, enable_periodic_reads=False)) as harness:
+        path = "/admin/api/energy/devices/main/battery-characterization/refresh"
+        headers = await admin_session(harness)
+        before = harness.runtime.gateway.device_status("main").transactions
+        frames = len(harness.net.frames)
+
+        response = await harness.client.post(
+            path, headers=headers, json={"names": ["battery_placeholder_0_ah_capacity"]}
+        )
+
+        assert response.status_code == 200, response.text
+        metric = next(item for item in response.json()["metrics"] if item["name"] == "battery_placeholder_0_ah_capacity")
+        assert metric["status"] == "unavailable"
+        assert harness.runtime.gateway.device_status("main").transactions == before
+        assert not any(frame.command in WRITE_COMMANDS for _, frame in harness.net.frames[frames:])
 
 
 async def test_revoking_the_register_approvals_disables_the_actions(tmp_path: Path) -> None:
@@ -1073,6 +1239,38 @@ async def test_a_pat_cannot_switch_the_mode_and_the_session_can(tmp_path: Path) 
         assert (await arm(harness, mode="manual"))["mode"] == "manual"
 
 
+async def test_the_admin_gui_fails_fast_when_the_inverter_is_not_connected(tmp_path: Path) -> None:
+    from dataclasses import replace
+
+    from app.gateway.base import DeviceState
+
+    async with running_app(energy_settings(tmp_path)) as harness:
+        seed_payloads(harness)
+        headers = await admin_session(harness)
+        gateway = harness.runtime.gateway
+        real = gateway.device_status
+        for state in (DeviceState.UNREACHABLE, DeviceState.DEGRADED, DeviceState.STARTING):
+            gateway.device_status = lambda device_id, state=state: replace(real(device_id), state=state)
+            try:
+                before = real("main").transactions
+                listing = await harness.client.get("/admin/api/energy/devices", headers=headers)
+                assert listing.json()[0]["connected"] is False, state
+                for method, path, body in (
+                    ("POST", "command", {"action": "hold"}),
+                    ("PUT", "mode", {"mode": "manual"}),
+                ):
+                    response = await harness.client.request(
+                        method, f"/admin/api/energy/devices/main/{path}", headers=headers, json=body
+                    )
+                    assert response.status_code == 502, (state, response.text)
+                    assert response.json()["code"] == "device_unreachable"
+                assert real("main").transactions == before  # refused before any device access
+            finally:
+                gateway.device_status = real
+        listing = await harness.client.get("/admin/api/energy/devices", headers=headers)
+        assert listing.json()[0]["connected"] is True
+
+
 async def test_the_mode_decides_which_surface_may_command(tmp_path: Path) -> None:
     body = {"action": "hold"}
     async with running_app(energy_settings(tmp_path)) as harness:
@@ -1494,14 +1692,20 @@ async def test_without_a_usable_balance_the_operator_is_asked_and_a_contradictio
 
 
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
+from zoneinfo import ZoneInfo
 
+from app.admin.forecast_refresh import solar_config_key, spot_config_key
+from app.optimizer.models import SolarForecast, SolarForecastInterval
 from app.spotmarket.base import SpotMarketConnectionError
 from app.spotmarket.models import (
+    SpotMarketConfig,
     SpotMarketProvider,
     SpotPriceInterval,
     SpotPriceSnapshot,
 )
+from app.weather.models import WeatherConfig
 
 SPOT_CONFIG = "/admin/api/energy/spot-market/config"
 SPOT_PREVIEW = "/admin/api/energy/spot-market/preview"
@@ -1533,8 +1737,77 @@ def _spot_body(**overrides) -> dict:
     return {**base, **overrides}
 
 
+def _seed_spot_prices(store, intervals, timezone="UTC") -> None:
+    config = SpotMarketConfig.model_validate(_spot_body())
+    fetched = datetime.now(UTC).isoformat()
+    zone = ZoneInfo(timezone)
+    store.replace_spot_market_intervals([
+        {
+            "config_key": spot_config_key(config),
+            "local_date": interval.start.astimezone(zone).date().isoformat(),
+            "interval_start": interval.start.isoformat(),
+            "interval_end": interval.end.isoformat(),
+            "price_eur_per_kwh": float(interval.price_eur_per_kwh),
+            "timezone": timezone,
+            "fetched_at": fetched,
+        }
+        for interval in intervals
+    ])
+
+
+def _activate_spot_market(harness) -> None:
+    config = SpotMarketConfig.model_validate(_spot_body())
+    harness.app.state.spotmarket_config = config
+    harness.app.state.admin_store.put("spotmarket_config", config.model_dump(mode="json"))
+
+
+def _stub_background_refreshes(harness) -> None:
+    class _SpotProvider:
+        def _empty(self, config):
+            return SpotPriceSnapshot(
+                SpotMarketProvider.ENERGY_CHARTS, config.bidding_zone, "EUR", datetime.now(UTC), (),
+                timezone="Europe/Berlin",
+            )
+
+        def fetch_today(self, config):
+            return self._empty(config)
+
+        def fetch_current(self, config):
+            return self._empty(config)
+
+        def fetch_yesterday(self, config, timezone):
+            return self._empty(config)
+
+        def fetch_day_ahead(self, config):
+            return self._empty(config)
+
+    class _SolarProvider:
+        def fetch_preview(self, config, now):
+            return SolarForecast(now, ())
+
+    harness.app.state.spotmarket_provider = _SpotProvider()
+    harness.app.state.solar_forecast_provider = _SolarProvider()
+
+
+def _seed_solar_forecast(store, config: WeatherConfig, forecast: SolarForecast) -> None:
+    zone = ZoneInfo(config.timezone or "UTC")
+    store.replace_solar_forecast_intervals([
+        {
+            "config_key": solar_config_key(config),
+            "local_date": interval.start.astimezone(zone).date().isoformat(),
+            "interval_start": interval.start.isoformat(),
+            "interval_end": interval.end.isoformat(),
+            "energy_wh": interval.energy_wh,
+            "timezone": config.timezone or "UTC",
+            "fetched_at": forecast.created_at.isoformat(),
+        }
+        for interval in forecast.intervals
+    ])
+
+
 async def test_spot_market_config_defaults_then_saves_and_reloads(tmp_path: Path) -> None:
     async with running_app(spot_market_settings(tmp_path)) as harness:
+        _stub_background_refreshes(harness)
         headers = await admin_session(harness)
         default = await harness.client.get(SPOT_CONFIG, headers=headers)
         assert default.status_code == 200, default.text
@@ -1561,11 +1834,44 @@ async def test_spot_market_config_defaults_then_saves_and_reloads(tmp_path: Path
 
 async def test_spot_market_config_persists_in_the_admin_store(tmp_path: Path) -> None:
     async with running_app(spot_market_settings(tmp_path)) as harness:
+        _stub_background_refreshes(harness)
         headers = await admin_session(harness)
         await harness.client.put(SPOT_CONFIG, headers=headers, json=_spot_body(bidding_zone="AT"))
         stored = harness.app.state.admin_store.get("spotmarket_config")
     assert stored["bidding_zone"] == "AT"
     assert stored["provider"] == "energy_charts"
+
+
+async def test_spot_market_save_leaves_db_and_runtime_in_agreement(tmp_path: Path) -> None:
+    # Finding A invariant: the persist and the app.state swap happen in the same critical section,
+    # so after a save the stored config and the in-process config describe the same bidding zone.
+    # A concurrent save can no longer leave the DB on one config and runtime on another.
+    async with running_app(spot_market_settings(tmp_path)) as harness:
+        _stub_background_refreshes(harness)
+        headers = await admin_session(harness)
+        saved = await harness.client.put(SPOT_CONFIG, headers=headers, json=_spot_body(bidding_zone="AT"))
+        assert saved.status_code == 200, saved.text
+        stored = harness.app.state.admin_store.get("spotmarket_config")
+        assert stored["bidding_zone"] == harness.app.state.spotmarket_config.bidding_zone == "AT"
+
+
+async def test_identical_spot_config_save_preserves_prices_without_refresh(tmp_path: Path, monkeypatch) -> None:
+    from app.admin import energy_api
+
+    async with running_app(spot_market_settings(tmp_path)) as harness:
+        _stub_background_refreshes(harness)
+        headers = await admin_session(harness)
+        body = _spot_body()
+        assert (await harness.client.put(SPOT_CONFIG, headers=headers, json=body)).status_code == 200
+        now = datetime.now(UTC)
+        interval = SpotPriceInterval(now, now + timedelta(minutes=15), Decimal("0.23"))
+        store = harness.app.state.admin_store
+        _seed_spot_prices(store, (interval,))
+        signals = []
+        monkeypatch.setattr(energy_api, "_signal_forecast_refresh", lambda *args: signals.append(args))
+        assert (await harness.client.put(SPOT_CONFIG, headers=headers, json=body)).status_code == 200
+        assert len(store.get_spot_market_intervals(spot_config_key(harness.app.state.spotmarket_config))) == 1
+        assert signals == []
 
 
 async def test_spot_market_config_rejects_a_bad_provider_or_zone(tmp_path: Path) -> None:
@@ -1580,7 +1886,7 @@ async def test_spot_market_config_rejects_a_bad_provider_or_zone(tmp_path: Path)
 
 
 async def test_spot_market_config_rejects_an_operator_supplied_api_url(tmp_path: Path) -> None:
-    # Finding 1 (SSRF): the save body forbids extra fields, so an attempt to smuggle a network
+    # The save body forbids extra fields, so an attempt to smuggle a network
     # target back in through ``api_url`` is a hard 422, never silently stored.
     async with running_app(spot_market_settings(tmp_path)) as harness:
         headers = await admin_session(harness)
@@ -1600,31 +1906,46 @@ async def test_spot_market_config_requires_an_admin_session(tmp_path: Path) -> N
 async def test_spot_market_preview_summarises_a_fetched_snapshot(tmp_path: Path) -> None:
     from decimal import Decimal
 
-    start = datetime(2026, 1, 1, 0, 0, tzinfo=UTC)
-    intervals = (
-        SpotPriceInterval(start, start.replace(minute=15), Decimal("0.20")),
-        SpotPriceInterval(start.replace(minute=15), start.replace(minute=30), Decimal("0.10")),
-        SpotPriceInterval(start.replace(minute=30), start.replace(minute=45), Decimal("0.30")),
-    )
+    # Each fetch returns its OWN calendar day (yesterday 01-01, today 01-02, tomorrow 01-03). The
+    # preview builder re-buckets by each interval's local date, so the three days land in distinct
+    # series. ``fetched_at`` is 01-03 00:20 so "now" falls inside tomorrow's second interval and the
+    # summary (which prefers the next-day series) still resolves a current price.
+    def _three(day: int) -> tuple[SpotPriceInterval, ...]:
+        base_day = datetime.now(UTC).date() + timedelta(days=day - 2)
+        base = datetime.combine(base_day, datetime.min.time(), tzinfo=UTC)
+        return (
+            SpotPriceInterval(base, base.replace(minute=15), Decimal("0.20")),
+            SpotPriceInterval(base.replace(minute=15), base.replace(minute=30), Decimal("0.10")),
+            SpotPriceInterval(base.replace(minute=30), base.replace(minute=45), Decimal("0.30")),
+        )
+
+    # "Now" is 01-02 00:20 — the real current day — so yesterday/today/tomorrow classify as
+    # 01-01/01-02/01-03.
+    fetched = datetime.now(UTC)
+
+    def _snapshot(config, intervals):
+        return SpotPriceSnapshot(
+            provider=SpotMarketProvider.ENERGY_CHARTS,
+            bidding_zone=config.bidding_zone,
+            currency="EUR",  # provider metadata, not operator config
+            fetched_at=fetched,
+            intervals=intervals,
+            timezone="UTC",
+        )
 
     class _StubProvider:
         def fetch_today(self, config):
-            return self.fetch_day_ahead(config)
+            return _snapshot(config, _three(2))
 
         def fetch_yesterday(self, config, timezone):
-            return self.fetch_day_ahead(config)
+            return _snapshot(config, _three(1))
 
         def fetch_day_ahead(self, config):
-            return SpotPriceSnapshot(
-                provider=SpotMarketProvider.ENERGY_CHARTS,
-                bidding_zone=config.bidding_zone,
-                currency="EUR",  # provider metadata, not operator config
-                fetched_at=datetime(2026, 1, 1, 0, 20, tzinfo=UTC),
-                intervals=intervals,
-            )
+            return _snapshot(config, _three(3))
 
     async with running_app(spot_market_settings(tmp_path)) as harness:
-        harness.app.state.spotmarket_provider = _StubProvider()
+        _activate_spot_market(harness)
+        _seed_spot_prices(harness.app.state.admin_store, (*_three(1), *_three(2), *_three(3)))
         headers = await admin_session(harness)
         response = await harness.client.post(SPOT_PREVIEW, headers=headers, json=_spot_body())
         assert response.status_code == 200, response.text
@@ -1636,31 +1957,221 @@ async def test_spot_market_preview_summarises_a_fetched_snapshot(tmp_path: Path)
         assert len(body["today_intervals"]) == 3
         assert len(body["next_day_intervals"]) == 3
         assert len(body["yesterday_intervals"]) == 3
-        # 00:20 falls inside the second interval (00:15–00:30).
-        assert body["current_price_eur_per_kwh"] == 0.10
+        # The summary (min/max) prefers tomorrow's series when it is published. "Now" (01-02) is not
+        # inside tomorrow's intervals (01-03), so there is no current price for that series.
+        assert body["current_price_eur_per_kwh"] is None
 
 
-async def test_spot_market_preview_reports_a_provider_failure_as_an_error_status(tmp_path: Path) -> None:
-    class _FailingProvider:
+async def test_spot_market_preview_reuses_the_overwritten_database_snapshot(tmp_path: Path) -> None:
+    today = datetime.now(UTC).date()
+    intervals = []
+    for day_offset, price in ((-1, "0.10"), (0, "0.20"), (1, "0.30")):
+        midnight = datetime.combine(today + timedelta(days=day_offset), datetime.min.time(), tzinfo=UTC)
+        for slot in range(96):
+            start = midnight + timedelta(minutes=15 * slot)
+            intervals.append(SpotPriceInterval(start, start + timedelta(minutes=15), Decimal(price)))
+
+    class _ProviderTripwire:
         def fetch_today(self, config):
-            raise SpotMarketConnectionError("Energy-Charts is unreachable")
+            raise AssertionError("the preview must read the database, not the provider")
+
+        def fetch_yesterday(self, config, timezone):
+            raise AssertionError("the preview must read the database, not the provider")
 
         def fetch_day_ahead(self, config):
-            raise SpotMarketConnectionError("Energy-Charts is unreachable")
+            raise AssertionError("the preview must read the database, not the provider")
 
     async with running_app(spot_market_settings(tmp_path)) as harness:
-        harness.app.state.spotmarket_provider = _FailingProvider()
+        _activate_spot_market(harness)
+        _seed_spot_prices(harness.app.state.admin_store, intervals)
+        harness.app.state.spotmarket_provider = _ProviderTripwire()
+        headers = await admin_session(harness)
+        first = await harness.client.post(SPOT_PREVIEW, headers=headers, json=_spot_body())
+        assert first.status_code == 200, first.text
+        with harness.app.state.admin_store.connect() as db:
+            assert db.execute("SELECT COUNT(*) FROM spot_market_intervals").fetchone()[0] == 3 * 96
+
+        second = await harness.client.post(SPOT_PREVIEW, headers=headers, json=_spot_body())
+        assert second.status_code == 200, second.text
+        assert second.json() == first.json()
+
+
+async def test_spot_market_preview_summarises_available_series_when_tomorrow_unpublished(
+    tmp_path: Path,
+) -> None:
+    # Regression: in the normal daily pre-auction state the next-day curve is not published yet
+    # (fetch_day_ahead raises SpotMarketNotAvailableYet), but yesterday and today exist. The
+    # Lowest/Highest figures must still be computed from the available series (today), not gated on
+    # tomorrow — before the fix min/max came back null whenever tomorrow was absent. The intervals
+    # are given in the bidding zone's LOCAL zone (Europe/Berlin) so the date bucketing is exercised
+    # across the local-day boundary, not only in UTC.
+    from decimal import Decimal
+    from zoneinfo import ZoneInfo
+
+    from app.spotmarket.base import SpotMarketNotAvailableYet
+
+    berlin = ZoneInfo("Europe/Berlin")  # CET (+01:00) on these January dates
+    # Anchor these rows to the current local date so the API's database projection can classify them.
+    now_local = datetime.now(berlin)
+    local_today = now_local.date()
+    fetched = now_local.astimezone(UTC)
+
+    def _quarter(local_dt: datetime, price: str) -> SpotPriceInterval:
+        return SpotPriceInterval(local_dt, local_dt + timedelta(minutes=15), Decimal(price))
+
+    # The first interval starts at 00:30 LOCAL, which can belong to the previous UTC date.
+    current_start = now_local.replace(minute=now_local.minute // 15 * 15, second=0, microsecond=0)
+    today_intervals = (
+        _quarter(datetime.combine(local_today, datetime.min.time(), tzinfo=berlin) + timedelta(minutes=30), "0.20"),
+        _quarter(current_start, "0.08"),
+        _quarter(datetime.combine(local_today, datetime.min.time(), tzinfo=berlin) + timedelta(hours=18), "0.25"),
+    )
+    # Yesterday in the configured bidding-zone timezone.
+    yesterday_intervals = (
+        _quarter(datetime.combine(local_today - timedelta(days=1), datetime.min.time(), tzinfo=berlin) + timedelta(hours=12), "0.15"),
+        _quarter(datetime.combine(local_today - timedelta(days=1), datetime.min.time(), tzinfo=berlin) + timedelta(hours=13), "0.17"),
+    )
+
+    class _StubProvider:
+        def fetch_today(self, config):
+            return SpotPriceSnapshot(
+                provider=SpotMarketProvider.ENERGY_CHARTS,
+                bidding_zone=config.bidding_zone,
+                currency="EUR",
+                fetched_at=fetched,
+                intervals=today_intervals,
+                timezone="Europe/Berlin",
+            )
+
+        def fetch_yesterday(self, config, timezone):
+            return SpotPriceSnapshot(
+                provider=SpotMarketProvider.ENERGY_CHARTS,
+                bidding_zone=config.bidding_zone,
+                currency="EUR",
+                fetched_at=fetched,
+                intervals=yesterday_intervals,
+                timezone="Europe/Berlin",
+            )
+
+        def fetch_day_ahead(self, config):
+            raise SpotMarketNotAvailableYet("Energy-Charts next-day prices are not published yet")
+
+    async with running_app(spot_market_settings(tmp_path)) as harness:
+        _activate_spot_market(harness)
+        _seed_spot_prices(harness.app.state.admin_store, (*today_intervals, *yesterday_intervals), "Europe/Berlin")
         headers = await admin_session(harness)
         response = await harness.client.post(SPOT_PREVIEW, headers=headers, json=_spot_body())
-        # A dead external API is a 200 with status=error, never a 5xx: it must not look like a
-        # server fault and must stay isolated from the inverter control path.
         assert response.status_code == 200, response.text
-        assert response.json()["status"] == "error"
-        assert "unreachable" in response.json()["message"]
+        body = response.json()
+        assert body["status"] == "connected"
+        # Tomorrow is empty and its unavailability is reported, but it is not an error.
+        assert body["next_day_intervals"] == []
+        assert body["next_day_message"]
+        # Both available series render, bucketed by their own local date and kept distinct.
+        assert len(body["today_intervals"]) == 3
+        assert len(body["yesterday_intervals"]) == 2
+        today_starts = {item["start"] for item in body["today_intervals"]}
+        yesterday_starts = {item["start"] for item in body["yesterday_intervals"]}
+        assert today_starts.isdisjoint(yesterday_starts)
+        # Midnight-boundary proof: the 00:30 LOCAL interval (23:30 UTC the previous day) is filed
+        # under today, not yesterday — i.e. the bucketing used the zone, not UTC.
+        assert any(start.endswith("00:30:00+01:00") or "T00:30" in start for start in today_starts)
+        # The key assertion: Lowest/Highest are computed over today (the best available populated
+        # series), not left null just because tomorrow is unpublished.
+        assert body["min_price_eur_per_kwh"] == 0.08
+        assert body["max_price_eur_per_kwh"] == 0.25
+        assert body["min_price_at"] is not None
+        assert body["max_price_at"] is not None
+        # 10:20 local falls inside today's second interval (10:15–10:30).
+        assert body["current_price_eur_per_kwh"] == 0.08
+
+
+async def test_spot_market_preview_buckets_a_misfiled_today_curve_by_local_date(tmp_path: Path) -> None:
+    # The exact user regression: the provider's "today" fetch returns a curve whose intervals are
+    # actually TODAY's local day, but a naive builder that trusts the fetch source would need the
+    # provider to be perfect. Here the provider mislabels — fetch_today returns an EMPTY snapshot
+    # while fetch_yesterday returns today's full curve plus yesterday's. Re-bucketing by each
+    # interval's own local date must still split them into distinct today/yesterday series and
+    # produce non-null Lowest/Highest, so the chart draws BOTH grey (yesterday) and green (today).
+    from decimal import Decimal
+    from zoneinfo import ZoneInfo
+
+    from app.spotmarket.base import SpotMarketNotAvailableYet
+
+    berlin = ZoneInfo("Europe/Berlin")
+    fetched = datetime.now(berlin)
+    local_today = fetched.date()
+
+    def _quarter(local_dt: datetime, price: str) -> SpotPriceInterval:
+        return SpotPriceInterval(local_dt, local_dt + timedelta(minutes=15), Decimal(price))
+
+    # A mixed snapshot delivered through fetch_yesterday that actually spans both local days.
+    mixed = (
+        _quarter(datetime.combine(local_today - timedelta(days=1), datetime.min.time(), tzinfo=berlin) + timedelta(hours=9), "0.15"),  # yesterday
+        _quarter(datetime.combine(local_today, datetime.min.time(), tzinfo=berlin) + timedelta(hours=9), "0.07"),  # today (lowest)
+        _quarter(datetime.combine(local_today, datetime.min.time(), tzinfo=berlin) + timedelta(hours=19), "0.28"),  # today (highest)
+    )
+
+    class _StubProvider:
+        def fetch_today(self, config):
+            # Mislabelled/empty today window: the data really arrives via the yesterday fetch.
+            return SpotPriceSnapshot(
+                provider=SpotMarketProvider.ENERGY_CHARTS,
+                bidding_zone=config.bidding_zone,
+                currency="EUR",
+                fetched_at=fetched,
+                intervals=(),
+                timezone="Europe/Berlin",
+            )
+
+        def fetch_yesterday(self, config, timezone):
+            return SpotPriceSnapshot(
+                provider=SpotMarketProvider.ENERGY_CHARTS,
+                bidding_zone=config.bidding_zone,
+                currency="EUR",
+                fetched_at=fetched,
+                intervals=mixed,
+                timezone="Europe/Berlin",
+            )
+
+        def fetch_day_ahead(self, config):
+            raise SpotMarketNotAvailableYet("not published yet")
+
+    async with running_app(spot_market_settings(tmp_path)) as harness:
+        _activate_spot_market(harness)
+        _seed_spot_prices(harness.app.state.admin_store, mixed, "Europe/Berlin")
+        headers = await admin_session(harness)
+        response = await harness.client.post(SPOT_PREVIEW, headers=headers, json=_spot_body())
+        assert response.status_code == 200, response.text
+        body = response.json()
+        # Despite the empty "today" fetch, today's curve is recovered from the actual interval dates.
+        assert len(body["today_intervals"]) == 2
+        assert len(body["yesterday_intervals"]) == 1
+        # Lowest/Highest come from today's populated series, not n/a.
+        assert body["min_price_eur_per_kwh"] == 0.07
+        assert body["max_price_eur_per_kwh"] == 0.28
+
+
+async def test_spot_market_preview_reports_empty_database_without_fetching_provider(tmp_path: Path) -> None:
+    class _ProviderTripwire:
+        def fetch_today(self, config):
+            raise AssertionError("preview requests must not fetch provider data")
+
+        fetch_yesterday = fetch_today
+        fetch_day_ahead = fetch_today
+
+    async with running_app(spot_market_settings(tmp_path)) as harness:
+        _activate_spot_market(harness)
+        harness.app.state.spotmarket_provider = _ProviderTripwire()
+        headers = await admin_session(harness)
+        response = await harness.client.post(SPOT_PREVIEW, headers=headers, json=_spot_body())
+        assert response.status_code == 200, response.text
+        assert response.json()["status"] == "unavailable"
+        assert "background" in response.json()["message"]
 
 
 async def test_spot_market_config_rejects_operator_currency_or_price_unit(tmp_path: Path) -> None:
-    # Finding 2: currency and price unit are provider metadata, not operator input. The save body
+    # Currency and price unit are provider metadata, not operator input. The save body
     # forbids extra fields, so smuggling either one back in is a hard 422, never stored.
     async with running_app(spot_market_settings(tmp_path)) as harness:
         headers = await admin_session(harness)
@@ -1670,7 +2181,7 @@ async def test_spot_market_config_rejects_operator_currency_or_price_unit(tmp_pa
 
 
 async def test_spot_market_config_preserves_the_fee_region_concept(tmp_path: Path) -> None:
-    # Amendment: the fee_region concept stays in the model and persistence even though the UI no
+    # The fee_region concept stays in the model and persistence even though the UI no
     # longer offers a field for it; a save that carries it through keeps the stored value.
     async with running_app(spot_market_settings(tmp_path)) as harness:
         headers = await admin_session(harness)
@@ -1729,14 +2240,731 @@ async def test_spot_market_bidding_zones_report_a_stale_list(tmp_path: Path) -> 
         assert response.json()["stale"] is True
 
 
-async def test_spot_market_bidding_zones_report_a_total_failure_as_502(tmp_path: Path) -> None:
-    class _DeadCache:
-        def get(self):
-            raise SpotMarketConnectionError("down and nothing cached")
+async def test_spot_market_bidding_zones_without_a_stored_list_answer_200_and_never_call_the_provider(
+    tmp_path: Path,
+) -> None:
+    from app.spotmarket.metadata import BiddingZoneMetadataCache
+
+    fetches: list[int] = []
+
+    def fetch():
+        fetches.append(1)
+        raise SpotMarketConnectionError("down")
 
     async with running_app(spot_market_settings(tmp_path)) as harness:
-        harness.app.state.spotmarket_zone_cache = _DeadCache()
+        harness.app.state.spotmarket_zone_cache = BiddingZoneMetadataCache(fetch)
         headers = await admin_session(harness)
-        response = await harness.client.get(SPOT_ZONES, headers=headers)
-        # No cached list at all is a bad-gateway, isolated from inverter control; never a 5xx crash.
-        assert response.status_code == 502, response.text
+        for _ in range(2):
+            response = await harness.client.get(SPOT_ZONES, headers=headers)
+            assert response.status_code == 200, response.text
+            assert response.json() == {"zones": [], "default": "", "stale": True, "last_update": None}
+        assert fetches == []  # opening the form never reaches the provider
+
+
+async def test_spot_market_preview_and_dashboard_never_call_the_provider(tmp_path: Path) -> None:
+    calls: list[str] = []
+
+    class _Tripwire:
+        def __getattr__(self, name):
+            def record(*args, **kwargs):
+                calls.append(name)
+                raise AssertionError("a page view must not reach the provider")
+
+            return record
+
+    async with running_app(spot_market_settings(tmp_path)) as harness:
+        _activate_spot_market(harness)
+        _stub_background_refreshes(harness)
+        headers = await admin_session(harness)
+        harness.app.state.spotmarket_provider = _Tripwire()
+        harness.app.state.solar_forecast_provider = _Tripwire()
+        for _ in range(2):
+            assert (await harness.client.post(SPOT_PREVIEW, headers=headers, json=_spot_body())).status_code == 200
+            dashboard = await harness.client.get(
+                "/admin/api/energy/dashboard-forecast?include=spot_current&include=spot_day_ahead&include=solar",
+                headers=headers,
+            )
+            assert dashboard.status_code == 200
+        assert calls == []
+
+
+#
+# Weather / solar forecast admin surface: config round-trip, strict validation, preview and the
+# server-side location search. The provider and geocoder are stubbed; no test reaches the network.
+
+
+from app.weather.base import WeatherConnectionError
+from app.weather.geocoding import GeocodingResult
+
+WEATHER_CONFIG = "/admin/api/energy/weather/config"
+WEATHER_PREVIEW = "/admin/api/energy/weather/preview"
+WEATHER_LOCATIONS = "/admin/api/energy/weather/locations"
+WEATHER_TIMEZONE = "/admin/api/energy/weather/timezone"
+
+
+class _WeatherTimezoneResolver:
+    def resolve(self, latitude, longitude):
+        return "America/New_York" if longitude < -30 else "Europe/Berlin"
+
+
+def _stub_weather_timezone(harness) -> None:
+    harness.app.state.solar_timezone_resolver = _WeatherTimezoneResolver()
+
+
+def _weather_body(**overrides) -> dict:
+    base = {
+        "enabled": True,
+        "provider": "open_meteo",
+        "location_name": "Remscheid, North Rhine-Westphalia, Germany",
+        "location_region": "North Rhine-Westphalia, Germany",
+        "latitude": 51.1798,
+        "longitude": 7.1925,
+        "pv_peak_power_wp": 10000.0,
+        "tilt_deg": 35.0,
+        "azimuth_deg": 0.0,
+        "performance_ratio": 0.85,
+    }
+    return {**base, **overrides}
+
+
+async def test_weather_config_defaults_then_saves_and_reloads(tmp_path: Path) -> None:
+    async with running_app(spot_market_settings(tmp_path)) as harness:
+        _stub_weather_timezone(harness)
+        _stub_background_refreshes(harness)
+        headers = await admin_session(harness)
+        default = await harness.client.get(WEATHER_CONFIG, headers=headers)
+        assert default.status_code == 200, default.text
+        body = default.json()
+        assert body["enabled"] is False
+        assert body["latitude"] is None and body["longitude"] is None
+        # A config saved before the region field existed degrades to no region line.
+        assert body["location_region"] is None
+        # Read-only provider metadata is projected for the GUI, never operator input.
+        assert body["provider_meta"]["source"] == "Open-Meteo"
+
+        saved = await harness.client.put(WEATHER_CONFIG, headers=headers, json=_weather_body())
+        assert saved.status_code == 200, saved.text
+        stored = saved.json()
+        assert stored["enabled"] is True
+        assert stored["location_name"] == "Remscheid, North Rhine-Westphalia, Germany"
+        assert stored["location_region"] == "North Rhine-Westphalia, Germany"
+        assert stored["latitude"] == pytest.approx(51.1798)
+        assert stored["timezone"] == "Europe/Berlin"
+        assert stored["pv_peak_power_wp"] == 10000.0
+
+        reloaded = await harness.client.get(WEATHER_CONFIG, headers=headers)
+        assert reloaded.json() == stored
+        # The in-process copy on app.state is updated too, not only the stored record.
+        assert harness.app.state.weather_config.location_name == "Remscheid, North Rhine-Westphalia, Germany"
+        assert harness.app.state.weather_config.timezone == "Europe/Berlin"
+
+
+async def test_weather_config_persists_in_the_admin_store(tmp_path: Path) -> None:
+    async with running_app(spot_market_settings(tmp_path)) as harness:
+        _stub_weather_timezone(harness)
+        _stub_background_refreshes(harness)
+        headers = await admin_session(harness)
+        await harness.client.put(WEATHER_CONFIG, headers=headers, json=_weather_body(azimuth_deg=-90))
+        stored = harness.app.state.admin_store.get("weather_config")
+    assert stored["azimuth_deg"] == -90
+    assert stored["provider"] == "open_meteo"
+
+
+async def test_weather_save_leaves_db_and_runtime_in_agreement(tmp_path: Path) -> None:
+    # Finding B invariant: the whole persist + state swap runs in one off-loop critical section, so
+    # after a save the stored config and the in-process config agree. The async handler no longer
+    # does SQLite work on the event loop, and the transaction stays atomic.
+    async with running_app(spot_market_settings(tmp_path)) as harness:
+        _stub_weather_timezone(harness)
+        _stub_background_refreshes(harness)
+        headers = await admin_session(harness)
+        saved = await harness.client.put(WEATHER_CONFIG, headers=headers, json=_weather_body(azimuth_deg=-90))
+        assert saved.status_code == 200, saved.text
+        stored = harness.app.state.admin_store.get("weather_config")
+        assert stored["azimuth_deg"] == harness.app.state.weather_config.azimuth_deg == -90
+
+
+async def test_identical_weather_config_save_preserves_forecast_without_refresh(tmp_path: Path, monkeypatch) -> None:
+    from app.admin import energy_api
+
+    async with running_app(spot_market_settings(tmp_path)) as harness:
+        _stub_weather_timezone(harness)
+        _stub_background_refreshes(harness)
+        headers = await admin_session(harness)
+        body = _weather_body()
+        assert (await harness.client.put(WEATHER_CONFIG, headers=headers, json=body)).status_code == 200
+        now = datetime.now(UTC)
+        forecast = SolarForecast(now, (
+            SolarForecastInterval(now, now + timedelta(minutes=15), 100.0),
+        ))
+        store = harness.app.state.admin_store
+        config = harness.app.state.weather_config
+        _seed_solar_forecast(store, config, forecast)
+        signals = []
+        monkeypatch.setattr(energy_api, "_signal_forecast_refresh", lambda *args: signals.append(args))
+        assert (await harness.client.put(WEATHER_CONFIG, headers=headers, json=body)).status_code == 200
+        today = now.astimezone(ZoneInfo(config.timezone)).date().isoformat()
+        assert len(store.get_solar_forecast_intervals(solar_config_key(config), today, today)) == 1
+        assert signals == []
+
+
+async def test_a_disabled_config_may_be_saved_incomplete(tmp_path: Path) -> None:
+    async with running_app(spot_market_settings(tmp_path)) as harness:
+        _stub_weather_timezone(harness)
+        headers = await admin_session(harness)
+        body = {"enabled": False, "provider": "open_meteo", "latitude": 51.0}
+        response = await harness.client.put(WEATHER_CONFIG, headers=headers, json=body)
+        assert response.status_code == 200, response.text
+        assert response.json()["enabled"] is False
+
+
+async def test_an_enabled_config_requires_every_forecast_value(tmp_path: Path) -> None:
+    async with running_app(spot_market_settings(tmp_path)) as harness:
+        _stub_weather_timezone(harness)
+        headers = await admin_session(harness)
+        incomplete = _weather_body()
+        del incomplete["pv_peak_power_wp"]
+        incomplete["pv_peak_power_wp"] = None
+        response = await harness.client.put(WEATHER_CONFIG, headers=headers, json=incomplete)
+        assert response.status_code == 422, response.text
+        # The 422 carries the real pydantic errors (a list of {loc, msg}) so the form can show which
+        # field is missing, never the old opaque "Invalid weather configuration" string.
+        detail = response.json()["detail"]
+        assert isinstance(detail, list) and detail, detail
+        assert all(isinstance(item.get("msg"), str) and "loc" in item for item in detail), detail
+        assert any("pv_peak_power_wp" in item["msg"] for item in detail), detail
+        assert response.text.count("Invalid weather configuration") == 0
+
+
+async def test_an_enabled_config_with_an_out_of_range_field_returns_structured_errors(tmp_path: Path) -> None:
+    # An out-of-range single field is rejected at the request-body boundary, so it already carries
+    # a per-field problem-document entry naming the field; the client renders it inline.
+    async with running_app(spot_market_settings(tmp_path)) as harness:
+        _stub_weather_timezone(harness)
+        headers = await admin_session(harness)
+        response = await harness.client.put(WEATHER_CONFIG, headers=headers, json=_weather_body(performance_ratio=1.5))
+        assert response.status_code == 422, response.text
+        body = response.json()
+        assert any(err.get("parameter") == "performance_ratio" for err in body.get("errors", [])), body
+
+
+async def test_weather_config_rejects_out_of_range_and_unknown_fields(tmp_path: Path) -> None:
+    async with running_app(spot_market_settings(tmp_path)) as harness:
+        _stub_weather_timezone(harness)
+        headers = await admin_session(harness)
+        for bad in (
+            _weather_body(tilt_deg=120),
+            _weather_body(azimuth_deg=270),
+            _weather_body(performance_ratio=1.5),
+            _weather_body(provider="made_up"),
+            {**_weather_body(), "api_url": "http://127.0.0.1/forecast"},  # extra="forbid"
+        ):
+            response = await harness.client.put(WEATHER_CONFIG, headers=headers, json=bad)
+            assert response.status_code == 422, (bad, response.text)
+
+
+async def test_weather_config_timezone_follows_coordinates(tmp_path: Path) -> None:
+    async with running_app(spot_market_settings(tmp_path)) as harness:
+        _stub_weather_timezone(harness)
+        _stub_background_refreshes(harness)
+        headers = await admin_session(harness)
+        saved = await harness.client.put(
+            WEATHER_CONFIG,
+            headers=headers,
+            json=_weather_body(latitude=40.7128, longitude=-74.0060),
+        )
+        assert saved.status_code == 200, saved.text
+        assert saved.json()["timezone"] == "America/New_York"
+
+
+async def test_weather_config_requires_an_admin_session(tmp_path: Path) -> None:
+    async with running_app(spot_market_settings(tmp_path)) as harness:
+        _stub_weather_timezone(harness)
+        anonymous = await harness.client.put(WEATHER_CONFIG, json=_weather_body(), headers={"Origin": "http://test"})
+        assert anonymous.status_code in (401, 403)
+
+
+async def test_weather_preview_summarises_yesterday_today_and_tomorrow(tmp_path: Path) -> None:
+    async with running_app(spot_market_settings(tmp_path)) as harness:
+        _stub_weather_timezone(harness)
+        config = WeatherConfig.model_validate({**_weather_body(), "timezone": "Europe/Berlin"})
+        harness.app.state.weather_config = config
+        harness.app.state.admin_store.put("weather_config", config.model_dump(mode="json"))
+        zone = ZoneInfo(config.timezone)
+        midnight = datetime.now(UTC).astimezone(zone).replace(hour=0, minute=0, second=0, microsecond=0)
+        starts = [
+            midnight - timedelta(days=1) + timedelta(hours=12),
+            midnight + timedelta(hours=12),
+            midnight + timedelta(days=1, hours=12),
+        ]
+        forecast = SolarForecast(
+            created_at=datetime.now(UTC),
+            intervals=tuple(
+                SolarForecastInterval(
+                    start.astimezone(UTC), (start + timedelta(minutes=15)).astimezone(UTC), 1000.0
+                )
+                for start in starts
+            ),
+        )
+        _seed_solar_forecast(harness.app.state.admin_store, config, forecast)
+        headers = await admin_session(harness)
+        response = await harness.client.post(WEATHER_PREVIEW, headers=headers, json=_weather_body())
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["status"] == "connected"
+        assert body["source"] == "Open-Meteo"
+        assert body["timezone"] == "Europe/Berlin"
+        assert len(body["yesterday_intervals"]) == 1
+        assert len(body["today_intervals"]) == 1
+        assert len(body["next_day_intervals"]) == 1
+        assert body["yesterday_intervals"][0]["power_kw"] == pytest.approx(4.0)
+        assert body["today_intervals"][0]["power_kw"] == pytest.approx(4.0)
+        assert body["next_day_intervals"][0]["power_kw"] == pytest.approx(4.0)
+        # Exactly one of the two noon intervals (today/tomorrow) falls inside the rolling next 24h.
+        assert body["energy_next_24h_kwh"] == pytest.approx(1.0)
+
+
+async def test_weather_preview_reports_disabled_for_an_incomplete_config(tmp_path: Path) -> None:
+    async with running_app(spot_market_settings(tmp_path)) as harness:
+        _stub_weather_timezone(harness)
+        headers = await admin_session(harness)
+        response = await harness.client.post(
+            WEATHER_PREVIEW, headers=headers, json={"enabled": False, "provider": "open_meteo"}
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["status"] == "disabled"
+
+
+async def test_weather_preview_reports_disabled_for_an_enabled_but_incomplete_config(tmp_path: Path) -> None:
+    # Flipping enable on before the forecast fields are filled must not 422 the preview: an
+    # enabled-but-incomplete config is simply not forecastable yet and reports the clean disabled
+    # view, so the operator fills the form without hitting an opaque error.
+    async with running_app(spot_market_settings(tmp_path)) as harness:
+        _stub_weather_timezone(harness)
+        headers = await admin_session(harness)
+        response = await harness.client.post(
+            WEATHER_PREVIEW, headers=headers, json={"enabled": True, "provider": "open_meteo"}
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["status"] == "disabled"
+
+
+async def test_weather_preview_still_rejects_an_out_of_range_field(tmp_path: Path) -> None:
+    # A genuinely invalid field value is still a structured 422 in the preview path; only the
+    # enabled-but-incomplete case degrades to the disabled view.
+    async with running_app(spot_market_settings(tmp_path)) as harness:
+        _stub_weather_timezone(harness)
+        headers = await admin_session(harness)
+        response = await harness.client.post(WEATHER_PREVIEW, headers=headers, json=_weather_body(tilt_deg=120))
+        assert response.status_code == 422, response.text
+        body = response.json()
+        assert any(err.get("parameter") == "tilt_deg" for err in body.get("errors", [])), body
+
+
+async def test_weather_preview_reports_an_empty_database_without_fetching_provider(tmp_path: Path) -> None:
+    class _ProviderTripwire:
+        def fetch_preview(self, config, now):
+            raise AssertionError("preview requests must not fetch provider data")
+
+    async with running_app(spot_market_settings(tmp_path)) as harness:
+        _stub_weather_timezone(harness)
+        config = WeatherConfig.model_validate({**_weather_body(), "timezone": "Europe/Berlin"})
+        harness.app.state.weather_config = config
+        harness.app.state.admin_store.put("weather_config", config.model_dump(mode="json"))
+        harness.app.state.solar_forecast_provider = _ProviderTripwire()
+        headers = await admin_session(harness)
+        response = await harness.client.post(WEATHER_PREVIEW, headers=headers, json=_weather_body())
+        assert response.status_code == 200, response.text
+        assert response.json()["status"] == "unavailable"
+        assert "background" in response.json()["message"]
+
+
+async def test_weather_preview_of_an_unsaved_configuration_reports_unsaved_without_message(tmp_path: Path) -> None:
+    async with running_app(spot_market_settings(tmp_path)) as harness:
+        _stub_weather_timezone(harness)
+        config = WeatherConfig.model_validate({**_weather_body(), "timezone": "Europe/Berlin"})
+        harness.app.state.weather_config = config
+        harness.app.state.admin_store.put("weather_config", config.model_dump(mode="json"))
+        headers = await admin_session(harness)
+        response = await harness.client.post(
+            WEATHER_PREVIEW, headers=headers, json=_weather_body(latitude=49.8728, longitude=8.6512),
+        )
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["status"] == "unsaved"
+        # The saved zone belongs to the old location and must not leak into the unsaved view.
+        assert body["message"] is None and body["timezone"] is None
+
+
+async def test_weather_locations_returns_mapped_hits(tmp_path: Path) -> None:
+    class _StubGeocoder:
+        def search(self, query, *, count, country_code=None):
+            assert query == "Rem"
+            return [
+                GeocodingResult(
+                    name="Remscheid", latitude=51.1798, longitude=7.1925, country="Germany",
+                    country_code="de", admin1="North Rhine-Westphalia", admin2="Remscheid",
+                    district="Lüttringhausen", city="Remscheid", timezone=None, postal_code="42857",
+                ),
+                GeocodingResult(
+                    name="Remagen", latitude=50.579, longitude=7.227, country="Germany",
+                    country_code="de", admin1="Rhineland-Palatinate", admin2=None,
+                    city=None, timezone=None, postal_code=None,
+                ),
+            ]
+
+    async with running_app(spot_market_settings(tmp_path)) as harness:
+        _stub_weather_timezone(harness)
+        harness.app.state.solar_geocoder = _StubGeocoder()
+        headers = await admin_session(harness)
+        response = await harness.client.get(f"{WEATHER_LOCATIONS}?q=Rem", headers=headers)
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["status"] == "ok"
+        assert [r["name"] for r in body["results"]] == ["Remscheid", "Remagen"]
+        # admin2, district, country_code and the canonical postal_code are projected for display
+        # (not persisted).
+        assert body["results"][0]["admin2"] == "Remscheid"
+        assert body["results"][0]["district"] == "Lüttringhausen"
+        assert body["results"][0]["country_code"] == "de"
+        assert body["results"][0]["postal_code"] == "42857"
+        assert body["results"][1]["postal_code"] is None
+
+
+async def test_weather_config_attribution_reflects_the_active_geocoder(tmp_path: Path) -> None:
+    from app.weather.geocoding import OpenMeteoGeocoder, PhotonGeocoder
+
+    async with running_app(spot_market_settings(tmp_path)) as harness:
+        _stub_weather_timezone(harness)
+        headers = await admin_session(harness)
+
+        harness.app.state.solar_geocoder = PhotonGeocoder()
+        meta = (await harness.client.get(WEATHER_CONFIG, headers=headers)).json()["provider_meta"]
+        assert "Open-Meteo" in meta["attribution"]
+        assert "OpenStreetMap" in meta["location_attribution"]
+
+        harness.app.state.solar_geocoder = OpenMeteoGeocoder()
+        meta = (await harness.client.get(WEATHER_CONFIG, headers=headers)).json()["provider_meta"]
+        assert "Open-Meteo" in meta["attribution"]
+        assert "GeoNames" in meta["location_attribution"]
+
+
+async def test_weather_locations_forwards_optional_country_code(tmp_path: Path) -> None:
+    class _RecordingGeocoder:
+        def __init__(self) -> None:
+            self.calls: list[str | None] = []
+
+        def search(self, query, *, count, country_code=None):
+            self.calls.append(country_code)
+            return []
+
+    async with running_app(spot_market_settings(tmp_path)) as harness:
+        _stub_weather_timezone(harness)
+        geocoder = _RecordingGeocoder()
+        harness.app.state.solar_geocoder = geocoder
+        headers = await admin_session(harness)
+        with_code = await harness.client.get(f"{WEATHER_LOCATIONS}?q=London&country_code=gb", headers=headers)
+        without_code = await harness.client.get(f"{WEATHER_LOCATIONS}?q=London", headers=headers)
+        assert with_code.status_code == without_code.status_code == 200
+        assert geocoder.calls == ["gb", None]
+
+
+async def test_weather_locations_handles_an_empty_result(tmp_path: Path) -> None:
+    class _EmptyGeocoder:
+        def search(self, query, *, count, country_code=None):
+            return []
+
+    async with running_app(spot_market_settings(tmp_path)) as harness:
+        _stub_weather_timezone(harness)
+        harness.app.state.solar_geocoder = _EmptyGeocoder()
+        headers = await admin_session(harness)
+        response = await harness.client.get(f"{WEATHER_LOCATIONS}?q=zzzzz", headers=headers)
+        assert response.status_code == 200, response.text
+        assert response.json() == {"status": "ok", "message": None, "results": []}
+
+
+async def test_weather_locations_reports_a_geocoder_failure_as_a_status(tmp_path: Path) -> None:
+    class _DeadGeocoder:
+        def search(self, query, *, count, country_code=None):
+            raise WeatherConnectionError("geocoding is unreachable")
+
+    async with running_app(spot_market_settings(tmp_path)) as harness:
+        _stub_weather_timezone(harness)
+        harness.app.state.solar_geocoder = _DeadGeocoder()
+        headers = await admin_session(harness)
+        response = await harness.client.get(f"{WEATHER_LOCATIONS}?q=Rem", headers=headers)
+        # A dead geocoder is a 200 with status=error, never a 5xx, so location search cannot look
+        # like a server fault or reach the inverter control path.
+        assert response.status_code == 200, response.text
+        assert response.json()["status"] == "error"
+        assert "unreachable" in response.json()["message"]
+
+
+async def test_weather_locations_short_query_makes_no_geocoder_call(tmp_path: Path) -> None:
+    class _TrippedGeocoder:
+        def search(self, query, *, count, country_code=None):
+            raise AssertionError("a one-character query must not reach the geocoder")
+
+    async with running_app(spot_market_settings(tmp_path)) as harness:
+        _stub_weather_timezone(harness)
+        harness.app.state.solar_geocoder = _TrippedGeocoder()
+        headers = await admin_session(harness)
+        response = await harness.client.get(f"{WEATHER_LOCATIONS}?q=R", headers=headers)
+        assert response.status_code == 200, response.text
+        assert response.json()["results"] == []
+
+
+async def test_weather_timezone_is_derived_from_coordinates(tmp_path: Path) -> None:
+    # Photon carries no zone, so the server derives it from lat/lon. The resolver is stubbed; no
+    # test reaches the network. Remscheid 51.18/7.19 -> Europe/Berlin.
+    class _StubResolver:
+        def resolve(self, latitude, longitude):
+            assert (round(latitude, 2), round(longitude, 2)) == (51.18, 7.19)
+            return "Europe/Berlin"
+
+    async with running_app(spot_market_settings(tmp_path)) as harness:
+        _stub_weather_timezone(harness)
+        harness.app.state.solar_timezone_resolver = _StubResolver()
+        headers = await admin_session(harness)
+        response = await harness.client.get(
+            f"{WEATHER_TIMEZONE}?latitude=51.18&longitude=7.19", headers=headers
+        )
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body == {"status": "ok", "message": None, "timezone": "Europe/Berlin"}
+
+
+async def test_weather_timezone_resolves_a_second_zone(tmp_path: Path) -> None:
+    class _StubResolver:
+        def resolve(self, latitude, longitude):
+            return "America/New_York"
+
+    async with running_app(spot_market_settings(tmp_path)) as harness:
+        _stub_weather_timezone(harness)
+        harness.app.state.solar_timezone_resolver = _StubResolver()
+        headers = await admin_session(harness)
+        response = await harness.client.get(
+            f"{WEATHER_TIMEZONE}?latitude=40.7128&longitude=-74.0060", headers=headers
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["timezone"] == "America/New_York"
+
+
+async def test_weather_timezone_reports_a_derivation_failure_as_a_status(tmp_path: Path) -> None:
+    class _DeadResolver:
+        def resolve(self, latitude, longitude):
+            raise WeatherConnectionError("Open-Meteo timezone lookup is unreachable")
+
+    async with running_app(spot_market_settings(tmp_path)) as harness:
+        _stub_weather_timezone(harness)
+        harness.app.state.solar_timezone_resolver = _DeadResolver()
+        headers = await admin_session(harness)
+        response = await harness.client.get(
+            f"{WEATHER_TIMEZONE}?latitude=51.18&longitude=7.19", headers=headers
+        )
+        # A failed derivation is a 200 with status=error, never a 5xx: it stays isolated from the
+        # inverter/dispatch/forecast path and never claims an empty or wrong zone as a success.
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["status"] == "error"
+        assert body["timezone"] is None
+        assert "unreachable" in body["message"]
+
+
+async def test_weather_timezone_rejects_out_of_range_coordinates(tmp_path: Path) -> None:
+    class _TrippedResolver:
+        def resolve(self, latitude, longitude):
+            raise AssertionError("out-of-range coordinates must be rejected before the resolver")
+
+    async with running_app(spot_market_settings(tmp_path)) as harness:
+        _stub_weather_timezone(harness)
+        harness.app.state.solar_timezone_resolver = _TrippedResolver()
+        headers = await admin_session(harness)
+        response = await harness.client.get(
+            f"{WEATHER_TIMEZONE}?latitude=120&longitude=7.19", headers=headers
+        )
+        # An out-of-range coordinate is a request-boundary 422, before the resolver is consulted.
+        assert response.status_code == 422, response.text
+
+
+async def test_weather_config_derives_timezone_and_rejects_timezone_input(tmp_path: Path) -> None:
+    async with running_app(spot_market_settings(tmp_path)) as harness:
+        _stub_weather_timezone(harness)
+        _stub_background_refreshes(harness)
+        headers = await admin_session(harness)
+        saved = await harness.client.put(WEATHER_CONFIG, headers=headers, json=_weather_body())
+        assert saved.status_code == 200, saved.text
+        assert saved.json()["timezone"] == "Europe/Berlin"
+        assert harness.app.state.weather_config.timezone == "Europe/Berlin"
+
+        # Timezone is not part of the request contract: coordinates are the sole authority.
+        rejected = await harness.client.put(
+            WEATHER_CONFIG,
+            headers=headers,
+            json={**_weather_body(), "timezone": "America/New_York"},
+        )
+        assert rejected.status_code == 422, rejected.text
+
+
+async def test_dashboard_forecast_include_solar_loads_only_the_solar_projection(tmp_path: Path) -> None:
+    start = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+    forecast = SolarForecast(
+        created_at=datetime.now(UTC),
+        intervals=(SolarForecastInterval(start, start + timedelta(minutes=15), 500.0),),
+    )
+
+    async with running_app(spot_market_settings(tmp_path)) as harness:
+        headers = await admin_session(harness)
+        config = WeatherConfig.model_validate({**_weather_body(), "timezone": "Europe/Berlin"})
+        harness.app.state.weather_config = config
+        harness.app.state.admin_store.put("weather_config", config.model_dump(mode="json"))
+        _seed_solar_forecast(harness.app.state.admin_store, config, forecast)
+        response = await harness.client.get(
+            "/admin/api/energy/dashboard-forecast?include=solar", headers=headers
+        )
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert "solar" in body and "spot" not in body
+        assert body["solar"]["source"] == "Open-Meteo"
+
+
+async def test_dashboard_forecast_solar_is_disabled_without_a_forecastable_config(tmp_path: Path) -> None:
+    async with running_app(spot_market_settings(tmp_path)) as harness:
+        _stub_weather_timezone(harness)
+        headers = await admin_session(harness)
+
+        class _Tripwire:
+            def get(self, config):
+                raise AssertionError("a disabled config must not touch the solar cache")
+
+        harness.app.state.solar_forecast_provider = _Tripwire()
+        response = await harness.client.get(
+            "/admin/api/energy/dashboard-forecast?include=solar", headers=headers
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["solar"]["status"] == "disabled"
+
+
+async def test_spot_market_preview_reports_a_failed_daily_retrieval(tmp_path: Path) -> None:
+    from app.admin.forecast_refresh import SPOT_STATUS_KEY, record_refresh_status
+
+    today = datetime.now(UTC).date()
+
+    def day(offset: int) -> SpotPriceInterval:
+        start = datetime.combine(today + timedelta(days=offset), datetime.min.time(), tzinfo=UTC)
+        return SpotPriceInterval(start, start + timedelta(minutes=15), Decimal("0.2"))
+
+    async with running_app(spot_market_settings(tmp_path)) as harness:
+        _activate_spot_market(harness)
+        store = harness.app.state.admin_store
+        key = spot_config_key(harness.app.state.spotmarket_config)
+        headers = await admin_session(harness)
+
+        # No stored data: the failure replaces the endless "being loaded" hint, without the raw cause.
+        record_refresh_status(store, SPOT_STATUS_KEY, key, False, "provider down")
+        empty = (await harness.client.post(SPOT_PREVIEW, headers=headers, json=_spot_body())).json()
+        assert empty["status"] == "error"
+        assert "provider down" not in empty["message"] and empty["refresh_error"] == "provider down"
+
+        # Today is missing although it is due: stored data stays visible and the warning appears.
+        _seed_spot_prices(store, [day(-1)])
+        stale = (await harness.client.post(SPOT_PREVIEW, headers=headers, json=_spot_body())).json()
+        assert stale["status"] == "connected" and stale["refresh_error"] == "provider down"
+        assert stale["stale"] is True
+        dashboard = (await harness.client.get(
+            "/admin/api/energy/dashboard-forecast?include=spot_day_ahead", headers=headers)).json()["spot"]
+        assert dashboard["status"] == "stale" and dashboard["refresh_error"] == "provider down"
+
+        # All three displayed days are stored: nothing is missing, so an old failure raises no warning.
+        _seed_spot_prices(store, [day(-1), day(0), day(1)])
+        calm = (await harness.client.post(SPOT_PREVIEW, headers=headers, json=_spot_body())).json()
+        assert calm["stale"] is False and calm["refresh_error"] == "provider down"
+        dashboard = (await harness.client.get(
+            "/admin/api/energy/dashboard-forecast?include=spot_day_ahead", headers=headers)).json()["spot"]
+        assert dashboard["status"] == "available"
+
+        record_refresh_status(store, SPOT_STATUS_KEY, key, True)
+        ok = (await harness.client.post(SPOT_PREVIEW, headers=headers, json=_spot_body())).json()
+        assert ok["refresh_error"] is None and ok["refresh_error_at"] is None
+
+
+async def test_weather_preview_and_dashboard_report_a_failed_background_refresh(tmp_path: Path) -> None:
+    from app.admin.forecast_refresh import SOLAR_STATUS_KEY, record_refresh_status
+
+    async with running_app(spot_market_settings(tmp_path)) as harness:
+        headers = await admin_session(harness)
+        config = WeatherConfig.model_validate({**_weather_body(), "timezone": "Europe/Berlin"})
+        harness.app.state.weather_config = config
+        store = harness.app.state.admin_store
+        record_refresh_status(store, SOLAR_STATUS_KEY, solar_config_key(config), False, "weather down")
+        preview = (await harness.client.post(WEATHER_PREVIEW, headers=headers, json=_weather_body())).json()
+        assert preview["status"] == "error" and preview["refresh_error"] == "weather down"
+        dashboard = (await harness.client.get(
+            "/admin/api/energy/dashboard-forecast?include=solar", headers=headers)).json()["solar"]
+        assert dashboard["status"] == "error" and dashboard["refresh_error"] == "weather down"
+
+
+async def test_config_save_clears_rows_under_the_refresh_lock_and_blocks_a_stale_refresh(tmp_path: Path) -> None:
+    from app.admin.forecast_refresh import refresh_spot_market
+
+    today = datetime.now(UTC).date()
+    midnight = datetime.combine(today, datetime.min.time(), tzinfo=UTC)
+
+    class _Provider:
+        """Simulates a save for another zone landing while the old-zone fetch is in flight."""
+
+        def __init__(self, harness):
+            self.harness = harness
+
+        def _snapshot(self, config):
+            return SpotPriceSnapshot(
+                config.provider, config.bidding_zone, "EUR", datetime.now(UTC),
+                (SpotPriceInterval(midnight, midnight + timedelta(minutes=15), Decimal("0.1")),), timezone="UTC",
+            )
+
+        def fetch_current(self, config):
+            return self._snapshot(config)
+
+        def fetch_today(self, config):
+            self.harness.app.state.spotmarket_config = SpotMarketConfig.model_validate(
+                {**_spot_body(), "bidding_zone": "AT"}
+            )
+            return self._snapshot(config)
+
+        def fetch_yesterday(self, config, timezone):
+            return self._snapshot(config)
+
+        def fetch_day_ahead(self, config):
+            return self._snapshot(config)
+
+    async with running_app(spot_market_settings(tmp_path)) as harness:
+        _activate_spot_market(harness)
+        store = harness.app.state.admin_store
+        old = harness.app.state.spotmarket_config
+        old_key = spot_config_key(old)
+        wrote = await refresh_spot_market(
+            store, _Provider(harness), old,
+            lambda: spot_config_key(harness.app.state.spotmarket_config) == old_key,
+        )
+        assert wrote is False
+        assert store.get_spot_market_intervals(old_key) == []
+
+
+def test_dry_run_price_disclaimer_matches_the_strict_latest_wins_planner() -> None:
+    """P3.3: the price text must not claim the price breaks ties between equivalent slots.
+
+    The V1 planner is strict latest-wins (``planner.py`` sorts candidates ``reverse=True``; a later
+    slot wins even when an earlier one is cheaper), so the day-ahead price never moves charging into
+    an earlier slot. The disclaimer and the model docstring must say that, not the old tie-breaker
+    claim, and must still flag that no absolute household cost is implied.
+    """
+    from app.admin.energy_api import DryRunPlanView
+
+    view = DryRunPlanView(device_id="main", status="ok", horizon_hours=1.0)
+    disclaimer = view.price_disclaimer
+    assert "breaks ties" not in disclaimer
+    assert "equivalent slots" not in disclaimer
+    assert "never moves charging into an earlier slot" in disclaimer
+    assert "household cost" in disclaimer
+    docstring = DryRunPlanView.__doc__ or ""
+    assert "break\n    ties" not in docstring and "ties between slots equivalent" not in docstring

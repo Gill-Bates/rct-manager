@@ -14,8 +14,6 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from app.allowlist import Allowlist
-from app.cache import CacheEntry, CacheFreshness, ValueStore, age_seconds
 from app.catalog.registry import RegistryCatalog, RegistryEntry
 from app.clock import Clock
 from app.config import (
@@ -49,10 +47,13 @@ from app.gateway.base import (
     StaleReason,
     WriteOutcome,
 )
+from app.gateway.cache import CacheEntry, CacheFreshness, ValueStore, age_seconds
+from app.gateway.sample_sink import MetricSampleSink
 from app.gateway.vendor import SlaveDiscovery, TransportInfo
 from app.observability.stats import Histogram
 from app.protocol.frames import Frame
 from app.protocol.slave_data import SlaveData, decode_slave_data
+from app.protocol.timeseries import TimeSeriesPoint, decode_timeseries
 from app.protocol.types import Command, DataType, FrameKind
 from app.protocol.values import ScalarValue, decode_string, decode_value, encode_value
 from app.scheduling.budget import BudgetHandle
@@ -65,6 +66,7 @@ from app.scheduling.periodic import (
 from app.scheduling.retry import RetryConfig, execute_with_retry
 from app.scheduling.serializer import AccessSerializer
 from app.scheduling.singleflight import SingleFlight
+from app.security.allowlist import Allowlist
 from app.transport.endpoint import TransportEndpoint
 from app.transport.types import (
     TransactionOrigin,
@@ -74,6 +76,7 @@ from app.transport.types import (
 )
 
 log = logging.getLogger(__name__)
+_HISTORY_TRACE_INTERVAL_SECONDS = 60.0
 MAX_SLAVES = 31  # network ids the plant network can hold (Requirement 18.10)
 _INVERTER_NAME_OBJECT_ID = 0xEBC62737
 _INVERTER_SERIAL_OBJECT_ID = 0x7924ABD9
@@ -147,11 +150,16 @@ class RctGateway:
         slave_cache_ttl_seconds: float = 300.0,
         slave_stable_reads: int = 3,
         slave_max_reads: int = 40,
+        sample_sink: MetricSampleSink | None = None,
     ) -> None:
         self._catalog = catalog
         self._cache = cache
         self._clock = clock
         self._allowlist = allowlist
+        # Optional passive observer of decoded periodic values; the gateway never learns what it
+        # does. None keeps the receiver path exactly as it was.
+        self._sample_sink = sample_sink
+        self._history_trace_last: dict[tuple[str, str], float] = {}
         self._retry = retry or RetryConfig()
         self._fresh_mode = fresh_mode
         self._encoding = encoding
@@ -177,6 +185,10 @@ class RctGateway:
         # the cache (TTL exemption) without any device I/O. Cleared only by replace_devices().
         self._inventory_state: dict[str, dict[str, str]] = {}
         self._inventory_values: dict[str, dict[str, tuple[ScalarValue, datetime]]] = {}
+        # Last-known-good battery topology per (device_id, tower prefix), owned by
+        # app.gateway.battery_inventory. It is derived from the inventory above and must be dropped
+        # with it, otherwise a re-addressed device would keep reporting the old hardware's towers.
+        self.module_topology_state: dict[tuple[str, str], dict] = {}
 
     def read_failed(self, device_id: str, name: str, *, min_failures: int = REFRESH_FAILURES_CONFIRMED) -> bool:
         """True once refresh reads of this value failed repeatedly in a row (each already retried).
@@ -387,6 +399,17 @@ class RctGateway:
 
     def replace_devices(self, bindings: list[DeviceBinding]) -> None:
         """Swap the whole device/address map for a freshly built graph (live device-list reload)."""
+        # A device_id that is gone, or kept but re-addressed to a different endpoint/network, must
+        # not carry the OLD hardware's cached register values forward: a later read would otherwise
+        # serve a stale value for a device that now answers at that id (or no longer exists). Compute
+        # the affected ids before the map is cleared, then drop their value-cache entries below. A
+        # device whose key is unchanged keeps its cache, like its serializer and slave locks.
+        new_keys = {binding.entry.device_id: binding.entry.key for binding in bindings}
+        stale_ids = [
+            device_id
+            for device_id, binding in self._devices.items()
+            if new_keys.get(device_id) != binding.entry.key
+        ]
         self._devices.clear()
         self._by_address.clear()
         # These caches are keyed by the logical device_id, which an operator may keep while changing
@@ -403,6 +426,12 @@ class RctGateway:
         # own towers instead of inheriting the old hardware's inventory topology.
         self._inventory_state.clear()
         self._inventory_values.clear()
+        self.module_topology_state.clear()
+        # The value cache is keyed by (device_id, metric name). The ValueStore port exposes only a
+        # per-key invalidate, so drop every catalog metric for each gone/re-addressed device.
+        for device_id in stale_ids:
+            for entry in self._catalog.entries():
+                self._cache.invalidate((device_id, entry.name))
         for binding in bindings:
             self.add_device(binding)
 
@@ -444,20 +473,29 @@ class RctGateway:
                 return  # a write acknowledgement must never populate the cache (Requirement 9.13)
             device_id = self._by_address.get((endpoint_key, frame.plant_address))
             entry = self._catalog.entry_by_object_id(frame.object_id)
-            if device_id is None or entry is None or entry.data_type is DataType.STRUCT:
+            if device_id is None or entry is None or entry.is_compound:
                 return
             try:
                 value = self._decode(entry, frame.payload)
             except DeviceApiError:
                 log.debug("Dropped undecodable periodic value for metric %s", entry.name)
                 return
+            measured_at = self._clock.now()
             self._cache.put(
                 (device_id, entry.name),
                 value,
-                measured_at=self._clock.now(),
+                measured_at=measured_at,
                 received_monotonic=self._clock.monotonic(),
                 origin="periodic",
             )
+            # Passive, non-blocking fan-out AFTER the cache update: an observer failure must never
+            # stop the cache from being filled nor damage the connection (Requirement: fail-safe).
+            sink_observer = self._sample_sink
+            if sink_observer is not None:
+                try:
+                    sink_observer.sample(device_id, entry.name, value, measured_at)
+                except Exception:
+                    log.debug("Metric sample observer failed for %s", entry.name, exc_info=True)
 
         return sink
 
@@ -544,6 +582,21 @@ class RctGateway:
             reason=reason,
             freshness=freshness,
         )
+
+    def cached_metric(self, device_id: str, name: str) -> MetricReading | None:
+        """Return only a currently fresh cache value, without ever touching the transport.
+
+        This is intentionally stricter than read_metric(fresh=False): that method may start a
+        transaction on a cache miss or stale entry. Diagnostic/UI surfaces that must be harmless
+        on page load use this method instead.
+        """
+        self._device(device_id)  # validate the device id without performing I/O
+        entry = self._metric(name)
+        key = (device_id, name)
+        cached = self._cache.get(key)
+        if cached is None or self._classify(key, cached) is not CacheFreshness.FRESH:
+            return None
+        return self._from_cache(entry, key, cached, None, None)
 
     async def read_metric(
         self, device_id: str, name: str, *, fresh: bool, charge: BudgetHandle | None = None
@@ -841,6 +894,59 @@ class RctGateway:
             raise DeviceUnreachable()
         return decode_string(result.frame.payload, self._encoding)[0]
 
+    def _trace_history_query(self, device_id: str, name: str, object_id: int) -> None:
+        """Rate-limited DEBUG record of an outgoing compound-history query (no payload).
+
+        This is the only code path that sends a logger query, so a logger frame in the receive log
+        with no matching line here was not requested by this application.
+        """
+        if not log.isEnabledFor(logging.DEBUG):
+            return
+        now = self._clock.monotonic()
+        key = (device_id, name)
+        last = self._history_trace_last.get(key)
+        if last is not None and now - last < _HISTORY_TRACE_INTERVAL_SECONDS:
+            return
+        self._history_trace_last[key] = now
+        log.debug(
+            "Outgoing history query: origin=%s command=0x%02x object_id=0x%08x metric=%s device=%s",
+            TransactionOrigin.SYSTEM_READ.name, Command.WRITE, object_id, name, device_id,
+        )
+
+    async def query_history_series(self, device_id: str, name: str, before: datetime) -> tuple[TimeSeriesPoint, ...]:
+        """Read-only history query of a logger object through the device's own serializer.
+
+        The wire form is a WRITE frame carrying a timestamp, but it stores nothing on the device.
+        It is therefore classified as a read: no write gate, allowlist, barrier or write retry rule
+        applies, and it is budget-exempt SYSTEM_READ work queued behind other FIFO requests.
+        """
+        binding = self._device(device_id)
+        entry = self._catalog.object_entry(name)
+        if entry.response_type is not DataType.TIMESERIES:
+            raise UnknownMetric(name=name)
+        if binding.endpoint.maintenance():
+            raise DeviceMaintenance()
+        query = int(before.timestamp())
+        try:
+            payload = encode_value(entry.data_type, query)
+        except (OverflowError, ValueError):
+            raise ProtocolError("timeseries_query_out_of_range", name=name) from None
+        self._trace_history_query(device_id, name, entry.object_id)
+        request = TransactionRequest(
+            binding.entry.key,
+            make_frame(binding.entry.network_id, Command.WRITE, entry.object_id, payload),
+            TransactionOrigin.SYSTEM_READ,
+            "read",
+            self._clock.now(),
+            idempotent=True,
+        )
+        result = await binding.serializer.submit(request)
+        if result.error is not None:
+            raise result.error
+        if result.frame is None:
+            raise DeviceUnreachable()
+        return decode_timeseries(result.frame.payload, expected_query=query)
+
     def heartbeat_read(self, device_id: str) -> Callable[[], Awaitable[bool]]:
         """Callable for ``Heartbeat``: one budget-exempt read of the heartbeat metric."""
         binding = self._device(device_id)
@@ -873,6 +979,10 @@ class RctGateway:
 
     def set_allowlist(self, allowlist: Allowlist) -> None:
         self._allowlist = allowlist
+
+    def set_sample_sink(self, sink: MetricSampleSink | None) -> None:
+        """Install (or clear) the passive observer the periodic value_sink notifies after the cache."""
+        self._sample_sink = sink
 
     def cached_reading(self, device_id: str, name: str) -> tuple[ScalarValue, CacheFreshness] | None:
         """Cached value with its freshness; None when absent or expired."""

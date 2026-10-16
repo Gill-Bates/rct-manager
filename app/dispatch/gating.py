@@ -8,7 +8,7 @@
 
 from datetime import datetime
 
-from app.dispatch.models import DispatchConfig, PowerSetpoint
+from app.dispatch.models import DispatchConfig, PowerDirection, PowerSetpoint
 
 
 def should_write(
@@ -19,11 +19,17 @@ def should_write(
     last_write_at: datetime | None,
     config: DispatchConfig,
     export_cut: bool = False,
+    charge_derate: bool = False,
 ) -> bool:
     if desired.direction != current.direction:
         return True
     # Grid export is a safety boundary: a reduction must not wait for deadband or interval.
     if export_cut and desired.watts < current.watts:
+        return True
+    # A live charge limit that drops while charging is a safety derate: lower the setpoint
+    # immediately, bypassing deadband and min-write interval, exactly like the export cut above. An
+    # INCREASE of the limit is not urgent and falls through to the normal deadband/interval path.
+    if charge_derate and desired.direction is PowerDirection.CHARGE and desired.watts < current.watts:
         return True
     if abs(desired.watts - current.watts) < config.power_write_deadband_w:
         return False

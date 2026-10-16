@@ -30,6 +30,7 @@ from app.dispatch.capabilities import (
     evaluate_gate,
     required_for,
 )
+from app.dispatch.controller import CapabilityConflict
 from app.dispatch.models import (
     DeviceControlSnapshot,
     DeviceLimits,
@@ -413,6 +414,46 @@ async def test_set_capability_refuses_a_record_of_another_device(tmp_path: Path)
         await dispatch.set_capability("slave1", verified("main", CapabilityName.WRITE_PATH))
 
 
+async def test_capability_change_is_refused_while_a_restore_is_outstanding(tmp_path: Path) -> None:
+    """D2: a device in FAULT_RESTORE_PENDING still has a restore outstanding — the pending restore
+    replays the WHOLE captured snapshot — so no capability, limit or policy change may land meanwhile
+    or the eventual restore could be inconsistent. The refusal is unconditional, not limited to the
+    capabilities the faulted mode depended on.
+    """
+    clock = ManualClock()
+    store = dispatch_store(tmp_path)
+    registry = CapabilityRegistry()
+    dispatch = controller_with_store(store, clock, FakeDispatchGateway(clock), capabilities=registry)
+    now = clock.now()
+    intent = DispatchIntent(
+        operation_id="pending-restore-op",
+        mode=DispatchMode.CHARGE_FROM_GRID,
+        target_soc_percent=80.0,
+        max_power_w=2000.0,
+        max_power_w_requested=2000.0,
+        valid_until=now + timedelta(hours=1),
+        valid_until_requested=now + timedelta(hours=1),
+        created_at=now,
+    )
+    # A device whose automatic restore has not yet succeeded: restore_required stays True.
+    await asyncio.to_thread(
+        store.put,
+        DispatchRecord(
+            "main",
+            state=DispatchState.FAULT_RESTORE_PENDING,
+            intent=intent,
+            snapshot=DeviceControlSnapshot(PowerSetpoint(), 0.5, 1, False, now, all_fresh=True),
+            restore_required=True,
+        ),
+    )
+    # A capability the faulted mode does NOT depend on must be refused just the same.
+    with pytest.raises(CapabilityConflict) as excinfo:
+        await dispatch.set_capability("main", verified("main", CapabilityName.GRID_POWER_SIGN, grid_import_positive=False))
+    assert excinfo.value.operation_id == "pending-restore-op"
+    # The registry stayed untouched: the refused change was never taken over.
+    assert registry.record("main", CapabilityName.GRID_POWER_SIGN).status is CapabilityStatus.UNVERIFIED
+
+
 async def test_a_failed_commit_leaves_the_registry_untouched(tmp_path: Path) -> None:
     """Fail closed: if the verification is not durable, the gate must not act on it either."""
     clock = ManualClock()
@@ -452,6 +493,19 @@ async def test_set_device_limits_persists_the_switch_and_the_limits(tmp_path: Pa
     assert store.get_device_configs() == {"main": DeviceLimits(1000, 2000, engineering_mode=True)}
     assert dispatch.device_limits("main") == DeviceLimits(1000, 2000, engineering_mode=True)
     assert dispatch.device_limits("slave1") is None
+
+
+async def test_p2_8_set_device_limits_persists_per_device_usable_capacity(tmp_path: Path) -> None:
+    """P2-8: an operator-supplied usable capacity is persisted and read back through the same
+    per-device limits context the planner uses, and a device left without one reads back as unset."""
+    clock = ManualClock()
+    store = dispatch_store(tmp_path)
+    dispatch = controller_with_store(store, clock, FakeDispatchGateway(clock))
+    await dispatch.set_device_limits("main", DeviceLimits(1000, 2000, usable_capacity_wh=12_500.0))
+    assert dispatch.device_limits("main").usable_capacity_wh == 12_500.0
+    assert store.get_device_configs()["main"].usable_capacity_wh == 12_500.0
+    await dispatch.set_device_limits("main", DeviceLimits(1000, 2000))
+    assert dispatch.device_limits("main").usable_capacity_wh is None
 
 
 async def test_a_capability_write_on_one_device_does_not_block_another_device(tmp_path: Path) -> None:
@@ -966,8 +1020,38 @@ async def test_admin_api_sets_device_limits_and_the_engineering_switch(tmp_path:
             "max_charge_power_w": 1500.0,
             "max_discharge_power_w": 2500.0,
             "engineering_mode": True,
+            "usable_capacity_wh": None,
         }
         assert harness.runtime.dispatch.device_limits("main").engineering_mode is True
+
+
+async def test_admin_api_sets_per_device_usable_capacity(tmp_path: Path) -> None:
+    """P2-8: the dispatch API accepts an operator-supplied per-device usable capacity, persists it
+    with the device's limits, and echoes it back; it is optional and defaults to unset."""
+    async with _admin_harness(tmp_path) as (harness, headers):
+        resp = await harness.client.put(
+            "/admin/api/dispatch/devices/main",
+            headers=headers,
+            json={
+                "max_charge_power_w": 1500,
+                "max_discharge_power_w": 2500,
+                "usable_capacity_wh": 9600,
+            },
+        )
+        assert resp.status_code == 200
+        assert resp.json()["usable_capacity_wh"] == 9600.0
+        assert harness.runtime.dispatch.device_limits("main").usable_capacity_wh == 9600.0
+        # A non-positive/absurd capacity is rejected, never stored or guessed.
+        for bad in ("0", "-1", "NaN", "1e9"):
+            rejected = await harness.client.put(
+                "/admin/api/dispatch/devices/main",
+                headers={**headers, "Content-Type": "application/json"},
+                content=(
+                    '{"max_charge_power_w": 1500, "max_discharge_power_w": 2500, '
+                    f'"usable_capacity_wh": {bad}}}'
+                ),
+            )
+            assert rejected.status_code == 422, (bad, rejected.text)
 
 
 async def test_admin_api_rejects_non_finite_or_absurd_device_limits(tmp_path: Path) -> None:
@@ -1015,6 +1099,17 @@ async def test_capability_optional_fields_belong_to_their_own_capability(tmp_pat
         )
         assert right.status_code == 200, right.text
         assert (right.json()["volatile"], right.json()["refresh_interval_seconds"]) == (True, 30.0)
+
+
+@pytest.mark.parametrize("field", [
+    "battery_discharge_positive", "grid_import_positive",
+    "write_frame_layout_verified", "apply_sequence_verified",
+])
+@pytest.mark.parametrize("value", ["false", 0, None])
+def test_persisted_capability_requires_real_booleans(field: str, value: object) -> None:
+    row = {"device_id": "main", "name": "battery_power_sign_convention", "status": "unverified", field: value}
+    with pytest.raises(TypeError, match=field):
+        CapabilityRecord.from_dict(row)
 
 
 def _admin_settings(tmp_path: Path, admin_path: Path, **overrides):
@@ -1160,3 +1255,65 @@ async def test_a_verified_device_keeps_the_long_ttl_even_with_the_switch_on(tmp_
         "main", DispatchCommand(DispatchMode.CHARGE_FROM_GRID, 80, 2000, requested)
     )
     assert status.valid_until == requested  # below the 6 h cap, so passed through unchanged
+
+
+def _verified_kwargs() -> dict:
+    return {
+        "soc_strategy_external_code": 1,
+        "enum_byte_width": 1,
+        "bool_byte_width": 1,
+        "write_frame_layout_verified": True,
+        "apply_sequence_verified": True,
+        "soc_target_unit": "ratio",
+        "note": "bench evidence",
+        "export_limit_zero_blocks_export": True,
+    }
+
+
+@pytest.mark.parametrize(
+    ("name", "field", "bad"),
+    [
+        (CapabilityName.WRITE_PATH, "soc_strategy_external_code", None),
+        (CapabilityName.WRITE_PATH, "enum_byte_width", None),
+        (CapabilityName.WRITE_PATH, "bool_byte_width", None),
+        (CapabilityName.WRITE_PATH, "write_frame_layout_verified", False),
+        (CapabilityName.WRITE_PATH, "apply_sequence_verified", False),
+        (CapabilityName.WRITE_PATH, "note", ""),
+        (CapabilityName.WRITE_PATH, "note", "   "),
+        (CapabilityName.EXPORT_LIMIT, "export_limit_zero_blocks_export", None),
+    ],
+)
+def test_missing_verified_evidence_names_each_absent_field(name, field, bad) -> None:
+    from app.dispatch.capabilities import missing_verified_evidence
+
+    complete = CapabilityRecord(device_id="main", name=name, **_verified_kwargs())
+    assert missing_verified_evidence(name, complete) == []
+    incomplete = CapabilityRecord(device_id="main", name=name, **{**_verified_kwargs(), field: bad})
+    assert missing_verified_evidence(name, incomplete) == [field]
+
+
+def test_a_setpoint_volatility_record_needs_no_evidence() -> None:
+    from app.dispatch.capabilities import missing_verified_evidence
+
+    record = CapabilityRecord(device_id="main", name=CapabilityName.SETPOINT_VOLATILITY)
+    assert missing_verified_evidence(CapabilityName.SETPOINT_VOLATILITY, record) == []
+
+
+def test_dataclass_and_persistence_evidence_rules_stay_inside_the_shared_table() -> None:
+    """Drift guard: the record's own checks may only demand fields the shared table requires."""
+    from app.dispatch.capabilities import EXPLICIT_REQUIRED_FLAGS, REQUIRED_FOR_VERIFIED
+
+    for name, keys in CapabilityRecord._EXPLICIT_EVIDENCE.items():
+        assert set(keys) <= set(REQUIRED_FOR_VERIFIED[name])
+    for name in (CapabilityName.WRITE_PATH, CapabilityName.EXPORT_LIMIT):
+        hard = {f for f in REQUIRED_FOR_VERIFIED[name] if f not in ("soc_target_unit", "note")}
+        for field in hard:
+            bad = False if field.endswith("_verified") else None
+            with pytest.raises(ValueError):
+                CapabilityRecord(
+                    device_id="main", name=name, status=CapabilityStatus.VERIFIED,
+                    **{**_verified_kwargs(), field: bad},
+                )
+    assert set(EXPLICIT_REQUIRED_FLAGS) == {
+        "battery_discharge_positive", "grid_import_positive", "soc_target_unit",
+    }

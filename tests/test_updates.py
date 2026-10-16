@@ -78,3 +78,26 @@ def test_fetch_rejects_an_unparseable_release_tag(tag: str, monkeypatch: pytest.
 def test_a_junk_tag_does_not_parse_as_a_version() -> None:
     assert _version_parts("1.2.3-invalid-junk") == (0,)  # not read as (1, 2, 3)
     assert _version_parts("garbage") == (0,)
+
+
+@pytest.mark.parametrize(
+    ("left", "right"),
+    [("1.2.3.0", "1.2.3"), ("1.2.3", "1.2.3.0"), ("1.2.0.0", "1.2"), ("1.2.3.0.0", "1.2.3")],
+)
+def test_trailing_zero_segments_are_equivalent(left: str, right: str) -> None:
+    # 1.2.3.0 and 1.2.3 are the same release: neither must be read as an update over the other.
+    assert _version_parts(left) == _version_parts(right)
+    assert _version_key(left) == _version_key(right)
+
+
+def test_a_trailing_zero_release_is_not_reported_as_an_update() -> None:
+    assert _version_key("1.2.3.0") == _version_key("1.2.3")
+    assert not (_version_key("1.2.3.0") > _version_key("1.2.3"))
+
+
+def test_a_higher_patch_is_still_newer() -> None:
+    assert _version_key("1.2.4") > _version_key("1.2.3")
+
+
+def test_a_pre_release_still_sorts_below_its_final_release() -> None:
+    assert _version_key("2.0.0rc1") < _version_key("2.0.0")

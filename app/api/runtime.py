@@ -18,6 +18,7 @@ from app.catalog.base import MetricCatalog
 from app.clock import Clock
 from app.config import DeviceEntry, Settings
 from app.dispatch.base import BatteryDispatchPort
+from app.dispatch.battery_facts import NoVerifiedCapacity, VerifiedCapacityPort
 from app.energy.base import EnergyManagerPort
 from app.energy.readings import EnergyReadingsPort
 from app.errors import DeviceApiError, UnknownDevice, UnknownMetric
@@ -54,6 +55,8 @@ class Runtime:
     # Cache-only sign-normalized readings, independent of dispatch/Energy-Manager state, so the
     # dashboard's energy_flow projection works even with write support disabled (design §4.2).
     energy_readings: EnergyReadingsPort | None = None
+    # Evidence-backed usable battery capacity (cache/store only). The default never yields a value.
+    battery_capacity: VerifiedCapacityPort = field(default_factory=NoVerifiedCapacity)
     # Register names through which battery dispatch commands the device; injected by the composition
     # root so routers need not import the vendor adapter that defines them.
     dispatch_control_registers: frozenset[str] = frozenset()
@@ -61,6 +64,10 @@ class Runtime:
     # Set when a device reconfiguration failed after the old graph was torn down: the live graph is
     # then partial, so readiness must not report the service as healthy.
     graph_failed: bool = False
+    # Set when the startup dispatch-recovery sweep itself raised: the dispatch loops are then not
+    # started, so readiness must report not-ready until a restart retries the sweep. A per-device
+    # restore that merely stays pending is tracked by the controller's recovery_ready() instead.
+    dispatch_recovery_failed: bool = False
 
     def shutting_down(self) -> bool:
         return self.shutdown is not None and self.shutdown.plan is not None

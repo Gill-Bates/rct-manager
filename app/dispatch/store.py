@@ -37,7 +37,7 @@ log = logging.getLogger(__name__)
 # Each table is created in its own BEGIN IMMEDIATE ... COMMIT unit, so a crash between two of them
 # leaves each table either fully created or absent, never half-built; the next start creates the
 # ones still missing. ``initialize()`` creates a table only when it does not exist and otherwise
-# checks the on-disk columns against ``_TABLE_COLUMNS``: a database whose shape does not match the
+# checks the on-disk definition: a database whose shape does not match the
 # current baseline fails clearly instead of being silently upgraded (there is no migration path).
 _SCHEMA: tuple[tuple[str, str], ...] = (
     (
@@ -97,17 +97,8 @@ _SCHEMA: tuple[tuple[str, str], ...] = (
     ),
 )
 
-# The column set each baseline table must have on disk. An existing table that differs (an old,
-# incompatible dev database) is rejected rather than migrated.
-_TABLE_COLUMNS: dict[str, frozenset[str]] = {
-    "dispatch_operations": frozenset(
-        {"device_id", "state", "restore_required", "updated_at", "record_version", "encrypted"}
-    ),
-    "dispatch_capabilities": frozenset({"device_id", "name", "status", "encrypted"}),
-    "dispatch_device_config": frozenset({"device_id", "engineering_mode", "encrypted"}),
-    "energy_manager_state": frozenset({"device_id", "mode", "encrypted"}),
-    "dispatch_soc_target_policy": frozenset({"device_id", "mode", "encrypted"}),
-}
+def _schema_sql(sql: str) -> str:
+    return sql.strip().rstrip(";")
 
 
 def _authenticated_bool(data: dict, key: str) -> bool:
@@ -155,11 +146,11 @@ class DispatchStore:
         finally:
             os.close(fd)
         db = sqlite3.connect(self.path, timeout=5)
-        db.row_factory = sqlite3.Row
-        db.execute("PRAGMA foreign_keys = ON")
-        db.execute("PRAGMA busy_timeout = 5000")
-        db.execute("PRAGMA synchronous = FULL")
         try:
+            db.row_factory = sqlite3.Row
+            db.execute("PRAGMA foreign_keys = ON")
+            db.execute("PRAGMA busy_timeout = 5000")
+            db.execute("PRAGMA synchronous = FULL")
             yield db
             db.commit()
         except BaseException:
@@ -170,20 +161,19 @@ class DispatchStore:
 
     def initialize(self) -> None:
         with self.connect() as db:
-            db.execute("PRAGMA journal_mode = WAL")
+            if db.execute("PRAGMA journal_mode = WAL").fetchone()[0].lower() != "wal":
+                log.warning("SQLite WAL mode is unavailable; dispatch store is using the rollback journal")
             # Create the current baseline schema directly; there is no migration from an older
-            # layout. A table that already exists with the expected columns is left as is, so a
+            # layout. A table that already exists with the expected definition is left as is, so a
             # normal restart is a no-op; one that exists with a different shape (an incompatible
             # old dev database) fails clearly here — the developer must delete it before start.
             for table, create in _SCHEMA:
-                existing = {
-                    row["name"] for row in db.execute(f"PRAGMA table_info({table})").fetchall()
-                }
-                if not existing:
+                row = db.execute("SELECT sql FROM sqlite_schema WHERE type='table' AND name=?", (table,)).fetchone()
+                if row is None:
                     # executescript() commits any pending transaction first, so the BEGIN/COMMIT
                     # has to live inside the script to make this one CREATE its own atomic unit.
                     db.executescript(f"BEGIN IMMEDIATE;{create}COMMIT;")
-                elif existing != set(_TABLE_COLUMNS[table]):
+                elif _schema_sql(row["sql"]) != _schema_sql(create):
                     raise ValueError(
                         f"dispatch database table {table!r} does not match the current schema; "
                         "this build does not migrate an older database — delete it and restart"
@@ -341,10 +331,17 @@ class DispatchStore:
                 engineering_mode = _authenticated_bool(data, "engineering_mode")
                 if engineering_mode != bool(row["engineering_mode"]):
                     raise ValueError("engineering_mode integrity mismatch")
+                # usable_capacity_wh is optional: a blob written before this field carries no key,
+                # which reads back as "no capacity set" (None) — the device then fails closed in the
+                # Dry-Run plan, never defaulted to a guessed value. A present-but-null value is the
+                # same "unset". DeviceLimits.__post_init__ rejects a non-finite/<=0 stored value.
+                raw_capacity = data.get("usable_capacity_wh")
+                usable_capacity_wh = None if raw_capacity is None else float(raw_capacity)
                 configs[row["device_id"]] = DeviceLimits(
                     max_charge_power_w=float(data["max_charge_power_w"]),
                     max_discharge_power_w=float(data["max_discharge_power_w"]),
                     engineering_mode=engineering_mode,
+                    usable_capacity_wh=usable_capacity_wh,
                 )
             except (ValueError, TypeError, KeyError):
                 log.error(
@@ -366,6 +363,7 @@ class DispatchStore:
                 "max_charge_power_w": limits.max_charge_power_w,
                 "max_discharge_power_w": limits.max_discharge_power_w,
                 "engineering_mode": limits.engineering_mode,
+                "usable_capacity_wh": limits.usable_capacity_wh,
             },
         )
         with self.connect() as db:
@@ -507,8 +505,12 @@ class DispatchStore:
         policy), so the persisted and the published state agree. The device-configuration row is
         kept but its engineering-mode switch is cleared, because the power limits in it are a
         site/installation property the operator set, not a hardware-identity claim — only the
-        engineering switch is identity-bound. The limits travel in the encrypted blob, which stays
-        untouched; only the cleartext ``engineering_mode`` column is reset.
+        engineering switch is identity-bound. Engineering mode lives in BOTH the cleartext column
+        and the authenticated blob, and ``get_device_configs`` trusts the blob and discards the whole
+        row (power limits included) on a mismatch. Clearing only the cleartext column would therefore
+        make a device that had engineering mode on lose its preserved limits on the next read, so the
+        reset rewrites both representations together: the blob is re-encrypted with the same limits
+        and ``engineering_mode`` false.
         """
         if not device_ids:
             return
@@ -517,9 +519,38 @@ class DispatchStore:
             for device_id in device_ids:
                 db.execute("DELETE FROM dispatch_capabilities WHERE device_id=?", (device_id,))
                 db.execute("DELETE FROM dispatch_soc_target_policy WHERE device_id=?", (device_id,))
-                db.execute(
-                    "UPDATE dispatch_device_config SET engineering_mode=0 WHERE device_id=?", (device_id,)
-                )
+                self._clear_engineering_mode(db, device_id)
+
+    def _clear_engineering_mode(self, db: sqlite3.Connection, device_id: str) -> None:
+        """Clear engineering mode in both the cleartext column and the authenticated blob, keeping
+        the stored power limits. A missing row updates nothing; a row whose blob cannot be decrypted
+        or lacks the limits is left exactly as it is so it keeps failing closed on read instead of
+        being rewritten into a readable row with assumed values.
+        """
+        row = db.execute(
+            "SELECT encrypted FROM dispatch_device_config WHERE device_id=?", (device_id,)
+        ).fetchone()
+        if row is None:
+            return
+        try:
+            data = self._decrypt(device_id, row["encrypted"])
+            limits = {
+                "max_charge_power_w": float(data["max_charge_power_w"]),
+                "max_discharge_power_w": float(data["max_discharge_power_w"]),
+            }
+            # Usable capacity is a site/installation property like the power limits, not a
+            # hardware-identity claim, so it is preserved across an identity reset. Absent in an
+            # older blob means it stays unset.
+            raw_capacity = data.get("usable_capacity_wh")
+            if raw_capacity is not None:
+                limits["usable_capacity_wh"] = float(raw_capacity)
+        except (DispatchRecordCorrupt, ValueError, TypeError, KeyError):
+            return
+        encrypted = self._encrypt(device_id, {**limits, "engineering_mode": False})
+        db.execute(
+            "UPDATE dispatch_device_config SET engineering_mode=0, encrypted=? WHERE device_id=?",
+            (encrypted, device_id),
+        )
 
     def delete(self, device_id: str) -> None:
         with self.connect() as db:

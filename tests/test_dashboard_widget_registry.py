@@ -30,11 +30,11 @@ def _load_widget_ids() -> list[str]:
 
 
 def test_widget_ids_json_is_well_formed():
-    """The shared id source parses to all thirteen available ids, with no duplicates."""
+    """The shared id source parses to all sixteen available ids, with no duplicates."""
     ids = _load_widget_ids()
     assert isinstance(ids, list)
     assert all(isinstance(widget_id, str) for widget_id in ids)
-    assert len(ids) == 13
+    assert len(ids) == 16
     assert len(set(ids)) == len(ids)
 
 
@@ -66,13 +66,12 @@ def test_validate_dashboard_layout_rejects_an_unknown_id():
     assert excinfo.value.status_code == 422
 
 
-@pytest.mark.parametrize("widget_id", ["solar-forecast-status", "pv-forecast-curve"])
-def test_unavailable_weather_widgets_are_not_selectable(widget_id):
-    from fastapi import HTTPException
-
+@pytest.mark.parametrize("widget_id", ["solar-forecast-status", "pv-forecast-curve", "charging-schedule"])
+def test_weather_widgets_are_now_selectable(widget_id):
+    # The Open-Meteo solar forecast ships these two widgets, so a layout that places either one is
+    # accepted. They remain hidden by default (dashboard-widgets.js); availability is not visibility.
     body = DashboardLayout(version=1, widgets=[DashboardWidgetLayout(
         id=widget_id, x=0, y=0, w=2, h=2, visible=True,
     )])
-    with pytest.raises(HTTPException) as excinfo:
-        _validate_dashboard_layout(body)
-    assert excinfo.value.status_code == 422
+    # No HTTPException raised: the id is in the allowlist.
+    _validate_dashboard_layout(body)

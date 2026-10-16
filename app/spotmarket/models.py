@@ -24,9 +24,11 @@ from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from app.clock import is_valid_iana_zone
+from app.clock import require_aware as _require_aware
 
 # A conservative bound on how many day-ahead intervals one snapshot may carry. A full day at
 # 15-minute resolution is 96; two days with a little headroom stays well under this.
@@ -132,14 +134,6 @@ class BiddingZoneCatalog:
             raise ValueError("the default bidding zone must be one of the listed zones")
 
 
-def _require_aware(moment: datetime, field: str) -> None:
-    if not isinstance(moment, datetime):
-        raise ValueError(f"{field} must be a datetime")
-    # A naive datetime has no usable instant for an optimizer that compares across zones.
-    if moment.tzinfo is None or moment.tzinfo.utcoffset(moment) is None:
-        raise ValueError(f"{field} must be timezone-aware")
-
-
 @dataclass(frozen=True, slots=True)
 class SpotPriceInterval:
     """One day-ahead price interval, normalised. ``price_eur_per_kwh`` is always EUR/kWh regardless
@@ -190,10 +184,8 @@ class SpotPriceSnapshot:
         if self.timezone is not None:
             if not isinstance(self.timezone, str):
                 raise ValueError("timezone must be an IANA zone")
-            try:
-                ZoneInfo(self.timezone)
-            except (ValueError, ZoneInfoNotFoundError) as exc:
-                raise ValueError("timezone must be an IANA zone") from exc
+            if not is_valid_iana_zone(self.timezone):
+                raise ValueError("timezone must be an IANA zone")
         for field in ("source_generated_at", "available_from", "available_until", "valid_until"):
             value = getattr(self, field)
             if value is not None:

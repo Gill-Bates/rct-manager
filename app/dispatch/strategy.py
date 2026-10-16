@@ -31,6 +31,23 @@ def target_reached(mode: DispatchMode, soc_percent: float, target_soc_percent: f
     return False
 
 
+def effective_charge_limit_w(max_power_w: float, live_charge_limit_w: float | None) -> float:
+    """The transient charge execution ceiling: ``min(max_power_w, verified_fresh_live_limit)``.
+
+    ``max_power_w`` is the durable bound the controller already derived as
+    ``min(requested, configured_static)``; ``live_charge_limit_w`` is a value the caller has ALREADY
+    confirmed is both hardware-verified and fresh, or ``None`` when it is missing/stale/unverified.
+    A ``None`` live limit is never invented into a number — it simply leaves the durable bound in
+    force. This is a pure safety clamp: it only ever lowers the ceiling, it never selects an
+    economically optimal power. The result is transient (recomputed each apply/tick) and must not be
+    persisted into the durable ``DispatchIntent.max_power_w``, so a later increase of the live limit
+    can rise back up to the durable bound.
+    """
+    if live_charge_limit_w is None:
+        return max_power_w
+    return min(max_power_w, live_charge_limit_w)
+
+
 def calculate_setpoint(
     mode: DispatchMode,
     telemetry: ControlTelemetry,
@@ -46,6 +63,10 @@ def calculate_setpoint(
     if target_reached(mode, telemetry.soc_percent, target_soc_percent):
         return PowerSetpoint()
     if mode is DispatchMode.CHARGE_FROM_GRID:
+        # Constant-power grid charging. ``max_power_w`` is the already-clamped execution ceiling the
+        # controller hands in; strategy.py does not know, and must not know, WHY it shrank. The
+        # Live Charge Envelope is applied upstream by effective_charge_limit_w()/the controller, so
+        # a lowered ceiling arrives here as a smaller max_power_w, not as a separate argument.
         return PowerSetpoint(PowerDirection.CHARGE, max_power_w)
     if mode is not DispatchMode.DISCHARGE_TO_LOAD:
         return PowerSetpoint()

@@ -16,6 +16,7 @@ ignored.
 | `DISPATCH_DB_PATH` | `<project>/data/rct-dispatch.db` | Location of the encrypted, crash-durable dispatch state database |
 | `DISPATCH_MAX_CHARGE_POWER_W` | unset | Verified maximum grid-charge power; required for dispatch |
 | `DISPATCH_MAX_DISCHARGE_POWER_W` | unset | Verified maximum load-following discharge power; required for dispatch |
+| `DISPATCH_USABLE_BATTERY_CAPACITY_WH` | unset | Legacy seed only: initial per-device usable capacity (Wh) where no capacity is stored. It is treated as a persisted Expert override, not an automatically verified battery fact. No verified automatic Wh source is connected yet; without a stored capacity the Dry-Run plan reports `battery_state_unavailable` |
 | `BIND_ADDRESS` | `127.0.0.1` | Listen address |
 | `BIND_PORT` | `8000` | Listen port, 1024 to 65535 |
 | `ALLOW_NON_LOOPBACK_BIND` | `false` | Explicit consent for a non-loopback listener; does not provide TLS or secure cookies. Compose sets it while publishing only on host loopback |

@@ -4,7 +4,7 @@
 //
 
 // Focused tests for the shared spot-widget forecast renderer. Run with Node's built-in runner
-// (no npm/bundler): `node --test 'tests/js/**/*.test.js'`. Each test exercises exactly one
+// (no npm/bundler): `node --test tests/js/*.test.js`. Each test exercises exactly one
 // behaviour (chart library load/retry, no interpolation between intervals, gaps stay gaps, the
 // market timezone drives the axis, stale data stays rendered, hiding destroys the chart, a missing
 // timezone falls back to UTC) so a failure points at a single cause.
@@ -22,7 +22,7 @@ const SOURCE = fs.readFileSync(path.join(__dirname, '../../app/admin/static/js/d
 // Build an isolated DOM/window harness and run the renderer source inside it. The returned handle
 // exposes the collected scripts, created charts, requested API paths and a visibility switch, plus
 // a `pump` that drains the microtask queue the renderer uses between its await points.
-function harness({ spot } = {}) {
+function harness({ spot, solar } = {}) {
   const elements = new Map();
   const scripts = [];
   const chartConfigs = [];
@@ -44,7 +44,13 @@ function harness({ spot } = {}) {
   };
   const window = {
     RCTAdmin: {
-      api: async (url) => { paths.push(url); return { spot: spot() }; },
+      api: async (url) => {
+        paths.push(url);
+        const data = {};
+        if (spot) data.spot = spot();
+        if (solar) data.solar = solar();
+        return data;
+      },
       messageFrom: (error) => error.message
     },
     Chart: class {
@@ -200,4 +206,110 @@ test('switching the visible widget switches the requested projection', async () 
   h.api.sync();
   await h.pump();
   assert.equal(h.paths[1], 'energy/dashboard-forecast?include=spot_current');
+});
+
+// --- Solar widgets --------------------------------------------------------------------------------
+
+const SOLAR_CURVE = [
+  { start: '2026-10-12T12:00:00Z', end: '2026-10-12T12:15:00Z', power_kw: 2.5, energy_wh: 625 },
+  { start: '2026-10-12T13:00:00Z', end: '2026-10-12T13:15:00Z', power_kw: 3.0, energy_wh: 750 },
+];
+
+function availableSolar(overrides = {}) {
+  return {
+    status: 'available', source: 'Open-Meteo', created_at: '2026-10-12T11:55:00Z',
+    fetched_at: '2026-10-12T11:55:00Z', covered_until: '2026-10-12T13:15:00Z',
+    energy_next_24h_wh: 12400, future_curve: SOLAR_CURVE, ...overrides,
+  };
+}
+
+async function renderSolarCurve(solar) {
+  const h = harness({ solar: () => solar });
+  h.visibleIds.add('pv-forecast-curve');
+  h.api.sync();
+  await h.pump();
+  while (h.scripts.some((s) => !s.resolved)) {
+    const script = h.scripts.find((s) => !s.resolved);
+    script.resolved = true;
+    script.onload();
+    await h.pump();
+  }
+  return h;
+}
+
+test('a solar-only dashboard requests include=solar and renders without data.spot', async () => {
+  const h = harness({ solar: () => availableSolar() });
+  h.visibleIds.add('solar-forecast-status');
+  h.api.sync();
+  await h.pump();
+  assert.equal(h.paths[0], 'energy/dashboard-forecast?include=solar');
+  // The KPI headline is the next-24h energy in kWh and the detail names the Open-Meteo source.
+  assert.equal(h.element('solar-forecast-status-value').textContent, '12.4 kWh');
+  assert.match(h.element('solar-forecast-status-detail').textContent, /Source: Open-Meteo/);
+});
+
+test('a spot-only dashboard never requests solar', async () => {
+  const h = harness({ spot: () => availableSpot() });
+  h.visibleIds.add('spot-price-current');
+  h.api.sync();
+  await h.pump();
+  assert.equal(h.paths[0], 'energy/dashboard-forecast?include=spot_current');
+  assert.ok(!h.paths[0].includes('solar'));
+});
+
+test('spot and solar widgets bundle both includes into one request', async () => {
+  const h = harness({ spot: () => availableSpot(), solar: () => availableSolar() });
+  h.visibleIds.add('spot-price-current');
+  h.visibleIds.add('solar-forecast-status');
+  h.api.sync();
+  await h.pump();
+  assert.equal(h.paths.length, 1);
+  assert.equal(h.paths[0], 'energy/dashboard-forecast?include=spot_current&include=solar');
+});
+
+test('the solar curve renders valid intervals without crossing gaps', async () => {
+  const h = await renderSolarCurve(availableSolar());
+  assert.equal(h.chartConfigs.length, 1);
+  const data = JSON.parse(JSON.stringify(h.chartConfigs[0].data.datasets[0].data));
+  // Two non-contiguous intervals (12:15 then 13:00): a null break keeps the gap empty, never a line
+  // sloped across it. spanGaps false enforces that at render time.
+  assert.equal(h.chartConfigs[0].data.datasets[0].spanGaps, false);
+  assert.deepEqual(data, [
+    { x: Date.parse(SOLAR_CURVE[0].start), y: 2.5, interval: SOLAR_CURVE[0] },
+    { x: Date.parse(SOLAR_CURVE[0].end), y: 2.5, interval: SOLAR_CURVE[0] },
+    { x: Date.parse(SOLAR_CURVE[0].end), y: null },
+    { x: Date.parse(SOLAR_CURVE[1].start), y: 3.0, interval: SOLAR_CURVE[1] },
+    { x: Date.parse(SOLAR_CURVE[1].end), y: 3.0, interval: SOLAR_CURVE[1] },
+  ]);
+});
+
+test('a stale solar forecast stays rendered and marked stale', async () => {
+  const h = await renderSolarCurve(availableSolar({ status: 'stale' }));
+  assert.equal(h.chartConfigs.length, 1);
+  assert.match(h.element('pv-forecast-curve-state').textContent, /Last available data/);
+});
+
+test('a disabled solar forecast shows a word, never an invented figure', async () => {
+  const h = harness({ solar: () => availableSolar({ status: 'disabled', energy_next_24h_wh: null, future_curve: [] }) });
+  h.visibleIds.add('solar-forecast-status');
+  h.api.sync();
+  await h.pump();
+  assert.equal(h.element('solar-forecast-status-value').textContent, 'Disabled');
+});
+
+test('hiding the solar curve widget destroys its chart', async () => {
+  const h = await renderSolarCurve(availableSolar());
+  assert.equal(h.chartConfigs.length, 1);
+  h.visibleIds.delete('pv-forecast-curve');
+  h.api.sync();
+  await h.pump();
+  assert.equal(h.element('pv-forecast-curve-box').hidden, true);
+});
+
+test('a provider error produces an understandable solar status', async () => {
+  const h = harness({ solar: () => availableSolar({ status: 'error', energy_next_24h_wh: null, future_curve: [] }) });
+  h.visibleIds.add('solar-forecast-status');
+  h.api.sync();
+  await h.pump();
+  assert.equal(h.element('solar-forecast-status-value').textContent, 'Data unavailable');
 });

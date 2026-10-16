@@ -26,6 +26,8 @@ DEFAULT_WIDTHS: Mapping[DataType, int | None] = {
     DataType.ENUM: 4,
     DataType.STRING: None,
     DataType.STRUCT: None,
+    DataType.TIMESERIES: None,
+    DataType.EVENT_TABLE: None,
 }
 
 _SIGNED = frozenset({DataType.INT8, DataType.INT16, DataType.INT32})
@@ -43,6 +45,10 @@ def decode_value(
     """Decode a payload; a length differing from the expected width raises DecodeLengthMismatch."""
     if data_type is DataType.STRUCT:
         raise ValueError("t_struct is decoded by its structure decoder")
+    if data_type is DataType.TIMESERIES:
+        raise ValueError("t_timeseries is decoded by decode_timeseries")
+    if data_type is DataType.EVENT_TABLE:
+        raise ValueError("t_event_table has no scalar decoder")
     if data_type is DataType.STRING:
         if byte_width is not None and len(payload) != byte_width:
             raise DecodeLengthMismatch(byte_width, len(payload))
@@ -65,8 +71,8 @@ def encode_value(
     data_type: DataType, value: ScalarValue, *, byte_width: int | None = None, encoding: str = "utf-8"
 ) -> bytes:
     """Encode a scalar; raises ValueError for a foreign type and OverflowError outside the range."""
-    if data_type is DataType.STRUCT:
-        raise ValueError("t_struct is not writable")
+    if data_type in (DataType.STRUCT, DataType.TIMESERIES, DataType.EVENT_TABLE):
+        raise ValueError(f"{data_type.value} is not writable")
     if data_type is DataType.STRING:
         if not isinstance(value, str):
             raise ValueError("t_string requires str")

@@ -27,7 +27,14 @@ from datetime import datetime
 from enum import StrEnum
 from typing import ClassVar, Literal
 
-from app.dispatch.models import NOTE_MAX_LENGTH, DispatchMode, check_printable_ascii
+from app.dispatch.models import NOTE_MAX_LENGTH, DispatchMode, check_printable_ascii, strict_persisted_bool
+
+# Single source for the capability value bounds. The admin input model (app.admin.dispatch_api)
+# imports these so its 422 Field() limits and this dataclass invariant (H6) cannot drift apart.
+SOC_STRATEGY_CODE_MAX = 255
+REGISTER_BYTE_WIDTH_MIN = 1
+REGISTER_BYTE_WIDTH_MAX = 4
+REFRESH_INTERVAL_SECONDS_MAX = 86_400.0
 
 
 class CapabilityName(StrEnum):
@@ -41,6 +48,48 @@ class CapabilityName(StrEnum):
 class CapabilityStatus(StrEnum):
     UNVERIFIED = "unverified"
     VERIFIED = "verified"
+
+
+# Required evidence per capability before `status=verified` may be entered (4.1/4.6). V-17
+# (soc_target_unit) is now required for WRITE_PATH: every non-HOLD dispatch writes a SoC target
+# (controller.py submit()/_apply()), so the register representation it is written in must be
+# attested like the other write-path evidence, not left on the dataclass's unchecked default.
+REQUIRED_FOR_VERIFIED: dict[CapabilityName, tuple[str, ...]] = {
+    CapabilityName.WRITE_PATH: (
+        "soc_strategy_external_code",
+        "enum_byte_width",
+        "bool_byte_width",
+        "write_frame_layout_verified",
+        "apply_sequence_verified",
+        "soc_target_unit",
+        # The strategy code is a vendor-specific raw value with no project-wide meaning, so it is
+        # only interpretable together with the evidence an operator writes down for it.
+        "note",
+    ),
+    CapabilityName.BATTERY_POWER_SIGN: ("battery_discharge_positive",),
+    CapabilityName.GRID_POWER_SIGN: ("grid_import_positive",),
+    CapabilityName.EXPORT_LIMIT: ("export_limit_zero_blocks_export",),
+    CapabilityName.SETPOINT_VOLATILITY: (),
+}
+_SIGN_FLAGS = ("battery_discharge_positive", "grid_import_positive")
+# soc_target_unit has the same "non-None default looks like a value" shape as the sign flags: it
+# must be explicitly sent (model_fields_set) to count as evidence, not silently taken from the
+# CapabilityRecord/CapabilityUpdate default of "ratio".
+EXPLICIT_REQUIRED_FLAGS = (*_SIGN_FLAGS, "soc_target_unit")
+TRUTHY_FLAGS = frozenset({"write_frame_layout_verified", "apply_sequence_verified"})
+# A value that is present but blank is no evidence: `note` carries the human-readable backing for
+# the strategy code, so an empty or whitespace-only string counts as missing.
+NON_BLANK_FIELDS = frozenset({"note"})
+
+
+def missing_verified_evidence(name: CapabilityName, record: "CapabilityRecord") -> list[str]:
+    missing = []
+    for field_name in REQUIRED_FOR_VERIFIED[name]:
+        value = getattr(record, field_name)
+        blank = field_name in NON_BLANK_FIELDS and isinstance(value, str) and not value.strip()
+        if value is None or blank or (field_name in TRUTHY_FLAGS and not value):
+            missing.append(field_name)
+    return missing
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,18 +134,22 @@ class CapabilityRecord:
         # is only an additional input bound, never the single safe one (H6): a directly constructed
         # or historically mis-persisted record must not carry an out-of-range code or byte width.
         # The bounds mirror app.admin.dispatch_api.CapabilityUpdate's own Field() limits.
-        if self.soc_strategy_external_code is not None and not 0 <= self.soc_strategy_external_code <= 255:
+        if (
+            self.soc_strategy_external_code is not None
+            and not 0 <= self.soc_strategy_external_code <= SOC_STRATEGY_CODE_MAX
+        ):
             raise ValueError("soc_strategy_external_code must be within 0..255")
         for width_name in ("enum_byte_width", "bool_byte_width"):
             width = getattr(self, width_name)
-            if width is not None and not 1 <= width <= 4:
+            if width is not None and not REGISTER_BYTE_WIDTH_MIN <= width <= REGISTER_BYTE_WIDTH_MAX:
                 raise ValueError(f"{width_name} must be within 1..4")
         if self.refresh_interval_seconds is not None and (
-            not math.isfinite(self.refresh_interval_seconds) or not 0.0 <= self.refresh_interval_seconds <= 86_400.0
+            not math.isfinite(self.refresh_interval_seconds)
+            or not 0.0 <= self.refresh_interval_seconds <= REFRESH_INTERVAL_SECONDS_MAX
         ):
             raise ValueError("refresh_interval_seconds must be finite and within 0..86400")
-        # Mirrors app.admin.dispatch_api's own _REQUIRED_FOR_VERIFIED/_missing_evidence gate, but
-        # enforces it at the dataclass boundary too (H6): a directly constructed/copied record, or
+        # Enforces the hard (non-note, non-unit) part of REQUIRED_FOR_VERIFIED at the dataclass
+        # boundary too (H6): a directly constructed/copied record, or
         # a future caller that bypasses the admin API, must not be able to carry a VERIFIED
         # capability record without the evidence that status claims. The dispatch gate decides on
         # status alone (CapabilityRegistry.unverified_for), so a VERIFIED record with the safety
@@ -112,6 +165,16 @@ class CapabilityRecord:
                 raise ValueError("WRITE_PATH cannot be verified without write-path evidence")
             if self.name is CapabilityName.EXPORT_LIMIT and self.export_limit_zero_blocks_export is None:
                 raise ValueError("EXPORT_LIMIT cannot be verified without export_limit_zero_blocks_export")
+
+    @property
+    def is_verified(self) -> bool:
+        """Whether this capability is a confirmed hardware fact (``status`` is verified).
+
+        A read-only predicate for consumers that must only trust assumption-based defaults once an
+        operator has attested them (e.g. the characterization adapter's sign normalization). It
+        asserts nothing: it merely reports the stored status, so it is not a code-side verification.
+        """
+        return self.status is CapabilityStatus.VERIFIED
 
     def to_dict(self) -> dict:
         """JSON-capable projection for the encrypted part of ``dispatch_capabilities``."""
@@ -173,14 +236,7 @@ class CapabilityRecord:
 
 
 def _strict_bool(data: dict, key: str, default: bool) -> bool:
-    """Fail-closed read of a safety-relevant bool field (H6): ``bool("false")`` is ``True``, so a
-    permissive coercion would silently accept a corrupted/malformed persisted value instead of
-    letting the store's existing (ValueError, TypeError) handling treat the row as unreadable.
-    """
-    value = data.get(key, default)
-    if not isinstance(value, bool):
-        raise TypeError(f"{key} must be a bool, got {type(value).__name__}")
-    return value
+    return strict_persisted_bool(data.get(key, default), key)
 
 
 def _strict_optional_int(value: object) -> int | None:

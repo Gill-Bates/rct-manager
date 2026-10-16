@@ -42,7 +42,7 @@ def test_sliding_window_allows_exactly_limit_hits_across_threads() -> None:
     limit, threads = 10, 64
     window = _SlowLimitWindow(limit, 60.0, _YieldingClock())  # type: ignore[arg-type]
     # Explicit sync point so every thread is lined up right before the check-then-act section,
-    # instead of merely hoping sleeps in the clock/_limit widen the race window (Finding 7).
+    # instead of relying on sleeps in the clock or limiter to widen the race window.
     barrier = threading.Barrier(threads)
 
     def worker(_: int) -> object:

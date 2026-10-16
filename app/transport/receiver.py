@@ -30,46 +30,67 @@ class ReceiverExit(StrEnum):
 
 
 class ArrivalLedger:
-    """Tracks the monotonic instant each chunk entered the reader via ``feed_data``.
+    """Tracks, per absolute stream offset, the monotonic instant its bytes entered the reader.
 
     A timestamp taken after the caller's read call returns is too late: bytes may already have
     sat in the reader's internal buffer, delivered by ``data_received``, before the caller got
-    around to consuming them. Wrapping the specific reader instance's ``feed_data`` right after
-    connecting captures the real arrival instant without a custom StreamReader/Protocol class, so
-    the injectable ``Connector`` contract and the single ``asyncio.open_connection`` call site are
-    both untouched.
+    around to consuming them. The arrival instant has to be recorded at the point the transport
+    hands bytes to the reader, which for ``asyncio.StreamReader`` is ``feed_data``.
+
+    Design choice (deliberate, kept over a protocol rework): the only public seam that records at
+    that point without touching the injectable ``Connector`` contract or the single
+    ``asyncio.open_connection`` call site is to wrap the specific reader instance's ``feed_data``.
+    A ``StreamReaderProtocol`` subclass that records in ``data_received`` would record at the same
+    point, but it is reachable only through ``loop.create_connection`` with a custom protocol
+    factory, which would change the ``Connector`` type, its default, and every test connector (the
+    fakes deliver bytes with ``reader.feed_data`` on a plain ``asyncio.StreamReader``). That rework
+    is broad and would move the timing out of the path the test suite exercises, so in this
+    safety-critical transport it is not worth the risk; the instance wrap is the smaller change.
+
+    ``feed_data`` is a documented method of ``asyncio.StreamReader`` but overriding it per instance
+    relies on the class permitting instance attributes (no ``__slots__``). The constructor asserts
+    the override took effect and raises ``RuntimeError`` otherwise, so a future interpreter that
+    stops honouring it fails loudly here instead of silently reintroducing the arrival-time race.
+    CI pins the interpreter (see pyproject ``requires-python``); a CPython bump re-runs this guard.
     """
 
     def __init__(self, reader: asyncio.StreamReader, monotonic: Callable[[], float]) -> None:
         self._monotonic = monotonic
+        # (arrival, absolute offset one past the chunk's last byte), oldest first.
         self._chunks: deque[tuple[float, int]] = deque()
+        self._fed = 0
         original = reader.feed_data
 
         def tracked_feed_data(data: bytes) -> None:
             if data:
-                self._chunks.append((monotonic(), len(data)))
+                self._fed += len(data)
+                self._chunks.append((monotonic(), self._fed))
             original(data)
 
-        reader.feed_data = tracked_feed_data  # instance-level wrap; the transport stays the sole caller
+        try:
+            reader.feed_data = tracked_feed_data  # type: ignore[method-assign]  # instance-level wrap; the transport stays the sole caller
+        except AttributeError as exc:
+            # A future StreamReader with __slots__ would reject the attribute outright.
+            raise RuntimeError("ArrivalLedger could not install its feed_data wrapper") from exc
         if reader.feed_data is not tracked_feed_data:
-            # Fails loudly if a future interpreter stops honoring instance-attribute overrides on
-            # StreamReader, instead of silently reintroducing the arrival-time race.
+            # The assignment was accepted but did not take (e.g. a data descriptor shadowing it).
             raise RuntimeError("ArrivalLedger could not install its feed_data wrapper")
 
-    def earliest_arrival(self, consumed: int) -> float:
-        """Earliest arrival time among ``consumed`` bytes just taken off the front of the buffer."""
-        earliest: float | None = None
-        while consumed > 0 and self._chunks:
-            at, size = self._chunks[0]
-            if earliest is None:
-                earliest = at
-            if size <= consumed:
-                consumed -= size
-                self._chunks.popleft()
-            else:
-                self._chunks[0] = (at, size - consumed)
-                consumed = 0
-        return earliest if earliest is not None else self._monotonic()
+    def arrival_of(self, offset: int) -> float:
+        """Arrival instant of the byte at absolute stream ``offset``.
+
+        Callers query strictly increasing offsets, so records before ``offset`` are dropped here.
+        """
+        self._release(offset)
+        return self._chunks[0][0] if self._chunks else self._monotonic()
+
+    def release(self, consumed: int) -> None:
+        """Forget records for the first ``consumed`` bytes, which the parser has fully handled."""
+        self._release(consumed)
+
+    def _release(self, offset: int) -> None:
+        while self._chunks and self._chunks[0][1] <= offset:
+            self._chunks.popleft()
 
 
 class Receiver:
@@ -108,10 +129,6 @@ class Receiver:
         # working. The endpoint passes its own long-lived instance so escalation survives reconnects.
         self._crc_log = crc_log if crc_log is not None else CrcLogRateLimiter(unexpected_window_seconds)
         self.unexpected_samples: deque[tuple[int, int, int | None]] = deque(maxlen=4)
-        # Oldest arrival instant still unresolved in the parser buffer, carried across reads so a
-        # frame assembled from an earlier, pre-commit chunk is not credited with a later chunk's
-        # arrival time. Reset to None once the buffer fully drains.
-        self._pending_since: float | None = None
 
     async def run(self, reader: asyncio.StreamReader, ledger: ArrivalLedger) -> ReceiverExit:
         """Read until the connection ends or must be rebuilt. Never drains the buffer wholesale.
@@ -128,17 +145,7 @@ class Receiver:
             # Taken at the read boundary: good enough for noise rating and window bookkeeping,
             # which only need a coarse, monotonically advancing instant.
             now = self._monotonic()
-            # Arrival instant from the ledger (see ArrivalLedger); a frame assembled across several
-            # reads keeps the oldest pending instant instead of its last chunk's.
-            chunk_earliest = ledger.earliest_arrival(len(data))
-            received_monotonic = self._pending_since if self._pending_since is not None else chunk_earliest
-            frames = self._parser.feed(data)
-            if self._parser.buffered_bytes == 0:
-                self._pending_since = None
-            else:
-                # Frames extracted this round resolved any earlier partial frame, so a leftover
-                # tail began fresh with this chunk; otherwise the oldest pending instant persists.
-                self._pending_since = chunk_earliest if frames else received_monotonic
+            frames = self._parser.feed_located(data)
             stats = self._parser.stats
             self._counters.discarded_bytes += stats.discarded_bytes - self._counted_discards
             self._counted_discards = stats.discarded_bytes
@@ -158,10 +165,14 @@ class Receiver:
             if magic:
                 self._magic_handled = True
                 self._on_bootloader()
-            for frame in frames:
+            for frame, frame_end in frames:
                 self._counters.last_frame_at = self._now()
+                # Dated by its own last byte, so a batched or multi-read frame neither inherits
+                # nor lends an arrival time (Requirement 3.2-3.8, per frame).
+                received_monotonic = ledger.arrival_of(frame_end - 1)
                 if self._demux.dispatch(frame, received_monotonic) is FrameKind.UNEXPECTED:
                     self.unexpected_samples.append((int(frame.command), frame.object_id, frame.plant_address))
+            ledger.release(self._parser.consumed_bytes)
             if magic:
                 return ReceiverExit.BOOTLOADER
             if self._parser.buffered_bytes > 2 * self._max:

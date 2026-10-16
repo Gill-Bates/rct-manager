@@ -15,37 +15,57 @@ import stat
 import sys
 from pathlib import Path
 
-from app.allowlist import Allowlist
 from app.api.restart import container_ip as _container_ip
 from app.api.restart import in_container as _in_container
-from app.banner import environment, print_banner, resolve_version
 from app.catalog.registry import RegistryCatalog
-from app.config import Settings, load_settings, parse_env_file
+from app.config import _MAX_ENV_FILE_BYTES, Settings, load_settings, parse_env_text
 from app.errors import ConfigError
-from app.logging_setup import setup_logging
+from app.observability.banner import environment, print_banner, resolve_version
+from app.observability.logging_setup import setup_logging
+from app.security.allowlist import Allowlist
 
 log = logging.getLogger("app")
 _DEFAULT_ENV_FILE = Path(__file__).resolve().parent.parent / "settings.env"
 
 
-def _secure_existing_permissions(path: Path) -> None:
-    """Repair overly permissive bits on a file already holding the secret.
+def _read_existing_secret_file(path: Path) -> dict[str, str] | None:
+    """Open an existing secret file once and return its parsed contents, hardening it fail-closed.
 
-    Opens with O_NOFOLLOW first and changes permissions on the resulting file descriptor, the
-    same FD-based check creation uses, so a symlink swapped in between the stat() that found the
-    loose bits and this call cannot redirect the chmod to a different file.
+    The single ``O_NOFOLLOW`` descriptor is used for the regular-file check, the permission repair
+    and the read, so a symlink or a validation->read path swap (TOCTOU) cannot redirect any of
+    them: the HMAC secret guards the admin and dispatch stores. Returns ``None`` when the file does
+    not exist; raises ``ConfigError`` for a non-regular file or a too-open file that cannot be
+    hardened, so an exposed secret fails the start instead of warning and continuing.
     """
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
-    except OSError:
-        log.warning("%s holds the secret but is readable by other users and could not be reopened to fix it", path)
-        return
+        # O_NONBLOCK so a non-regular path such as a FIFO cannot block the open before the
+        # regular-file check below can reject it.
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        # O_NOFOLLOW on a symlink raises ELOOP; any other open error on an existing path is fatal
+        # too, because the secret cannot be read or protected through this descriptor.
+        raise ConfigError("invalid_configuration", detail="settings.env must be a regular file") from exc
     try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            log.warning("%s holds the secret but is not a regular file; refusing to change its permissions", path)
-            return
-        os.fchmod(fd, 0o600)
-        log.warning("%s held the secret but was readable by other users; permissions corrected to 0600", path)
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise ConfigError("invalid_configuration", detail="settings.env must be a regular file")
+        if st.st_mode & 0o077:
+            try:
+                os.fchmod(fd, 0o600)
+            except OSError as exc:
+                raise ConfigError(
+                    "invalid_configuration",
+                    detail="settings.env holds the secret but is readable by other users and could not be secured",
+                ) from exc
+            log.warning("%s held the secret but was readable by other users; permissions corrected to 0600", path)
+        with os.fdopen(os.dup(fd), encoding="utf-8") as target:
+            text = target.read(_MAX_ENV_FILE_BYTES + 1)
+            if len(text) > _MAX_ENV_FILE_BYTES:
+                # Fail closed: an over-cap secret file cannot be read safely; the operator must shrink it.
+                raise ConfigError("invalid_configuration", detail="settings.env is implausibly large")
+            return parse_env_text(text)
     finally:
         os.close(fd)
 
@@ -54,10 +74,8 @@ def _ensure_hmac_secret(env_file: Path | None) -> None:
     if os.environ.get("HMAC_SECRET") or os.environ.get("ADMIN_SECRET"):
         return
     path = env_file or _DEFAULT_ENV_FILE
-    stored = parse_env_file(path) if path.exists() else {}
+    stored = _read_existing_secret_file(path) or {}
     if stored.get("HMAC_SECRET") or stored.get("ADMIN_SECRET"):  # the deprecated name still unlocks old databases
-        if path.stat().st_mode & 0o077:
-            _secure_existing_permissions(path)
         return
     secret = base64.b64encode(secrets.token_bytes(32)).decode()  # same shape as `openssl rand -base64 32`
     try:

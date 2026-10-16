@@ -45,8 +45,11 @@ def _version_parts(value: str) -> tuple[int, ...]:
     match = _VERSION_RE.fullmatch(value)
     if match is None:
         return (0,)
-    parts = tuple(int(part) for part in match.group(1).split("."))
-    return parts + (0,) * max(0, 3 - len(parts))
+    parts = [int(part) for part in match.group(1).split(".")]
+    while len(parts) > 3 and parts[-1] == 0:
+        parts.pop()
+    parts += [0] * max(0, 3 - len(parts))
+    return tuple(parts)
 
 
 def _version_key(value: str) -> tuple[tuple[int, ...], int, int]:

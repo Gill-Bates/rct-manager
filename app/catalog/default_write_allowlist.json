@@ -104,22 +104,10 @@
       "maximum": 3.4028234663852886e+38
     },
     {
-      "name": "logger_day_egrid_load_log_ts",
-      "data_type": "t_int32",
-      "minimum": -2147483648,
-      "maximum": 2147483647
-    },
-    {
       "name": "battery_cells_stat_4_t_max_index",
       "data_type": "t_uint8",
       "minimum": 0,
       "maximum": 255
-    },
-    {
-      "name": "logger_minutes_ubat_log_ts",
-      "data_type": "t_int32",
-      "minimum": -2147483648,
-      "maximum": 2147483647
     },
     {
       "name": "battery_charged_amp_hours",
@@ -190,12 +178,6 @@
       "data_type": "t_float",
       "minimum": -3.4028234663852886e+38,
       "maximum": 3.4028234663852886e+38
-    },
-    {
-      "name": "logger_minutes_ul3_log_ts",
-      "data_type": "t_int32",
-      "minimum": -2147483648,
-      "maximum": 2147483647
     },
     {
       "name": "battery_placeholder_0_minimum_discharge_voltage_constant_u",
@@ -300,12 +282,6 @@
       "maximum": 2147483647
     },
     {
-      "name": "logger_day_eb_log_ts",
-      "data_type": "t_int32",
-      "minimum": -2147483648,
-      "maximum": 2147483647
-    },
-    {
       "name": "io_board_io1_polarity",
       "data_type": "t_bool"
     },
@@ -344,12 +320,6 @@
       "data_type": "t_float",
       "minimum": -3.4028234663852886e+38,
       "maximum": 3.4028234663852886e+38
-    },
-    {
-      "name": "logger_minutes_ub_log_ts",
-      "data_type": "t_int32",
-      "minimum": -2147483648,
-      "maximum": 2147483647
     },
     {
       "name": "io_board_check_rs485_result",
@@ -404,12 +374,6 @@
       "data_type": "t_float",
       "minimum": -3.4028234663852886e+38,
       "maximum": 3.4028234663852886e+38
-    },
-    {
-      "name": "logger_minutes_temp2_log_ts",
-      "data_type": "t_int32",
-      "minimum": -2147483648,
-      "maximum": 2147483647
     },
     {
       "name": "battery_cells_4",
@@ -512,12 +476,6 @@
       "maximum": 2147483647
     },
     {
-      "name": "logger_year_egrid_feed_log_ts",
-      "data_type": "t_int32",
-      "minimum": -2147483648,
-      "maximum": 2147483647
-    },
-    {
       "name": "p_rec_req_0",
       "data_type": "t_float",
       "minimum": -3.4028234663852886e+38,
@@ -562,12 +520,6 @@
       "data_type": "t_float",
       "minimum": -3.4028234663852886e+38,
       "maximum": 3.4028234663852886e+38
-    },
-    {
-      "name": "logger_minutes_eb_log_ts",
-      "data_type": "t_int32",
-      "minimum": -2147483648,
-      "maximum": 2147483647
     },
     {
       "name": "battery_placeholder_0_cells_4",
@@ -634,12 +586,6 @@
       "data_type": "t_float",
       "minimum": -3.4028234663852886e+38,
       "maximum": 3.4028234663852886e+38
-    },
-    {
-      "name": "logger_minutes_eac1_log_ts",
-      "data_type": "t_int32",
-      "minimum": -2147483648,
-      "maximum": 2147483647
     },
     {
       "name": "battery_current",
@@ -854,12 +800,6 @@
       "maximum": 65535
     },
     {
-      "name": "logger_year_log_ts",
-      "data_type": "t_int32",
-      "minimum": -2147483648,
-      "maximum": 2147483647
-    },
-    {
       "name": "battery_max_cell_voltage",
       "data_type": "t_float",
       "minimum": -3.4028234663852886e+38,
@@ -906,12 +846,6 @@
       "data_type": "t_uint32",
       "minimum": 0,
       "maximum": 4294967295
-    },
-    {
-      "name": "logger_month_ea_log_ts",
-      "data_type": "t_int32",
-      "minimum": -2147483648,
-      "maximum": 2147483647
     },
     {
       "name": "energy_e_load_day",
@@ -1000,12 +934,6 @@
       "maximum": 255
     },
     {
-      "name": "logger_year_eb_log_ts",
-      "data_type": "t_int32",
-      "minimum": -2147483648,
-      "maximum": 2147483647
-    },
-    {
       "name": "net_index",
       "data_type": "t_int8",
       "minimum": -128,
@@ -1090,12 +1018,6 @@
     {
       "name": "flash_rtc_flag_time_auto_switch",
       "data_type": "t_bool"
-    },
-    {
-      "name": "logger_minutes_eext_log_ts",
-      "data_type": "t_int32",
-      "minimum": -2147483648,
-      "maximum": 2147483647
     },
     {
       "name": "wifi_connect_to_server",
@@ -1292,12 +1214,6 @@
       "maximum": 3.4028234663852886e+38
     },
     {
-      "name": "logger_month_eload_log_ts",
-      "data_type": "t_int32",
-      "minimum": -2147483648,
-      "maximum": 2147483647
-    },
-    {
       "name": "g_sync_p_ac_0",
       "data_type": "t_float",
       "minimum": -3.4028234663852886e+38,
@@ -1406,12 +1322,6 @@
       "maximum": 3.4028234663852886e+38
     },
     {
-      "name": "logger_minutes_ul2_log_ts",
-      "data_type": "t_int32",
-      "minimum": -2147483648,
-      "maximum": 2147483647
-    },
-    {
       "name": "g_sync_i_dr_lp_2",
       "data_type": "t_float",
       "minimum": -3.4028234663852886e+38,
@@ -1472,12 +1382,6 @@
       "data_type": "t_float",
       "minimum": -3.4028234663852886e+38,
       "maximum": 3.4028234663852886e+38
-    },
-    {
-      "name": "logger_year_ea_log_ts",
-      "data_type": "t_int32",
-      "minimum": -2147483648,
-      "maximum": 2147483647
     },
     {
       "name": "nsm_cos_phi_p_2_1",
@@ -1558,12 +1462,6 @@
       "maximum": 255
     },
     {
-      "name": "logger_year_eext_log_ts",
-      "data_type": "t_int32",
-      "minimum": -2147483648,
-      "maximum": 2147483647
-    },
-    {
       "name": "energy_e_load_year_sum",
       "data_type": "t_float",
       "minimum": -3.4028234663852886e+38,
@@ -1614,12 +1512,6 @@
       "maximum": 65535
     },
     {
-      "name": "logger_minutes_ea_log_ts",
-      "data_type": "t_int32",
-      "minimum": -2147483648,
-      "maximum": 2147483647
-    },
-    {
       "name": "prim_sm_island_reset_retrials_counter_time",
       "data_type": "t_float",
       "minimum": -3.4028234663852886e+38,
@@ -1636,12 +1528,6 @@
       "data_type": "t_uint16",
       "minimum": 0,
       "maximum": 65535
-    },
-    {
-      "name": "logger_minutes_soc_log_ts",
-      "data_type": "t_int32",
-      "minimum": -2147483648,
-      "maximum": 2147483647
     },
     {
       "name": "battery_placeholder_0_cells_stat_2_u_max_index",
@@ -1668,12 +1554,6 @@
       "maximum": 3.4028234663852886e+38
     },
     {
-      "name": "logger_minutes_ul1_log_ts",
-      "data_type": "t_int32",
-      "minimum": -2147483648,
-      "maximum": 2147483647
-    },
-    {
       "name": "grid_mon_1_u_over_threshold",
       "data_type": "t_float",
       "minimum": -3.4028234663852886e+38,
@@ -1696,12 +1576,6 @@
       "data_type": "t_float",
       "minimum": -3.4028234663852886e+38,
       "maximum": 3.4028234663852886e+38
-    },
-    {
-      "name": "logger_minutes_eac2_log_ts",
-      "data_type": "t_int32",
-      "minimum": -2147483648,
-      "maximum": 2147483647
     },
     {
       "name": "battery_stored_energy",
@@ -1852,12 +1726,6 @@
       "data_type": "t_bool"
     },
     {
-      "name": "logger_month_egrid_load_log_ts",
-      "data_type": "t_int32",
-      "minimum": -2147483648,
-      "maximum": 2147483647
-    },
-    {
       "name": "net_update_slaves",
       "data_type": "t_bool"
     },
@@ -1900,12 +1768,6 @@
       "data_type": "t_uint32",
       "minimum": 0,
       "maximum": 4294967295
-    },
-    {
-      "name": "logger_day_eext_log_ts",
-      "data_type": "t_int32",
-      "minimum": -2147483648,
-      "maximum": 2147483647
     },
     {
       "name": "g_sync_s_ac_1",
@@ -2024,12 +1886,6 @@
       "maximum": 3.4028234663852886e+38
     },
     {
-      "name": "logger_minutes_eac_log_ts",
-      "data_type": "t_int32",
-      "minimum": -2147483648,
-      "maximum": 2147483647
-    },
-    {
       "name": "energy_e_ac_year_sum",
       "data_type": "t_float",
       "minimum": -3.4028234663852886e+38,
@@ -2110,12 +1966,6 @@
     {
       "name": "battery_cells_2",
       "data_type": "t_string"
-    },
-    {
-      "name": "logger_month_eb_log_ts",
-      "data_type": "t_int32",
-      "minimum": -2147483648,
-      "maximum": 2147483647
     },
     {
       "name": "db_power_board_afi_i30",
@@ -2226,12 +2076,6 @@
       "maximum": 3.4028234663852886e+38
     },
     {
-      "name": "logger_error_log_time_stamp",
-      "data_type": "t_int32",
-      "minimum": -2147483648,
-      "maximum": 2147483647
-    },
-    {
       "name": "db_power_board_afi_i150",
       "data_type": "t_float",
       "minimum": -3.4028234663852886e+38,
@@ -2261,12 +2105,6 @@
     },
     {
       "name": "battery_bat_status",
-      "data_type": "t_int32",
-      "minimum": -2147483648,
-      "maximum": 2147483647
-    },
-    {
-      "name": "logger_year_eac_log_ts",
       "data_type": "t_int32",
       "minimum": -2147483648,
       "maximum": 2147483647
@@ -2336,12 +2174,6 @@
       "maximum": 4294967295
     },
     {
-      "name": "logger_minutes_ua_log_ts",
-      "data_type": "t_int32",
-      "minimum": -2147483648,
-      "maximum": 2147483647
-    },
-    {
       "name": "flash_rtc_time_stamp_factory",
       "data_type": "t_uint32",
       "minimum": 0,
@@ -2390,12 +2222,6 @@
       "data_type": "t_float",
       "minimum": -3.4028234663852886e+38,
       "maximum": 3.4028234663852886e+38
-    },
-    {
-      "name": "logger_minutes_soc_targ_log_ts",
-      "data_type": "t_int32",
-      "minimum": -2147483648,
-      "maximum": 2147483647
     },
     {
       "name": "wifi_encryption_algorithm",
@@ -3028,18 +2854,6 @@
       "maximum": 255
     },
     {
-      "name": "logger_month_egrid_feed_log_ts",
-      "data_type": "t_int32",
-      "minimum": -2147483648,
-      "maximum": 2147483647
-    },
-    {
-      "name": "logger_minutes_egrid_load_log_ts",
-      "data_type": "t_int32",
-      "minimum": -2147483648,
-      "maximum": 2147483647
-    },
-    {
       "name": "svnversion_last_known",
       "data_type": "t_string"
     },
@@ -3368,12 +3182,6 @@
       "maximum": 3.4028234663852886e+38
     },
     {
-      "name": "logger_minutes_egrid_feed_log_ts",
-      "data_type": "t_int32",
-      "minimum": -2147483648,
-      "maximum": 2147483647
-    },
-    {
       "name": "battery_soc_target_low",
       "data_type": "t_float",
       "minimum": -3.4028234663852886e+38,
@@ -3408,12 +3216,6 @@
       "data_type": "t_uint16",
       "minimum": 0,
       "maximum": 65535
-    },
-    {
-      "name": "logger_minutes_eload_log_ts",
-      "data_type": "t_int32",
-      "minimum": -2147483648,
-      "maximum": 2147483647
     },
     {
       "name": "battery_cells_stat_2_t_max_index",
@@ -3590,12 +3392,6 @@
       "data_type": "t_float",
       "minimum": -3.4028234663852886e+38,
       "maximum": 3.4028234663852886e+38
-    },
-    {
-      "name": "logger_day_egrid_feed_log_ts",
-      "data_type": "t_int32",
-      "minimum": -2147483648,
-      "maximum": 2147483647
     },
     {
       "name": "g_sync_p_ac_sc_2",
@@ -4006,12 +3802,6 @@
       "maximum": 3.4028234663852886e+38
     },
     {
-      "name": "logger_year_egrid_load_log_ts",
-      "data_type": "t_int32",
-      "minimum": -2147483648,
-      "maximum": 2147483647
-    },
-    {
       "name": "battery_placeholder_0_cells_stat_4_t_max_index",
       "data_type": "t_uint8",
       "minimum": 0,
@@ -4128,12 +3918,6 @@
       "maximum": 4294967295
     },
     {
-      "name": "logger_day_eload_log_ts",
-      "data_type": "t_int32",
-      "minimum": -2147483648,
-      "maximum": 2147483647
-    },
-    {
       "name": "g_sync_s_ac_0",
       "data_type": "t_float",
       "minimum": -3.4028234663852886e+38,
@@ -4168,12 +3952,6 @@
       "data_type": "t_uint32",
       "minimum": 0,
       "maximum": 4294967295
-    },
-    {
-      "name": "logger_minutes_ebat_log_ts",
-      "data_type": "t_int32",
-      "minimum": -2147483648,
-      "maximum": 2147483647
     },
     {
       "name": "hw_test_timer2",
@@ -4268,12 +4046,6 @@
       "data_type": "t_float",
       "minimum": -3.4028234663852886e+38,
       "maximum": 3.4028234663852886e+38
-    },
-    {
-      "name": "logger_minutes_temp_bat_log_ts",
-      "data_type": "t_int32",
-      "minimum": -2147483648,
-      "maximum": 2147483647
     },
     {
       "name": "battery_placeholder_0_cells_stat_0_t_max_time",
@@ -4500,12 +4272,6 @@
       "maximum": 255
     },
     {
-      "name": "logger_day_eac_log_ts",
-      "data_type": "t_int32",
-      "minimum": -2147483648,
-      "maximum": 2147483647
-    },
-    {
       "name": "cs_map_0",
       "data_type": "t_uint8",
       "minimum": 0,
@@ -4542,12 +4308,6 @@
       "maximum": 3.4028234663852886e+38
     },
     {
-      "name": "logger_minutes_eac3_log_ts",
-      "data_type": "t_int32",
-      "minimum": -2147483648,
-      "maximum": 2147483647
-    },
-    {
       "name": "prim_sm_uzk_pump_grad_0",
       "data_type": "t_float",
       "minimum": -3.4028234663852886e+38,
@@ -4566,12 +4326,6 @@
       "maximum": 3.4028234663852886e+38
     },
     {
-      "name": "logger_month_eext_log_ts",
-      "data_type": "t_int32",
-      "minimum": -2147483648,
-      "maximum": 2147483647
-    },
-    {
       "name": "battery_placeholder_0_maximum_charge_voltage_constant_u",
       "data_type": "t_float",
       "minimum": -3.4028234663852886e+38,
@@ -4582,12 +4336,6 @@
       "data_type": "t_float",
       "minimum": -3.4028234663852886e+38,
       "maximum": 3.4028234663852886e+38
-    },
-    {
-      "name": "logger_year_eload_log_ts",
-      "data_type": "t_int32",
-      "minimum": -2147483648,
-      "maximum": 2147483647
     },
     {
       "name": "hw_test_bt_power_8",
@@ -4842,12 +4590,6 @@
       "maximum": 3.4028234663852886e+38
     },
     {
-      "name": "logger_month_eac_log_ts",
-      "data_type": "t_int32",
-      "minimum": -2147483648,
-      "maximum": 2147483647
-    },
-    {
       "name": "p_buf_available",
       "data_type": "t_float",
       "minimum": -3.4028234663852886e+38,
@@ -4936,12 +4678,6 @@
       "data_type": "t_uint8",
       "minimum": 0,
       "maximum": 255
-    },
-    {
-      "name": "logger_minutes_temp_log_ts",
-      "data_type": "t_int32",
-      "minimum": -2147483648,
-      "maximum": 2147483647
     },
     {
       "name": "heat_sink_temperature",
@@ -5064,12 +4800,6 @@
       "data_type": "t_float",
       "minimum": -3.4028234663852886e+38,
       "maximum": 3.4028234663852886e+38
-    },
-    {
-      "name": "logger_day_ea_log_ts",
-      "data_type": "t_int32",
-      "minimum": -2147483648,
-      "maximum": 2147483647
     },
     {
       "name": "grid_mon_1_f_over_time",

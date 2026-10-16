@@ -44,7 +44,8 @@ read succeeds.
   support off), a power card and one card per battery tower. The module count of a tower is derived
   from its populated module serial slots; until all slots were read the card shows "Detecting
   modules…", and a slot pattern that cannot describe a documented tower shows "Module layout
-  unclear" instead of a drawing.
+  unclear" instead of a drawing (for example seven populated slots, where a Power Battery 11.5
+  has six modules). A tower with N modules is drawn as top cap, N-1 middle parts and bottom part.
 - The Energy Manager page shows a compact grid, house and battery energy-flow view beside the
   controls when space allows. Both views use measured, sign-normalized readings.
 - If the server cannot be reached, the dashboard keeps showing the last data (up to one hour old,
@@ -159,10 +160,25 @@ calls cancel/submit again. The delay between attempts doubles from 1 s up to 30 
 attempt limit. The Energy Manager admin status carries the failed attempts (`restore_attempts`) and
 the next retry time (`next_restore_at`).
 
+## Charge power limits
+
+Grid charging is bounded by a safety clamp that can only ever **lower** the charge power, never
+raise it. The effective charge power is `min(requested power, configured static device limit,
+verified live limit)`. The static device limit is the verified maximum grid-charge power configured
+for the device; the inverter and its BMS keep their own internal protection regardless.
+
+The live-limit term is the **Live Charge Envelope** seam. On this build it is **wired but
+unconditionally inert**: the RCT producer always reports "no live limit", so the configured static
+device limit alone governs. A live limit will only ever constrain dispatch once a real per-device
+hardware-verification contract exists for the register it would come from; until then no value is
+derived or invented, and a missing, stale or unverified limit always falls back to the static bound.
+A live limit, once a verified producer is attached, is additionally ignored when its measurement is
+older than a conservative freshness bound, so a stale ceiling can never keep constraining dispatch.
+
 ## Protocol catalog
 
 `app/catalog/objects.json` ships 894 of the 895 IDs from the supplied protocol PDF
-v1.14 (without `wifi_password`). The shipped write-policy seed describes 893
+v1.14 (without `wifi_password`). The shipped write-policy seed describes 849
 scalar objects; the GUI manages actual write approvals in `data/rct.db`.
 Existing friendly names stay stable; additional names replace dots and brackets with underscores. `net_slave_data`
 remains a structured diagnostic read. Catalog and policy seed are packaged

@@ -12,6 +12,7 @@ design.md 2.4.6), so it ships behind the same per-device capability gate as ever
 tests below pin the gate, not a hardware claim.
 """
 
+import asyncio
 from datetime import timedelta
 from pathlib import Path
 
@@ -241,6 +242,7 @@ async def test_a_hold_applies_control_mode_grid_charge_and_a_zero_setpoint(tmp_p
     assert gateway.calls == [
         ("read_soc", "main"),
         ("snapshot", "main"),
+        ("telemetry", "main"),
         ("control", True),
         ("grid_charge", False),  # holding must not let the grid charge the battery
         ("telemetry", "main"),
@@ -555,3 +557,77 @@ async def test_a_hold_on_an_unreleased_device_stays_blocked(tmp_path: Path) -> N
     assert (await dispatch.submit("main", hold(clock))).state is DispatchState.HOLDING
     with pytest.raises(DispatchRejected, match="dispatch_unverified"):
         await dispatch.submit("slave1", hold(clock))
+
+
+async def test_a_verification_probe_runs_on_a_genuinely_idle_device(tmp_path: Path) -> None:
+    """The positive case: with no intent and no restore outstanding, the probe is accepted and
+    holds, passing the gate as if engineering mode were on even without it being persisted."""
+    clock = ManualClock()
+    gateway = FakeDispatchGateway(clock)
+    dispatch = controller(tmp_path, clock, gateway, limits={"main": DeviceLimits(3000, 5000, engineering_mode=False)})
+
+    status = await dispatch.submit_verification_probe("main", hold(clock))
+
+    assert status.state is DispatchState.HOLDING
+
+
+async def test_a_verification_probe_refuses_a_device_with_an_active_operation(tmp_path: Path) -> None:
+    """P2: a real charge/discharge that started after the caller's lock-free preflight check must
+    not be silently replaced by the probe's HOLD. Under the device lock the probe re-asserts
+    idle-only and raises dispatch_operation_conflict; the live operation stays exactly as it was.
+    """
+    clock = ManualClock()
+    gateway = FakeDispatchGateway(clock)
+    dispatch = controller(tmp_path, clock, gateway)
+    live = await dispatch.submit("main", charge(clock))
+    assert live.state is DispatchState.CHARGING
+
+    with pytest.raises(DispatchRejected, match="dispatch_operation_conflict"):
+        await dispatch.submit_verification_probe("main", hold(clock))
+
+    after = await dispatch.status("main")
+    assert after.state is DispatchState.CHARGING
+    assert after.operation_id == live.operation_id  # the running operation was not replaced
+
+
+async def test_a_verification_probe_refuses_a_device_awaiting_restore(tmp_path: Path) -> None:
+    """A device whose restore is still outstanding (restore_required) is not idle: the probe must
+    refuse rather than write a HOLD on top of a half-restored device. Reached through the real
+    path — a failed restore leaves FAULT_RESTORE_PENDING with restore_required set."""
+    clock = ManualClock()
+    gateway = FakeDispatchGateway(clock)
+    dispatch = controller(tmp_path, clock, gateway)
+    await dispatch.submit("main", charge(clock))
+    gateway.fail_restore = True
+    stuck = await dispatch.cancel("main")
+    assert stuck.state is DispatchState.FAULT_RESTORE_PENDING and stuck.restore_required is True
+    gateway.fail_restore = False
+
+    with pytest.raises(DispatchRejected, match="dispatch_operation_conflict"):
+        await dispatch.submit_verification_probe("main", hold(clock))
+
+
+async def test_a_concurrent_charge_and_probe_never_let_the_probe_replace_the_charge(tmp_path: Path) -> None:
+    """Race: a charge and a verification probe are submitted concurrently. The device lock orders
+    them; whichever runs first wins, and the probe never silently replaces a charge that got in
+    first. The device therefore never ends up holding on top of a discarded live operation.
+    """
+    clock = ManualClock()
+    gateway = FakeDispatchGateway(clock)
+    dispatch = controller(tmp_path, clock, gateway)
+
+    charge_task = asyncio.create_task(dispatch.submit("main", charge(clock)))
+    probe_task = asyncio.create_task(dispatch.submit_verification_probe("main", hold(clock)))
+    results = await asyncio.gather(charge_task, probe_task, return_exceptions=True)
+
+    final = await dispatch.status("main")
+    probe_result = results[1]
+    if isinstance(probe_result, DispatchRejected):
+        # The charge won the lock; the probe was refused and the charge is still live.
+        assert probe_result.code == "dispatch_operation_conflict"
+        assert final.state is DispatchState.CHARGING
+    else:
+        # The probe won the lock on a still-idle device; the later charge then replaces the hold
+        # through the normal, operator-visible replacement path (not the probe silently winning).
+        assert final.state is DispatchState.CHARGING
+    assert not isinstance(results[0], Exception)  # the charge itself never errors

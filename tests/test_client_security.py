@@ -7,6 +7,7 @@
 """Client-facing security boundaries: source address resolution, request body limit, secrets kept out of the read API."""
 
 import json
+import logging
 from ipaddress import ip_network
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,10 +15,11 @@ from types import SimpleNamespace
 import pytest
 from starlette.datastructures import Headers
 
-from app.allowlist import Allowlist
 from app.api.body_limit import MAX_BODY_BYTES, BodyLimitMiddleware
+from app.api.middleware import RequestContextMiddleware
 from app.catalog.registry import RegistryCatalog
 from app.errors import ConfigError
+from app.security.allowlist import Allowlist
 from app.security.client_ip import ClientIpResolver
 from tests.api_helpers import make_settings, running_app, write_fixtures
 
@@ -148,6 +150,29 @@ async def test_large_legal_body_passes_the_limit(tmp_path) -> None:
     assert response.status_code == 401  # reached the authentication layer
 
 
+def test_a_spoofed_forwarded_header_from_an_untrusted_peer_cannot_change_the_identity() -> None:
+    """The rate-limit identity is the direct peer, never an attacker-controlled header, unless the
+    peer is itself a configured trusted proxy. A client that is not in trusted_proxies cannot move
+    its identity by sending X-Forwarded-For, so it cannot evade or impersonate a rate-limit bucket.
+    """
+    resolver = ClientIpResolver([ip_network("10.0.0.0/8")], "X-Forwarded-For")
+    # The peer 203.0.113.5 is NOT a trusted proxy; its forged header names someone else entirely.
+    headers = Headers({"X-Forwarded-For": "198.51.100.7"})
+    assert resolver.resolve("203.0.113.5", headers) == "203.0.113.5"  # the peer, not the spoof
+    # Even a header naming a trusted-proxy address does not help an untrusted peer.
+    headers = Headers({"X-Forwarded-For": "10.0.0.9"})
+    assert resolver.resolve("203.0.113.5", headers) == "203.0.113.5"
+
+
+def test_a_configured_forwarded_header_is_ignored_when_no_proxy_is_trusted() -> None:
+    """With no trusted_proxies configured every peer is untrusted, so the header is never consulted
+    and the identity stays the direct peer.
+    """
+    resolver = ClientIpResolver([], "X-Forwarded-For")
+    headers = Headers({"X-Forwarded-For": "198.51.100.7"})
+    assert resolver.resolve("203.0.113.5", headers) == "203.0.113.5"
+
+
 def test_two_forwarding_header_lines_are_joined_in_order() -> None:
     resolver = ClientIpResolver([ip_network("10.0.0.0/8")], "X-Forwarded-For")
     headers = Headers(raw=[(b"x-forwarded-for", b"203.0.113.9"), (b"x-forwarded-for", b"10.1.1.1")])
@@ -173,3 +198,73 @@ def test_partially_trusted_forwarding_chain_yields_the_first_untrusted_hop() -> 
     resolver = ClientIpResolver([ip_network("10.0.0.0/24")], "X-Forwarded-For")
     headers = Headers(raw=[(b"x-forwarded-for", b"203.0.113.9, 10.0.0.2")])
     assert resolver.resolve("10.0.0.3", headers) == "203.0.113.9"
+
+
+async def test_access_log_marks_a_response_aborted_after_the_status_was_sent(caplog) -> None:
+    """P3-5: once http.response.start sent a 2xx the wire status cannot change, but if the app then
+    fails mid-body the request did not succeed. The access log must record that at ERROR with
+    response_aborted=True while preserving the already-sent status, so an aborted 200 is not read as
+    a clean success."""
+
+    async def inner(scope, receive, send):
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        raise RuntimeError("stream broke after the status line")
+
+    async def receive():  # pragma: no cover - not awaited in this path
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    sent: list[dict] = []
+
+    async def send(message):
+        sent.append(message)
+
+    scope = {
+        "type": "http",
+        "method": "GET",
+        "path": "/api/v1/devices",
+        "headers": [],
+        "query_string": b"",
+        "scheme": "http",
+        "server": ("test", 80),
+        "app": SimpleNamespace(state=SimpleNamespace()),
+    }
+    with caplog.at_level(logging.DEBUG, logger="app.access"), pytest.raises(RuntimeError):
+        await RequestContextMiddleware(inner)(scope, receive, send)
+
+    assert sent[0]["status"] == 200  # the wire status is preserved
+    record = next(r for r in caplog.records if r.name == "app.access" and hasattr(r, "response_aborted"))
+    assert record.levelno == logging.ERROR
+    assert record.response_aborted is True
+    assert record.status == 200
+
+
+async def test_access_log_level_is_unchanged_for_a_clean_response(caplog) -> None:
+    """The abort path must not disturb the normal classification: a 200 that completes is logged at
+    its usual level (DEBUG for a plain API GET here) with response_aborted=False."""
+
+    async def inner(scope, receive, send):
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"{}"})
+
+    async def receive():  # pragma: no cover - not awaited in this path
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    scope = {
+        "type": "http",
+        "method": "GET",
+        "path": "/health",
+        "headers": [],
+        "query_string": b"",
+        "scheme": "http",
+        "server": ("test", 80),
+        "app": SimpleNamespace(state=SimpleNamespace()),
+    }
+    with caplog.at_level(logging.DEBUG, logger="app.access"):
+        await RequestContextMiddleware(inner)(scope, receive, lambda _m: _noop())
+
+    record = next(r for r in caplog.records if r.name == "app.access" and hasattr(r, "response_aborted"))
+    assert record.levelno == logging.DEBUG and record.response_aborted is False and record.status == 200
+
+
+async def _noop() -> None:
+    return None

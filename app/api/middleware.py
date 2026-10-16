@@ -15,7 +15,7 @@ from starlette.requests import Request
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from app.api.problems import ErrorCode, build_problem
-from app.logging_setup import correlation_id
+from app.observability.logging_setup import correlation_id
 from app.observability.stats import ServiceCounters
 
 log = logging.getLogger("app.access")
@@ -23,6 +23,9 @@ _VALID_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
 _MUTATING = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 _API_PREFIXES = ("/api/", "/metrics", "/health")
 _BROWSER_PROBES = frozenset({"/.well-known/appspecific/com.chrome.devtools.json"})  # Chrome DevTools asks on its own
+# Read-only projections the admin GUI refreshes on its own (POST only because they carry a body):
+# they are not admin actions, so a success is DEBUG like any other GUI poll.
+_READ_ONLY_POSTS = frozenset({"/admin/api/energy/spot-market/preview", "/admin/api/energy/weather/preview"})
 
 
 def access_log_level(method: str, path: str, status: int) -> int:
@@ -34,9 +37,13 @@ def access_log_level(method: str, path: str, status: int) -> int:
         return logging.DEBUG
     if status >= 400:
         return logging.WARNING
+    if path in _READ_ONLY_POSTS:
+        return logging.DEBUG
     if path.startswith("/admin/api/") and method in _MUTATING:
         return logging.INFO
-    if path == "/metrics":
+    # Liveness/metrics probes fire every few seconds (container health check, scrapers): a successful
+    # poll is DEBUG so it does not flood the access log, while any 4xx/5xx was already classified above.
+    if path in ("/metrics", "/health"):
         return logging.DEBUG
     if path.startswith(_API_PREFIXES):
         return logging.INFO
@@ -76,6 +83,7 @@ class RequestContextMiddleware:
         started = time.perf_counter()
         status = 500
         sent = False
+        aborted = False
 
         async def wrapped(message: Message) -> None:
             nonlocal status, sent
@@ -95,29 +103,35 @@ class RequestContextMiddleware:
             except Exception:
                 log.exception("Unhandled error while processing the request")
                 if sent:
+                    # The 2xx/3xx status line already went out, so the wire status cannot change;
+                    # mark the response aborted so the access log does not read as a clean success.
+                    aborted = True
                     raise
                 response = build_problem(Request(scope), ErrorCode.INTERNAL_ERROR)
                 await response(scope, receive, wrapped)
         finally:
             duration_ms = round((time.perf_counter() - started) * 1000, 1)
+            level = logging.ERROR if aborted else access_log_level(scope["method"], scope["path"], status)
             # uvicorn's h11 unquotes the raw URL into scope["path"], so e.g. %0A becomes a literal
             # newline: an unauthenticated request could otherwise inject fake multi-line log entries.
             method = _escape_for_log(scope["method"])
             path = _escape_for_log(scope["path"])
             log.log(
-                access_log_level(scope["method"], scope["path"], status),
-                "%s %s -> %d in %.1f ms (token %s)",
+                level,
+                "%s %s -> %d in %.1f ms (token %s)%s",
                 method,
                 path,
                 status,
                 duration_ms,
                 scope.get("token_id") or "-",
+                " [response aborted]" if aborted else "",
                 extra={
                     "method": method,
                     "path": path,
                     "status": status,
                     "duration_ms": duration_ms,
                     "token_id": scope.get("token_id"),
+                    "response_aborted": aborted,
                 },
             )
             correlation_id.reset(token)
