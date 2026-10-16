@@ -1078,8 +1078,14 @@ body {
     display: none;
 }
 
+/* Mirrors the dashboard .kpi-card layout: the icon sits left and vertically centered next to the
+   label/value column instead of stacking above it. Cells without an icon still align sensibly as
+   the pair is simply the only flex item. */
 .device-metric-card {
     min-width: 0;
+    display: flex;
+    align-items: center;
+    gap: .5rem;
     padding: .45rem .55rem;
     border: 1px solid var(--rct-line);
     border-radius: .45rem;
@@ -1088,10 +1094,15 @@ body {
 }
 
 .device-metric-card-icon {
-    display: block;
-    margin-bottom: .15rem;
-    font-size: .95rem;
+    flex: none;
+    font-size: 1.3rem;
     color: var(--bs-secondary-color);
+}
+
+/* The label/value column must be able to shrink below its longest word so the icon never pushes
+   the readings out of the cell (mirrors .kpi-card .card-body>div). */
+.device-metric-card .device-metric-pair {
+    min-width: 0;
 }
 
 .device-metric-card dt {
