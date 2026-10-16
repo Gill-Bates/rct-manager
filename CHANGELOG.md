@@ -15,6 +15,7 @@
 - ``Fix`` The Charging plan no longer shows the "Please wait …" spinner for good: a missing or unverifiable battery state shows its explanation at once, a pending input that is still pending after the 30 polls keeps its status card instead of returning to the spinner every 5 minutes, and the text for a missing consumption estimate matches the baseline fallback. Several logger points for one local date in the inverter day history are now logged once.
 - ``Fix`` Non-finite floats are rejected when decoding a reply or encoding a write, and a device host is stored in its canonical form (IP address normalized, host name lower-cased).
 - ``Fix`` The outline-secondary buttons (e.g. "Edit dashboard") use the theme's secondary text colour in the light theme, so their label reaches the 4.5:1 contrast ratio.
+- ``Fix`` The Charging plan no longer announces a "Next grid charge" while the Energy Manager is off for the inverter; it states that no grid charge will be started.
 
 <details markdown="1">
 <summary>Previous versions...</summary>

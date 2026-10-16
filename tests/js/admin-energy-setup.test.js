@@ -713,3 +713,21 @@ test('Battery remaining shows a dash, never NaN or undefined, without a snapshot
     assert.ok(tiles.every((t) => !/NaN|undefined|null/.test(`${t.value} ${t.sub || ''}`)));
   }
 });
+
+test('Charging plan announces no grid charge while the Energy Manager is off', () => {
+  const slots = [{ action: 'charge', start: '2026-01-01T10:00:00Z', end: '2026-01-01T10:15:00Z', max_power_w: 2000, target_soc_percent: 80 }];
+  for (const [mode, expectOff] of [['off', true], ['manual', false], [undefined, false]]) {
+    const h = harness();
+    h.context.formatPower = (w) => `${w} W`;
+    const host = h.context.element('div');
+    host.id = 'energy-plan-result';
+    const select = h.context.element('select');
+    select.id = 'energy-plan-device';
+    select.value = 'main';
+    vm.runInContext(`planDevices = [{ device_id: 'main', mode: ${JSON.stringify(mode)} }]`, h.context);
+    h.context.renderDryRunPlan({ status: 'ok', horizon_hours: 24, slots, energy: {}, window: {} });
+    const text = flatten(host).map((n) => n.textContent || '').join(' ');
+    assert.equal(/Next grid charge/.test(text), !expectOff, `mode ${mode}`);
+    assert.equal(/Energy Manager is off/.test(text), expectOff, `mode ${mode}`);
+  }
+});

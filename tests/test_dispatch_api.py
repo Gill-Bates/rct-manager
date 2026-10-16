@@ -56,7 +56,9 @@ def settings(tmp_path: Path, **overrides):
         "admin_db_path": admin_path,
         # The dispatch gate blocks unverified hardware, so an integration test that drives a device
         # has to seed the verification of exactly that device explicitly.
-        "dispatch_db_path": dispatch_capabilities(tmp_path, ("main", "slave1"), secret=SECRET),
+        "dispatch_db_path": dispatch_capabilities(
+            tmp_path, ("main", "slave1"), secret=SECRET
+        ),
         "dispatch_max_charge_power_w": 3000,
         "dispatch_max_discharge_power_w": 5000,
         "write_response_timeout_ms": 50,
@@ -148,7 +150,9 @@ async def test_a_generic_write_to_a_dispatch_register_is_refused_during_an_activ
     assert blocked.json()["code"] == "dispatch_register_locked"
 
 
-async def test_a_generic_write_to_a_dispatch_register_is_allowed_when_idle(tmp_path: Path) -> None:
+async def test_a_generic_write_to_a_dispatch_register_is_allowed_when_idle(
+    tmp_path: Path,
+) -> None:
     """The lock is scoped to an active dispatch: with no dispatch and the Energy Manager off, the
     same register is writable through the generic endpoint (the escape hatch still exists).
     """
@@ -162,16 +166,21 @@ async def test_a_generic_write_to_a_dispatch_register_is_allowed_when_idle(tmp_p
     assert response.status_code == 200, response.text
 
 
-async def test_raw_control_write_rechecks_energy_mode_after_waiting_for_mode_lock(tmp_path: Path) -> None:
+async def test_raw_control_write_rechecks_energy_mode_after_waiting_for_mode_lock(
+    tmp_path: Path,
+) -> None:
     async with running_app(settings(tmp_path)) as harness:
         seed_payloads(harness)
         manager = harness.runtime.energy
         assert manager is not None
         async with manager.guard_raw_write("main"):
-            pending = asyncio.create_task(harness.client.put(
-                "/api/v1/devices/main/metrics/power_mng_battery_power_extern",
-                headers=WRITER, json={"value": 0.0},
-            ))
+            pending = asyncio.create_task(
+                harness.client.put(
+                    "/api/v1/devices/main/metrics/power_mng_battery_power_extern",
+                    headers=WRITER,
+                    json={"value": 0.0},
+                )
+            )
             await asyncio.sleep(0)
             assert not pending.done()
             manager._mode_states["main"] = ModeRecord("main", mode=EnergyMode.MANUAL)
@@ -180,7 +189,9 @@ async def test_raw_control_write_rechecks_energy_mode_after_waiting_for_mode_loc
         assert blocked.json()["code"] == "dispatch_register_locked"
 
 
-async def test_an_existing_request_body_produces_the_recorded_response(tmp_path: Path) -> None:
+async def test_an_existing_request_body_produces_the_recorded_response(
+    tmp_path: Path,
+) -> None:
     """AC-16: the body an existing client sends today must still produce the same response, field
     for field. Recorded here so a regression shows up as a diff instead of as a silent change.
     """
@@ -220,7 +231,9 @@ async def test_an_existing_request_body_produces_the_recorded_response(tmp_path:
     }
 
 
-async def test_a_hold_body_is_accepted_and_reports_a_held_battery(tmp_path: Path) -> None:
+async def test_a_hold_body_is_accepted_and_reports_a_held_battery(
+    tmp_path: Path,
+) -> None:
     """`hold` carries no SoC goal and no power budget; the commanded figures carry the zero."""
     async with running_app(settings(tmp_path)) as harness:
         seed_payloads(harness)
@@ -242,18 +255,32 @@ async def test_a_hold_body_is_accepted_and_reports_a_held_battery(tmp_path: Path
         assert body["max_power_w"] == 0.0
         assert body["commanded_direction"] == "none"
         assert body["commanded_power_w"] == 0.0
-        stopped = await harness.client.delete("/api/v1/devices/main/battery/dispatch", headers=WRITER)
+        stopped = await harness.client.delete(
+            "/api/v1/devices/main/battery/dispatch", headers=WRITER
+        )
         assert stopped.status_code == 200, stopped.text
         assert stopped.json()["state"] == "idle"
 
 
-async def test_mode_dependent_bodies_are_rejected_before_the_device_is_touched(tmp_path: Path) -> None:
+async def test_mode_dependent_bodies_are_rejected_before_the_device_is_touched(
+    tmp_path: Path,
+) -> None:
     valid_until = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
     bad_bodies = [
-        {"mode": "hold", "target_soc_percent": 80, "max_power_w": 0, "valid_until": valid_until},
+        {
+            "mode": "hold",
+            "target_soc_percent": 80,
+            "max_power_w": 0,
+            "valid_until": valid_until,
+        },
         {"mode": "hold", "max_power_w": 500, "valid_until": valid_until},
         {"mode": "charge_from_grid", "max_power_w": 2000, "valid_until": valid_until},
-        {"mode": "charge_from_grid", "target_soc_percent": 80, "max_power_w": 0, "valid_until": valid_until},
+        {
+            "mode": "charge_from_grid",
+            "target_soc_percent": 80,
+            "max_power_w": 0,
+            "valid_until": valid_until,
+        },
     ]
     async with running_app(settings(tmp_path)) as harness:
         seed_payloads(harness)
@@ -263,7 +290,9 @@ async def test_mode_dependent_bodies_are_rejected_before_the_device_is_touched(t
             )
             assert response.status_code == 422, (body, response.text)
             assert response.json()["code"] == "invalid_request"
-        status = await harness.client.get("/api/v1/devices/main/battery/dispatch", headers=WRITER)
+        status = await harness.client.get(
+            "/api/v1/devices/main/battery/dispatch", headers=WRITER
+        )
         assert status.json()["state"] == "idle"
 
 
@@ -282,7 +311,9 @@ async def test_dispatch_route_is_hidden_when_writes_are_disabled() -> None:
     assert response.json()["code"] == "write_disabled"
 
 
-async def test_readiness_stays_red_while_a_dispatch_record_is_unreadable(tmp_path: Path) -> None:
+async def test_readiness_stays_red_while_a_dispatch_record_is_unreadable(
+    tmp_path: Path,
+) -> None:
     """C2 regression: an unreadable dispatch record means battery settings were NOT automatically
     restored (controller.recover()'s own contract), so a green readiness must not precede that —
     even once every device otherwise answers heartbeats fine.
@@ -296,7 +327,10 @@ async def test_readiness_stays_red_while_a_dispatch_record_is_unreadable(tmp_pat
 
     store.put(DispatchRecord("main", state=DispatchState.PRECHECK))
     with store.connect() as db:
-        db.execute("UPDATE dispatch_operations SET encrypted=? WHERE device_id='main'", (b"garbage",))
+        db.execute(
+            "UPDATE dispatch_operations SET encrypted=? WHERE device_id='main'",
+            (b"garbage",),
+        )
     store.close()
 
     async with running_app(device_settings) as harness:
@@ -306,7 +340,9 @@ async def test_readiness_stays_red_while_a_dispatch_record_is_unreadable(tmp_pat
         assert harness.runtime.dispatch.unreadable_devices == ("main",)
 
 
-async def test_readiness_is_green_once_dispatch_recovery_completes_cleanly(tmp_path: Path) -> None:
+async def test_readiness_is_green_once_dispatch_recovery_completes_cleanly(
+    tmp_path: Path,
+) -> None:
     async with running_app(settings(tmp_path)) as harness:
         response = await harness.client.get("/api/v1/readiness", headers=WRITER)
         assert response.status_code == 200
@@ -345,23 +381,34 @@ async def test_a_recovery_sweep_that_raises_leaves_the_app_not_ready_and_starts_
             assert harness.runtime.dispatch_recovery_failed is True
 
     assert run_calls == []  # no dispatch loop started after the failed sweep
-    assert any("Battery dispatch recovery failed" in r.getMessage() for r in caplog.records)
+    assert any(
+        "Battery dispatch recovery failed" in r.getMessage() for r in caplog.records
+    )
 
 
 def test_dispatch_fixture_contains_exact_write_registers(tmp_path: Path) -> None:
     paths = dispatch_fixtures(tmp_path)
     allowlist = json.loads(paths["write_allowlist_path"].read_text(encoding="utf-8"))
-    assert {entry["name"] for entry in allowlist["entries"]} == set(DISPATCH_WRITE_NAMES)
+    assert {entry["name"] for entry in allowlist["entries"]} == set(
+        DISPATCH_WRITE_NAMES
+    )
 
 
-async def test_reconfiguration_is_rejected_when_an_affected_devices_restore_fails(tmp_path: Path) -> None:
+async def test_reconfiguration_is_rejected_when_an_affected_devices_restore_fails(
+    tmp_path: Path,
+) -> None:
     """P0 safety invariant: removing a device with an active dispatch must be refused, not silently
     swapped out, when the synchronous restore through the still-live transport cannot complete. The
-    old device graph, its transport and the dispatch's persisted state must stay intact."""
-    config = settings(tmp_path, devices=[DeviceEntry(device_id="main", host=HOST, port=PORT)])
+    old device graph, its transport and the dispatch's persisted state must stay intact.
+    """
+    config = settings(
+        tmp_path, devices=[DeviceEntry(device_id="main", host=HOST, port=PORT)]
+    )
     admin_write_token(config)
     async with running_app(config) as harness:
-        ADMIN_WRITER = await admin_session_headers(harness.client, "replacement-test-password")
+        ADMIN_WRITER = await admin_session_headers(
+            harness.client, "replacement-test-password"
+        )
         seed_payloads(harness)
         started = await harness.client.post(
             "/api/v1/devices/main/battery/dispatch",
@@ -401,14 +448,20 @@ async def test_reconfiguration_is_rejected_when_an_affected_devices_restore_fail
         assert any(d["device_id"] == "main" for d in after["devices"])
 
 
-async def test_reconfiguration_succeeds_and_rebuilds_limits_after_a_clean_restore(tmp_path: Path) -> None:
+async def test_reconfiguration_succeeds_and_rebuilds_limits_after_a_clean_restore(
+    tmp_path: Path,
+) -> None:
     """The success path of the same transaction: the active dispatch is cleanly restored, the
     device is removed from the live graph, and a newly added device picks up fresh limits (no
     leftover ``dispatch_limits_missing`` from a stale per-device dict)."""
-    config = settings(tmp_path, devices=[DeviceEntry(device_id="main", host=HOST, port=PORT)])
+    config = settings(
+        tmp_path, devices=[DeviceEntry(device_id="main", host=HOST, port=PORT)]
+    )
     admin_write_token(config)
     async with running_app(config) as harness:
-        ADMIN_WRITER = await admin_session_headers(harness.client, "replacement-test-password")
+        ADMIN_WRITER = await admin_session_headers(
+            harness.client, "replacement-test-password"
+        )
         seed_payloads(harness)
         started = await harness.client.post(
             "/api/v1/devices/main/battery/dispatch",
@@ -428,12 +481,21 @@ async def test_reconfiguration_succeeds_and_rebuilds_limits_after_a_clean_restor
         # must treat both the same way.
         new_host, new_port = "192.0.2.90", 48999
         response = await harness.client.put(
-            "/admin/api/settings", headers=ADMIN_WRITER,
+            "/admin/api/settings",
+            headers=ADMIN_WRITER,
             json={"devices": [{"host": new_host, "port": new_port}]},
         )
         assert response.status_code == 200, response.text
         devices = response.json()["settings"]["devices"]
-        assert devices == [{"device_id": "main", "host": new_host, "port": new_port, "display_name": None, "network_id": None}]
+        assert devices == [
+            {
+                "device_id": "main",
+                "host": new_host,
+                "port": new_port,
+                "display_name": None,
+                "network_id": None,
+            }
+        ]
         assert harness.runtime.devices["main"].host == new_host
         new_id = "main"
 
@@ -455,17 +517,25 @@ async def test_reconfiguration_succeeds_and_rebuilds_limits_after_a_clean_restor
         assert dispatch_response.json()["code"] == "dispatch_unverified"
 
 
-async def test_readdressing_clears_unverified_evidence_and_engineering_mode_too(tmp_path: Path) -> None:
+async def test_readdressing_clears_unverified_evidence_and_engineering_mode_too(
+    tmp_path: Path,
+) -> None:
     """A revoke keeps a capability's evidence while it is UNVERIFIED (by design); a readdressing
     must not let that leftover evidence, or an engineering-mode switch, follow onto whatever
     physical device now answers under the same device_id — not only the capabilities that still
     happened to be VERIFIED when the device list was saved."""
-    config = settings(tmp_path, devices=[DeviceEntry(device_id="main", host=HOST, port=PORT)])
+    config = settings(
+        tmp_path, devices=[DeviceEntry(device_id="main", host=HOST, port=PORT)]
+    )
     token = admin_write_token(config)
     headers = {"Authorization": f"Bearer {token}"}
     async with running_app(config) as harness:
-        ADMIN_WRITER = await admin_session_headers(harness.client, "replacement-test-password")
-        headers = ADMIN_WRITER  # PAT calls would be refused once the cookie session exists
+        ADMIN_WRITER = await admin_session_headers(
+            harness.client, "replacement-test-password"
+        )
+        headers = (
+            ADMIN_WRITER  # PAT calls would be refused once the cookie session exists
+        )
         # UNVERIFIED but carrying evidence a revoke would leave behind (strategy code, note).
         put_cap = await harness.client.put(
             "/admin/api/dispatch/devices/main/capabilities/write_path_convention",
@@ -486,7 +556,11 @@ async def test_readdressing_clears_unverified_evidence_and_engineering_mode_too(
         put_limits = await harness.client.put(
             "/admin/api/dispatch/devices/main",
             headers=headers,
-            json={"max_charge_power_w": 3000, "max_discharge_power_w": 5000, "engineering_mode": True},
+            json={
+                "max_charge_power_w": 3000,
+                "max_discharge_power_w": 5000,
+                "engineering_mode": True,
+            },
         )
         assert put_limits.status_code == 200, put_limits.text
         assert harness.runtime.dispatch.device_limits("main").engineering_mode is True
@@ -495,12 +569,20 @@ async def test_readdressing_clears_unverified_evidence_and_engineering_mode_too(
         # is (per-device/firmware), so a readdressing must reset it to the shipped default too.
         await harness.runtime.dispatch.set_soc_target_policy(
             "main",
-            SocTargetPolicy(device_id="main", mode=SocTargetMode.BELOW_CURRENT_SOC, note="old device policy"),
+            SocTargetPolicy(
+                device_id="main",
+                mode=SocTargetMode.BELOW_CURRENT_SOC,
+                note="old device policy",
+            ),
         )
-        assert harness.runtime.dispatch.soc_target_policy("main").mode is SocTargetMode.BELOW_CURRENT_SOC
+        assert (
+            harness.runtime.dispatch.soc_target_policy("main").mode
+            is SocTargetMode.BELOW_CURRENT_SOC
+        )
 
         response = await harness.client.put(
-            "/admin/api/settings", headers=ADMIN_WRITER,
+            "/admin/api/settings",
+            headers=ADMIN_WRITER,
             json={"devices": [{"host": "192.0.2.91", "port": 48998}]},
         )
         assert response.status_code == 200, response.text
@@ -508,7 +590,9 @@ async def test_readdressing_clears_unverified_evidence_and_engineering_mode_too(
         after = await harness.client.get(
             "/admin/api/dispatch/devices/main/capabilities", headers=headers
         )
-        write_path = next(r for r in after.json() if r["name"] == "write_path_convention")
+        write_path = next(
+            r for r in after.json() if r["name"] == "write_path_convention"
+        )
         assert write_path["status"] == "unverified"
         assert write_path["soc_strategy_external_code"] is None
         assert write_path["note"] is None
@@ -518,80 +602,132 @@ async def test_readdressing_clears_unverified_evidence_and_engineering_mode_too(
         assert reset_policy.note is None
 
 
-async def test_failed_graph_build_leaves_identity_bound_state_untouched(tmp_path: Path) -> None:
+async def test_failed_graph_build_leaves_identity_bound_state_untouched(
+    tmp_path: Path,
+) -> None:
     """A readdressing whose new graph does not build must roll back completely: the old device
-    keeps running, so its capability evidence and engineering mode must not have been reset."""
-    config = settings(tmp_path, devices=[DeviceEntry(device_id="main", host=HOST, port=PORT)])
+    keeps running, so its capability evidence and engineering mode must not have been reset.
+    """
+    config = settings(
+        tmp_path, devices=[DeviceEntry(device_id="main", host=HOST, port=PORT)]
+    )
     token = admin_write_token(config)
     headers = {"Authorization": f"Bearer {token}"}
     async with running_app(config) as harness:
-        ADMIN_WRITER = await admin_session_headers(harness.client, "replacement-test-password")
-        headers = ADMIN_WRITER  # PAT calls would be refused once the cookie session exists
+        ADMIN_WRITER = await admin_session_headers(
+            harness.client, "replacement-test-password"
+        )
+        headers = (
+            ADMIN_WRITER  # PAT calls would be refused once the cookie session exists
+        )
         put_cap = await harness.client.put(
             "/admin/api/dispatch/devices/main/capabilities/write_path_convention",
             headers=headers,
-            json={"status": "unverified", "soc_strategy_external_code": 2, "note": "keep me"},
+            json={
+                "status": "unverified",
+                "soc_strategy_external_code": 2,
+                "note": "keep me",
+            },
         )
         assert put_cap.status_code == 200, put_cap.text
         put_limits = await harness.client.put(
             "/admin/api/dispatch/devices/main",
             headers=headers,
-            json={"max_charge_power_w": 3000, "max_discharge_power_w": 5000, "engineering_mode": True},
+            json={
+                "max_charge_power_w": 3000,
+                "max_discharge_power_w": 5000,
+                "engineering_mode": True,
+            },
         )
         assert put_limits.status_code == 200, put_limits.text
 
-        with patch("app.api.app_factory._build_device_graph", side_effect=RuntimeError("boom")):
+        with patch(
+            "app.api.app_factory._build_device_graph", side_effect=RuntimeError("boom")
+        ):
             response = await harness.client.put(
-                "/admin/api/settings", headers=ADMIN_WRITER,
+                "/admin/api/settings",
+                headers=ADMIN_WRITER,
                 json={"devices": [{"host": "192.0.2.91", "port": 48998}]},
             )
         assert response.status_code >= 400, response.text
 
-        after = await harness.client.get("/admin/api/dispatch/devices/main/capabilities", headers=headers)
-        write_path = next(r for r in after.json() if r["name"] == "write_path_convention")
+        after = await harness.client.get(
+            "/admin/api/dispatch/devices/main/capabilities", headers=headers
+        )
+        write_path = next(
+            r for r in after.json() if r["name"] == "write_path_convention"
+        )
         assert write_path["soc_strategy_external_code"] == 2
         assert write_path["note"] == "keep me"
         assert harness.runtime.dispatch.device_limits("main").engineering_mode is True
         assert harness.runtime.devices["main"].host == HOST
 
 
-async def test_a_device_added_after_a_removal_does_not_inherit_the_removed_ones_capabilities(tmp_path: Path) -> None:
+async def test_a_device_added_after_a_removal_does_not_inherit_the_removed_ones_capabilities(
+    tmp_path: Path,
+) -> None:
     """remove -> save -> add without a device_id -> save hands the freed id "main" to new hardware;
-    the removed device's verified capabilities and engineering mode must not follow that id."""
-    config = settings(tmp_path, devices=[DeviceEntry(device_id="main", host=HOST, port=PORT)])
+    the removed device's verified capabilities and engineering mode must not follow that id.
+    """
+    config = settings(
+        tmp_path, devices=[DeviceEntry(device_id="main", host=HOST, port=PORT)]
+    )
     admin_write_token(config)
     async with running_app(config) as harness:
-        headers = await admin_session_headers(harness.client, "replacement-test-password")
+        headers = await admin_session_headers(
+            harness.client, "replacement-test-password"
+        )
         # The fixture verified "main"; engineering mode is switched on for the removed device.
-        assert any(r.status.value == "verified" for r in harness.runtime.dispatch.capabilities("main"))
+        assert any(
+            r.status.value == "verified"
+            for r in harness.runtime.dispatch.capabilities("main")
+        )
         put_limits = await harness.client.put(
-            "/admin/api/dispatch/devices/main", headers=headers,
-            json={"max_charge_power_w": 3000, "max_discharge_power_w": 5000, "engineering_mode": True},
+            "/admin/api/dispatch/devices/main",
+            headers=headers,
+            json={
+                "max_charge_power_w": 3000,
+                "max_discharge_power_w": 5000,
+                "engineering_mode": True,
+            },
         )
         assert put_limits.status_code == 200, put_limits.text
 
         removed = await harness.client.put(
-            "/admin/api/settings", headers=headers,
-            json={"devices": [{"device_id": "slave1", "host": "192.0.2.50", "port": 48990}]},
+            "/admin/api/settings",
+            headers=headers,
+            json={
+                "devices": [
+                    {"device_id": "slave1", "host": "192.0.2.50", "port": 48990}
+                ]
+            },
         )
         assert removed.status_code == 200, removed.text
         assert "main" not in harness.runtime.devices
 
         added = await harness.client.put(
-            "/admin/api/settings", headers=headers,
-            json={"devices": [
-                {"device_id": "slave1", "host": "192.0.2.50", "port": 48990},
-                {"host": "192.0.2.51", "port": 48991},
-            ]},
+            "/admin/api/settings",
+            headers=headers,
+            json={
+                "devices": [
+                    {"device_id": "slave1", "host": "192.0.2.50", "port": 48990},
+                    {"host": "192.0.2.51", "port": 48991},
+                ]
+            },
         )
         assert added.status_code == 200, added.text
         assert "main" in harness.runtime.devices
-        assert all(r.status.value == "unverified" for r in harness.runtime.dispatch.capabilities("main"))
+        assert all(
+            r.status.value == "unverified"
+            for r in harness.runtime.dispatch.capabilities("main")
+        )
         limits = harness.runtime.dispatch.device_limits("main")
         assert limits is None or limits.engineering_mode is False
 
 
-async def test_p2_8_dynamic_plan_resolves_capacity_per_device_from_stored_limits(tmp_path: Path) -> None:
+async def test_p2_8_dynamic_plan_resolves_capacity_per_device_from_stored_limits(
+    tmp_path: Path,
+) -> None:
     """P2-8 (finding 5): the real ``get_dynamic_plan`` path must resolve each device's usable
     capacity from its OWN stored ``DeviceLimits`` and thread it into the ``BatteryState`` the planner
     converts SoC<->Wh with. Two devices with different stored capacities must yield two different
@@ -608,8 +744,12 @@ async def test_p2_8_dynamic_plan_resolves_capacity_per_device_from_stored_limits
         # seed_payloads only stages device payloads; an explicit read warms the cache the readings
         # port serves the (fresh, non-stale) 50 % SoC from. The endpoint itself performs no read.
         for device_id in ("main", "slave1"):
-            await harness.runtime.gateway.read_metric(device_id, "battery_soc", fresh=False)
-        headers = await admin_session_headers(harness.client, "replacement-test-password")
+            await harness.runtime.gateway.read_metric(
+                device_id, "battery_soc", fresh=False
+            )
+        headers = await admin_session_headers(
+            harness.client, "replacement-test-password"
+        )
 
         # Two devices, two deliberately different operator-set usable capacities, stored through the
         # real admin PUT that writes DeviceLimits.usable_capacity_wh.
@@ -624,21 +764,29 @@ async def test_p2_8_dynamic_plan_resolves_capacity_per_device_from_stored_limits
                 },
             )
             assert put.status_code == 200, put.text
-            assert harness.runtime.dispatch.device_limits(device_id).usable_capacity_wh == capacity
+            assert (
+                harness.runtime.dispatch.device_limits(device_id).usable_capacity_wh
+                == capacity
+            )
 
         resolved: dict[str, float] = {}
         original_current = EnergyReadingsBatteryStateProvider.current
 
         def recording_current(self):
-            state = original_current(self)  # the real production resolution runs unchanged
+            state = original_current(
+                self
+            )  # the real production resolution runs unchanged
             resolved[self._device_id] = state.usable_capacity_wh
             return state
 
         bodies: dict[str, dict] = {}
-        with patch.object(EnergyReadingsBatteryStateProvider, "current", recording_current):
+        with patch.object(
+            EnergyReadingsBatteryStateProvider, "current", recording_current
+        ):
             for device_id in ("main", "slave1"):
                 resp = await harness.client.get(
-                    f"/admin/api/energy/devices/{device_id}/dynamic-plan", headers=headers
+                    f"/admin/api/energy/devices/{device_id}/dynamic-plan",
+                    headers=headers,
                 )
                 assert resp.status_code == 200, resp.text
                 bodies[device_id] = resp.json()
@@ -660,10 +808,14 @@ async def test_p2_8_dynamic_plan_resolves_capacity_per_device_from_stored_limits
         assert resolved["slave1"] * soc_fraction == 10_000.0
 
 
-async def test_dynamic_plan_validates_policy_inputs_and_lists_replan_triggers(tmp_path: Path) -> None:
+async def test_dynamic_plan_validates_policy_inputs_and_lists_replan_triggers(
+    tmp_path: Path,
+) -> None:
     config = settings(tmp_path)
     async with running_app(config) as harness:
-        headers = await admin_session_headers(harness.client, "replacement-test-password")
+        headers = await admin_session_headers(
+            harness.client, "replacement-test-password"
+        )
         url = "/admin/api/energy/devices/main/dynamic-plan"
         for query in (
             "target_soc_percent=80",
@@ -672,15 +824,22 @@ async def test_dynamic_plan_validates_policy_inputs_and_lists_replan_triggers(tm
             "target_soc_percent=99&target_time=2026-10-15T06:00:00%2B00:00",
             "policy=bogus",
         ):
-            assert (await harness.client.get(f"{url}?{query}", headers=headers)).status_code == 422, query
+            assert (
+                await harness.client.get(f"{url}?{query}", headers=headers)
+            ).status_code == 422, query
         ok = await harness.client.get(
             f"{url}?policy=meet_deadline&target_soc_percent=80&target_time=2026-10-15T06:00:00%2B00:00",
             headers=headers,
         )
         assert ok.status_code == 200, ok.text
         body = ok.json()
-        assert body["policy"] is None and body["reserve_satisfied"] is None  # no plan without inputs
-        assert {t["code"] for t in body["replan"]["triggers"]} >= {"soc_deviation", "missed_charge_slot"}
+        assert (
+            body["policy"] is None and body["reserve_satisfied"] is None
+        )  # no plan without inputs
+        assert {t["code"] for t in body["replan"]["triggers"]} >= {
+            "soc_deviation",
+            "missed_charge_slot",
+        }
         # The inert live-limit producer yields no limit: absent, never unlimited.
         assert harness.runtime.dispatch.verified_live_charge_limit_w("main") is None
 
@@ -689,23 +848,49 @@ def test_plan_view_exposes_flags_power_energy_assumptions_and_reasons() -> None:
     from datetime import UTC, datetime, timedelta
 
     from app.admin.energy_api import DryRunPlanView, _plan_flag_fields
-    from app.optimizer.models import BatteryState, ConsumptionForecast, PlanningInput, SolarForecast
+    from app.optimizer.models import (
+        BatteryState,
+        ConsumptionForecast,
+        PlanningInput,
+        SolarForecast,
+    )
     from app.optimizer.planner import DynamicChargeOptimizer, PlanParameters
     from app.spotmarket.models import SpotMarketProvider, SpotPriceSnapshot
 
     now = datetime(2026, 1, 15, 22, 0, tzinfo=UTC)
     prices = SpotPriceSnapshot(
-        provider=SpotMarketProvider.ENERGY_CHARTS, bidding_zone="DE-LU", currency="EUR", fetched_at=now, intervals=()
+        provider=SpotMarketProvider.ENERGY_CHARTS,
+        bidding_zone="DE-LU",
+        currency="EUR",
+        fetched_at=now,
+        intervals=(),
     )
     battery = BatteryState(50.0, 10_000.0, 3000.0, 3000.0, now)
     plan = DynamicChargeOptimizer(
         PlanParameters(target_soc_percent=90.0, target_time=now + timedelta(hours=2))
-    ).plan(PlanningInput(now, battery, prices, SolarForecast(now, ()), ConsumptionForecast(now, ()), timedelta(hours=3)))
-    view = DryRunPlanView(device_id="main", status="ok", horizon_hours=3.0, **_plan_flag_fields(plan))
+    ).plan(
+        PlanningInput(
+            now,
+            battery,
+            prices,
+            SolarForecast(now, ()),
+            ConsumptionForecast(now, ()),
+            timedelta(hours=3),
+        )
+    )
+    view = DryRunPlanView(
+        device_id="main", status="ok", horizon_hours=3.0, **_plan_flag_fields(plan)
+    )
     assert view.policy == "gentle" and view.reserve_satisfied is True
     assert view.target_reachable is False and view.unserved_target_energy_wh > 0
-    assert view.power.live_limit_available is False and view.power.live_charge_limit_w is None
-    assert view.assumptions.charge_efficiency_source == "assumed" and not view.assumptions.power_reference_verified
+    assert (
+        view.power.live_limit_available is False
+        and view.power.live_charge_limit_w is None
+    )
+    assert (
+        view.assumptions.charge_efficiency_source == "assumed"
+        and not view.assumptions.power_reference_verified
+    )
     assert {r.code for r in view.limiting_reasons} >= {"live_limit_unavailable"}
 
 
@@ -716,23 +901,33 @@ async def test_limits_put_keeps_omitted_capacity_clears_explicit_null_and_status
     omitted field must keep the stored value, only an explicit null clears it."""
     config = settings(tmp_path)
     async with running_app(config) as harness:
-        headers = await admin_session_headers(harness.client, "replacement-test-password")
+        headers = await admin_session_headers(
+            harness.client, "replacement-test-password"
+        )
         url = "/admin/api/dispatch/devices/main"
         base = {"max_charge_power_w": 3000, "max_discharge_power_w": 5000}
 
-        put = await harness.client.put(url, headers=headers, json={**base, "usable_capacity_wh": 9_000.0})
+        put = await harness.client.put(
+            url, headers=headers, json={**base, "usable_capacity_wh": 9_000.0}
+        )
         assert put.status_code == 200, put.text
 
-        omitted = await harness.client.put(url, headers=headers, json={**base, "engineering_mode": True})
+        omitted = await harness.client.put(
+            url, headers=headers, json={**base, "engineering_mode": True}
+        )
         assert omitted.status_code == 200, omitted.text
         assert omitted.json()["usable_capacity_wh"] == 9_000.0
-        assert harness.runtime.dispatch.device_limits("main").usable_capacity_wh == 9_000.0
+        assert (
+            harness.runtime.dispatch.device_limits("main").usable_capacity_wh == 9_000.0
+        )
 
         status = await harness.client.get("/admin/api/energy/devices")
         entry = next(item for item in status.json() if item["device_id"] == "main")
         assert entry["limits"]["usable_capacity_wh"] == 9_000.0
 
-        cleared = await harness.client.put(url, headers=headers, json={**base, "usable_capacity_wh": None})
+        cleared = await harness.client.put(
+            url, headers=headers, json={**base, "usable_capacity_wh": None}
+        )
         assert cleared.status_code == 200, cleared.text
         assert cleared.json()["usable_capacity_wh"] is None
         assert harness.runtime.dispatch.device_limits("main").usable_capacity_wh is None
@@ -741,9 +936,19 @@ async def test_limits_put_keeps_omitted_capacity_clears_explicit_null_and_status
 def test_battery_facts_preserve_legacy_capacity_as_expert_override() -> None:
     limits = DeviceLimits(3000, 4000, usable_capacity_wh=9000)
     assert resolve_battery_facts(limits).capacity_source == "expert_override"
-    assert resolve_battery_facts(limits, verified_usable_capacity_wh=8000).usable_capacity_wh == 9000
-    assert resolve_battery_facts(DeviceLimits(3000, 4000)).capacity_source == "unavailable"
-    assert resolve_battery_facts(None, verified_usable_capacity_wh=8000).capacity_source == "verified"
+    assert (
+        resolve_battery_facts(
+            limits, verified_usable_capacity_wh=8000
+        ).usable_capacity_wh
+        == 9000
+    )
+    assert (
+        resolve_battery_facts(DeviceLimits(3000, 4000)).capacity_source == "unavailable"
+    )
+    assert (
+        resolve_battery_facts(None, verified_usable_capacity_wh=8000).capacity_source
+        == "verified"
+    )
 
 
 class _FixedCapacity:
@@ -755,33 +960,80 @@ class _FixedCapacity:
 
 
 def test_resolve_device_battery_facts_priority_and_invalid_source() -> None:
-    from app.dispatch.battery_facts import NoVerifiedCapacity, resolve_device_battery_facts
+    from app.dispatch.battery_facts import (
+        NoVerifiedCapacity,
+        resolve_device_battery_facts,
+    )
 
     limits = DeviceLimits(3000, 4000)
-    assert resolve_device_battery_facts(limits, NoVerifiedCapacity(), "main").capacity_source == "unavailable"
-    assert resolve_device_battery_facts(limits, _FixedCapacity(8000), "main").capacity_source == "verified"
+    assert (
+        resolve_device_battery_facts(
+            limits, NoVerifiedCapacity(), "main"
+        ).capacity_source
+        == "unavailable"
+    )
+    assert (
+        resolve_device_battery_facts(
+            limits, _FixedCapacity(8000), "main"
+        ).capacity_source
+        == "verified"
+    )
     for bad in (float("nan"), float("inf"), 0, -5, True, "8000"):
-        assert resolve_device_battery_facts(limits, _FixedCapacity(bad), "main").capacity_source == "unavailable"
+        assert (
+            resolve_device_battery_facts(
+                limits, _FixedCapacity(bad), "main"
+            ).capacity_source
+            == "unavailable"
+        )
     override = DeviceLimits(3000, 4000, usable_capacity_wh=9000)
-    assert resolve_device_battery_facts(override, _FixedCapacity(8000), "main").usable_capacity_wh == 9000
+    assert (
+        resolve_device_battery_facts(
+            override, _FixedCapacity(8000), "main"
+        ).usable_capacity_wh
+        == 9000
+    )
 
 
-async def test_verified_capacity_source_reaches_device_list_and_plan_without_device_access(tmp_path: Path) -> None:
+async def test_verified_capacity_source_reaches_device_list_and_plan_without_device_access(
+    tmp_path: Path,
+) -> None:
     from app.optimizer.adapters import EnergyReadingsBatteryStateProvider
 
-    config = settings(tmp_path, enable_write_support=False, dispatch_max_charge_power_w=None,
-                      dispatch_max_discharge_power_w=None)
+    config = settings(
+        tmp_path,
+        enable_write_support=False,
+        dispatch_max_charge_power_w=None,
+        dispatch_max_discharge_power_w=None,
+    )
     async with running_app(config) as harness:
         seed_payloads(harness)
         await harness.runtime.gateway.read_metric("main", "battery_soc", fresh=False)
-        headers = await admin_session_headers(harness.client, "replacement-test-password")
+        headers = await admin_session_headers(
+            harness.client, "replacement-test-password"
+        )
         url = "/admin/api/energy/devices/main/planning-limits"
         body = {"max_charge_power_w": 3000, "max_discharge_power_w": 4000}
-        assert (await harness.client.put(url, headers=headers, json=body)).status_code == 200
+        assert (
+            await harness.client.put(url, headers=headers, json=body)
+        ).status_code == 200
 
         async def source() -> str:
-            listing = await harness.client.get("/admin/api/energy/planning-devices", headers=headers)
-            return next(i for i in listing.json() if i["device_id"] == "main")["battery_capacity_source"]
+            listing = await harness.client.get(
+                "/admin/api/energy/planning-devices", headers=headers
+            )
+            return next(i for i in listing.json() if i["device_id"] == "main")[
+                "battery_capacity_source"
+            ]
+
+        listing = await harness.client.get(
+            "/admin/api/energy/planning-devices", headers=headers
+        )
+        assert next(i for i in listing.json() if i["device_id"] == "main")["mode"] in {
+            "off",
+            "manual",
+            "external",
+            None,
+        }
 
         resolved = {}
         original = EnergyReadingsBatteryStateProvider.current
@@ -797,50 +1049,78 @@ async def test_verified_capacity_source_reaches_device_list_and_plan_without_dev
         harness.runtime.battery_capacity = _FixedCapacity(8_000.0)
         sent_before = len(harness.net.frames)
         with patch.object(EnergyReadingsBatteryStateProvider, "current", recording):
-            assert (await harness.client.get(plan_url, headers=headers)).status_code == 200
+            assert (
+                await harness.client.get(plan_url, headers=headers)
+            ).status_code == 200
         assert await source() == "verified"
         assert resolved["wh"] == 8_000.0
         assert len(harness.net.frames) == sent_before  # the plan endpoint sent nothing
 
-        saved = await harness.client.put(url, headers=headers, json={**body, "usable_capacity_wh": 9_000})
+        saved = await harness.client.put(
+            url, headers=headers, json={**body, "usable_capacity_wh": 9_000}
+        )
         assert saved.status_code == 200, saved.text
         assert await source() == "expert_override"
         with patch.object(EnergyReadingsBatteryStateProvider, "current", recording):
-            assert (await harness.client.get(plan_url, headers=headers)).status_code == 200
+            assert (
+                await harness.client.get(plan_url, headers=headers)
+            ).status_code == 200
         assert resolved["wh"] == 9_000.0
 
 
-async def test_dry_run_planning_data_works_with_write_support_off(tmp_path: Path) -> None:
+async def test_dry_run_planning_data_works_with_write_support_off(
+    tmp_path: Path,
+) -> None:
     """The preview's device list and battery data do not depend on the dispatch controller, and
     saving them never switches battery control on."""
     from app.optimizer.adapters import EnergyReadingsBatteryStateProvider
 
-    config = settings(tmp_path, enable_write_support=False, dispatch_max_charge_power_w=None,
-                      dispatch_max_discharge_power_w=None)
+    config = settings(
+        tmp_path,
+        enable_write_support=False,
+        dispatch_max_charge_power_w=None,
+        dispatch_max_discharge_power_w=None,
+    )
     async with running_app(config) as harness:
         assert harness.runtime.dispatch is None
         seed_payloads(harness)
         await harness.runtime.gateway.read_metric("main", "battery_soc", fresh=False)
-        headers = await admin_session_headers(harness.client, "replacement-test-password")
-        listing = await harness.client.get("/admin/api/energy/planning-devices", headers=headers)
+        headers = await admin_session_headers(
+            harness.client, "replacement-test-password"
+        )
+        listing = await harness.client.get(
+            "/admin/api/energy/planning-devices", headers=headers
+        )
         assert listing.status_code == 200, listing.text
-        assert {item["device_id"] for item in listing.json()} == set(harness.runtime.devices)
+        assert {item["device_id"] for item in listing.json()} == set(
+            harness.runtime.devices
+        )
         assert all(item["limits"] is None for item in listing.json())
-        assert all(item["battery_capacity_source"] == "unavailable" for item in listing.json())
+        assert all(
+            item["battery_capacity_source"] == "unavailable" for item in listing.json()
+        )
 
         url = "/admin/api/energy/devices/main/planning-limits"
         body = {"max_charge_power_w": 3000, "max_discharge_power_w": 4000}
-        saved = await harness.client.put(url, headers=headers, json={**body, "usable_capacity_wh": 9_000})
+        saved = await harness.client.put(
+            url, headers=headers, json={**body, "usable_capacity_wh": 9_000}
+        )
         assert saved.status_code == 200, saved.text
         assert harness.runtime.dispatch is None  # no executor was activated
 
-        kept = await harness.client.put(url, headers=headers, json=body)  # omitted capacity is kept
+        kept = await harness.client.put(
+            url, headers=headers, json=body
+        )  # omitted capacity is kept
         assert kept.json()["usable_capacity_wh"] == 9_000
-        listing = await harness.client.get("/admin/api/energy/planning-devices", headers=headers)
+        listing = await harness.client.get(
+            "/admin/api/energy/planning-devices", headers=headers
+        )
         main = next(item for item in listing.json() if item["device_id"] == "main")
         assert main["limits"] == {
-            "max_charge_power_w": 3000, "max_discharge_power_w": 4000,
-            "engineering_mode": False, "usable_capacity_wh": 9_000,
+            "max_charge_power_w": 3000,
+            "max_discharge_power_w": 4000,
+            "engineering_mode": False,
+            "usable_capacity_wh": 9_000,
         }
         assert main["battery_capacity_source"] == "expert_override"
 
@@ -849,46 +1129,94 @@ async def test_dry_run_planning_data_works_with_write_support_off(tmp_path: Path
 
         def recording(self):
             state = original(self)
-            resolved[self._device_id] = (state.usable_capacity_wh, state.max_charge_power_w, state.max_discharge_power_w)
+            resolved[self._device_id] = (
+                state.usable_capacity_wh,
+                state.max_charge_power_w,
+                state.max_discharge_power_w,
+            )
             return state
 
         with patch.object(EnergyReadingsBatteryStateProvider, "current", recording):
-            plan = await harness.client.get("/admin/api/energy/devices/main/dynamic-plan", headers=headers)
+            plan = await harness.client.get(
+                "/admin/api/energy/devices/main/dynamic-plan", headers=headers
+            )
         assert plan.status_code == 200, plan.text
         assert resolved["main"] == (9_000, 3000, 4000)
 
-        cleared = await harness.client.put(url, headers=headers, json={**body, "usable_capacity_wh": None})
+        cleared = await harness.client.put(
+            url, headers=headers, json={**body, "usable_capacity_wh": None}
+        )
         assert cleared.json()["usable_capacity_wh"] is None
         # Battery execution stays gated by write support.
-        assert (await harness.client.put(
-            "/admin/api/dispatch/devices/main", headers=headers, json=body
-        )).status_code == 503
+        assert (
+            await harness.client.put(
+                "/admin/api/dispatch/devices/main", headers=headers, json=body
+            )
+        ).status_code == 503
 
 
-async def test_consumption_history_lists_the_last_60_completed_days_from_the_store(tmp_path: Path) -> None:
+async def test_consumption_history_lists_the_last_60_completed_days_from_the_store(
+    tmp_path: Path,
+) -> None:
     config = settings(tmp_path, enable_write_support=False)
     async with running_app(config) as harness:
-        headers = await admin_session_headers(harness.client, "replacement-test-password")
+        headers = await admin_session_headers(
+            harness.client, "replacement-test-password"
+        )
         store = harness.app.state.admin_store
         now = harness.runtime.clock.now()
         yesterday = (now.astimezone(UTC) - timedelta(days=1)).date()
-        store.upsert_consumption_daily("main", [
-            {"local_date": yesterday.isoformat(), "energy_wh": 12345.0, "source": "inverter_history",
-             "timezone": "UTC", "fetched_at": now.isoformat()},
-        ])
-        response = await harness.client.get("/admin/api/energy/devices/main/consumption-history", headers=headers)
+        store.upsert_consumption_daily(
+            "main",
+            [
+                {
+                    "local_date": yesterday.isoformat(),
+                    "energy_wh": 12345.0,
+                    "source": "inverter_history",
+                    "timezone": "UTC",
+                    "fetched_at": now.isoformat(),
+                },
+            ],
+        )
+        response = await harness.client.get(
+            "/admin/api/energy/devices/main/consumption-history", headers=headers
+        )
         assert response.status_code == 200
         days = response.json()["days"]
-        assert len(days) == 60 and days[-1]["date"] == yesterday.isoformat()  # oldest first, running day excluded
-        assert days[-1] == {"date": yesterday.isoformat(), "energy_wh": 12345.0, "source": "inverter_history"}
-        assert all(day["source"] == "unavailable" and day["energy_wh"] is None for day in days[:-1])
+        assert (
+            len(days) == 60 and days[-1]["date"] == yesterday.isoformat()
+        )  # oldest first, running day excluded
+        assert days[-1] == {
+            "date": yesterday.isoformat(),
+            "energy_wh": 12345.0,
+            "source": "inverter_history",
+        }
+        assert all(
+            day["source"] == "unavailable" and day["energy_wh"] is None
+            for day in days[:-1]
+        )
         body = response.json()
-        assert body["recording_since"] is None and body["inverter_import_enabled"] is False
-        store.upsert_consumption_intervals("main", [
-            {"interval_start": "2026-10-14T20:15:00+00:00", "interval_end": "2026-10-14T20:30:00+00:00",
-             "energy_wh": 100.0, "sample_count": 3, "coverage_seconds": 900.0},
-        ])
-        again = await harness.client.get("/admin/api/energy/devices/main/consumption-history", headers=headers)
+        assert (
+            body["recording_since"] is None and body["inverter_import_enabled"] is False
+        )
+        store.upsert_consumption_intervals(
+            "main",
+            [
+                {
+                    "interval_start": "2026-10-14T20:15:00+00:00",
+                    "interval_end": "2026-10-14T20:30:00+00:00",
+                    "energy_wh": 100.0,
+                    "sample_count": 3,
+                    "coverage_seconds": 900.0,
+                },
+            ],
+        )
+        again = await harness.client.get(
+            "/admin/api/energy/devices/main/consumption-history", headers=headers
+        )
         assert again.json()["recording_since"] == "2026-10-14T20:15:00+00:00"
-        assert (await harness.client.get("/admin/api/energy/devices/nope/consumption-history",
-                                         headers=headers)).status_code == 404
+        assert (
+            await harness.client.get(
+                "/admin/api/energy/devices/nope/consumption-history", headers=headers
+            )
+        ).status_code == 404

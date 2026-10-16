@@ -1310,10 +1310,16 @@ function renderDryRunPlan(plan, { waiting = true } = {}) {
     host.replaceChildren(readiness);
     return;
   }
-  const next = nextGridCharge(plan.slots || []);
-  const card = next
-    ? planStatusCard('Next grid charge', `${planDateTime(next.start)} – ${planDateTime(next.end)}`)
-    : planStatusCard('No grid charge planned', 'The current plan does not schedule a grid charge.');
+  // While the Energy Manager is off for this inverter no grid charge will ever be started, so the
+  // plan must not announce one.
+  const selectedDevice = planDevices.find((item) => item.device_id === $('energy-plan-device')?.value);
+  const managerOff = selectedDevice?.mode === 'off';
+  const next = managerOff ? null : nextGridCharge(plan.slots || []);
+  const card = managerOff
+    ? planStatusCard('Energy Manager is off', 'No grid charge will be started while the Energy Manager is off for this inverter.')
+    : next
+      ? planStatusCard('Next grid charge', `${planDateTime(next.start)} – ${planDateTime(next.end)}`)
+      : planStatusCard('No grid charge planned', 'The current plan does not schedule a grid charge.');
   // Four equal KPI tiles built from the plan's own battery snapshot (no second data source).
   const summary = element('div', 'spot-market-highlights energy-plan-highlights mt-3');
   const add = (caption, value, icon, sub) => {
@@ -1774,6 +1780,13 @@ async function loadDryRunPlan({ poll = false } = {}) {
     host.replaceChildren(planWaitState());
   }
   try {
+    // Keep the Energy Manager mode current without rebuilding the select or the limits form.
+    await api('energy/planning-devices').then((list) => {
+      for (const fresh of list) {
+        const known = planDevices.find((item) => item.device_id === fresh.device_id);
+        if (known) known.mode = fresh.mode;
+      }
+    }).catch(() => { });
     const plan = await api(`energy/devices/${encodeURIComponent(select.value)}/dynamic-plan`);
     if (generation !== planGeneration) return;
     if (plan.status !== planLastStatus) { planLastStatus = plan.status; planPollAttempts = 0; }

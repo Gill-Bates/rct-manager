@@ -30,7 +30,12 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, ValidationError
 
-from app.admin.api import _battery_module_report, _battery_tower_present, _csrf, require_admin
+from app.admin.api import (
+    _battery_module_report,
+    _battery_tower_present,
+    _csrf,
+    require_admin,
+)
 from app.admin.consumption_backfill import WINDOW_DAYS as CONSUMPTION_WINDOW_DAYS
 from app.admin.consumption_backfill import load_daily_consumption
 from app.admin.dispatch_api import (
@@ -57,7 +62,12 @@ from app.dispatch.battery_facts import resolve_device_battery_facts
 from app.dispatch.capabilities import CapabilityName, CapabilityRecord, CapabilityStatus
 from app.dispatch.controller import CapabilityConflict
 from app.dispatch.models import DeviceLimits
-from app.dispatch.soc_policy import BELOW_MARGIN_PERCENT_MAX, NOTE_MAX_LENGTH, SocTargetMode, SocTargetPolicy
+from app.dispatch.soc_policy import (
+    BELOW_MARGIN_PERCENT_MAX,
+    NOTE_MAX_LENGTH,
+    SocTargetMode,
+    SocTargetPolicy,
+)
 from app.dispatch.store import DispatchStore
 from app.energy.base import EnergyAdminPort
 from app.energy.manager import MAX_POWER_W
@@ -78,7 +88,12 @@ from app.optimizer.adapters import (
     solar_forecast_from_rows,
     spot_snapshot_from_rows,
 )
-from app.optimizer.models import EnergyPlan, PlanPolicy, SolarForecast, SolarForecastInterval
+from app.optimizer.models import (
+    EnergyPlan,
+    PlanPolicy,
+    SolarForecast,
+    SolarForecastInterval,
+)
 from app.optimizer.planner import PlanParameters
 from app.optimizer.replan import DEFAULT_REPLAN_THRESHOLDS, TRIGGER_DESCRIPTIONS
 from app.spotmarket.base import SpotMarketError
@@ -151,7 +166,9 @@ class SocTargetPolicyBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     mode: SocTargetMode
-    below_margin_percent: float = Field(5.0, ge=0, le=BELOW_MARGIN_PERCENT_MAX, allow_inf_nan=False)
+    below_margin_percent: float = Field(
+        5.0, ge=0, le=BELOW_MARGIN_PERCENT_MAX, allow_inf_nan=False
+    )
     note: str | None = Field(None, max_length=NOTE_MAX_LENGTH)
 
 
@@ -163,7 +180,9 @@ class SocTargetPolicyView(BaseModel):
     @classmethod
     def from_domain(cls, policy: SocTargetPolicy) -> "SocTargetPolicyView":
         return cls(
-            mode=policy.mode, below_margin_percent=policy.below_margin_percent, note=policy.note
+            mode=policy.mode,
+            below_margin_percent=policy.below_margin_percent,
+            note=policy.note,
         )
 
 
@@ -221,7 +240,9 @@ class AdminEnergyDeviceStatus(EnergyStatusResponse):
 
     device_name: str
     mode_recorded: bool
-    write_support_enabled: bool  # the global write switch; the checklist's write access needs it
+    write_support_enabled: (
+        bool  # the global write switch; the checklist's write access needs it
+    )
     host: str
     connected: bool  # the inverter answers (state ok or degraded)
     connection_state: str
@@ -230,11 +251,17 @@ class AdminEnergyDeviceStatus(EnergyStatusResponse):
     limits: LimitsView | None
     capabilities: list[CapabilityView]
     added_write_names: list[str]  # what mode switches contributed, display only
-    approved_write_names: list[str]  # the live write allowlist, state-independent (Setup checklist)
-    required_write_names: list[str]  # what the Setup checklist needs approved (single source: backend)
+    approved_write_names: list[
+        str
+    ]  # the live write allowlist, state-independent (Setup checklist)
+    required_write_names: list[
+        str
+    ]  # what the Setup checklist needs approved (single source: backend)
     mode_changed_at: datetime | None
     mode_changed_by: str | None
-    restore_attempts: int = 0  # failed automatic restore attempts since the last clean restore
+    restore_attempts: int = (
+        0  # failed automatic restore attempts since the last clean restore
+    )
     next_restore_at: datetime | None = None
 
 
@@ -262,21 +289,31 @@ async def hardware_strategies(
             try:
                 # Page loading must never create an inverter transaction. Missing or stale cache is
                 # reported as n/a; an explicit mode/action path may perform device I/O when needed.
-                reading = runtime.gateway.cached_metric(device_id, "power_mng_soc_strategy")
-                if reading is not None and isinstance(reading.value, int) and not isinstance(reading.value, bool):
+                reading = runtime.gateway.cached_metric(
+                    device_id, "power_mng_soc_strategy"
+                )
+                if (
+                    reading is not None
+                    and isinstance(reading.value, int)
+                    and not isinstance(reading.value, bool)
+                ):
                     code = reading.value
                     label = reading.enum_label
                     stale = reading.stale
             except DeviceApiError:
                 pass
-        result.append(HardwareStrategyView(
-            device_id=device_id,
-            device_name=device.display_name or runtime.gateway.reported_name(device_id) or device_id,
-            host=device.host,
-            code=code,
-            label=label,
-            stale=stale,
-        ))
+        result.append(
+            HardwareStrategyView(
+                device_id=device_id,
+                device_name=device.display_name
+                or runtime.gateway.reported_name(device_id)
+                or device_id,
+                host=device.host,
+                code=code,
+                label=label,
+                stale=stale,
+            )
+        )
     return result
 
 
@@ -289,7 +326,9 @@ def _is_connected(state: DeviceState) -> bool:
 
 def _require_connected(request: Request, device_id: str) -> None:
     """Fail fast: a device command to an unreachable inverter would only wait for the timeout."""
-    if not _is_connected(request.app.state.runtime.gateway.device_status(device_id).state):
+    if not _is_connected(
+        request.app.state.runtime.gateway.device_status(device_id).state
+    ):
         raise DeviceUnreachable(device_id=device_id)
 
 
@@ -309,7 +348,9 @@ async def _admin_status(request: Request, device_id: str) -> AdminEnergyDeviceSt
         **public.model_dump(),
         mode_recorded=energy.mode_recorded(device_id),
         write_support_enabled=runtime.settings.enable_write_support,
-        device_name=device.display_name or runtime.gateway.reported_name(device_id) or device_id,
+        device_name=device.display_name
+        or runtime.gateway.reported_name(device_id)
+        or device_id,
         host=device.host,
         connected=_is_connected(state),
         connection_state=state.value,
@@ -323,14 +364,18 @@ async def _admin_status(request: Request, device_id: str) -> AdminEnergyDeviceSt
             )
             for action, decision in energy.gate_decisions(device_id)
         ],
-        soc_target_policy=SocTargetPolicyView.from_domain(dispatch.soc_target_policy(device_id)),
-        limits=None
-        if limits is None
-        else LimitsView(
-            max_charge_power_w=limits.max_charge_power_w,
-            max_discharge_power_w=limits.max_discharge_power_w,
-            engineering_mode=limits.engineering_mode,
-            usable_capacity_wh=limits.usable_capacity_wh,
+        soc_target_policy=SocTargetPolicyView.from_domain(
+            dispatch.soc_target_policy(device_id)
+        ),
+        limits=(
+            None
+            if limits is None
+            else LimitsView(
+                max_charge_power_w=limits.max_charge_power_w,
+                max_discharge_power_w=limits.max_discharge_power_w,
+                engineering_mode=limits.engineering_mode,
+                usable_capacity_wh=limits.usable_capacity_wh,
+            )
         ),
         capabilities=[
             CapabilityView(
@@ -361,12 +406,15 @@ async def _admin_status(request: Request, device_id: str) -> AdminEnergyDeviceSt
 
 @router.get("/devices")
 async def list_devices(
-    request: Request, admin: Annotated[dict | None, Depends(_require_admin_sensitive_read)]
+    request: Request,
+    admin: Annotated[dict | None, Depends(_require_admin_sensitive_read)],
 ) -> list[AdminEnergyDeviceStatus]:
     """One entry per configured device, readings included, so the GUI needs one poll per cycle."""
     del admin
     result = []
-    for device_id in sorted(request.app.state.runtime.devices):  # sorted() copies: safe across the awaits
+    for device_id in sorted(
+        request.app.state.runtime.devices
+    ):  # sorted() copies: safe across the awaits
         try:
             result.append(await _admin_status(request, device_id))
         except HTTPException as exc:
@@ -376,7 +424,9 @@ async def list_devices(
     return result
 
 
-async def _status_after_action(request: Request, device_id: str) -> AdminEnergyDeviceStatus:
+async def _status_after_action(
+    request: Request, device_id: str
+) -> AdminEnergyDeviceStatus:
     """The action already happened: a failing status projection must not turn it into a 500.
 
     The caller could retry a hardware action that did run, so the success is reported anyway.
@@ -384,9 +434,13 @@ async def _status_after_action(request: Request, device_id: str) -> AdminEnergyD
     try:
         return await _admin_status(request, device_id)
     except Exception:
-        log.exception("Status projection failed after an executed energy action (device=%s)", device_id)
+        log.exception(
+            "Status projection failed after an executed energy action (device=%s)",
+            device_id,
+        )
         return JSONResponse(  # type: ignore[return-value]
-            {"executed": True, "status_available": False, "device_id": device_id}, status_code=202
+            {"executed": True, "status_available": False, "device_id": device_id},
+            status_code=202,
         )
 
 
@@ -497,12 +551,16 @@ async def put_hardware_verification(
     _device_or_404(request, device_id)
     dispatch = _dispatch_or_503(request)
     missing = [
-        flag for flag in ("write_frame_layout_verified", "apply_sequence_verified") if not getattr(body, flag)
+        flag
+        for flag in ("write_frame_layout_verified", "apply_sequence_verified")
+        if not getattr(body, flag)
     ]
     if not body.note.strip():
         missing.append("note")
     if missing:
-        raise HTTPException(400, f"missing evidence for write_path_convention: {', '.join(missing)}")
+        raise HTTPException(
+            400, f"missing evidence for write_path_convention: {', '.join(missing)}"
+        )
     now = request.app.state.runtime.clock.now()
     try:
         records = verification_records(dispatch, device_id, body, now)
@@ -530,24 +588,37 @@ async def delete_hardware_verification(
     dispatch = _dispatch_or_503(request)
     current = {record.name: record for record in dispatch.capabilities(device_id)}
     revoked = [
-        replace(current[name], status=CapabilityStatus.UNVERIFIED, verified_at=None, verified_by=None)
+        replace(
+            current[name],
+            status=CapabilityStatus.UNVERIFIED,
+            verified_at=None,
+            verified_by=None,
+        )
         for name in _VERIFIED_CAPABILITIES
     ]
     try:
         await dispatch.set_capabilities(device_id, revoked)
     except CapabilityConflict as exc:
         raise _conflict(exc) from exc
-    log.warning("Energy hardware verification revoked: device=%s admin=%s", device_id, _ADMIN_ACTOR)
+    log.warning(
+        "Energy hardware verification revoked: device=%s admin=%s",
+        device_id,
+        _ADMIN_ACTOR,
+    )
     return await _admin_status(request, device_id)
 
 
 @router.get("/devices/{device_id}/soc-target-policy")
 def get_soc_target_policy(
-    request: Request, device_id: str, admin: Annotated[dict | None, Depends(_require_admin_read)]
+    request: Request,
+    device_id: str,
+    admin: Annotated[dict | None, Depends(_require_admin_read)],
 ) -> SocTargetPolicyView:
     del admin
     _device_or_404(request, device_id)
-    return SocTargetPolicyView.from_domain(_dispatch_or_503(request).soc_target_policy(device_id))
+    return SocTargetPolicyView.from_domain(
+        _dispatch_or_503(request).soc_target_policy(device_id)
+    )
 
 
 @router.put("/devices/{device_id}/soc-target-policy")
@@ -792,7 +863,14 @@ def _preview_from_snapshot(
         return view
     lowest = min(summary, key=lambda item: item.price_eur_per_kwh)
     highest = max(summary, key=lambda item: item.price_eur_per_kwh)
-    current = next((item for item in summary if item.start <= (now or snapshot.fetched_at) < item.end), None)
+    current = next(
+        (
+            item
+            for item in summary
+            if item.start <= (now or snapshot.fetched_at) < item.end
+        ),
+        None,
+    )
     view.min_price_eur_per_kwh = float(lowest.price_eur_per_kwh)
     view.max_price_eur_per_kwh = float(highest.price_eur_per_kwh)
     view.min_price_at = lowest.start
@@ -820,7 +898,9 @@ def _refresh_failure(status: dict | None) -> tuple[str | None, datetime | None]:
     """The message and time of a failed latest background refresh, or ``(None, None)`` after a success."""
     if not status or status.get("ok"):
         return None, None
-    return status.get("message") or "Refresh failed", datetime.fromisoformat(status["at"])
+    return status.get("message") or "Refresh failed", datetime.fromisoformat(
+        status["at"]
+    )
 
 
 def _with_refresh_failure(view, status: dict | None, *, complete: bool = True):
@@ -836,13 +916,18 @@ def _with_refresh_failure(view, status: dict | None, *, complete: bool = True):
         return view
     update = {"refresh_error": error, "refresh_error_at": at}
     if view.status == "unavailable":
-        update.update(status="error", message="The data could not be loaded yet. Another attempt follows automatically.")
+        update.update(
+            status="error",
+            message="The data could not be loaded yet. Another attempt follows automatically.",
+        )
     else:
         update["stale"] = not complete
     return view.model_copy(update=update)
 
 
-def _spot_preview_from_rows(config: SpotMarketConfig, rows: list[dict], now: datetime) -> SpotMarketPreviewView:
+def _spot_preview_from_rows(
+    config: SpotMarketConfig, rows: list[dict], now: datetime
+) -> SpotMarketPreviewView:
     if not rows:
         return SpotMarketPreviewView(
             provider=config.provider,
@@ -869,17 +954,20 @@ def _spot_preview_from_rows(config: SpotMarketConfig, rows: list[dict], now: dat
 
     def _snapshot(day_offset: int) -> SpotPriceSnapshot | None:
         target = today_date + timedelta(days=day_offset)
-        intervals = tuple(sorted(
-            (
-                SpotPriceInterval(
-                    start=datetime.fromisoformat(row["interval_start"]),
-                    end=datetime.fromisoformat(row["interval_end"]),
-                    price_eur_per_kwh=Decimal(str(row["price_eur_per_kwh"])),
-                )
-                for row in rows if row["local_date"] == target.isoformat()
-            ),
-            key=lambda item: item.start,
-        ))
+        intervals = tuple(
+            sorted(
+                (
+                    SpotPriceInterval(
+                        start=datetime.fromisoformat(row["interval_start"]),
+                        end=datetime.fromisoformat(row["interval_end"]),
+                        price_eur_per_kwh=Decimal(str(row["price_eur_per_kwh"])),
+                    )
+                    for row in rows
+                    if row["local_date"] == target.isoformat()
+                ),
+                key=lambda item: item.start,
+            )
+        )
         if not intervals:
             return None
         return SpotPriceSnapshot(
@@ -901,13 +989,18 @@ def _spot_preview_from_rows(config: SpotMarketConfig, rows: list[dict], now: dat
     )
     yesterday, next_day = _snapshot(-1), _snapshot(1)
     tomorrow_message = (
-        None if next_day is not None
+        None
+        if next_day is not None
         else "Tomorrow's prices are not available yet; the database refresh runs automatically."
     )
-    return _preview_from_snapshot(today, yesterday, next_day, None, tomorrow_message, now)
+    return _preview_from_snapshot(
+        today, yesterday, next_day, None, tomorrow_message, now
+    )
 
 
-def _spot_snapshot_from_rows(config: SpotMarketConfig, rows: list[dict]) -> SpotPriceSnapshot | None:
+def _spot_snapshot_from_rows(
+    config: SpotMarketConfig, rows: list[dict]
+) -> SpotPriceSnapshot | None:
     if not rows:
         return None
     return SpotPriceSnapshot(
@@ -916,22 +1009,27 @@ def _spot_snapshot_from_rows(config: SpotMarketConfig, rows: list[dict]) -> Spot
         currency=ENERGY_CHARTS_CURRENCY,
         fetched_at=max(datetime.fromisoformat(row["fetched_at"]) for row in rows),
         timezone=rows[0]["timezone"],
-        intervals=tuple(sorted(
-            (
-                SpotPriceInterval(
-                    start=datetime.fromisoformat(row["interval_start"]),
-                    end=datetime.fromisoformat(row["interval_end"]),
-                    price_eur_per_kwh=Decimal(str(row["price_eur_per_kwh"])),
-                )
-                for row in rows
-            ),
-            key=lambda item: item.start,
-        )),
+        intervals=tuple(
+            sorted(
+                (
+                    SpotPriceInterval(
+                        start=datetime.fromisoformat(row["interval_start"]),
+                        end=datetime.fromisoformat(row["interval_end"]),
+                        price_eur_per_kwh=Decimal(str(row["price_eur_per_kwh"])),
+                    )
+                    for row in rows
+                ),
+                key=lambda item: item.start,
+            )
+        ),
     )
 
 
 def _spot_dashboard_view(
-    config: SpotMarketConfig, snapshot: SpotPriceSnapshot | None, failed: bool, now: datetime,
+    config: SpotMarketConfig,
+    snapshot: SpotPriceSnapshot | None,
+    failed: bool,
+    now: datetime,
 ) -> dict:
     """Project only operator-facing prices and freshness, never provider payloads.
 
@@ -939,7 +1037,9 @@ def _spot_dashboard_view(
     retrieval failed while data that is due is still missing.
     """
     base = {
-        "status": "disabled" if not config.enabled else "error" if failed else "unavailable",
+        "status": (
+            "disabled" if not config.enabled else "error" if failed else "unavailable"
+        ),
         "bidding_zone": config.bidding_zone,
         "currency": ENERGY_CHARTS_CURRENCY,
         "fetched_at": None,
@@ -961,7 +1061,9 @@ def _spot_dashboard_view(
         if failed:
             base["current_status"] = "error"
         return base
-    current = next((item for item in snapshot.intervals if item.start <= now < item.end), None)
+    current = next(
+        (item for item in snapshot.intervals if item.start <= now < item.end), None
+    )
     base["current_fetched_at"] = snapshot.fetched_at.isoformat()
     base["current_valid_until"] = current.end.isoformat() if current else None
     base["current_status"] = "stale" if failed or current is None else "available"
@@ -976,14 +1078,25 @@ def _spot_dashboard_view(
         currency=snapshot.currency,
         fetched_at=snapshot.fetched_at.isoformat(),
         timezone=snapshot.timezone,
-        source_generated_at=snapshot.source_generated_at.isoformat() if snapshot.source_generated_at else None,
-        available_from=snapshot.available_from.isoformat() if snapshot.available_from else None,
-        available_until=snapshot.available_until.isoformat() if snapshot.available_until else None,
+        source_generated_at=(
+            snapshot.source_generated_at.isoformat()
+            if snapshot.source_generated_at
+            else None
+        ),
+        available_from=(
+            snapshot.available_from.isoformat() if snapshot.available_from else None
+        ),
+        available_until=(
+            snapshot.available_until.isoformat() if snapshot.available_until else None
+        ),
         age_seconds=round(age),
         intervals_available=len(future),
         future_curve=[
-            {"start": item.start.isoformat(), "end": item.end.isoformat(),
-             "price_ct_per_kwh": float(item.price_eur_per_kwh * 100)}
+            {
+                "start": item.start.isoformat(),
+                "end": item.end.isoformat(),
+                "price_ct_per_kwh": float(item.price_eur_per_kwh * 100),
+            }
             for item in future
         ],
     )
@@ -1023,7 +1136,10 @@ def _energy_next_24h_wh(future: list, now: datetime) -> float:
 
 
 def _solar_dashboard_view(
-    forecast: SolarForecast | None, now: datetime, failed: bool = False, timezone: str | None = None
+    forecast: SolarForecast | None,
+    now: datetime,
+    failed: bool = False,
+    timezone: str | None = None,
 ) -> dict:
     """Project only operator-facing solar figures and freshness, never provider payloads.
 
@@ -1062,8 +1178,12 @@ def _solar_dashboard_view(
         # A stale last-known-good forecast still exposes its remaining future intervals so the chart
         # keeps the curve visible; only a forecast with no future intervals left blanks the curve.
         future_curve=[
-            {"start": item.start.isoformat(), "end": item.end.isoformat(),
-             "power_kw": _interval_power_kw(item), "energy_wh": item.energy_wh}
+            {
+                "start": item.start.isoformat(),
+                "end": item.end.isoformat(),
+                "power_kw": _interval_power_kw(item),
+                "energy_wh": item.energy_wh,
+            }
             for item in future
         ],
     )
@@ -1075,24 +1195,30 @@ def _solar_forecast_from_rows(rows: list[dict]) -> SolarForecast | None:
         return None
     return SolarForecast(
         created_at=max(datetime.fromisoformat(row["fetched_at"]) for row in rows),
-        intervals=tuple(sorted(
-            (
-                SolarForecastInterval(
-                    start=datetime.fromisoformat(row["interval_start"]),
-                    end=datetime.fromisoformat(row["interval_end"]),
-                    energy_wh=float(row["energy_wh"]),
-                )
-                for row in rows
-            ),
-            key=lambda item: item.start,
-        )),
+        intervals=tuple(
+            sorted(
+                (
+                    SolarForecastInterval(
+                        start=datetime.fromisoformat(row["interval_start"]),
+                        end=datetime.fromisoformat(row["interval_end"]),
+                        energy_wh=float(row["energy_wh"]),
+                    )
+                    for row in rows
+                ),
+                key=lambda item: item.start,
+            )
+        ),
     )
 
 
 @router.get("/dashboard-forecast")
 async def dashboard_forecast(
-    request: Request, admin: Annotated[dict | None, Depends(_require_admin_read)],
-    include: Annotated[list[Literal["spot_current", "spot_day_ahead", "solar"]], Query(min_length=1, max_length=3)],
+    request: Request,
+    admin: Annotated[dict | None, Depends(_require_admin_read)],
+    include: Annotated[
+        list[Literal["spot_current", "spot_day_ahead", "solar"]],
+        Query(min_length=1, max_length=3),
+    ],
 ) -> dict:
     """Project only requested forecast data; a browser never calls an external provider."""
     del admin
@@ -1113,13 +1239,18 @@ async def dashboard_forecast(
         complete = spot_refresh_plan(rows, now).complete
         result["spot"] = {
             **_spot_dashboard_view(
-                config, _spot_snapshot_from_rows(config, rows), spot_error is not None and not complete, now
+                config,
+                _spot_snapshot_from_rows(config, rows),
+                spot_error is not None and not complete,
+                now,
             ),
             "refresh_error": spot_error,
             "refresh_error_at": spot_error_at.isoformat() if spot_error_at else None,
         }
     if "solar" in requested:
-        weather_config = getattr(request.app.state, "weather_config", None) or WeatherConfig()
+        weather_config = (
+            getattr(request.app.state, "weather_config", None) or WeatherConfig()
+        )
         if not weather_config.is_forecastable():
             # No network touch for a disabled or incomplete configuration: a disabled forecast is a
             # published state, not an error.
@@ -1128,7 +1259,9 @@ async def dashboard_forecast(
                 "status": "disabled",
             }
         else:
-            _, first_day, last_day = local_three_day_window(now, weather_config.timezone or "UTC")
+            _, first_day, last_day = local_three_day_window(
+                now, weather_config.timezone or "UTC"
+            )
             solar_rows = await asyncio.to_thread(
                 store.get_solar_forecast_intervals,
                 solar_config_key(weather_config),
@@ -1137,17 +1270,26 @@ async def dashboard_forecast(
             )
             solar_forecast = _solar_forecast_from_rows(solar_rows)
             solar_status = await asyncio.to_thread(
-                load_refresh_status, store, SOLAR_STATUS_KEY, solar_config_key(weather_config)
+                load_refresh_status,
+                store,
+                SOLAR_STATUS_KEY,
+                solar_config_key(weather_config),
             )
             solar_error, solar_error_at = _refresh_failure(solar_status)
-            solar_complete = solar_refresh_plan(solar_rows, now, weather_config.timezone).complete
+            solar_complete = solar_refresh_plan(
+                solar_rows, now, weather_config.timezone
+            ).complete
             result["solar"] = {
                 **_solar_dashboard_view(
-                    solar_forecast, now, solar_error is not None and not solar_complete,
+                    solar_forecast,
+                    now,
+                    solar_error is not None and not solar_complete,
                     timezone=weather_config.timezone,
                 ),
                 "refresh_error": solar_error,
-                "refresh_error_at": solar_error_at.isoformat() if solar_error_at else None,
+                "refresh_error_at": (
+                    solar_error_at.isoformat() if solar_error_at else None
+                ),
             }
     return result
 
@@ -1207,7 +1349,9 @@ def put_spot_market_config(
     # configuration then sees the new one and discards its result instead of writing it back.
     with store.forecast_write_lock:
         previous = getattr(request.app.state, "spotmarket_config", None)
-        identity_changed = previous is None or spot_config_key(previous) != spot_config_key(config)
+        identity_changed = previous is None or spot_config_key(
+            previous
+        ) != spot_config_key(config)
         store.put("spotmarket_config", config.model_dump(mode="json"))
         if identity_changed:
             store.clear_spot_market_intervals()
@@ -1256,7 +1400,9 @@ async def preview_spot_market(
     rows = await asyncio.to_thread(store.get_spot_market_intervals, key)
     status = await asyncio.to_thread(load_refresh_status, store, SPOT_STATUS_KEY, key)
     return _with_refresh_failure(
-        _spot_preview_from_rows(config, rows, now), status, complete=spot_refresh_plan(rows, now).complete
+        _spot_preview_from_rows(config, rows, now),
+        status,
+        complete=spot_refresh_plan(rows, now).complete,
     )
 
 
@@ -1289,12 +1435,18 @@ class WeatherConfigBody(BaseModel):
     enabled: StrictBool = False
     provider: WeatherProvider = WeatherProvider.OPEN_METEO
     location_name: str | None = Field(default=None, max_length=MAX_LOCATION_NAME_LENGTH)
-    location_region: str | None = Field(default=None, max_length=MAX_LOCATION_NAME_LENGTH)
+    location_region: str | None = Field(
+        default=None, max_length=MAX_LOCATION_NAME_LENGTH
+    )
     latitude: float | None = Field(default=None, ge=-90, le=90)
     longitude: float | None = Field(default=None, ge=-180, le=180)
-    pv_peak_power_wp: float | None = Field(default=None, gt=0, le=10_000_000, allow_inf_nan=False)
+    pv_peak_power_wp: float | None = Field(
+        default=None, gt=0, le=10_000_000, allow_inf_nan=False
+    )
     tilt_deg: float | None = Field(default=None, ge=0, le=90, allow_inf_nan=False)
-    azimuth_deg: float | None = Field(default=None, ge=-180, le=180, allow_inf_nan=False)
+    azimuth_deg: float | None = Field(
+        default=None, ge=-180, le=180, allow_inf_nan=False
+    )
     performance_ratio: float = Field(default=0.85, gt=0, le=1, allow_inf_nan=False)
 
 
@@ -1467,7 +1619,9 @@ def get_weather_config(
     # vice versa) is the configured provider.
     geocoder = getattr(request.app.state, "solar_geocoder", None)
     location_attribution = getattr(geocoder, "location_attribution", None)
-    return WeatherConfigView.from_domain(config, location_attribution=location_attribution)
+    return WeatherConfigView.from_domain(
+        config, location_attribution=location_attribution
+    )
 
 
 @router.get("/weather/locations")
@@ -1503,7 +1657,8 @@ async def search_weather_locations(
         log.info("Weather location search failed")
         return WeatherLocationsView(status="error", message=str(exc))
     return WeatherLocationsView(
-        status="ok", results=[WeatherLocationView.from_domain(result) for result in results]
+        status="ok",
+        results=[WeatherLocationView.from_domain(result) for result in results],
     )
 
 
@@ -1557,12 +1712,18 @@ def _weather_validation_errors(exc: ValidationError) -> list[dict]:
     attach each message to the offending field instead of surfacing one generic string.
     """
     return [
-        {"loc": list(error.get("loc", ())), "msg": error.get("msg", ""), "type": error.get("type", "")}
+        {
+            "loc": list(error.get("loc", ())),
+            "msg": error.get("msg", ""),
+            "type": error.get("type", ""),
+        }
         for error in exc.errors()
     ]
 
 
-async def _weather_body_with_timezone(request: Request, body: WeatherConfigBody) -> dict:
+async def _weather_body_with_timezone(
+    request: Request, body: WeatherConfigBody
+) -> dict:
     """Build WeatherConfig input with a timezone derived only from latitude/longitude.
 
     WeatherConfigBody deliberately has no timezone field, so the browser or another client cannot
@@ -1573,7 +1734,9 @@ async def _weather_body_with_timezone(request: Request, body: WeatherConfigBody)
     if body.latitude is None or body.longitude is None:
         return data
     resolver = request.app.state.solar_timezone_resolver
-    data["timezone"] = await asyncio.to_thread(resolver.resolve, body.latitude, body.longitude)
+    data["timezone"] = await asyncio.to_thread(
+        resolver.resolve, body.latitude, body.longitude
+    )
     return data
 
 
@@ -1604,7 +1767,9 @@ async def put_weather_config(
 ) -> WeatherConfigView:
     del admin
     try:
-        config = WeatherConfig.model_validate(await _weather_body_with_timezone(request, body))
+        config = WeatherConfig.model_validate(
+            await _weather_body_with_timezone(request, body)
+        )
     except WeatherError as exc:
         raise HTTPException(503, f"Could not determine site timezone: {exc}") from exc
     except ValidationError as exc:
@@ -1621,7 +1786,9 @@ async def put_weather_config(
         # inline would stall the whole loop. The read/persist/clear/swap stay atomic to each other.
         with store.forecast_write_lock:
             previous = getattr(request.app.state, "weather_config", None)
-            identity_changed = previous is None or solar_config_key(previous) != solar_config_key(config)
+            identity_changed = previous is None or solar_config_key(
+                previous
+            ) != solar_config_key(config)
             store.put("weather_config", config.model_dump(mode="json"))
             if identity_changed:
                 store.clear_solar_forecast_intervals()
@@ -1629,7 +1796,10 @@ async def put_weather_config(
             return previous, identity_changed
 
     previous, identity_changed = await asyncio.to_thread(_save_weather)
-    if config.is_forecastable() and (identity_changed or (previous is not None and previous.enabled != config.enabled)):
+    if config.is_forecastable() and (
+        identity_changed
+        or (previous is not None and previous.enabled != config.enabled)
+    ):
         _signal_forecast_refresh(request, "weather_refresh_event")
     log.info(
         "Weather configuration saved: provider=%s enabled=%s admin=%s",
@@ -1659,17 +1829,35 @@ async def preview_weather(
         # than a 422 the operator sees while still filling the form. Any other validation error
         # (out of range, unknown provider, extra field) stays a structured 422.
         if _weather_incomplete_fields(exc):
-            provider = body.provider if isinstance(body.provider, WeatherProvider) else WeatherProvider.OPEN_METEO
-            return WeatherPreviewView(provider=provider, source=_SOLAR_SOURCE, status="disabled", timezone=None)
+            provider = (
+                body.provider
+                if isinstance(body.provider, WeatherProvider)
+                else WeatherProvider.OPEN_METEO
+            )
+            return WeatherPreviewView(
+                provider=provider,
+                source=_SOLAR_SOURCE,
+                status="disabled",
+                timezone=None,
+            )
         raise HTTPException(422, _weather_validation_errors(exc)) from exc
     if not config.is_forecastable():
-        return WeatherPreviewView(provider=config.provider, source=_SOLAR_SOURCE, status="disabled", timezone=config.timezone)
+        return WeatherPreviewView(
+            provider=config.provider,
+            source=_SOLAR_SOURCE,
+            status="disabled",
+            timezone=config.timezone,
+        )
     now = datetime.now(UTC)
-    if saved_config is None or solar_config_key(config) != solar_config_key(saved_config):
+    if saved_config is None or solar_config_key(config) != solar_config_key(
+        saved_config
+    ):
         # The unsaved form has no stored forecast to project. Report that as its own status with no
         # timezone, so the browser neither shows a "warming up" state nor lets the saved zone
         # override the one it is deriving for the newly chosen location.
-        return WeatherPreviewView(provider=config.provider, source=_SOLAR_SOURCE, status="unsaved")
+        return WeatherPreviewView(
+            provider=config.provider, source=_SOLAR_SOURCE, status="unsaved"
+        )
     zone, first_day, last_day = local_three_day_window(now, config.timezone or "UTC")
     local_today = now.astimezone(zone).date()
     weather_store = _weather_store(request)
@@ -1680,14 +1868,21 @@ async def preview_weather(
         first_day.isoformat(),
         last_day.isoformat(),
     )
-    status = await asyncio.to_thread(load_refresh_status, weather_store, SOLAR_STATUS_KEY, solar_key)
+    status = await asyncio.to_thread(
+        load_refresh_status, weather_store, SOLAR_STATUS_KEY, solar_key
+    )
     forecast = _solar_forecast_from_rows(rows)
     if forecast is None:
-        return _with_refresh_failure(WeatherPreviewView(
-            provider=config.provider, source=_SOLAR_SOURCE, status="unavailable",
-            message="Solar forecast values are being loaded into the database in the background.",
-            timezone=config.timezone,
-        ), status)
+        return _with_refresh_failure(
+            WeatherPreviewView(
+                provider=config.provider,
+                source=_SOLAR_SOURCE,
+                status="unavailable",
+                message="Solar forecast values are being loaded into the database in the background.",
+                timezone=config.timezone,
+            ),
+            status,
+        )
     future = [item for item in forecast.intervals if item.end > now]
 
     def preview_intervals(day_offset: int) -> list[WeatherPreviewInterval]:
@@ -1703,25 +1898,33 @@ async def preview_weather(
             if item.start.astimezone(zone).date() == target_date
         ]
 
-    return _with_refresh_failure(WeatherPreviewView(
-        provider=config.provider,
-        source=_SOLAR_SOURCE,
-        status="connected",
-        timezone=config.timezone,
-        fetched_at=forecast.created_at,
-        covered_until=future[-1].end if future else None,
-        energy_next_24h_kwh=_energy_next_24h_wh(future, now) / 1000 if future else 0.0,
-        intervals=[
-            WeatherPreviewInterval(
-                start=item.start, end=item.end,
-                power_kw=_interval_power_kw(item), energy_wh=item.energy_wh,
-            )
-            for item in future
-        ],
-        yesterday_intervals=preview_intervals(-1),
-        today_intervals=preview_intervals(0),
-        next_day_intervals=preview_intervals(1),
-    ), status, complete=solar_refresh_plan(rows, now, config.timezone).complete)
+    return _with_refresh_failure(
+        WeatherPreviewView(
+            provider=config.provider,
+            source=_SOLAR_SOURCE,
+            status="connected",
+            timezone=config.timezone,
+            fetched_at=forecast.created_at,
+            covered_until=future[-1].end if future else None,
+            energy_next_24h_kwh=(
+                _energy_next_24h_wh(future, now) / 1000 if future else 0.0
+            ),
+            intervals=[
+                WeatherPreviewInterval(
+                    start=item.start,
+                    end=item.end,
+                    power_kw=_interval_power_kw(item),
+                    energy_wh=item.energy_wh,
+                )
+                for item in future
+            ],
+            yesterday_intervals=preview_intervals(-1),
+            today_intervals=preview_intervals(0),
+            next_day_intervals=preview_intervals(1),
+        ),
+        status,
+        complete=solar_refresh_plan(rows, now, config.timezone).complete,
+    )
 
 
 #
@@ -1805,7 +2008,10 @@ class DryRunReplanView(BaseModel):
 def _replan_view() -> DryRunReplanView:
     thresholds = DEFAULT_REPLAN_THRESHOLDS
     return DryRunReplanView(
-        triggers=[DryRunReplanTriggerView(code=code.value, description=text) for code, text in TRIGGER_DESCRIPTIONS.items()],
+        triggers=[
+            DryRunReplanTriggerView(code=code.value, description=text)
+            for code, text in TRIGGER_DESCRIPTIONS.items()
+        ],
         thresholds={
             "soc_deviation_percent": thresholds.soc_deviation_percent,
             "charge_limit_change_w": thresholds.charge_limit_change_w,
@@ -1951,7 +2157,8 @@ def _plan_flag_fields(plan: EnergyPlan | None) -> dict:
             preferred_range_status=assumptions.preferred_range_status,
         ),
         "limiting_reasons": [
-            DryRunLimitingReasonView(code=reason.code.value, detail=reason.detail) for reason in plan.limiting_reasons
+            DryRunLimitingReasonView(code=reason.code.value, detail=reason.detail)
+            for reason in plan.limiting_reasons
         ],
     }
 
@@ -1967,16 +2174,22 @@ def _planning_store(request: Request, *, create: bool) -> DispatchStore | None:
     if state_store is not None:
         return state_store
     settings = request.app.state.runtime.settings
-    if settings.hmac_secret is None or not (create or settings.dispatch_db_path.exists()):
+    if settings.hmac_secret is None or not (
+        create or settings.dispatch_db_path.exists()
+    ):
         return None
-    store = DispatchStore(settings.dispatch_db_path, settings.hmac_secret.get_secret_value())
+    store = DispatchStore(
+        settings.dispatch_db_path, settings.hmac_secret.get_secret_value()
+    )
     store.initialize()
     return store
 
 
 async def _planning_limits(request: Request) -> dict[str, DeviceLimits]:
     """Per-device limits for planning: the live controller when present, else the stored rows."""
-    from app.api.app_factory import _seed_limits  # late import: app_factory imports this module
+    from app.api.app_factory import (
+        _seed_limits,
+    )  # late import: app_factory imports this module
 
     runtime = request.app.state.runtime
     if runtime.dispatch is not None:
@@ -2006,6 +2219,9 @@ class PlanningDeviceView(BaseModel):
     device_name: str
     limits: LimitsView | None
     battery_capacity_source: Literal["verified", "expert_override", "unavailable"]
+    # Energy Manager operating mode; None when the manager is not running. The plan page hides
+    # "Next grid charge" while the mode is "off".
+    mode: Literal["off", "manual", "external"] | None = None
 
 
 _BATTERY_CHARACTERIZATION_NAMES = (
@@ -2088,7 +2304,13 @@ class BatteryCalibrationHistoryView(BaseModel):
     commissioning: BatteryCommissioningView | None
     baseline: BatteryCalibrationBaseline | None
     baseline_unavailable_reason: (
-        Literal["inverter_serial_unknown", "no_commissioning_date", "no_measurement", "battery_replaced"] | None
+        Literal[
+            "inverter_serial_unknown",
+            "no_commissioning_date",
+            "no_measurement",
+            "battery_replaced",
+        ]
+        | None
     )
     points: list[BatteryCalibrationHistoryPoint]
 
@@ -2107,42 +2329,63 @@ class BatteryCharacterizationRefreshBody(BaseModel):
     )
 
 
-def _battery_characterization_view(runtime, device_id: str) -> BatteryCharacterizationView:
+def _battery_characterization_view(
+    runtime, device_id: str
+) -> BatteryCharacterizationView:
     towers = []
     for prefix in ("battery", "battery_placeholder_0"):
         report = _battery_module_report(runtime, device_id, prefix)
-        towers.append(BatteryTowerModulesView(
-            id=prefix,
-            present=_battery_tower_present(runtime, device_id, prefix, report["populated_module_slots"]),
-            **report,
-        ))
+        towers.append(
+            BatteryTowerModulesView(
+                id=prefix,
+                present=_battery_tower_present(
+                    runtime, device_id, prefix, report["populated_module_slots"]
+                ),
+                **report,
+            )
+        )
     second_tower_present = towers[1].present
     metrics = []
     for name in _BATTERY_CHARACTERIZATION_NAMES:
-        entry = runtime.catalog.object_entry(name) if runtime.catalog.exists(name) else None
+        entry = (
+            runtime.catalog.object_entry(name) if runtime.catalog.exists(name) else None
+        )
         sample = (
             runtime.gateway.cached_sample(device_id, name)
-            if entry is not None and (not name.startswith("battery_placeholder_0_") or second_tower_present)
+            if entry is not None
+            and (not name.startswith("battery_placeholder_0_") or second_tower_present)
             else None
         )
         value = sample[0] if sample is not None else None
-        if isinstance(value, bool) or not isinstance(value, (int, float)) or (
-            isinstance(value, float) and not math.isfinite(value)
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or (isinstance(value, float) and not math.isfinite(value))
         ):
             sample = None
-        metrics.append(BatteryCharacterizationMetricView(
-            name=name,
-            value=sample[0] if sample is not None else None,
-            unit=entry.unit if entry is not None else None,
-            age_seconds=sample[1] if sample is not None else None,
-            status=("fresh" if sample[2] is CacheFreshness.FRESH else "stale") if sample is not None else "unavailable",
-        ))
-    return BatteryCharacterizationView(device_id=device_id, metrics=metrics, towers=towers)
+        metrics.append(
+            BatteryCharacterizationMetricView(
+                name=name,
+                value=sample[0] if sample is not None else None,
+                unit=entry.unit if entry is not None else None,
+                age_seconds=sample[1] if sample is not None else None,
+                status=(
+                    ("fresh" if sample[2] is CacheFreshness.FRESH else "stale")
+                    if sample is not None
+                    else "unavailable"
+                ),
+            )
+        )
+    return BatteryCharacterizationView(
+        device_id=device_id, metrics=metrics, towers=towers
+    )
 
 
 @router.get("/devices/{device_id}/battery-characterization")
 async def battery_characterization(
-    request: Request, device_id: str, admin: Annotated[dict | None, Depends(_require_admin_read)]
+    request: Request,
+    device_id: str,
+    admin: Annotated[dict | None, Depends(_require_admin_read)],
 ) -> BatteryCharacterizationView:
     """Return cache-only raw battery diagnostics without device transactions or capacity claims."""
     del admin
@@ -2150,12 +2393,20 @@ async def battery_characterization(
     return _battery_characterization_view(request.app.state.runtime, device_id)
 
 
-def _calibration_view(store, device_id: str, serial: str | None, limit: int) -> BatteryCalibrationHistoryView:
+def _calibration_view(
+    store, device_id: str, serial: str | None, limit: int
+) -> BatteryCalibrationHistoryView:
     """History of the inverter's current battery series plus the commissioning baseline (store reads only)."""
     if not serial:
         return BatteryCalibrationHistoryView(
-            device_id=device_id, inverter_serial=None, battery_bms_sn=None, battery_replaced=False,
-            commissioning=None, baseline=None, baseline_unavailable_reason="inverter_serial_unknown", points=[],
+            device_id=device_id,
+            inverter_serial=None,
+            battery_bms_sn=None,
+            battery_replaced=False,
+            commissioning=None,
+            baseline=None,
+            baseline_unavailable_reason="inverter_serial_unknown",
+            points=[],
         )
     history = store.get_battery_calibration_history(serial, limit)
     points = history["points"]
@@ -2171,14 +2422,24 @@ def _calibration_view(store, device_id: str, serial: str | None, limit: int) -> 
     else:
         rated = points[-1]["rated_usable_capacity_wh"]
         baseline = BatteryCalibrationBaseline(
-            date=commissioning["commissioned_at"], battery_cycles=0, rated_usable_capacity_wh=rated,
-            current_usable_capacity_wh=rated, remaining_capacity_percent=100.0, source=commissioning["source"],
+            date=commissioning["commissioned_at"],
+            battery_cycles=0,
+            rated_usable_capacity_wh=rated,
+            current_usable_capacity_wh=rated,
+            remaining_capacity_percent=100.0,
+            source=commissioning["source"],
         )
     return BatteryCalibrationHistoryView(
-        device_id=device_id, inverter_serial=serial, battery_bms_sn=history["battery_bms_sn"],
+        device_id=device_id,
+        inverter_serial=serial,
+        battery_bms_sn=history["battery_bms_sn"],
         battery_replaced=history["battery_replaced"],
-        commissioning=None if commissioning is None else BatteryCommissioningView(**commissioning),
-        baseline=baseline, baseline_unavailable_reason=reason, points=points,
+        commissioning=(
+            None if commissioning is None else BatteryCommissioningView(**commissioning)
+        ),
+        baseline=baseline,
+        baseline_unavailable_reason=reason,
+        points=points,
     )
 
 
@@ -2196,7 +2457,9 @@ async def battery_calibration_history(
     del admin
     _device_or_404(request, device_id)
     serial = request.app.state.runtime.gateway.reported_serial(device_id)
-    return await asyncio.to_thread(_calibration_view, _spotmarket_store(request), device_id, serial, limit)
+    return await asyncio.to_thread(
+        _calibration_view, _spotmarket_store(request), device_id, serial, limit
+    )
 
 
 MIN_COMMISSIONING_DATE = date(2010, 1, 1)
@@ -2216,19 +2479,36 @@ async def put_battery_commissioning(
     serial = runtime.gateway.reported_serial(device_id)
     if not serial:
         raise HTTPException(409, "The inverter serial number is not known yet")
-    if not MIN_COMMISSIONING_DATE <= body.commissioned_on <= runtime.clock.now().astimezone(UTC).date():
-        raise HTTPException(422, "The commissioning date must lie between 2010-01-01 and today")
+    if (
+        not MIN_COMMISSIONING_DATE
+        <= body.commissioned_on
+        <= runtime.clock.now().astimezone(UTC).date()
+    ):
+        raise HTTPException(
+            422, "The commissioning date must lie between 2010-01-01 and today"
+        )
     store = _spotmarket_store(request)
-    moment = datetime(body.commissioned_on.year, body.commissioned_on.month, body.commissioned_on.day, tzinfo=UTC)
+    moment = datetime(
+        body.commissioned_on.year,
+        body.commissioned_on.month,
+        body.commissioned_on.day,
+        tzinfo=UTC,
+    )
     await asyncio.to_thread(store.set_inverter_commissioning, serial, moment, "manual")
-    log.warning("Battery commissioning date set manually: device=%s date=%s admin=%s",
-                device_id, body.commissioned_on, _ADMIN_ACTOR)
+    log.warning(
+        "Battery commissioning date set manually: device=%s date=%s admin=%s",
+        device_id,
+        body.commissioned_on,
+        _ADMIN_ACTOR,
+    )
     return await asyncio.to_thread(_calibration_view, store, device_id, serial, 1200)
 
 
 @router.delete("/devices/{device_id}/battery-commissioning")
 async def delete_battery_commissioning(
-    request: Request, device_id: str, admin: Annotated[dict | None, Depends(_require_admin_write)]
+    request: Request,
+    device_id: str,
+    admin: Annotated[dict | None, Depends(_require_admin_write)],
 ) -> BatteryCalibrationHistoryView:
     """Remove the operator override; a date derived from the loggers applies again."""
     del admin
@@ -2238,7 +2518,11 @@ async def delete_battery_commissioning(
         raise HTTPException(409, "The inverter serial number is not known yet")
     store = _spotmarket_store(request)
     await asyncio.to_thread(store.delete_inverter_commissioning, serial, "manual")
-    log.warning("Battery commissioning date override removed: device=%s admin=%s", device_id, _ADMIN_ACTOR)
+    log.warning(
+        "Battery commissioning date override removed: device=%s admin=%s",
+        device_id,
+        _ADMIN_ACTOR,
+    )
     return await asyncio.to_thread(_calibration_view, store, device_id, serial, 1200)
 
 
@@ -2259,17 +2543,24 @@ async def refresh_battery_characterization(
     """Budgeted, explicit read of at most four allowlisted numeric metrics; never a write."""
     del admin
     _device_or_404(request, device_id)
-    if len(set(body.names)) != len(body.names) or any(name not in _BATTERY_CHARACTERIZATION_NAMES for name in body.names):
+    if len(set(body.names)) != len(body.names) or any(
+        name not in _BATTERY_CHARACTERIZATION_NAMES for name in body.names
+    ):
         raise HTTPException(422, "Unknown or duplicate battery characterization metric")
     runtime = request.app.state.runtime
     second_report = _battery_module_report(runtime, device_id, "battery_placeholder_0")
     second_tower_present = _battery_tower_present(
-        runtime, device_id, "battery_placeholder_0", second_report["populated_module_slots"]
+        runtime,
+        device_id,
+        "battery_placeholder_0",
+        second_report["populated_module_slots"],
     )
     for name in body.names:
         if name.startswith("battery_placeholder_0_") and not second_tower_present:
             continue
-        if not runtime.catalog.exists(name) or not is_numeric(runtime.catalog.object_entry(name).value_type):
+        if not runtime.catalog.exists(name) or not is_numeric(
+            runtime.catalog.object_entry(name).value_type
+        ):
             continue
         try:
             await runtime.gateway.read_metric(device_id, name, fresh=False)
@@ -2289,11 +2580,18 @@ async def planning_devices(
     return [
         PlanningDeviceView(
             device_id=device_id,
-            device_name=device.display_name or runtime.gateway.reported_name(device_id) or device_id,
+            device_name=device.display_name
+            or runtime.gateway.reported_name(device_id)
+            or device_id,
             limits=_limits_view(limits.get(device_id)),
             battery_capacity_source=resolve_device_battery_facts(
                 limits.get(device_id), runtime.battery_capacity, device_id
             ).capacity_source,
+            mode=(
+                runtime.energy.mode(device_id).value
+                if runtime.energy is not None
+                else None
+            ),
         )
         for device_id, device in sorted(runtime.devices.items())
     ]
@@ -2307,7 +2605,9 @@ class PlanningLimitsBody(BaseModel):
     max_charge_power_w: float = Field(gt=0, le=MAX_POWER_W, allow_inf_nan=False)
     max_discharge_power_w: float = Field(gt=0, le=MAX_POWER_W, allow_inf_nan=False)
     # Omitted keeps the stored value, explicit null clears it.
-    usable_capacity_wh: float | None = Field(default=None, gt=0, le=1_000_000, allow_inf_nan=False)
+    usable_capacity_wh: float | None = Field(
+        default=None, gt=0, le=1_000_000, allow_inf_nan=False
+    )
 
 
 @router.put("/devices/{device_id}/planning-limits")
@@ -2366,25 +2666,43 @@ class ConsumptionHistoryView(BaseModel):
 
 @router.get("/devices/{device_id}/consumption-history")
 async def consumption_history(
-    request: Request, device_id: str, admin: Annotated[dict | None, Depends(_require_admin_read)]
+    request: Request,
+    device_id: str,
+    admin: Annotated[dict | None, Depends(_require_admin_read)],
 ) -> ConsumptionHistoryView:
     """The last completed local days (the running day excluded), with no device I/O."""
     del admin
     _device_or_404(request, device_id)
     store = _spotmarket_store(request)
     runtime = request.app.state.runtime
-    zone_name = getattr(getattr(request.app.state, "weather_config", None), "timezone", None) or "UTC"
+    zone_name = (
+        getattr(getattr(request.app.state, "weather_config", None), "timezone", None)
+        or "UTC"
+    )
     now = runtime.clock.now()
     last = now.astimezone(_zone_or_utc(zone_name)).date() - timedelta(days=1)
     first = last - timedelta(days=CONSUMPTION_WINDOW_DAYS - 1)
     days = await asyncio.to_thread(
-        load_daily_consumption, store, device_id, first, last, zone_name=zone_name, now=now
+        load_daily_consumption,
+        store,
+        device_id,
+        first,
+        last,
+        zone_name=zone_name,
+        now=now,
     )
-    recording_since = await asyncio.to_thread(store.first_consumption_measurement, device_id)
+    recording_since = await asyncio.to_thread(
+        store.first_consumption_measurement, device_id
+    )
     return ConsumptionHistoryView(
         device_id=device_id,
         timezone=zone_name,
-        days=[ConsumptionDayView(date=d.date.isoformat(), energy_wh=d.energy_wh, source=d.source.value) for d in days],
+        days=[
+            ConsumptionDayView(
+                date=d.date.isoformat(), energy_wh=d.energy_wh, source=d.source.value
+            )
+            for d in days
+        ],
         recording_since=recording_since,
         inverter_import_enabled=runtime.settings.consumption_daily_backfill_enabled,
     )
@@ -2403,7 +2721,9 @@ async def get_dynamic_plan(
     device_id: str,
     admin: Annotated[dict | None, Depends(_require_admin_read)],
     policy: PlanPolicy = PlanPolicy.GENTLE,
-    target_soc_percent: Annotated[float | None, Query(ge=TARGET_SOC_MIN_PERCENT, le=TARGET_SOC_MAX_PERCENT)] = None,
+    target_soc_percent: Annotated[
+        float | None, Query(ge=TARGET_SOC_MIN_PERCENT, le=TARGET_SOC_MAX_PERCENT)
+    ] = None,
     target_time: datetime | None = None,
 ) -> DryRunPlanView:
     """Compute and return the current Dry-Run dynamic charging plan for one device.
@@ -2419,7 +2739,9 @@ async def get_dynamic_plan(
     del admin
     _device_or_404(request, device_id)
     if (target_soc_percent is None) != (target_time is None):
-        raise HTTPException(422, "target_soc_percent and target_time must be given together")
+        raise HTTPException(
+            422, "target_soc_percent and target_time must be given together"
+        )
     if target_time is not None and target_time.tzinfo is None:
         raise HTTPException(422, "target_time must include a UTC offset")
     runtime = request.app.state.runtime
@@ -2427,18 +2749,28 @@ async def get_dynamic_plan(
     now = runtime.clock.now()
 
     # Spot prices and solar forecast from the rolling SQLite tables; no provider call is made here.
-    spot_config = getattr(request.app.state, "spotmarket_config", None) or SpotMarketConfig()
+    spot_config = (
+        getattr(request.app.state, "spotmarket_config", None) or SpotMarketConfig()
+    )
     spot_rows = (
-        await asyncio.to_thread(store.get_spot_market_intervals, spot_config_key(spot_config))
+        await asyncio.to_thread(
+            store.get_spot_market_intervals, spot_config_key(spot_config)
+        )
         if spot_config.enabled
         else []
     )
-    prices = spot_snapshot_from_rows(spot_config, spot_rows) if spot_config.enabled else None
+    prices = (
+        spot_snapshot_from_rows(spot_config, spot_rows) if spot_config.enabled else None
+    )
 
-    weather_config = getattr(request.app.state, "weather_config", None) or WeatherConfig()
+    weather_config = (
+        getattr(request.app.state, "weather_config", None) or WeatherConfig()
+    )
     solar = None
     if weather_config.is_forecastable():
-        _, first_day, last_day = local_three_day_window(now, weather_config.timezone or "UTC")
+        _, first_day, last_day = local_three_day_window(
+            now, weather_config.timezone or "UTC"
+        )
         solar_rows = await asyncio.to_thread(
             store.get_solar_forecast_intervals,
             solar_config_key(weather_config),
@@ -2450,7 +2782,9 @@ async def get_dynamic_plan(
     # Priority: persisted expert override, then the cache-only verified source, else unavailable.
     # The same resolver feeds the device list; nothing here touches the device.
     limits = (await _planning_limits(request)).get(device_id)
-    battery_facts = resolve_device_battery_facts(limits, runtime.battery_capacity, device_id)
+    battery_facts = resolve_device_battery_facts(
+        limits, runtime.battery_capacity, device_id
+    )
     readings_port = runtime.energy_readings
     battery_provider = EnergyReadingsBatteryStateProvider(
         readings_port,
@@ -2461,17 +2795,24 @@ async def get_dynamic_plan(
         clock=runtime.clock,
         # Only a verified, fresh live limit counts; without the dispatch controller there is none.
         live_charge_limit_w=(
-            runtime.dispatch.verified_live_charge_limit_w(device_id) if runtime.dispatch is not None else None
+            runtime.dispatch.verified_live_charge_limit_w(device_id)
+            if runtime.dispatch is not None
+            else None
         ),
     )
 
     consumption_provider = StoredConsumptionForecastProvider(
-        store, device_id=device_id, timezone=weather_config.timezone or "UTC", clock=runtime.clock
+        store,
+        device_id=device_id,
+        timezone=weather_config.timezone or "UTC",
+        clock=runtime.clock,
     )
 
     # The plan must not propose a target the executor would reject, so clamp to the same effective
     # SoC window the Energy Manager enforces (operator bounds narrowed to the product window).
-    reserve, cap = effective_target_window(runtime.settings.dispatch_min_soc, runtime.settings.dispatch_max_soc)
+    reserve, cap = effective_target_window(
+        runtime.settings.dispatch_min_soc, runtime.settings.dispatch_max_soc
+    )
     try:
         parameters = PlanParameters(
             reserve_soc_percent=reserve,
