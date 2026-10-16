@@ -41,8 +41,9 @@ import statistics
 import sys
 from collections import Counter
 from collections.abc import Sequence
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 # The tool lives in tools/; make the project importable when run as a script.
 _PROJECT_DIR = Path(__file__).resolve().parent.parent
@@ -72,6 +73,17 @@ from app.transport.endpoint import EndpointConfig, TransportEndpoint
 MINUTES_LOAD_LOG_METRIC = "logger_minutes_eload_log_ts"
 DEFAULT_METRICS = (DAY_LOAD_LOG_METRIC, MINUTES_LOAD_LOG_METRIC)
 DEFAULT_PAGES = 4
+DEFAULT_TZ = "Europe/Berlin"
+# Operator-observed logger day values (Wh) and the CSV-integrated reference for 2026-10-15. These
+# are rendered as a comparison note only; no logic depends on them.
+_OPERATOR_DAY_WH = {
+    date(2026, 10, 13): 17989.4,
+    date(2026, 10, 14): 20856.4,
+    date(2026, 10, 15): 18018.7,
+}
+_CSV_INTEGRATED_NOTE = (
+    "CSV-integrated 2026-10-15 Verbrauch ~ 16.0 kWh (5-min power integration)"
+)
 _DEVICE_ID = "probe"  # internal only; the device address is never recorded
 _REPORT_PATH = (
     _PROJECT_DIR / ".agents" / "tasks" / "consumption-history-probe-report.md"
@@ -198,6 +210,132 @@ def value_magnitude_hint(points: Sequence[TimeSeriesPoint]) -> str:
     )
 
 
+# --- before= A/B timestamp-semantics helpers (pure, hardware-free; unit-tested) ----------------
+
+
+def _wire_int(before: datetime) -> int:
+    """The exact wire integer the gateway sends for this ``before``.
+
+    Mirrors ``RctGateway.query_history_series`` (app/gateway/rct.py), which derives the outgoing
+    timestamp as ``int(before.timestamp())`` — the true POSIX/UTC epoch of the instant. Both A/B
+    datetimes below are tz-aware, so this value is fully determined by this tool, never by the host
+    clock.
+    """
+    return int(before.timestamp())
+
+
+def _ab_before_datetimes(target: date, tz: ZoneInfo) -> tuple[datetime, datetime]:
+    """Return ``(before_A, before_B)`` for the local-midnight boundary of ``target``.
+
+    Both differ only in how the SAME wall-clock numbers ``target 00:00`` are interpreted:
+
+    * Query A — ``true-UTC-instant`` (what production does today): the real instant of local
+      midnight. For ``target=2026-10-16`` / ``Europe/Berlin`` (October = UTC+2) this is
+      ``2026-10-16 00:00+02:00`` whose wire int is 1792101600 == ``2026-10-15T22:00:00+00:00``.
+    * Query B — ``pseudo-UTC-wall-clock``: the SAME numbers relabelled as if already UTC, no
+      offset. For the same target this is ``2026-10-16 00:00+00:00`` whose wire int is 1792108800
+      == ``2026-10-16T00:00:00+00:00``.
+
+    The two wire ints differ by exactly the zone offset (7200 s in October), so B queries 2 h later
+    than A and can include the boundary point A drops. ``before_A`` attaches the site zone to the
+    naive local numbers (NOT ``astimezone``) so the local calendar numbers are preserved; midnight
+    is never inside a Berlin DST transition, so no fold handling is required.
+    """
+    # The naive wall-clock numbers target 00:00 are made aware two ways: attached to the site zone
+    # (A, real local-midnight instant) and relabelled as UTC (B). Building each aware directly keeps
+    # ruff DTZ happy without a naive intermediate.
+    before_a = datetime(target.year, target.month, target.day, 0, 0, tzinfo=tz)
+    before_b = datetime(target.year, target.month, target.day, 0, 0, tzinfo=UTC)
+    return before_a, before_b
+
+
+def _boundary_instant(target: date) -> datetime:
+    """The decoded (UTC-labelled) stamp of the boundary-day point for ``--before-ab target``.
+
+    Observed day points are stamped ``...T23:59:59+00:00``; the boundary point for ``target`` is
+    the one at ``(target - 1 day) 23:59:59`` in UTC, i.e. for 2026-10-16 -> 2026-10-15T23:59:59Z.
+    """
+    return datetime(target.year, target.month, target.day, tzinfo=UTC) - timedelta(
+        seconds=1
+    )
+
+
+def _point_present(points: Sequence[TimeSeriesPoint], instant: datetime) -> bool:
+    """True iff any returned point's (UTC-aware) timestamp equals ``instant``."""
+    return any(point.timestamp == instant for point in points)
+
+
+def _ab_conclusion(present_a: bool, present_b: bool) -> str:
+    """The overall A/B verdict string (exact wording per task)."""
+    if present_b and not present_a:
+        return "QUERY timestamp must be normalized to device wall-clock (write-side fix needed)"
+    if present_a and present_b:
+        return "query-side normalization not required for this boundary"
+    return "inconclusive / need another boundary"
+
+
+def _wallclock_local_date(stamp: datetime, tz: ZoneInfo) -> date:
+    """Re-date a decoded (UTC-labelled) stamp under the wall-clock hypothesis.
+
+    Under the hypothesis the device encoded its LOCAL wall-clock as the epoch, so the stamp's naive
+    Y/M/D/H/M/S fields ARE the site-local wall clock. This treats those numbers as local time and
+    returns the local calendar date. Pure arithmetic; it fetches nothing and converts no units.
+    """
+    numbers = stamp.astimezone(UTC)
+    local = datetime(
+        numbers.year,
+        numbers.month,
+        numbers.day,
+        numbers.hour,
+        numbers.minute,
+        numbers.second,
+        tzinfo=tz,
+    )
+    return local.date()
+
+
+# --- before= A/B + correlation reports ---------------------------------------------------------
+
+
+class AbBranch:
+    """One A/B branch: its constructed ``before``, the wire int, returned points and presence."""
+
+    def __init__(self, label: str, before: datetime) -> None:
+        self.label = label
+        self.before = before
+        self.wire_int = _wire_int(before)
+        self.points: list[TimeSeriesPoint] = []
+        self.present = False
+
+
+class AbReport:
+    """Both A/B branches for one target boundary plus the resolved conclusion."""
+
+    def __init__(
+        self, target: date, tz: ZoneInfo, branch_a: AbBranch, branch_b: AbBranch
+    ) -> None:
+        self.target = target
+        self.tz = tz
+        self.branch_a = branch_a
+        self.branch_b = branch_b
+        self.boundary = _boundary_instant(target)
+
+    @property
+    def conclusion(self) -> str:
+        return _ab_conclusion(self.branch_a.present, self.branch_b.present)
+
+
+class DaysAroundReport:
+    """Three target local dates with decoded day points and their wall-clock re-dated dates."""
+
+    def __init__(self, target: date, tz: ZoneInfo) -> None:
+        self.target = target
+        self.tz = tz
+        self.dates = [target - timedelta(days=1), target, target + timedelta(days=1)]
+        # date -> (decoded UTC-labelled stamp, value)
+        self.decoded: dict[date, tuple[datetime, float]] = {}
+
+
 # --- probing (hardware) ------------------------------------------------------------------------
 
 
@@ -244,6 +382,57 @@ async def _probe_metric(
             report.before_returned_duplicates = any(
                 point.timestamp in seen for point in older
             )
+    return report
+
+
+async def _probe_before_ab(
+    gateway: RctGateway, metric: str, target: date, tz: ZoneInfo, clock: SystemClock
+) -> AbReport:
+    """Issue exactly TWO read-only history queries for the same local-midnight boundary.
+
+    The two queries differ ONLY in how the ``before`` instant is constructed (A = true-UTC instant
+    of local midnight; B = the same wall-clock numbers relabelled as UTC). Each call still goes
+    through ``_GuardedGateway``, so the only frame emitted is the metric's read-only history query;
+    no write of ``logger_log_rate`` or any other register can occur.
+    """
+    before_a, before_b = _ab_before_datetimes(target, tz)
+    branch_a = AbBranch("true-UTC-instant", before_a)
+    branch_b = AbBranch("pseudo-UTC-wall-clock", before_b)
+    boundary = _boundary_instant(target)
+    for index, branch in enumerate((branch_a, branch_b)):
+        if index:
+            await clock.sleep(
+                PAUSE_BETWEEN_QUERIES_SECONDS
+            )  # gentle on the shared device queue
+        points = await gateway.query_history_series(_DEVICE_ID, metric, branch.before)
+        branch.points = list(points)
+        branch.present = _point_present(points, boundary)
+    return AbReport(target, tz, branch_a, branch_b)
+
+
+async def _probe_days_around(
+    gateway: RctGateway, metric: str, target: date, tz: ZoneInfo, clock: SystemClock
+) -> DaysAroundReport:
+    """Fetch day points covering ``target-1, target, target+1`` with a single read-only query.
+
+    ``before`` is the true-UTC instant of ``target+2`` local midnight so the returned page includes
+    the ``23:59:59`` points of all three target days. The re-dating under the wall-clock hypothesis
+    is pure arithmetic on the already-fetched points.
+    """
+    report = DaysAroundReport(target, tz)
+    before_a, _ = _ab_before_datetimes(target + timedelta(days=2), tz)
+    points = await gateway.query_history_series(_DEVICE_ID, metric, before_a)
+    # Index each returned point by its decoded UTC-labelled calendar date (00:00..23:59:59 maps to
+    # that same UTC day); the boundary points are stamped ...T23:59:59Z.
+    by_utc_date: dict[date, tuple[datetime, float]] = {}
+    for point in points:
+        by_utc_date[point.timestamp.astimezone(UTC).date()] = (
+            point.timestamp,
+            point.value,
+        )
+    for day in report.dates:
+        if day in by_utc_date:
+            report.decoded[day] = by_utc_date[day]
     return report
 
 
@@ -375,13 +564,102 @@ def _render_report(reports: list[MetricReport], *, pages: int, live: bool) -> st
     return "\n".join(header + body) + "\n"
 
 
+def _render_wire_timestamp(wire_int: int, tz: ZoneInfo) -> str:
+    """Human-readable UTC and site-local rendering of a wire epoch integer."""
+    instant = datetime.fromtimestamp(wire_int, UTC)
+    return f"{wire_int} (UTC {instant.isoformat()}; {tz.key} {instant.astimezone(tz).isoformat()})"
+
+
+def _render_before_ab(report: AbReport) -> list[str]:
+    """Render both A/B branches, per-query VERDICT lines and the overall CONCLUSION."""
+    boundary = report.boundary
+    heading = (
+        f"### `before=` A/B timestamp semantics — target local day {report.target.isoformat()}"
+        f" ({report.tz.key})"
+    )
+    sought = (
+        f"Boundary-day point sought: decoded stamp {iso(boundary)} "
+        f"(= {report.target.isoformat()} minus 1 s, UTC-labelled)."
+    )
+    lines: list[str] = [heading, "", sought, ""]
+    for branch in (report.branch_a, report.branch_b):
+        lines.append(f"#### Query {branch.label}")
+        lines.append(
+            f"- wire query timestamp sent: {_render_wire_timestamp(branch.wire_int, report.tz)}"
+        )
+        lines.append(f"- `before` instant constructed: {branch.before.isoformat()}")
+        lines.append(f"- points returned: {len(branch.points)}")
+        for point in branch.points:
+            lines.append(
+                f"  - {iso(point.timestamp)}  raw/decoded value={point.value!r}"
+            )
+        verdict = "PRESENT" if branch.present else "ABSENT"
+        lines.append(f"- VERDICT: boundary-day point {verdict}")
+        lines.append("")
+    lines.append(f"**A/B CONCLUSION:** {report.conclusion}")
+    lines.append("")
+    return lines
+
+
+def _render_days_around(report: DaysAroundReport) -> list[str]:
+    """Render the three target days side by side: decoded UTC date vs wall-clock-redated date."""
+    lines: list[str] = [
+        f"### Three-day correlation around {report.target.isoformat()} ({report.tz.key})",
+        "",
+        "| target local date | decoded stamp (UTC-labelled) | value | wall-clock re-dated local date |",
+        "| --- | --- | --- | --- |",
+    ]
+    for day in report.dates:
+        entry = report.decoded.get(day)
+        if entry is None:
+            lines.append(f"| {day.isoformat()} | _no point returned_ | — | — |")
+            continue
+        stamp, value = entry
+        redated = _wallclock_local_date(stamp, report.tz)
+        lines.append(
+            f"| {day.isoformat()} | {iso(stamp)} | {value!r} | {redated.isoformat()} |"
+        )
+    lines.append("")
+    lines.append("Operator-observed logger day values (Wh), for comparison only:")
+    for day, wh in sorted(_OPERATOR_DAY_WH.items()):
+        lines.append(f"- {day.isoformat()}: {wh} Wh")
+    lines.append(f"- {_CSV_INTEGRATED_NOTE}")
+    lines.append("")
+    return lines
+
+
+def _render_ab_section(
+    ab: AbReport | None, days: DaysAroundReport | None, *, metric: str
+) -> str:
+    """Assemble the NEW report section for the A/B and/or correlation probe output."""
+    lines: list[str] = [
+        "## before= A/B timestamp semantics",
+        "",
+        f"- generated at: {datetime.now(UTC).isoformat()}",
+        f"- metric: `{metric}`",
+        "",
+        "Read-only: the only frames emitted were the history queries for the metric above; this",
+        "mode never writes `logger_log_rate` or any register and never touches the backfill gate.",
+        "No host, port or credential is recorded.",
+        "",
+    ]
+    if ab is not None:
+        lines.extend(_render_before_ab(ab))
+    if days is not None:
+        lines.extend(_render_days_around(days))
+    return "\n".join(lines)
+
+
 # --- gateway construction (single device, single transport) ------------------------------------
 
 
-async def _run_live(
-    args: argparse.Namespace, catalog: RegistryCatalog, metrics: list[str]
-) -> int:
-    clock = SystemClock()
+def _build_guarded_gateway(
+    args: argparse.Namespace,
+    catalog: RegistryCatalog,
+    metrics: list[str],
+    clock: SystemClock,
+) -> tuple[_GuardedGateway, TransportEndpoint, AccessSerializer]:
+    """Wire a single read-only transport to one device, guarded against any non-history frame."""
     allowed_ids = frozenset(catalog.object_entry(name).object_id for name in metrics)
     guard = _ReadOnlyGuard(allowed_ids)
     gateway = _GuardedGateway(
@@ -401,6 +679,28 @@ async def _run_live(
     )
     serializer = AccessSerializer(endpoint, gateway.handler(endpoint))
     gateway.add_device(DeviceBinding(entry, endpoint, serializer))
+    return gateway, endpoint, serializer
+
+
+def _append_section(section: str) -> None:
+    """Append a NEW section to the probe report, preserving whatever is already in the file."""
+    _REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    existing = _REPORT_PATH.read_text(encoding="utf-8") if _REPORT_PATH.exists() else ""
+    separator = (
+        ""
+        if not existing or existing.endswith("\n\n")
+        else ("\n" if existing.endswith("\n") else "\n\n")
+    )
+    _REPORT_PATH.write_text(existing + separator + section + "\n", encoding="utf-8")
+
+
+async def _run_live(
+    args: argparse.Namespace, catalog: RegistryCatalog, metrics: list[str]
+) -> int:
+    clock = SystemClock()
+    gateway, endpoint, serializer = _build_guarded_gateway(
+        args, catalog, metrics, clock
+    )
     serializer.start()
     reports: list[MetricReport] = []
     try:
@@ -416,6 +716,42 @@ async def _run_live(
     _REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
     _REPORT_PATH.write_text(rendered, encoding="utf-8")
     sys.stdout.write(f"\nReport written to {_REPORT_PATH}\n")
+    return 0
+
+
+async def _run_before_ab(
+    args: argparse.Namespace,
+    catalog: RegistryCatalog,
+    metric: str,
+    *,
+    ab_target: date | None,
+    days_target: date | None,
+    tz: ZoneInfo,
+) -> int:
+    """Run the A/B and/or 3-day correlation probe(s) for a single day metric, read-only."""
+    clock = SystemClock()
+    gateway, endpoint, serializer = _build_guarded_gateway(
+        args, catalog, [metric], clock
+    )
+    serializer.start()
+    ab: AbReport | None = None
+    days: DaysAroundReport | None = None
+    try:
+        await endpoint.start()
+        if ab_target is not None:
+            ab = await _probe_before_ab(gateway, metric, ab_target, tz, clock)
+        if days_target is not None:
+            if ab_target is not None:
+                await clock.sleep(PAUSE_BETWEEN_QUERIES_SECONDS)
+            days = await _probe_days_around(gateway, metric, days_target, tz, clock)
+    finally:
+        await serializer.stop()
+        await endpoint.close()
+
+    section = _render_ab_section(ab, days, metric=metric)
+    sys.stdout.write(section + "\n")
+    _append_section(section)
+    sys.stdout.write(f"\nReport section appended to {_REPORT_PATH}\n")
     return 0
 
 
@@ -451,6 +787,30 @@ def _check(args: argparse.Namespace, catalog: RegistryCatalog) -> int:
         [MetricReport(m) for m in metrics], pages=args.pages, live=False
     )
     sys.stdout.write(f"  render OK ({len(skeleton)} chars of skeleton report)\n")
+
+    # Validate the A/B / correlation flags and the day-metric resolution without a socket.
+    if args.before_ab or args.days_around:
+        try:
+            ab_metric = _resolve_metrics(catalog, args.metric or DAY_LOAD_LOG_METRIC)[0]
+            tz = _resolve_tz(args.tz)
+            if args.before_ab:
+                target = _parse_date(args.before_ab)
+                before_a, before_b = _ab_before_datetimes(target, tz)
+                sys.stdout.write(
+                    f"  A/B      {ab_metric} @ {target.isoformat()} ({tz.key}): "
+                    f"A wire={_wire_int(before_a)} B wire={_wire_int(before_b)} "
+                    f"delta={_wire_int(before_b) - _wire_int(before_a)}s "
+                    f"boundary={iso(_boundary_instant(target))}\n"
+                )
+            if args.days_around:
+                sys.stdout.write(
+                    f"  3-DAY    {ab_metric} around {_parse_date(args.days_around).isoformat()} "
+                    f"({tz.key})\n"
+                )
+        except (UnknownMetric, ValueError) as exc:
+            sys.stdout.write(f"  BAD      A/B flags: {exc}\n")
+            ok = False
+
     sys.stdout.write("Self-check passed\n" if ok else "Self-check FAILED\n")
     return 0 if ok else 1
 
@@ -487,6 +847,24 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         help=f"backwards pagination pages per metric (default {DEFAULT_PAGES})",
     )
     parser.add_argument(
+        "--before-ab",
+        metavar="DATE",
+        default=None,
+        help="run the before= A/B timestamp-semantics probe for this LOCAL calendar day "
+        "(YYYY-MM-DD); its 00:00 boundary is probed with a true-UTC vs a wall-clock instant",
+    )
+    parser.add_argument(
+        "--days-around",
+        metavar="DATE",
+        default=None,
+        help="run the three-day correlation helper for DATE-1/DATE/DATE+1 (YYYY-MM-DD, day metric)",
+    )
+    parser.add_argument(
+        "--tz",
+        default=DEFAULT_TZ,
+        help=f"site timezone for the A/B and correlation modes (default {DEFAULT_TZ})",
+    )
+    parser.add_argument(
         "--check",
         action="store_true",
         help="dry self-check of catalog lookup and argument parsing; opens no socket",
@@ -494,11 +872,34 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def _parse_date(value: str) -> date:
+    """Parse a YYYY-MM-DD calendar date, raising ``ValueError`` on bad input."""
+    return datetime.strptime(value, "%Y-%m-%d").replace(tzinfo=UTC).date()
+
+
+def _resolve_tz(value: str) -> ZoneInfo:
+    """Resolve a timezone name, raising ``ValueError`` on an unknown zone."""
+    try:
+        return ZoneInfo(value)
+    except (ZoneInfoNotFoundError, ValueError) as exc:
+        raise ValueError(f"unknown timezone {value!r}") from exc
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parse_args(argv)
     if args.pages < 1:
         sys.stderr.write("error: --pages must be at least 1\n")
         return 2
+
+    # Parse the A/B / correlation flags early so bad input fails socket-free with code 2.
+    try:
+        ab_target = _parse_date(args.before_ab) if args.before_ab else None
+        days_target = _parse_date(args.days_around) if args.days_around else None
+        tz = _resolve_tz(args.tz)
+    except ValueError as exc:
+        sys.stderr.write(f"error: {exc}\n")
+        return 2
+
     catalog = RegistryCatalog.from_file(
         _PROJECT_DIR / "app" / "catalog" / "objects.json"
     )
@@ -511,6 +912,25 @@ def main(argv: Sequence[str] | None = None) -> int:
             "error: --host is required for a live probe (use --check for a dry run)\n"
         )
         return 2
+
+    # A/B and correlation operate on a single day metric (default logger_day_eload_log_ts,
+    # overridable via --metric). They append a NEW report section instead of the default probe.
+    if ab_target is not None or days_target is not None:
+        try:
+            metric = _resolve_metrics(catalog, args.metric or DAY_LOAD_LOG_METRIC)[0]
+        except UnknownMetric as exc:
+            sys.stderr.write(f"error: {exc}\n")
+            return 1
+        return asyncio.run(
+            _run_before_ab(
+                args,
+                catalog,
+                metric,
+                ab_target=ab_target,
+                days_target=days_target,
+                tz=tz,
+            )
+        )
 
     try:
         metrics = _resolve_metrics(catalog, args.metric)
