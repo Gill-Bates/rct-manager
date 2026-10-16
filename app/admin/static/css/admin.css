@@ -1764,11 +1764,73 @@ body {
     }
 }
 
-/* Charging plan: all hero metrics in one row; they stack only on narrow screens. */
-@media (min-width: 576px) {
-    .spot-market-highlights.spot-market-highlights-row {
-        grid-template-columns: repeat(auto-fit, minmax(0, 1fr));
-        grid-auto-flow: column;
+/* Charging plan KPI strip: four equal tiles (reuses .spot-market-highlight); 2 x 2 on tablets,
+   stacked on phones. Spot Market and Weather keep their own two-column .spot-market-highlights. */
+.energy-plan-highlights {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: .75rem;
+}
+
+@media (max-width: 991.98px) {
+    .energy-plan-highlights {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+}
+
+@media (max-width: 575.98px) {
+    .energy-plan-highlights {
+        grid-template-columns: minmax(0, 1fr);
+    }
+}
+
+.energy-plan-highlights .spot-market-highlight {
+    min-width: 0;
+    align-content: center;
+}
+
+.energy-plan-highlights .spot-market-highlight-value {
+    font-variant-numeric: tabular-nums;
+}
+
+.spot-market-highlight-sub {
+    font-size: .8rem;
+    color: var(--bs-secondary-color);
+    font-variant-numeric: tabular-nums;
+}
+
+/* Charging plan header: title left, inverter select and Expert switch compact on the right on wide
+   screens; the controls wrap below the title on narrow ones. */
+.energy-plan-head {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    align-items: flex-end;
+    gap: .75rem 1.5rem;
+}
+
+.energy-plan-head-controls {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    gap: .75rem 1.25rem;
+    min-width: 0;
+}
+
+.energy-plan-device-field {
+    min-width: min(16rem, 100%);
+}
+
+.energy-plan-expert-field {
+    display: flex;
+    align-items: center;
+    min-height: 2.5rem;
+}
+
+@media (max-width: 575.98px) {
+    .energy-plan-head-controls,
+    .energy-plan-device-field {
+        width: 100%;
     }
 }
 

@@ -1817,6 +1817,34 @@ def _replan_view() -> DryRunReplanView:
     )
 
 
+class DryRunBatteryView(BaseModel):
+    """The BatteryState snapshot the plan was computed from (never re-read from the inverter).
+
+    ``remaining_energy_wh`` is the verified usable capacity times the measured SoC, not the nominal
+    total capacity.
+    """
+
+    soc_percent: float
+    usable_capacity_wh: float
+    remaining_energy_wh: float
+    max_charge_power_w: float
+    max_discharge_power_w: float
+    measured_at: datetime
+
+
+def _battery_view(state) -> DryRunBatteryView | None:
+    if state is None:
+        return None
+    return DryRunBatteryView(
+        soc_percent=state.soc_percent,
+        usable_capacity_wh=state.usable_capacity_wh,
+        remaining_energy_wh=state.usable_capacity_wh * state.soc_percent / 100.0,
+        max_charge_power_w=state.max_charge_power_w,
+        max_discharge_power_w=state.max_discharge_power_w,
+        measured_at=state.measured_at,
+    )
+
+
 class DryRunPlanView(BaseModel):
     """The Dry-Run plan preview for one device.
 
@@ -1841,6 +1869,8 @@ class DryRunPlanView(BaseModel):
     forecast_basis: ForecastBasis | None = None
     consumption_history_available: bool | None = None
     forecast_confidence: ForecastConfidence | None = None
+    # Battery snapshot of the plan's own input; None when no verified battery state was available.
+    battery: DryRunBatteryView | None = None
     slots: list[DryRunPlanSlotView] = Field(default_factory=list)
     window: DryRunForecastWindowView = Field(default_factory=DryRunForecastWindowView)
     # Reserve (hard lower bound along the whole trajectory) and target (goal at target_time) are
@@ -2478,6 +2508,7 @@ async def get_dynamic_plan(
         forecast_basis=result.forecast_basis,
         consumption_history_available=result.consumption_history_available,
         forecast_confidence=result.forecast_confidence,
+        battery=_battery_view(result.battery_state),
         slots=_plan_slot_views(plan) if plan is not None else [],
         window=DryRunForecastWindowView(
             consumption_from=result.window.consumption_from,

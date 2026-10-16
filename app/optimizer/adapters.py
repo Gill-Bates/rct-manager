@@ -112,6 +112,8 @@ class DryRunResult:
     forecast_basis: ForecastBasis | None = None
     consumption_history_available: bool | None = None
     forecast_confidence: ForecastConfidence | None = None
+    # The BatteryState snapshot the plan was computed from; None while it could not be built.
+    battery_state: "BatteryState | None" = None
 
 
 class BatteryCapacityUnavailable(Exception):
@@ -125,7 +127,12 @@ class BatteryCapacityUnavailable(Exception):
 
 def _usable_live_limit(value: float | None) -> float | None:
     """A live limit only when it is a finite positive number; anything else counts as absent."""
-    if value is None or isinstance(value, bool) or not math.isfinite(value) or value <= 0:
+    if (
+        value is None
+        or isinstance(value, bool)
+        or not math.isfinite(value)
+        or value <= 0
+    ):
         return None
     return float(value)
 
@@ -162,8 +169,14 @@ class EnergyReadingsBatteryStateProvider:
         self._live_charge_limit_w = _usable_live_limit(live_charge_limit_w)
 
     def current(self) -> BatteryState:
-        if self._capacity_wh is None or not math.isfinite(self._capacity_wh) or self._capacity_wh <= 0:
-            raise BatteryCapacityUnavailable("usable battery capacity is not configured")
+        if (
+            self._capacity_wh is None
+            or not math.isfinite(self._capacity_wh)
+            or self._capacity_wh <= 0
+        ):
+            raise BatteryCapacityUnavailable(
+                "usable battery capacity is not configured"
+            )
         if (
             self._charge_power_w is None
             or self._discharge_power_w is None
@@ -177,7 +190,12 @@ class EnergyReadingsBatteryStateProvider:
             raise BatteryCapacityUnavailable("battery power limits are not configured")
         readings = self._readings.readings(self._device_id)
         soc = readings.battery_soc_percent
-        if soc.value is None or soc.stale or not math.isfinite(soc.value) or not 0.0 <= soc.value <= 100.0:
+        if (
+            soc.value is None
+            or soc.stale
+            or not math.isfinite(soc.value)
+            or not 0.0 <= soc.value <= 100.0
+        ):
             raise BatteryCapacityUnavailable("battery SoC is unavailable or stale")
         return BatteryState(
             soc_percent=float(soc.value),
@@ -203,7 +221,14 @@ class StoredConsumptionForecastProvider:
     caller decides whether the available data clears :data:`MIN_HISTORY_BUCKETS`.
     """
 
-    def __init__(self, store, *, device_id: str, timezone: str = "UTC", clock: Clock | None = None) -> None:
+    def __init__(
+        self,
+        store,
+        *,
+        device_id: str,
+        timezone: str = "UTC",
+        clock: Clock | None = None,
+    ) -> None:
         self._store = store
         self._device_id = device_id
         self._forecaster = AdaptiveConsumptionForecaster(timezone)
@@ -214,7 +239,9 @@ class StoredConsumptionForecastProvider:
 
     def horizon_coverage_ratio(self, now: datetime, horizon: timedelta) -> float:
         """Share of the horizon's slots backed by representative per-slot history (not the fallback)."""
-        return self._forecaster.horizon_coverage_ratio(self._load_history(now), now, horizon)
+        return self._forecaster.horizon_coverage_ratio(
+            self._load_history(now), now, horizon
+        )
 
     def coverage_end(self, now: datetime, horizon: timedelta) -> datetime:
         """How far from ``now`` the horizon is contiguously backed by per-slot history (not fallback)."""
@@ -228,17 +255,25 @@ class StoredConsumptionForecastProvider:
         """Profile basis, consumption phase, data coverage and uncertainty behind the forecast."""
         return self._forecaster.analyze(self._load_history(now), now)
 
-    def next_day(self, now: datetime, method: str = METHOD_ADAPTIVE) -> NextDayForecast | None:
+    def next_day(
+        self, now: datetime, method: str = METHOD_ADAPTIVE
+    ) -> NextDayForecast | None:
         """The next local calendar day's quarter-hour forecast (``method`` selects adaptive or median)."""
-        return self._forecaster.next_day_forecast(self._load_history(now), now, method=method)
+        return self._forecaster.next_day_forecast(
+            self._load_history(now), now, method=method
+        )
 
-    def evaluate_runs(self, now: datetime, first_created: datetime) -> list[tuple[dict, ForecastEvaluation | None]]:
+    def evaluate_runs(
+        self, now: datetime, first_created: datetime
+    ) -> list[tuple[dict, ForecastEvaluation | None]]:
         """Stored forecast runs created since ``first_created`` against sufficiently measured actuals.
 
         A run whose target day is not yet over, or whose actuals are too thin, maps to ``None``.
         """
         runs = self._store.get_consumption_forecast_runs(
-            self._device_id, first_created.astimezone(UTC).isoformat(), now.astimezone(UTC).isoformat()
+            self._device_id,
+            first_created.astimezone(UTC).isoformat(),
+            now.astimezone(UTC).isoformat(),
         )
         history = self._load_history(now)
         return [(run, evaluate_forecast(run["values"], history)) for run in runs]
@@ -247,7 +282,9 @@ class StoredConsumptionForecastProvider:
         first = (now - HISTORY_LOOKBACK).astimezone(UTC).isoformat()
         last = now.astimezone(UTC).isoformat()
         rows = self._store.get_consumption_intervals(self._device_id, first, last)
-        meter = self._store.get_consumption_meter_intervals(self._device_id, first, last)
+        meter = self._store.get_consumption_meter_intervals(
+            self._device_id, first, last
+        )
         return rows_to_history(rows, meter)
 
 
@@ -256,7 +293,9 @@ class StoredConsumptionForecastProvider:
 # ----------------------------------------------------------------------------------------------
 
 
-def spot_snapshot_from_rows(config: SpotMarketConfig, rows: Sequence[dict]) -> SpotPriceSnapshot | None:
+def spot_snapshot_from_rows(
+    config: SpotMarketConfig, rows: Sequence[dict]
+) -> SpotPriceSnapshot | None:
     """Build a :class:`SpotPriceSnapshot` from stored spot rows; ``None`` when none are stored.
 
     This never calls the provider: the plan preview must not trigger an Energy-Charts request.
@@ -392,7 +431,9 @@ def _clip_to_horizon(forecast, now: datetime, horizon: timedelta):
     partial intervals. Returns a value of the same forecast type.
     """
     horizon_end = now + horizon
-    kept = tuple(iv for iv in forecast.intervals if iv.end > now and iv.start < horizon_end)
+    kept = tuple(
+        iv for iv in forecast.intervals if iv.end > now and iv.start < horizon_end
+    )
     return type(forecast)(created_at=forecast.created_at, intervals=kept)
 
 
@@ -433,7 +474,9 @@ def resolve_consumption_forecast(
     well_covered = consumption_provider.well_covered_count(now)
     if well_covered == 0:
         return ConsumptionResolution(
-            BaselineConsumptionForecastProvider(baseline_household_load_w).forecast(now, planner_horizon),
+            BaselineConsumptionForecastProvider(baseline_household_load_w).forecast(
+                now, planner_horizon
+            ),
             ForecastBasis.BOOTSTRAP_BASELINE,
             ForecastConfidence.LOW,
             f"consumption: configured flat {baseline_household_load_w:g} W bootstrap baseline "
@@ -443,8 +486,14 @@ def resolve_consumption_forecast(
     coverage = consumption_provider.horizon_coverage_ratio(start, plannable_span)
     consumption = consumption_provider.forecast(now, planner_horizon)
     analysis = getattr(consumption_provider, "analysis", None)
-    learning = analysis(now).method != METHOD_ADAPTIVE if analysis is not None else False
-    if well_covered < MIN_HISTORY_BUCKETS or coverage < MIN_HORIZON_COVERAGE_RATIO or learning:
+    learning = (
+        analysis(now).method != METHOD_ADAPTIVE if analysis is not None else False
+    )
+    if (
+        well_covered < MIN_HISTORY_BUCKETS
+        or coverage < MIN_HORIZON_COVERAGE_RATIO
+        or learning
+    ):
         return ConsumptionResolution(
             consumption,
             ForecastBasis.HISTORY_FALLBACK,
@@ -454,7 +503,11 @@ def resolve_consumption_forecast(
             well_covered,
         )
     return ConsumptionResolution(
-        consumption, ForecastBasis.ADAPTIVE_HISTORY, ForecastConfidence.NORMAL, FORECAST_BASIS, well_covered
+        consumption,
+        ForecastBasis.ADAPTIVE_HISTORY,
+        ForecastConfidence.NORMAL,
+        FORECAST_BASIS,
+        well_covered,
     )
 
 
@@ -503,22 +556,33 @@ def build_dry_run_plan(
             "Usable battery capacity could not be verified for this inverter.",
         )
 
+    # Every result after this point carries the exact snapshot the planner works from, so the preview
+    # shows the same figures instead of re-reading the battery.
+    def _result(*args, **kwargs) -> DryRunResult:
+        return DryRunResult(*args, battery_state=battery, **kwargs)
+
     # An input the operator switched off or never configured will not appear on its own, so it gets
     # its own status instead of the "not available yet" wording that implies waiting helps.
     if not inputs.spot_enabled:
-        return DryRunResult(
-            PlanStatus.SPOT_DISABLED, None, window, "The spot market integration is disabled."
+        return _result(
+            PlanStatus.SPOT_DISABLED,
+            None,
+            window,
+            "The spot market integration is disabled.",
         )
     if not inputs.solar_configurable:
-        return DryRunResult(
-            PlanStatus.SOLAR_NOT_CONFIGURED, None, window, "The solar forecast is not configured."
+        return _result(
+            PlanStatus.SOLAR_NOT_CONFIGURED,
+            None,
+            window,
+            "The solar forecast is not configured.",
         )
 
     # The none-at-all preconditions stay first: with no input of a kind there is nothing to trim to.
     if inputs.prices is None or not inputs.prices.intervals:
-        return DryRunResult(PlanStatus.SPOT_PRICES_UNAVAILABLE, None, window)
+        return _result(PlanStatus.SPOT_PRICES_UNAVAILABLE, None, window)
     if inputs.solar is None or not inputs.solar.intervals:
-        return DryRunResult(PlanStatus.SOLAR_FORECAST_UNAVAILABLE, None, window)
+        return _result(PlanStatus.SOLAR_FORECAST_UNAVAILABLE, None, window)
 
     # Trim to the honest common horizon. Coverage is anchored at the instant the planner will
     # actually start from — the next full quarter-hour boundary (shared planning_start helper), not
@@ -552,14 +616,14 @@ def build_dry_run_plan(
             f"{max(0.0, plannable_span.total_seconds()) / 3600.0:.1f} h of the planning "
             f"horizon (need at least {min_hours:.0f} h)"
         )
-        return DryRunResult(status, None, window, detail)
+        return _result(status, None, window, detail)
 
     # Belt-and-braces: the trimmed horizon must still be fully, contiguously covered by prices and
     # solar from the planner's start boundary. _coverage_end already guarantees this, but keep the
     # explicit fail-closed gate so a future change to the trim logic cannot silently let a gap
     # through to the zero-reading planner.
     if not _covers_horizon(inputs.prices.intervals, start, plannable_span):
-        return DryRunResult(
+        return _result(
             PlanStatus.SPOT_PRICES_UNAVAILABLE,
             None,
             window,
@@ -567,7 +631,7 @@ def build_dry_run_plan(
             plannable_span,
         )
     if not _covers_horizon(inputs.solar.intervals, start, plannable_span):
-        return DryRunResult(
+        return _result(
             PlanStatus.SOLAR_FORECAST_UNAVAILABLE,
             None,
             window,
@@ -593,13 +657,17 @@ def build_dry_run_plan(
     basis_description = resolution.description
     well_covered = resolution.well_covered
     if not consumption.intervals:
-        return DryRunResult(
-            PlanStatus.INSUFFICIENT_HISTORY, None, window, "no consumption slots could be estimated", plannable_span
+        return _result(
+            PlanStatus.INSUFFICIENT_HISTORY,
+            None,
+            window,
+            "no consumption slots could be estimated",
+            plannable_span,
         )
 
     solar = _clip_to_horizon(inputs.solar, now, planner_horizon)
     if not solar.intervals:
-        return DryRunResult(
+        return _result(
             PlanStatus.SOLAR_FORECAST_UNAVAILABLE,
             None,
             window,
@@ -625,7 +693,7 @@ def build_dry_run_plan(
         prices_from=inputs.prices.intervals[0].start,
         prices_until=inputs.prices.intervals[-1].end,
     )
-    return DryRunResult(
+    return _result(
         PlanStatus.OK,
         plan,
         window,

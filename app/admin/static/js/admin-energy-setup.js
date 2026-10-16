@@ -1314,21 +1314,25 @@ function renderDryRunPlan(plan, { waiting = true } = {}) {
   const card = next
     ? planStatusCard('Next grid charge', `${planDateTime(next.start)} – ${planDateTime(next.end)}`)
     : planStatusCard('No grid charge planned', 'The current plan does not schedule a grid charge.');
-  if (next) {
-    // Same hero-metric blocks as the Spot Market view (.spot-market-highlight).
-    const summary = element('div', 'spot-market-highlights spot-market-highlights-row mt-3');
-    const add = (caption, value, icon) => {
-      const block = element('div', 'spot-market-highlight');
-      const glyph = element('span', 'material-icons spot-market-highlight-icon text-secondary', icon);
-      glyph.setAttribute('aria-hidden', 'true');
-      block.append(glyph, element('span', 'spot-market-highlight-caption', caption), element('span', 'spot-market-highlight-value', value));
-      summary.append(block);
-    };
-    if (next.target_soc_percent !== null && next.target_soc_percent !== undefined) add('Target SoC', `${Math.round(next.target_soc_percent)} %`, 'battery_charging_full');
-    if (next.max_power_w !== null && next.max_power_w !== undefined) add('Charge power', formatPower(next.max_power_w), 'bolt');
-    if (plan.energy?.grid_charge_energy_wh !== undefined) add('Total plan grid energy', planKwh(plan.energy.grid_charge_energy_wh), 'electric_meter');
-    card.append(summary);
-  }
+  // Four equal KPI tiles built from the plan's own battery snapshot (no second data source).
+  const summary = element('div', 'spot-market-highlights energy-plan-highlights mt-3');
+  const add = (caption, value, icon, sub) => {
+    const block = element('div', 'spot-market-highlight');
+    const glyph = element('span', 'material-icons spot-market-highlight-icon text-secondary', icon);
+    glyph.setAttribute('aria-hidden', 'true');
+    block.append(glyph, element('span', 'spot-market-highlight-caption', caption), element('span', 'spot-market-highlight-value', value));
+    if (sub) block.append(element('span', 'spot-market-highlight-sub', sub));
+    summary.append(block);
+  };
+  const known = (value) => value !== null && value !== undefined && Number.isFinite(Number(value));
+  const battery = plan.battery;
+  const hasBattery = known(battery?.remaining_energy_wh) && known(battery?.soc_percent) && known(battery?.usable_capacity_wh);
+  add('Battery remaining', hasBattery ? planKwh(battery.remaining_energy_wh) : '—', 'battery_5_bar',
+    hasBattery ? `${Math.round(battery.soc_percent)} % SoC · ${planKwh(battery.usable_capacity_wh)} usable` : 'Not available');
+  add('Target SoC', next && known(next.target_soc_percent) ? `${Math.round(next.target_soc_percent)} %` : '—', 'battery_charging_full');
+  add('Charge power', next && known(next.max_power_w) ? formatPower(next.max_power_w) : '—', 'bolt');
+  add('Total plan grid energy', known(plan.energy?.grid_charge_energy_wh) ? planKwh(plan.energy.grid_charge_energy_wh) : '—', 'electric_meter');
+  card.append(summary);
   if (plan.forecast_basis === 'bootstrap_baseline') {
     card.append(element('p', 'small text-secondary mt-3 mb-0', 'Preliminary plan using a conservative household baseline while consumption history is collected.'));
   } else if (plan.forecast_confidence === 'low') {
