@@ -52,10 +52,27 @@
     'battery-commissioning-date': (f) => (f.commissioning ? dayText(f.commissioning.commissioned_at) : 'Unknown'),
   };
 
+  // value is a string (one line) or an array of { label, text, title } rows, one per inverter.
   function setTile(id, value, detail) {
     const valueNode = node(`${id}-value`);
     const detailNode = node(`${id}-detail`);
-    if (valueNode) valueNode.textContent = value;
+    if (valueNode && Array.isArray(value)) {
+      valueNode.replaceChildren(...value.map((row) => {
+        const line = document.createElement('span');
+        line.className = 'battery-tile-row';
+        line.title = row.title;
+        const label = document.createElement('span');
+        label.className = 'battery-tile-label';
+        label.textContent = `${row.label}:`;
+        const text = document.createElement('span');
+        text.className = 'battery-tile-text';
+        text.textContent = row.text;
+        line.append(label, ' ', text);
+        return line;
+      }));
+    } else if (valueNode) {
+      valueNode.textContent = value;
+    }
     if (detailNode) detailNode.textContent = detail;
   }
 
@@ -63,18 +80,22 @@
     for (const id of TILES) {
       if (!visible(id)) continue;
       if (!entries.length) { setTile(id, NO_DATA, 'No inverter available'); continue; }
-      const lines = entries.map(({ name, f }) => {
+      const lines = entries.map(({ name, label, f }) => {
         // The commissioning date needs a known serial but no measurement; every other tile needs one.
         if (id === 'battery-commissioning-date') {
-          if (!f.serial) return { name, text: f.empty, note: '' };
-          return { name, text: TILE_TEXT[id](f), note: f.commissioning?.source === 'logger_derived' ? 'derived, unverified' : '' };
+          if (!f.serial) return { name, label, text: f.empty, note: '' };
+          return { name, label, text: TILE_TEXT[id](f), note: f.commissioning?.source === 'logger_derived' ? 'derived, unverified' : '' };
         }
-        return f.empty ? { name, text: f.empty, note: '' } : { name, text: TILE_TEXT[id](f), note: '' };
+        return f.empty ? { name, label, text: f.empty, note: '' } : { name, label, text: TILE_TEXT[id](f), note: '' };
       });
-      const single = lines.length === 1;
+      if (lines.length === 1) {
+        setTile(id, lines[0].text, lines[0].note || entries[0].name);
+        continue;
+      }
+      // One row per inverter: short display name, the full serial in the tooltip.
       setTile(id,
-        single ? lines[0].text : lines.map((line) => `${line.name}: ${line.text}`).join(' · '),
-        single ? (lines[0].note || entries[0].name) : lines.map((l) => l.note).filter(Boolean).join(' · '));
+        lines.map((line) => ({ label: line.label, text: line.text, title: line.name === line.label ? line.name : `${line.label} (${line.name})` })),
+        lines.map((l) => l.note).filter(Boolean).join(' · '));
     }
   }
 
@@ -153,7 +174,10 @@
     for (const device of list) {
       const view = await window.RCTAdmin.api(
         `energy/devices/${encodeURIComponent(device.device_id)}/battery-calibration-history`, { signal });
-      entries.push({ view, f: facts(view), name: view.inverter_serial || device.device_name || device.device_id });
+      const name = view.inverter_serial || device.device_name || device.device_id;
+      // device_name falls back to the device id when no display name is set; the serial reads better then.
+      const named = device.device_name && device.device_name !== device.device_id ? device.device_name : '';
+      entries.push({ view, f: facts(view), name, label: named || name });
     }
     return entries;
   }

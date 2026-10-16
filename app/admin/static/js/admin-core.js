@@ -147,6 +147,9 @@ function initDisclaimerGate(state) {
   if (!modalElement || !accept) return;
   const modal = window.bootstrap.Modal.getOrCreateInstance(modalElement);
   const errorBox = $('disclaimer-error');
+  // Blur and dim the dashboard behind the gate (same treatment as the connection-lost modal), so
+  // it reads as a true overlay the page cannot be used past until acceptance succeeds.
+  document.body.classList.add('is-disclaimer-pending');
   accept.addEventListener('click', async () => {
     accept.disabled = true; // block a double-click issuing two POSTs
     if (errorBox) errorBox.hidden = true;

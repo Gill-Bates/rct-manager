@@ -36,6 +36,16 @@ function trackProblems(pg, sink) {
 // A deliberate HTTP error shows up twice: as the response and as the browser's console line.
 const expectedStatus = (url, ...statuses) => (p) => statuses.some((st) =>
   (p.startsWith(`http ${st}: `) || (p.startsWith('console ') && p.includes(`status of ${st}`))) && p.includes(url));
+// The one-time usage notice locks every admin API until accepted; it cannot be dismissed.
+async function acceptDisclaimer(pg) {
+  const modal = pg.locator('#disclaimer-modal.show');
+  await modal.waitFor({ timeout: 10000 });
+  await pg.keyboard.press('Escape');
+  const heldOpen = await modal.isVisible();
+  await Promise.all([pg.waitForNavigation(), pg.click('#disclaimer-accept')]);
+  await pg.locator('#disclaimer-modal.show').waitFor({ state: 'detached', timeout: 10000 }).catch(() => { });
+  return heldOpen;
+}
 const waitForPort = async (port) => {
   for (let i = 0; i < 50; i++) {
     const up = await new Promise((resolve) => { const c = net.connect(port, '127.0.0.1', () => { c.destroy(); resolve(true); }); c.on('error', () => resolve(false)); });
@@ -135,6 +145,7 @@ try {
   await page.click('#change-password-form button[type=submit]');
   await page.waitForURL('**/ui/dashboard');
   check('password change lands on dashboard', true);
+  check('the usage notice cannot be dismissed with Escape and is accepted once', await acceptDisclaimer(page));
 
   // 2. dashboard with cached values only
   await page.waitForFunction(() => document.querySelector('.device-item .status-badge-success, .device-item .status-dot.online'), null, { timeout: 20000 }).catch(() => { });
@@ -1922,6 +1933,7 @@ try {
       await ep.fill('#confirm-password', NEW_PASSWORD);
       await ep.click('#change-password-form button[type=submit]');
       await ep.waitForURL('**/ui/dashboard');
+      await acceptDisclaimer(ep);
 
       // Measured values for the panel's own readings-derived text (e.g. the battery state sentence);
       // the simulator's own readings are not part of this contract.

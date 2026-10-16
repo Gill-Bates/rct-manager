@@ -22,14 +22,24 @@ function harness(views, { devices, visibleIds } = {}) {
   const paths = [];
   const state = { hidden: new Set() };
   const hiddenFor = (id) => (visibleIds ? !visibleIds.includes(id) : state.hidden.has(id));
+  // A minimal DOM node: textContent resets the children, container text is the concatenated child text.
+  const fakeNode = () => ({
+    children: null, own: '', title: '', className: '', hidden: true,
+    setAttribute(k, v) { this[k] = v; },
+    append(...nodes) { this.children = [...(this.children || []), ...nodes]; },
+    replaceChildren(...nodes) { this.children = nodes; },
+    get textContent() { return this.children ? this.children.map((c) => (typeof c === 'string' ? c : c.textContent)).join('') : this.own; },
+    set textContent(value) { this.children = null; this.own = value; },
+  });
   const element = (id) => {
-    if (!elements.has(id)) elements.set(id, { textContent: '', hidden: true, setAttribute(k, v) { this[k] = v; } });
+    if (!elements.has(id)) elements.set(id, fakeNode());
     return elements.get(id);
   };
   const document = {
     body: { dataset: { page: 'dashboard' } },
     documentElement: {},
     getElementById: element,
+    createElement: fakeNode,
     querySelector: (selector) => {
       const id = /data-widget-id="([\w-]+)"/.exec(selector)[1];
       return { classList: { contains: () => hiddenFor(id) } };
@@ -112,13 +122,35 @@ test('without a commissioning date the chart starts at the first measurement and
   assert.equal(h.element('battery-commissioning-date-value').textContent, 'Unknown');
 });
 
-test('each inverter is its own series and tile entry, keyed by serial', async () => {
+// One tile row per inverter: [full-name tooltip, label, figure].
+const rowsOf = (valueNode) => Array.from(valueNode.children, (row) => [row.title, row.children[0].textContent, row.children[2].textContent]);
+
+test('each inverter is its own series, and its own tile row labelled with the display name', async () => {
   const other = { ...VIEW_A, inverter_serial: 'SN-B', points: [point('2026-10-01T12:00:00Z', 50, 9800, 94.52)] };
-  const h = harness({ a: VIEW_A, b: other });
+  const devices = [{ device_id: 'a', device_name: 'WR Haus' }, { device_id: 'b', device_name: 'b' }];
+  const h = harness({ a: VIEW_A, b: other }, { devices });
   h.api.sync();
   await h.pump();
   assert.deepEqual(Array.from(h.configs[0].data.datasets, (d) => d.label), ['SN-A', 'SN-B']);
-  assert.match(h.element('battery-cycles-value').textContent, /SN-A: 128 · SN-B: 50/);
+  // The display name is the short label (serial in the tooltip); without one the serial is the label.
+  assert.deepEqual(rowsOf(h.element('battery-cycles-value')), [
+    ['WR Haus (SN-A)', 'WR Haus:', '128'],
+    ['SN-B', 'SN-B:', '50'],
+  ]);
+  assert.equal(h.element('battery-cycles-value').children.length, 2, 'never one joined line');
+});
+
+test('a single inverter and every empty state stay plain one-line text', async () => {
+  const h = harness({ a: VIEW_A }, { devices: [{ device_id: 'a', device_name: 'WR Haus' }] });
+  h.api.sync();
+  await h.pump();
+  assert.equal(h.element('battery-cycles-value').children, null);
+  assert.equal(h.element('battery-cycles-value').textContent, '128');
+
+  const two = harness({ a: { ...VIEW_A, points: [] }, b: { inverter_serial: null, points: [] } });
+  two.api.sync();
+  await two.pump();
+  assert.deepEqual(rowsOf(two.element('battery-usable-kwh-value')).map((r) => r[2]), ['No data yet', 'Serial unknown']);
 });
 
 test('empty states: no inverter, unknown serial, and no recorded calibration', async () => {

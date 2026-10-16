@@ -457,6 +457,28 @@ body {
     white-space: nowrap;
 }
 
+/* Battery health tiles with several inverters: one row per inverter. The name shrinks with an
+   ellipsis (the title holds the serial), the figure never clips. */
+.kpi-card strong .battery-tile-row {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: .5rem;
+    font-size: clamp(.9rem, 3.4vw, 1.05rem);
+    line-height: 1.35;
+}
+
+.kpi-card strong .battery-tile-label {
+    min-width: 0;
+    overflow: hidden;
+    font-weight: 400;
+    text-overflow: ellipsis;
+}
+
+.kpi-card strong .battery-tile-text {
+    flex: none;
+}
+
 /* A text status ("Not configured") may wrap between words, unlike a number with its unit. */
 .kpi-card #tsdb-status-label {
     white-space: normal;
@@ -2579,6 +2601,20 @@ body.is-reconnecting .sidebar {
 }
 
 body.is-reconnecting .modal-backdrop.show {
+    background-color: rgb(15 23 42 / 60%);
+}
+
+/* Mandatory usage disclaimer: the dashboard behind the modal is blurred and dimmed (same treatment
+   as the connection-lost modal) so the gate reads as a true overlay the page cannot be used past. */
+body.is-disclaimer-pending .main-content,
+body.is-disclaimer-pending .sidebar {
+    opacity: .35;
+    filter: blur(8px) saturate(.8);
+    pointer-events: none;
+    transition: opacity .2s ease, filter .2s ease;
+}
+
+body.is-disclaimer-pending .modal-backdrop.show {
     background-color: rgb(15 23 42 / 60%);
 }
 
