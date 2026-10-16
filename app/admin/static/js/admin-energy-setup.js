@@ -1386,30 +1386,38 @@ function drawBatteryCalibrationChart() {
     type: 'line',
     data: {
       datasets: [
-        { label: 'Usable capacity (kWh)', data: rows.map((row, index) => ({ x: times[index], y: row.wh / 1000 })),
-          borderColor: power, backgroundColor: power, pointRadius: 4, tension: 0 },
-        { label: 'Datasheet capacity (100%)',
+        {
+          label: 'Usable capacity (kWh)', data: rows.map((row, index) => ({ x: times[index], y: row.wh / 1000 })),
+          borderColor: power, backgroundColor: power, pointRadius: 4, tension: 0
+        },
+        {
+          label: 'Datasheet capacity (100%)',
           data: [{ x: times[0], y: rows[0].rated / 1000 }, { x: times[times.length - 1], y: rows[rows.length - 1].rated / 1000 }],
-          borderColor: label, backgroundColor: label, borderDash: [5, 4], pointRadius: 0, tension: 0 },
+          borderColor: label, backgroundColor: label, borderDash: [5, 4], pointRadius: 0, tension: 0
+        },
       ],
     },
     options: {
       responsive: true, maintainAspectRatio: false, animation: false,
       plugins: {
         legend: { labels: { color: label } },
-        tooltip: { callbacks: {
-          title: (items) => (items[0] ? dateText(items[0].parsed?.x ?? times[items[0].dataIndex]) : ''),
-          afterBody: (items) => {
-            if (items[0]?.datasetIndex === 1) return [];
-            const row = rows[items[0]?.dataIndex];
-            return row ? [`Cycles: ${row.cycles ?? 'n/a'}`, `Remaining: ${row.percent} %`] : [];
-          },
-        } },
+        tooltip: {
+          callbacks: {
+            title: (items) => (items[0] ? dateText(items[0].parsed?.x ?? times[items[0].dataIndex]) : ''),
+            afterBody: (items) => {
+              if (items[0]?.datasetIndex === 1) return [];
+              const row = rows[items[0]?.dataIndex];
+              return row ? [`Cycles: ${row.cycles ?? 'n/a'}`, `Remaining: ${row.percent} %`] : [];
+            },
+          }
+        },
       },
       scales: {
         x: { type: 'linear', ticks: { color: label, callback: dateText, maxTicksLimit: 8 }, grid: { color: grid } },
-        y: { beginAtZero: true, title: { display: true, text: 'kWh', color: label },
-          ticks: { color: label }, grid: { color: grid } },
+        y: {
+          beginAtZero: true, title: { display: true, text: 'kWh', color: label },
+          ticks: { color: label }, grid: { color: grid }
+        },
       },
     },
   });
@@ -1494,9 +1502,9 @@ function renderBatteryCalibrationHistory(history) {
     const tr = element('tr');
     const when = new Date(row.at);
     const values = [row.baseline ? `${when.toLocaleDateString()} (commissioning)` : when.toLocaleString(),
-      row.cycles ?? 'n/a',
-      (row.wh / 1000).toLocaleString(undefined, { maximumFractionDigits: 2 }),
-      row.percent.toLocaleString(undefined, { maximumFractionDigits: 2 })];
+    row.cycles ?? 'n/a',
+    (row.wh / 1000).toLocaleString(undefined, { maximumFractionDigits: 2 }),
+    row.percent.toLocaleString(undefined, { maximumFractionDigits: 2 })];
     for (const value of values) tr.append(element('td', '', String(value)));
     body.append(tr);
   }
@@ -1756,7 +1764,7 @@ async function loadDryRunPlan({ poll = false } = {}) {
     return;
   }
   const generation = ++planGeneration; // a slower earlier response must not overwrite a newer one
-  if (energyExpertMode) void loadBatteryCalibrationHistory(select.value);
+  if (typeof energyExpertMode !== 'undefined' && energyExpertMode) void loadBatteryCalibrationHistory(select.value);
   if (!poll) {
     void loadConsumptionHistory(select.value);
     host.replaceChildren(planWaitState());

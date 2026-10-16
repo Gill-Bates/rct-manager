@@ -275,7 +275,7 @@ class AdminStore:
             "rated_usable_capacity_wh, current_usable_capacity_wh, module_counts, source_contract"
         )
         db.executescript(
-            "BEGIN IMMEDIATE;"
+            "BEGIN IMMEDIATE;"  # noqa: S608 - identifiers are module constants
             "ALTER TABLE battery_calibration_history RENAME TO battery_calibration_history_legacy;"
             f"{_BATTERY_CALIBRATION_SQL}"
             f"INSERT INTO battery_calibration_history ({columns}) SELECT {columns} "

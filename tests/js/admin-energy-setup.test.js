@@ -107,6 +107,7 @@ function harness({ apiImpl } = {}) {
     messageFrom: (e) => e.message,
     NOT_AVAILABLE: 'n/a',
     ENERGY_ACTION_LABELS: {},
+    energyExpertMode: false, // lives in admin-energy-controls.js, which this harness does not load
     // Iterated as [value, text] pairs when the policy <select> is built.
     ENERGY_POLICY_MODES: [['target', 'Target'], ['below', 'Below current SoC']],
     missingRequiredWrites: () => [],
@@ -186,8 +187,11 @@ test('BMS calibration history starts at the commissioning baseline and shows dat
     assert.match(text(), /SN-A/);
     assert.match(text(), /not verified on hardware/);
     const [measured, datasheet] = charts[0].data.datasets;
-    assert.deepEqual(Array.from(measured.data, (p) => [p.x, p.y]),
-      [[Date.parse('2021-05-01T00:00:00Z'), 10.368], [Date.parse('2026-10-16T12:00:00+00:00'), 8.53835]]);
+    // Wh / 1000 carries binary float noise; compare the kWh values with a tolerance.
+    const measuredPoints = Array.from(measured.data, (p) => [p.x, p.y]);
+    assert.deepEqual(measuredPoints.map(([x]) => x), [Date.parse('2021-05-01T00:00:00Z'), Date.parse('2026-10-16T12:00:00+00:00')]);
+    assert.ok(Math.abs(measuredPoints[0][1] - 10.368) < 1e-9);
+    assert.ok(Math.abs(measuredPoints[1][1] - 8.53835) < 1e-9);
     assert.equal(datasheet.data[0].y, 10.368);
     assert.equal(charts[0].options.scales.x.type, 'linear');
     const callbacks = charts[0].options.plugins.tooltip.callbacks;

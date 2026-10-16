@@ -1846,7 +1846,7 @@ async def test_without_a_usable_balance_the_operator_is_asked_and_a_contradictio
 
 
 
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 

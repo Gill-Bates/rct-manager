@@ -448,6 +448,16 @@ After a battery replacement a derived date is not used for the new series; enter
 
 All three need an admin session (read-only for `GET`; `PUT` and `DELETE` need the CSRF header).
 
+Recording does not depend on the Energy Manager: the background Ah read, the calibration history and the
+commissioning-date derivation run whenever the gateway polls the device, also with write support off. A
+calibration is only recorded once the inverter serial is known (never under the device id).
+
+The dashboard offers the data as selectable widgets (off by default, added through **Edit Widgets**): the
+tiles *Usable capacity*, *Capacity vs datasheet*, *Battery cycles*, *Last calibration* and *Commissioned*, and the
+*Battery degradation* chart (remaining capacity in % over time, one curve per inverter serial, starting at the
+commissioning date when it is known). Without data they show "Serial unknown", "No data yet" or "No inverter
+available". A commissioning date derived from the logs is labelled "derived, unverified".
+
 ## How it works
 
 Three independent things decide whether a battery command is possible:

@@ -362,6 +362,11 @@ body {
     --bs-btn-color: var(--bs-secondary-color);
 }
 
+/* Bootstrap's #6c757d label is 4.44:1 on the light page background (axe color-contrast). */
+[data-bs-theme="light"] .btn-outline-secondary {
+    --bs-btn-color: var(--bs-secondary-color);
+}
+
 /* Bootstrap's link blue is 4.27:1 on the light tab bar; its own hover blue clears 4.5:1. Only the
    idle tab colour changes: hover, active and focus keep Bootstrap's values. */
 [data-bs-theme="light"] .energy-tabs {
@@ -494,12 +499,12 @@ body {
 
 /* One header row at any width: the title shrinks and wraps its text (h3 has overflow-wrap) so the
    badge and the delete button never drop to a second row on narrow cards. */
-.device-head-main > h3 {
+.device-head-main>h3 {
     flex: 1 1 auto;
     min-width: 0;
 }
 
-.device-head-main > .status-badge {
+.device-head-main>.status-badge {
     flex-shrink: 0;
 }
 
@@ -1683,6 +1688,7 @@ body {
 #energy-plan-result:has(> .plan-loading) {
     width: 100%;
 }
+
 .col-xl-7:has(> #energy-plan-result > .plan-loading) {
     flex: 0 0 auto;
     width: 100%;
@@ -1741,7 +1747,7 @@ body {
     font-size: .85rem;
 }
 
-.spot-market-preview > .spot-market-preview-context:first-child {
+.spot-market-preview>.spot-market-preview-context:first-child {
     margin-top: 0;
 }
 

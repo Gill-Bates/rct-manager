@@ -1,0 +1,21 @@
+import fs from 'node:fs';
+import { engine, freePort, NEW_PASSWORD, sleep, spawnPy } from './harness.mjs';
+const httpPort = await freePort(); const devicePort = await freePort();
+const base = `http://127.0.0.1:${httpPort}`;
+const stamp = Date.now();
+const serverLog = `/tmp/probe-server-${stamp}.log`;
+const fake = spawnPy(['tests.e2e.fake_inverter', String(devicePort)], `/tmp/probe-fake-${stamp}.log`);
+const server = spawnPy(['tests.e2e.run_server', `/tmp/probe-${stamp}.db`, String(httpPort), String(devicePort), 'planning'], serverLog);
+for (let i = 0; i < 100; i++) { try { if ((await fetch(`${base}/health`)).ok) break; } catch { /* */ } await sleep(200); }
+await sleep(500);
+const banner = fs.readFileSync(serverLog, 'utf8');
+const pwd = /One-time password:\s+(\S+)/.exec(banner)[1];
+const b = await engine.launch(); const ctx = await b.newContext(); const p = await ctx.newPage();
+await p.goto(base + '/login'); await p.fill('#password', pwd); await p.click('#login-form button[type=submit]');
+await p.waitForURL('**/change-password'); await p.fill('#current-password', pwd); await p.fill('#new-password', NEW_PASSWORD); await p.fill('#confirm-password', NEW_PASSWORD);
+await p.click('#change-password-form button[type=submit]'); await p.waitForURL('**/ui/dashboard');
+const r = await p.evaluate(async () => { const res = await fetch('/admin/api/energy/devices/sim/dynamic-plan'); return { status: res.status, body: await res.text() }; });
+console.log('PLAN', JSON.stringify(r).slice(0, 700));
+const hs = await p.evaluate(async () => { const res = await fetch('/admin/api/energy/hardware-strategies'); return { status: res.status, body: await res.text() }; });
+console.log('HWSTRAT', JSON.stringify(hs).slice(0, 400));
+await b.close(); for (const pr of [server.proc, fake.proc]) pr.kill('SIGTERM'); process.exit(0);
