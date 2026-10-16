@@ -1675,6 +1675,14 @@ def test_energy_page_wires_the_read_only_dry_run_plan_preview():
     plan_pane = html[html.index('id="energy-pane-plan"'):html.index('id="energy-pane-spot-market"')]
     assert 'id="energy-plan-card"' in plan_pane
     assert "method:" not in js[js.index("async function loadDryRunPlan"):js.index("function initDryRunPlan")]
+    # Full-width result area: no permanent 7/5 split, the optional consumption history sits below.
+    assert "col-xl-7" not in plan_pane and "col-xl-5" not in plan_pane
+    assert plan_pane.index('id="energy-plan-result"') < plan_pane.index('id="energy-plan-schedule"') < plan_pane.index('id="energy-consumption-section"')
+    assert 'id="energy-consumption-section"' in plan_pane and "hidden>" in plan_pane[plan_pane.index('id="energy-consumption-section"'):][:200]
+    # Plan-specific KPI grid; the shared two-column Spot Market grid and its tiles stay untouched.
+    css = (ADMIN_DIR / "static/css/admin.css").read_text(encoding="utf-8")
+    assert "energy-plan-highlights" in js and "spot-market-highlights-row" not in js + css
+    assert "repeat(4, minmax(0, 1fr))" in css[css.index(".energy-plan-highlights {"):]
 
 
 _PLAN_RENDER_DRIVER = r"""

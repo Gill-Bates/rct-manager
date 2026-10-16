@@ -634,12 +634,21 @@ async def test_p2_8_dynamic_plan_resolves_capacity_per_device_from_stored_limits
             resolved[self._device_id] = state.usable_capacity_wh
             return state
 
+        bodies: dict[str, dict] = {}
         with patch.object(EnergyReadingsBatteryStateProvider, "current", recording_current):
             for device_id in ("main", "slave1"):
                 resp = await harness.client.get(
                     f"/admin/api/energy/devices/{device_id}/dynamic-plan", headers=headers
                 )
                 assert resp.status_code == 200, resp.text
+                bodies[device_id] = resp.json()
+
+        # The response carries the very snapshot the planner used: usable capacity x SoC / 100.
+        for device_id, capacity in (("main", 8_000.0), ("slave1", 20_000.0)):
+            battery = bodies[device_id]["battery"]
+            assert battery["usable_capacity_wh"] == capacity
+            assert battery["soc_percent"] == 50.0
+            assert battery["remaining_energy_wh"] == capacity * 50.0 / 100.0
 
         # The capacity each device resolved to came from its own stored DeviceLimits, so the two
         # battery states convert the SAME 50 % SoC into DIFFERENT Wh (4000 vs 10000).

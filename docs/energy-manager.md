@@ -263,10 +263,10 @@ again. Re-addressing a device in a live reload re-reads it too and discards the 
 trusted tower topology.
 
 The **Charging plan** tab shows the battery-capacity source and the read-only preview
-in Basic mode. Beside the plan, a bar chart shows the household consumption of the last 60 completed
+in Basic mode. Below the schedule, a bar chart shows the household consumption of the last 60 completed
 local days (`GET /admin/api/energy/devices/{device_id}/consumption-history`, local store only, no
 device I/O): green for a locally measured day, blue for an inverter day total, a gap for an
-unknown day, and the daily average over the known days. While no day has data, the whole consumption section (heading included) stays hidden. The "Next grid charge" card shows Target SoC, Charge power and the total plan grid energy as hero metrics in the Spot Market style. Below, at full width, the schedule is drawn as a
+unknown day, and the daily average over the known days. While no day has data, the whole consumption section (heading included) stays hidden. The result area uses the full card width: the header carries title, preview note, Inverter select and Expert switch; a row of four equal KPI tiles shows Battery remaining (usable energy now: `33 % SoC · 10.37 kWh usable`, or `—` without a battery snapshot), Target SoC, Charge power and the total plan grid energy (four columns on desktop, 2 x 2 on tablets, stacked on phones); the schedule follows at full width, and the household consumption history sits below it without reserving space while hidden. The schedule is drawn as a
 time-series chart (it replaces the former slot table): grid charge power (kW, idle slots at 0) and the target SoC
 (%, second axis) on a real time axis, so slots of uneven length keep their length. The tooltip names the
 slot's time range, action, power, target SoC and plain-language reason; the canvas carries a text summary
@@ -410,7 +410,13 @@ statuses mean a configured input has no usable data yet. Missing or sparse consu
 selects a clearly marked low-confidence fallback. The response carries the plan
 status, `created_at`, `valid_until`, forecast basis and confidence, the horizon, the
 slots (action, target SoC, power, reason), the underlying forecast time ranges and a
-note that the plan is preview-only.
+note that the plan is preview-only. The `battery` block is the very `BatteryState` snapshot the
+plan was computed from (`soc_percent`, `usable_capacity_wh`, `remaining_energy_wh`,
+`max_charge_power_w`, `max_discharge_power_w`, `measured_at`); `remaining_energy_wh` is the
+verified usable capacity times the measured SoC divided by 100, never the nominal total
+capacity. It is `null` when no verified battery state exists (`battery_state_unavailable`); a
+remaining capacity is then never estimated, and the response triggers no extra inverter or
+provider query.
 
 ### Battery register comparison
 

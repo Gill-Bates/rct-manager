@@ -677,3 +677,39 @@ test('Off banner text appears only for a real mismatch or an unrecorded Off', ()
   assert.equal(c.energyOffView({ mode: 'manual', mode_recorded: true }, { code: 4, stale: false }).recorded, false);
   assert.equal(c.energyOffView({ mode: 'off', mode_recorded: false }, { code: 4, stale: false }).recorded, false);
 });
+
+// The KPI strip is built from the plan's own battery snapshot; no second data source.
+function planTiles(plan) {
+  const h = harness();
+  h.context.formatPower = (w) => `${w} W`; // defined in a script this harness does not load
+  const host = h.context.element('div');
+  host.id = 'energy-plan-result';
+  h.context.renderDryRunPlan({ status: 'ok', horizon_hours: 24, slots: [], energy: {}, window: {}, ...plan });
+  const nodes = flatten(host);
+  const strip = nodes.find((n) => (n.className || '').split(/\s+/).includes('energy-plan-highlights'));
+  const tiles = strip ? strip.children : [];
+  return tiles.map((tile) => Object.fromEntries(flatten(tile)
+    .filter((n) => /spot-market-highlight-(caption|value|sub)$/.test(n.className || ''))
+    .map((n) => [n.className.split('-').pop(), n.textContent])));
+}
+
+test('Charging plan shows four KPI tiles with Battery remaining first', () => {
+  const tiles = planTiles({
+    battery: { soc_percent: 33, usable_capacity_wh: 10370, remaining_energy_wh: 3422.1 },
+    energy: { grid_charge_energy_wh: 4000 },
+    slots: [{ action: 'charge', start: '2026-01-01T10:00:00Z', end: '2026-01-01T10:15:00Z', max_power_w: 2000, target_soc_percent: 80 }],
+  });
+  assert.equal(tiles.length, 4);
+  assert.deepEqual(tiles.map((t) => t.caption), ['Battery remaining', 'Target SoC', 'Charge power', 'Total plan grid energy']);
+  assert.match(tiles[0].value, /^3[.,]42 kWh$/);
+  assert.match(tiles[0].sub, /^33 % SoC · 10[.,]37 kWh usable$/);
+});
+
+test('Battery remaining shows a dash, never NaN or undefined, without a snapshot', () => {
+  for (const battery of [undefined, null, { soc_percent: null }]) {
+    const tiles = planTiles({ battery });
+    assert.equal(tiles.length, 4, 'the strip keeps its structure');
+    assert.equal(tiles[0].value, '—');
+    assert.ok(tiles.every((t) => !/NaN|undefined|null/.test(`${t.value} ${t.sub || ''}`)));
+  }
+});

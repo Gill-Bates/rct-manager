@@ -67,8 +67,8 @@ async function stop(server) {
   await new Promise((resolve, reject) => {
     const timeout = setTimeout(() => {
       proc.kill('SIGKILL');
-      reject(new Error(`server process ${proc.pid} did not stop within 5 seconds`));
-    }, 5000);
+      reject(new Error(`server process ${proc.pid} did not stop within 15 seconds`));
+    }, 15000); // uvicorn waits up to timeout_graceful_shutdown=5 s for the open SSE stream first
     proc.once('exit', () => { clearTimeout(timeout); resolve(); });
     proc.kill('SIGTERM');
   });
@@ -2493,6 +2493,7 @@ try {
         const plan = {
           device_id: 'sim', status: 'ok', detail: null, created_at: '2026-10-16T11:00:00+00:00', valid_until: '2026-10-17T14:00:00+00:00',
           horizon_hours: 26, preview_only: true, window: {}, forecast_basis: 'stored history', forecast_confidence: 'high',
+          battery: { soc_percent: 33, usable_capacity_wh: 10370, remaining_energy_wh: 3422.1, max_charge_power_w: 3000, max_discharge_power_w: 3000, measured_at: '2026-10-16T11:59:00+00:00' },
           slots: [
             slot('2026-10-16T12:00:00+00:00', '2026-10-16T15:15:00+00:00', 'idle', null, null, 'forecast PV covers demand'),
             slot('2026-10-16T15:15:00+00:00', '2026-10-16T17:15:00+00:00', 'charge', 3000, 62, 'forecast deficit, charged as late as permitted'),
@@ -2563,9 +2564,25 @@ try {
         check('plan schedule is the chart only: no table or details, charge slots listed for screen readers',
           (await ep.locator('#energy-plan-schedule table, #energy-plan-schedule details').count()) === 0
           && (await ep.locator('#energy-plan-schedule ul.visually-hidden li').count()) === 2);
-        const hero = await ep.locator('#energy-plan-result .spot-market-highlights .spot-market-highlight-caption').allInnerTexts();
-        check('next grid charge shows Target SoC, Charge power and Total plan grid energy as hero metrics',
-          hero.map((t) => t.toLowerCase()).join('|') === 'target soc|charge power|total plan grid energy' || (hero.length === 2 && /target soc/i.test(hero[0])), hero.join('|'));
+        const hero = await ep.locator('#energy-plan-result .energy-plan-highlights .spot-market-highlight-caption').allInnerTexts();
+        check('plan summary shows four KPI tiles with Battery remaining first',
+          hero.map((t) => t.toLowerCase()).join('|') === 'battery remaining|target soc|charge power|total plan grid energy', hero.join('|'));
+        const batteryTile = await ep.locator('#energy-plan-result .energy-plan-highlights .spot-market-highlight').first().innerText();
+        check('Battery remaining shows kWh, SoC and usable capacity from the plan snapshot',
+          /3[.,]42 kWh/.test(batteryTile) && /33 % SoC · 10[.,]37 kWh usable/.test(batteryTile), batteryTile);
+        const columnsAt = async (width) => {
+          await ep.setViewportSize({ width, height: 844 });
+          return ep.evaluate(() => new Set([...document.querySelectorAll('.energy-plan-highlights .spot-market-highlight')].map((t) => Math.round(t.getBoundingClientRect().left))).size);
+        };
+        check('KPI tiles: 4 columns on desktop, 2 on tablet, stacked on mobile',
+          (await columnsAt(1280)) === 4 && (await columnsAt(800)) === 2 && (await columnsAt(390)) === 1);
+        await ep.setViewportSize({ width: 1280, height: 844 });
+        const widths = await ep.evaluate(() => {
+          const w = (id) => Math.round(document.getElementById(id).getBoundingClientRect().width);
+          return { result: w('energy-plan-result'), schedule: w('energy-plan-schedule'), consumption: w('energy-consumption-section') };
+        });
+        check('summary, schedule and consumption history use the full card width',
+          widths.result === widths.schedule && widths.schedule === widths.consumption, JSON.stringify(widths));
         await Promise.all([ep.waitForResponse((r) => r.url().includes('/dynamic-plan')), ep.locator('#energy-plan-device').dispatchEvent('change')]);
         check('plan chart: exactly one Chart instance after reload', (await chartsIn('#energy-plan-schedule')) === 1);
         await ep.locator('#energy-plan-schedule canvas').scrollIntoViewIfNeeded();
