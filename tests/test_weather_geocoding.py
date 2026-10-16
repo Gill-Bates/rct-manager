@@ -620,19 +620,32 @@ def test_timezone_derivation_network_failure_is_a_weather_connection_error(monke
         TimezoneResolver().resolve(51.18, 7.19)
 
 
-def test_identical_coordinates_are_served_from_the_timezone_cache(monkeypatch):
+def _counting_open(monkeypatch, zones):
     calls = {"n": 0}
 
     def counting_open(request, timeout=None):
         calls["n"] += 1
-        return _FakeResponse(json.dumps({"timezone": "Europe/Berlin"}).encode())
+        return _FakeResponse(json.dumps({"timezone": zones[min(calls["n"], len(zones)) - 1]}).encode())
 
     monkeypatch.setattr(http_json._OPENER, "open", counting_open)
+    return calls
+
+
+def test_identical_coordinates_are_served_from_the_timezone_cache(monkeypatch):
+    calls = _counting_open(monkeypatch, ["Europe/Berlin"])
     resolver = TimezoneResolver()
     assert resolver.resolve(51.18, 7.19) == "Europe/Berlin"
-    # A sub-kilometre variant rounds to the same cache key, so it is served without a second call.
-    assert resolver.resolve(51.1803, 7.1897) == "Europe/Berlin"
+    assert resolver.resolve(51.18, 7.19) == "Europe/Berlin"
     assert calls["n"] == 1
+
+
+def test_nearby_coordinates_do_not_share_a_timezone_cache_entry(monkeypatch):
+    # A zone boundary can lie between two points a few hundred metres apart; the key is exact.
+    calls = _counting_open(monkeypatch, ["Europe/Berlin", "Europe/Amsterdam"])
+    resolver = TimezoneResolver()
+    assert resolver.resolve(51.1803, 7.1897) == "Europe/Berlin"
+    assert resolver.resolve(51.1804, 7.1897) == "Europe/Amsterdam"
+    assert calls["n"] == 2
 
 
 # Live Photon shapes (photon.komoot.io, lang=en), trimmed to the properties the mapper reads.
@@ -666,8 +679,30 @@ def test_a_postcode_area_carries_its_code_in_name_and_titles_with_the_city(
 def test_a_postcode_area_without_a_city_titles_with_its_district(monkeypatch):
     feature = _live("428997", "place", "postcode", district="Bedok", country="Singapore", countrycode="SG")
     _patch_opener(monkeypatch, payload=_photon(feature))
-    hit = PhotonGeocoder().search("42899")[0]
+    hit = PhotonGeocoder().search("428997")[0]
     assert (hit.name, hit.city, hit.postal_code) == ("Bedok", None, "428997")
+
+
+def test_a_postcode_area_in_a_name_search_never_supplies_a_postal_code(monkeypatch):
+    # The area's code is only adopted when the query matched it exactly; the title falls back to
+    # the place it belongs to (or the raw code when nothing else names it).
+    payload = _photon(
+        _live("42899", "place", "postcode", type="other", city="Remscheid", countrycode="DE"),
+        _live("428997", "place", "postcode", district="Bedok", countrycode="SG"),
+        _live("99999", "place", "postcode", countrycode="DE"),
+    )
+    _patch_opener(monkeypatch, payload=payload)
+    remscheid, bedok, bare = PhotonGeocoder().search("Remscheid")
+    assert (remscheid.name, remscheid.postal_code) == ("Remscheid", None)
+    assert (bedok.name, bedok.postal_code) == ("Bedok", None)
+    assert (bare.name, bare.postal_code) == ("99999", None)
+
+
+def test_a_postcode_area_is_matched_case_insensitively_and_exactly(monkeypatch):
+    _patch_opener(monkeypatch, payload=_photon(
+        _live("SW1A 1AA", "place", "postcode", city="London", countrycode="GB")))
+    assert PhotonGeocoder().search("sw1a 1aa")[0].postal_code == "SW1A 1AA"
+    assert PhotonGeocoder().search("SW1A")[0].postal_code is None
 
 
 def test_a_settlement_is_its_own_city_and_claims_no_postal_code(monkeypatch):
@@ -703,3 +738,63 @@ def test_open_meteo_marks_only_populated_places_as_city(monkeypatch):
     town, mountain = OpenMeteoGeocoder().search("Rem")
     assert town.city == "Remscheid"
     assert mountain.city is None
+
+
+# --- Shared search preparation (both geocoders) ------------------------------
+
+
+@pytest.fixture(params=[PhotonGeocoder, OpenMeteoGeocoder])
+def geocoder_cls(request):
+    return request.param
+
+
+def test_search_trims_and_ignores_a_too_short_query_without_a_request(monkeypatch, geocoder_cls):
+    def fail(*_a, **_k):
+        raise AssertionError("a too-short query must not reach the network")
+
+    monkeypatch.setattr(http_json._OPENER, "open", fail)
+    assert geocoder_cls().search("  a  ") == []
+    assert geocoder_cls().search("") == []
+    assert geocoder_cls().search(None) == []  # type: ignore[arg-type]
+
+
+def test_search_accepts_the_minimum_and_maximum_query_length(monkeypatch, geocoder_cls):
+    capture = {}
+    _patch_opener(monkeypatch, payload={}, capture=capture)
+    geocoder_cls().search("x" * geocoding.MIN_QUERY_LENGTH)
+    geocoder_cls().search(" " + "y" * geocoding.MAX_QUERY_LENGTH + " ")
+    assert capture["calls"] == 2
+
+
+def test_search_clamps_the_result_count(monkeypatch, geocoder_cls):
+    capture = {}
+    _patch_opener(monkeypatch, payload={}, capture=capture)
+    geocoder_cls().search("Berlin", count=0)
+    assert "=1&" in capture["url"] + "&"
+    geocoder_cls().search("Berlin", count=10_000)
+    assert f"={geocoding.MAX_RESULTS}&" in capture["url"] + "&"
+
+
+def test_search_validates_the_country_code(monkeypatch, geocoder_cls):
+    capture = {}
+    _patch_opener(monkeypatch, payload={}, capture=capture)
+    geocoder = geocoder_cls()
+    geocoder.search("Berlin", country_code=None)
+    assert "ountry" not in capture["url"]
+    # A blank code means "no filter": same cache entry, so no second request.
+    geocoder.search("Berlin", country_code="  ")
+    assert capture["calls"] == 1
+    with pytest.raises(WeatherResponseError):
+        geocoder.search("Berlin", country_code="D1")
+
+
+def test_search_cache_key_ignores_query_case_and_padding(monkeypatch, geocoder_cls):
+    capture = {}
+    _patch_opener(monkeypatch, payload={}, capture=capture)
+    geocoder = geocoder_cls()
+    geocoder.search("Berlin")
+    geocoder.search("  BERLIN ")
+    assert capture["calls"] == 1
+    geocoder.search("Berlin", country_code="de")
+    geocoder.search("Berlin", count=3)
+    assert capture["calls"] == 3

@@ -476,6 +476,15 @@ def test_daily_consumption_api_validates_the_range_and_starts_no_device_io(tmp_p
             assert_problem(too_long, 422, "invalid_parameter")
             backwards = await h.client.get(f"{base}/days", params={"from": "2026-03-02", "to": "2026-03-01"}, headers=BEARER)
             assert_problem(backwards, 422, "invalid_parameter")
+            # Range boundary: the limit is (to - from) < 60 days. 2026-01-01..2026-03-01 is (to - from) == 59
+            # days, i.e. 60 inclusive calendar days -> exactly at the limit, accepted with 60 day rows.
+            at_limit = await h.client.get(f"{base}/days", params={"from": "2026-01-01", "to": "2026-03-01"}, headers=BEARER)
+            assert at_limit.status_code == 200, at_limit.text
+            assert len(at_limit.json()["days"]) == 60
+            # 2026-01-01..2026-03-02 is (to - from) == 60 days, i.e. 61 inclusive days -> one day over, rejected.
+            over_limit = await h.client.get(f"{base}/days", params={"from": "2026-01-01", "to": "2026-03-02"}, headers=BEARER)
+            over_body = assert_problem(over_limit, 422, "invalid_parameter")
+            assert over_body["errors"][0]["parameter"] == "to"
             ok = await h.client.get(f"{base}/days", params={"from": "2026-01-01", "to": "2026-01-03"}, headers=BEARER)
             assert ok.status_code == 200
             body = ok.json()

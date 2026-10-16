@@ -2555,9 +2555,8 @@ await shot('prometheus-master-toggle-on');
       const hero = await ep.locator('#energy-plan-result .spot-market-highlights .spot-market-highlight-caption').allInnerTexts();
       check('next grid charge shows Target SoC, Charge power and Total plan grid energy as hero metrics',
         hero.map((t) => t.toLowerCase()).join('|') === 'target soc|charge power|total plan grid energy' || (hero.length === 2 && /target soc/i.test(hero[0])), hero.join('|'));
-      await Promise.all([ep.waitForResponse((r) => r.url().includes('/dynamic-plan')), ep.locator('#energy-plan-load').click()]);
-      await ep.waitForFunction(() => !document.querySelector('#energy-plan-load').disabled);
-      check('plan chart: exactly one Chart instance after Refresh', (await chartsIn('#energy-plan-schedule')) === 1);
+      await Promise.all([ep.waitForResponse((r) => r.url().includes('/dynamic-plan')), ep.locator('#energy-plan-device').dispatchEvent('change')]);
+      check('plan chart: exactly one Chart instance after reload', (await chartsIn('#energy-plan-schedule')) === 1);
       await ep.locator('#energy-plan-schedule canvas').scrollIntoViewIfNeeded();
       const box = await ep.locator('#energy-plan-schedule canvas').boundingBox();
       await ep.mouse.move(box.x + box.width * 0.3, box.y + box.height * 0.5);
@@ -2574,7 +2573,7 @@ await shot('prometheus-master-toggle-on');
       await ep.clock.install();
       const spinnerShown = () => ep.locator('#energy-plan-result .spinner-border').count();
       planStatus = 'battery_state_unavailable';
-      await ep.locator('#energy-plan-load').click();
+      await ep.locator('#energy-plan-device').dispatchEvent('change');
       await ep.waitForSelector('#energy-plan-result [role="status"] .spinner-border, #energy-plan-result .spinner-border');
       const waitText = await ep.locator('#energy-plan-result [role="status"]').first().innerText();
       check('a pending plan shows only a "Please wait" spinner in Basic mode',
@@ -2593,14 +2592,14 @@ await shot('prometheus-master-toggle-on');
       await ep.clock.runFor(60_000);
       check('polling stops on a device change and once the plan is ok', planRequests === before, String(planRequests - before));
       planStatus = 'spot_disabled';
-      await ep.locator('#energy-plan-load').click();
+      await ep.locator('#energy-plan-device').dispatchEvent('change');
       await ep.waitForFunction(() => /The spot market integration is disabled/.test(document.querySelector('#energy-plan-result').textContent));
       before = planRequests;
       await ep.clock.runFor(60_000);
       check('a configuration state shows text without a spinner and is never polled',
         (await spinnerShown()) === 0 && planRequests === before);
       planStatus = 'ok';
-      await ep.locator('#energy-plan-load').click();
+      await ep.locator('#energy-plan-device').dispatchEvent('change');
       await ep.waitForSelector('#energy-plan-schedule canvas');
 
       // Household consumption: chart with badge, no stale chart while loading, empty state.
@@ -2608,7 +2607,7 @@ await shot('prometheus-master-toggle-on');
         (await chartsIn('#energy-consumption')) === 1 && /kWh\/day/.test(await ep.locator('#energy-consumption-status').innerText()));
       let releaseConsumption;
       consumptionGate = new Promise((resolve) => { releaseConsumption = resolve; });
-      await ep.locator('#energy-plan-load').click();
+      await ep.locator('#energy-plan-device').dispatchEvent('change');
       await ep.waitForFunction(() => document.querySelector('#energy-consumption-section').hidden);
       check('consumption section and chart are gone while the next history loads',
         (await chartsIn('#energy-consumption')) === 0 && (await ep.locator('#energy-consumption canvas').count()) === 0);
@@ -2617,8 +2616,8 @@ await shot('prometheus-master-toggle-on');
       await ep.waitForSelector('#energy-consumption canvas');
       check('consumption chart is drawn once after a reload', (await chartsIn('#energy-consumption')) === 1);
       consumption = { days: [], recording_since: null, inverter_import_enabled: false };
-      await ep.locator('#energy-plan-load').click();
-      await ep.waitForFunction(() => window.Chart && !document.querySelector('#energy-plan-load').disabled);
+      await ep.locator('#energy-plan-device').dispatchEvent('change');
+      await ep.waitForFunction(() => window.Chart && /No (consumption|inverter)|./.test(document.querySelector('#energy-plan-result').textContent));
       check('without consumption data the whole section is hidden: no heading, no explanation',
         (await ep.locator('#energy-consumption-section').isHidden()) && (await chartsIn('#energy-consumption')) === 0
         && !/Recording locally|Importing daily totals|No consumption/.test(await ep.locator('#energy-tab-content').innerText()));

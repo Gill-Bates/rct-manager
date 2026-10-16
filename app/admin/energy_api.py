@@ -241,6 +241,7 @@ class AdminEnergyDeviceStatus(EnergyStatusResponse):
 class HardwareStrategyView(BaseModel):
     device_id: str
     device_name: str
+    host: str
     code: int | None
     label: str | None
     stale: bool = False
@@ -271,6 +272,7 @@ async def hardware_strategies(
         result.append(HardwareStrategyView(
             device_id=device_id,
             device_name=device.display_name or runtime.gateway.reported_name(device_id) or device_id,
+            host=device.host,
             code=code,
             label=label,
             stale=stale,

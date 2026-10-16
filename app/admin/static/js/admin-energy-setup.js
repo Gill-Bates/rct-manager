@@ -787,15 +787,15 @@ async function pollEnergy() {
   } finally { clearTimeout(timer); energyPolling = false; }
 }
 
-// One line per inverter. An unconnected inverter shows n/a, never the internal device id, so the
-// summary is redrawn after every energy poll as well (the connection state can change between).
+// One line per inverter. An unconnected inverter shows its configured host, never the internal
+// device id (the inverter is known even while it does not answer), so the summary is redrawn after every energy poll as well (the connection state can change between).
 function renderHardwareSummary() {
   const rows = [...energyHardwareStrategies.values()].map((device) => {
     const row = element('div');
     const code = Number.isInteger(device.code) ? device.code : null;
     const strategy = code === null ? NOT_AVAILABLE
       : device.label ? `${device.label} (code ${code})` : `Unknown (code ${code})`;
-    const shownName = energyPanels.get(device.device_id)?.isConnected() ? device.device_name : NOT_AVAILABLE;
+    const shownName = energyPanels.get(device.device_id)?.isConnected() ? device.device_name : device.host;
     row.textContent = `${shownName} · Inverter SOC strategy: ${strategy}${device.stale ? ' · stale' : ''}`;
     return row;
   });
@@ -1525,6 +1525,7 @@ async function loadConsumptionHistory(deviceId) {
 // every new load (refresh, device change) and when the page is hidden or left.
 const PLAN_POLL_MS = 10_000;
 const PLAN_POLL_MAX = 30;
+const PLAN_REFRESH_MS = 5 * 60 * 1000;
 let planPollTimer = null;
 let planPollAttempts = 0;
 
@@ -1545,7 +1546,6 @@ function armPlanPolling() {
 
 async function loadDryRunPlan({ poll = false } = {}) {
   const select = $('energy-plan-device');
-  const button = $('energy-plan-load');
   const host = $('energy-plan-result');
   stopPlanPolling();
   if (!poll) planPollAttempts = 0;
@@ -1560,7 +1560,6 @@ async function loadDryRunPlan({ poll = false } = {}) {
   const generation = ++planGeneration; // a slower earlier response must not overwrite a newer one
   if (!poll) {
     void loadConsumptionHistory(select.value);
-    button.disabled = true;
     host.replaceChildren(planWaitState());
   }
   try {
@@ -1571,15 +1570,12 @@ async function loadDryRunPlan({ poll = false } = {}) {
     if (PLAN_PENDING_STATUSES.has(plan.status) && !exhausted) armPlanPolling();
   } catch (error) {
     if (generation === planGeneration) host.replaceChildren(element('p', 'text-danger', messageFrom(error)));
-  } finally {
-    if (generation === planGeneration) button.disabled = false;
   }
 }
 
 function initDryRunPlan() {
   const select = $('energy-plan-device');
   if (!select) return;
-  $('energy-plan-load').addEventListener('click', () => { void loadDryRunPlan(); });
   select.addEventListener('change', () => { fillPlanLimits(); void loadDryRunPlan(); });
   $('energy-plan-limits')?.addEventListener('submit', (event) => { void savePlanLimits(event); });
   const planExpertSwitch = $('energy-plan-expert-mode');
@@ -1591,6 +1587,9 @@ function initDryRunPlan() {
     planExpertSwitch.addEventListener('change', () => setEnergyExpertMode(planExpertSwitch.checked));
   }
   window.addEventListener('pagehide', stopPlanPolling);
+  // The plan follows spot prices and forecasts, so it reloads by itself; no manual refresh needed.
+  setInterval(() => { if (!document.hidden && select.value) { planPollAttempts = 0; void loadDryRunPlan({ poll: true }); } }, PLAN_REFRESH_MS);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden && select.value) { planPollAttempts = 0; void loadDryRunPlan({ poll: true }); } });
   select.addEventListener('focus', () => { refreshPlanDevices().catch(() => { }); });
   refreshPlanDevices().then(() => loadDryRunPlan())
     .catch((error) => $('energy-plan-result').replaceChildren(element('p', 'text-danger', messageFrom(error))));

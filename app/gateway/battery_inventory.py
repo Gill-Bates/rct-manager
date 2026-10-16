@@ -1,3 +1,9 @@
+#!/usr/bin/env python3
+#
+# app/gateway/battery_inventory.py
+# Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
+#
+
 """Battery tower topology and verified usable capacity, derived from cached module serials.
 
 Cache-only: nothing here reads a device. The admin dashboard and the planning port

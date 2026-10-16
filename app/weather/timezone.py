@@ -28,12 +28,10 @@ from app.weather.models import OPEN_METEO_URL
 log = logging.getLogger(__name__)
 
 # A bounded, thread-safe cache: a site keeps its coordinates for a long time, so the same lat/lon
-# pair resolves to the same zone repeatedly (preview, save, re-save). Coordinates are rounded to
-# the cache key so near-identical manual edits still hit it; the zone never changes at this scale.
+# pair resolves to the same zone repeatedly (preview, save, re-save). The key is the exact pair:
+# rounding would let a neighbour across a timezone boundary reuse the wrong zone for up to 24 h.
 _CACHE_MAX_ENTRIES = 128
 _CACHE_TTL_SECONDS = 24 * 60 * 60
-# Coordinate precision for the cache key: ~1 km, far finer than any timezone boundary matters here.
-_COORDINATE_PRECISION = 2
 
 
 class TimezoneResolver:
@@ -67,10 +65,7 @@ class TimezoneResolver:
             raise WeatherResponseError("Coordinates must be finite numbers")
         if not (-90 <= latitude <= 90) or not (-180 <= longitude <= 180):
             raise WeatherResponseError("Coordinates are out of range")
-        key = (
-            round(latitude, _COORDINATE_PRECISION),
-            round(longitude, _COORDINATE_PRECISION),
-        )
+        key = (float(latitude), float(longitude))
         cached = self._cache.get(key)
         if cached is not None:
             return str(cached)

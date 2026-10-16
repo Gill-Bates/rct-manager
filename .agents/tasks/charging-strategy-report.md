@@ -137,8 +137,6 @@ cannot be flipped from the operator surface.
       `ReadingsBatteryStateProvider`, price/solar/consumption sources, scheduler, and clock) and
       `PlanDispatchHandoff` in `app/` and register them in `app_factory`, so the runtime path is
       actually exercised — not only the injected-service tests (assumption 1).
-- [ ] **Fix the handoff `enable_automatic_dispatch` docstring/behavior mismatch** (assumption 2), or
-      implement the live-read it describes, before relying on the flag at runtime.
 - [ ] **Validate operator config against the physical system:** `battery_usable_capacity_wh` and the
       per-device static `DeviceLimits` (max charge/discharge power) match the installed hardware's
       real ratings and safe operating limits (assumption 3).

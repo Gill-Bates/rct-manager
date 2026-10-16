@@ -1675,6 +1675,8 @@ body {
 
 .plan-loading {
     min-height: 8rem;
+    align-items: flex-start;
+    justify-content: flex-start;
 }
 
 .spot-market-chart-box {

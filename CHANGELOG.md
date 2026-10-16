@@ -1,5 +1,7 @@
 ## [1.2.2] - 2026-xx-xx
 
+- ``Fix`` The site timezone lookup no longer reuses a cached zone for nearby coordinates (a timezone boundary could yield the wrong zone for up to 24 h), and a place search no longer shows a postal code taken from a postcode-area hit unless the query matched it exactly.
+
 
 
 <details markdown="1">

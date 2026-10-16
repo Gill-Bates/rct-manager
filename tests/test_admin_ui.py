@@ -1656,7 +1656,7 @@ def test_weather_preview_renders_disabled_connected_and_unavailable_states():
 def test_energy_page_wires_the_read_only_dry_run_plan_preview():
     html = (TEMPLATES / "energy.html").read_text(encoding="utf-8")
     js = (ADMIN_DIR / "static/js/admin-energy-setup.js").read_text(encoding="utf-8")
-    for element_id in ("energy-plan-device", "energy-plan-load", "energy-plan-result"):
+    for element_id in ("energy-plan-device", "energy-plan-result"):
         assert f'id="{element_id}"' in html and f"$('{element_id}')" in js
     assert "/dynamic-plan`" in js
     # The device list and the battery data do not go through the dispatch-sensitive status route.

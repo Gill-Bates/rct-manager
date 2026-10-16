@@ -41,7 +41,6 @@ import math
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from itertools import pairwise
-from urllib.parse import urlencode, urlsplit, urlunsplit
 from urllib.request import build_opener
 from zoneinfo import ZoneInfo
 
@@ -117,19 +116,14 @@ class OpenMeteoProvider:
         intervals = self._parse_window(payload, config, window_start, window_end)
         return SolarForecast(created_at=datetime.now(UTC), intervals=intervals)
 
-    @staticmethod
-    def _build_url(config: WeatherConfig, horizon: timedelta) -> str:
+    def _build_url(self, config: WeatherConfig, horizon: timedelta) -> str:
         """Build the fixed-origin request URL from the validated config and horizon.
 
-        Only query parameters vary; the scheme/host/path come from :data:`OPEN_METEO_URL`, and HTTPS
-        plus the trusted origin are re-checked here as a second guard against a misconfigured
-        constant. ``forecast_days`` is clamped so a hostile horizon cannot request an unbounded range.
+        Only query parameters vary; the scheme/host/path come from :data:`OPEN_METEO_URL`, and the
+        shared client re-checks HTTPS as a second guard against a misconfigured constant. ``forecast_days`` is clamped so a hostile horizon cannot request an unbounded range.
         """
-        parts = urlsplit(OPEN_METEO_URL)
-        if parts.scheme != "https" or parts.netloc != urlsplit(OPEN_METEO_URL).netloc:
-            raise WeatherResponseError("The Open-Meteo endpoint must be an https URL")
         days = max(1, min(_MAX_FORECAST_DAYS, math.ceil(horizon.total_seconds() / 86400) + 1))
-        query = urlencode([
+        return self._http.build_url(OPEN_METEO_URL, [
             ("latitude", f"{config.latitude:.6f}"),
             ("longitude", f"{config.longitude:.6f}"),
             ("minutely_15", GTI_VARIABLE),
@@ -139,15 +133,10 @@ class OpenMeteoProvider:
             ("timeformat", "iso8601"),
             ("forecast_days", str(days)),
         ])
-        return urlunsplit((parts.scheme, parts.netloc, parts.path, query, ""))
 
-    @staticmethod
-    def _build_preview_url(config: WeatherConfig, window_start: datetime, window_end: datetime) -> str:
+    def _build_preview_url(self, config: WeatherConfig, window_start: datetime, window_end: datetime) -> str:
         """Build an exact UTC minutely-15 window for local yesterday/today/tomorrow."""
-        parts = urlsplit(OPEN_METEO_URL)
-        if parts.scheme != "https" or parts.netloc != urlsplit(OPEN_METEO_URL).netloc:
-            raise WeatherResponseError("The Open-Meteo endpoint must be an https URL")
-        query = urlencode([
+        return self._http.build_url(OPEN_METEO_URL, [
             ("latitude", f"{config.latitude:.6f}"),
             ("longitude", f"{config.longitude:.6f}"),
             ("minutely_15", GTI_VARIABLE),
@@ -158,7 +147,7 @@ class OpenMeteoProvider:
             ("start_minutely_15", window_start.astimezone(UTC).strftime("%Y-%m-%dT%H:%M")),
             ("end_minutely_15", window_end.astimezone(UTC).strftime("%Y-%m-%dT%H:%M")),
         ])
-        return urlunsplit((parts.scheme, parts.netloc, parts.path, query, ""))
+
     def _get(self, url: str) -> dict:
         return self._http.get_json(url)
 

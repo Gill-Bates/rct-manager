@@ -25,7 +25,7 @@ from urllib.request import Request
 import pytest
 
 from app.net import MAX_RETRY_AFTER_SECONDS, retry_after_seconds
-from app.weather import open_meteo
+from app.weather import models, open_meteo
 from app.weather.base import WeatherConnectionError, WeatherResponseError
 from app.weather.http_json import MAX_ATTEMPTS, REQUEST_TIMEOUT_SECONDS
 from app.weather.models import WeatherConfig, WeatherProvider
@@ -169,6 +169,15 @@ def test_location_name_and_timezone_are_descriptive_not_required_when_enabled():
     assert config.is_forecastable() is True
 
 
+def test_forecast_required_fields_match_between_validation_and_is_forecastable():
+    # Both checks share one field list, so each missing field is reported AND blocks forecasting.
+    for name in models._FORECAST_REQUIRED_FIELDS:
+        with pytest.raises(ValueError, match=name):
+            _config(**{name: None})
+        assert _config(enabled=False, **{name: None}).is_forecastable() is False
+    assert "timezone" not in models._FORECAST_REQUIRED_FIELDS
+
+
 # Request contract
 
 
@@ -185,6 +194,33 @@ def test_request_targets_the_fixed_https_origin_with_expected_parameters(monkeyp
     assert "latitude=52.520000" in url
     assert "longitude=13.405000" in url
     assert capture["timeout"] == REQUEST_TIMEOUT_SECONDS
+
+
+def test_forecast_and_preview_urls_are_exact(monkeypatch):
+    capture = {}
+    _patch_opener(monkeypatch, payload=_payload(_labels(4), [0, 100, 200, 300]), capture=capture)
+    OpenMeteoProvider().fetch(_config(), NOW, timedelta(hours=1))
+    base = (
+        "https://api.open-meteo.com/v1/forecast?latitude=52.520000&longitude=13.405000"
+        "&minutely_15=global_tilted_irradiance&tilt=30&azimuth=0&timezone=UTC&timeformat=iso8601"
+    )
+    assert capture["url"] == base + "&forecast_days=2"
+    window_start = datetime(2026, 7, 19, 22, 0, tzinfo=UTC)
+    _patch_opener(monkeypatch, payload=_payload(_labels(2, window_start), [1, 2]), capture=capture)
+    OpenMeteoProvider().fetch_preview(_config(timezone="Europe/Berlin"), NOW)
+    assert capture["url"] == (
+        base + "&start_minutely_15=2026-07-19T22%3A00&end_minutely_15=2026-07-22T22%3A00"
+    )
+
+
+def test_preview_without_a_site_timezone_uses_utc_day_boundaries(monkeypatch):
+    # The whole pipeline treats a missing timezone as UTC (refresh, storage, API windows).
+    capture = {}
+    window_start = datetime(2026, 7, 20, 0, 0, tzinfo=UTC)
+    _patch_opener(monkeypatch, payload=_payload(_labels(2, window_start), [1, 2]), capture=capture)
+    OpenMeteoProvider().fetch_preview(_config(timezone=None), NOW)
+    assert "start_minutely_15=2026-07-20T00%3A00" in capture["url"]
+    assert "end_minutely_15=2026-07-23T00%3A00" in capture["url"]
 
 
 def test_horizon_bounds_the_requested_forecast_days(monkeypatch):

@@ -237,6 +237,12 @@
       input('network_id').value = '';
       inverterAddedSinceOpen = true;
       setDeviceMessage('status', `Inverter ${deviceLabel(candidate)} added.`);
+      // In the dashboard modal an add finishes the interaction: close it (its on-close toast confirms).
+      const modal = card.closest('.modal');
+      if (modal) {
+        window.bootstrap.Modal.getInstance(modal)?.hide();
+        return;
+      }
     } catch (error) {
       failed = true;
       setDeviceMessage('error', deviceFailureMessage(error, 'Adding the inverter'));
