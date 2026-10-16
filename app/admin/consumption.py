@@ -96,13 +96,24 @@ class ConsumptionSampleSink:
         self._counters: deque[tuple[str, str, datetime, float]] = deque()
         self._max_buffered = max_buffered
         self._dropped = 0
+        self._dropped_counters = 0
+
+    def _drop_oldest_counter(self) -> None:
+        """Drop the oldest buffered counter reading on overflow and log it sparsely (as power does)."""
+        self._counters.popleft()
+        self._dropped_counters += 1
+        if self._dropped_counters == 1 or self._dropped_counters % 1000 == 0:
+            log.warning(
+                "Consumption counter buffer full (%d); dropping oldest counter readings (%d dropped so far)",
+                MAX_BUFFERED_COUNTER_READINGS, self._dropped_counters,
+            )
 
     def sample(self, device_id: str, metric_name: str, value: ScalarValue, measured_at: datetime) -> None:
         if metric_name in COUNTER_METRICS:
             reading = _finite_watts(value)  # same contract: finite and non-negative, else not a reading
             if reading is not None:
                 if len(self._counters) >= MAX_BUFFERED_COUNTER_READINGS:
-                    self._counters.popleft()
+                    self._drop_oldest_counter()
                 self._counters.append((device_id, metric_name, measured_at, reading))
             return
         if metric_name != HOUSE_LOAD_METRIC:
@@ -143,11 +154,15 @@ class ConsumptionSampleSink:
             for instant, value in sorted(series, reverse=True):
                 self._counters.appendleft((device_id, metric, instant, value))
         while len(self._counters) > MAX_BUFFERED_COUNTER_READINGS:
-            self._counters.popleft()
+            self._drop_oldest_counter()
 
     @property
     def dropped(self) -> int:
         return self._dropped
+
+    @property
+    def dropped_counters(self) -> int:
+        return self._dropped_counters
 
 
 @dataclass(slots=True)

@@ -362,8 +362,19 @@ async def start(
     """Read-only: identify the inverter and check the preconditions. Writes nothing."""
     del admin
     _device_or_404(request, device_id)
+
+    def _refuse_if_busy() -> None:
+        # Never replace or drop a session whose control test holds the mutex: that would orphan an
+        # in-flight 0 W hardware hold. Re-checked immediately before each mutation, both at entry and
+        # after the awaited preflight/device reads below, because the state can change in between.
+        current = _sessions(request).get(device_id)
+        if current is not None and current.busy.locked():
+            raise HTTPException(409, "The control test is running.")
+
+    _refuse_if_busy()
     blockers = await _preflight(request, device_id)
     if blockers:
+        _refuse_if_busy()
         _sessions(request).pop(device_id, None)
         return _view(device_id, None, blockers, None, None)
     try:
@@ -375,6 +386,7 @@ async def start(
     except _Blocked as exc:
         return _view(device_id, None, [str(exc)], None, None)
     session = _Session(request.app.state.runtime.clock.now(), model, firmware, unit)
+    _refuse_if_busy()
     _sessions(request)[device_id] = session
     log.info("Energy verification assistant started: device=%s model=%s firmware=%s admin=%s",
                 device_id, model, firmware, _ADMIN_ACTOR)  # fmt: skip
@@ -665,46 +677,54 @@ async def commit(
     if not body.confirm:
         raise HTTPException(400, "The operator must confirm before the verification is stored.")
     session = _live_session(request, device_id)
-    state = await _state(request, device_id, session, readings=False)
-    if not state.can_commit or session.busy.locked():
-        raise HTTPException(409, "The verification is incomplete: " + "; ".join(state.blockers or ["a step is open"]))
-    try:  # the inverter must still be the one that was tested
-        model = await _text(request, device_id, "android_description", 128)
-        firmware = await _text(request, device_id, "svnversion", 64)
-    except _Blocked as exc:
-        raise HTTPException(409, str(exc)) from exc
-    if (model, firmware) != (session.model, session.firmware):
+    if session.busy.locked():
+        raise HTTPException(409, "The control test is running.")
+    # session.busy is the operation mutex, not a point-in-time flag: hold it across the whole
+    # validate -> identity re-check -> record -> set_capabilities -> session removal sequence so a
+    # concurrent control test cannot start a 0 W hold between the check and the awaited store, nor be
+    # orphaned by this request completing underneath it. control_test is the only other acquirer and
+    # none of the callees below take the lock, so this single acquisition cannot deadlock.
+    async with session.busy:
+        state = await _state(request, device_id, session, readings=False)
+        if not state.can_commit:
+            raise HTTPException(409, "The verification is incomplete: " + "; ".join(state.blockers or ["a step is open"]))
+        try:  # the inverter must still be the one that was tested
+            model = await _text(request, device_id, "android_description", 128)
+            firmware = await _text(request, device_id, "svnversion", 64)
+        except _Blocked as exc:
+            raise HTTPException(409, str(exc)) from exc
+        if (model, firmware) != (session.model, session.firmware):
+            _sessions(request).pop(device_id, None)
+            raise HTTPException(409, "The inverter identification changed during the verification. Start again.")
+        assert session.code is not None and session.soc_target_unit is not None  # guaranteed by can_commit
+        note = (
+            f"Guided: battery sign by {session.battery_evidence}; grid sign by {session.grid_evidence}; "
+            f"{session.test_evidence}"
+        )[:200]
+        record_body = HardwareVerificationBody(
+            verified_device_model=model,
+            verified_firmware=firmware,
+            note=note,
+            soc_strategy_external_code=session.code,
+            enum_byte_width=session.enum_byte_width,
+            bool_byte_width=session.bool_byte_width,
+            write_frame_layout_verified=True,
+            apply_sequence_verified=True,
+            battery_discharge_positive=session.battery_discharge_positive,
+            grid_import_positive=session.grid_import_positive,
+            soc_target_unit=session.soc_target_unit,
+        )
+        dispatch = _dispatch_or_503(request)
+        try:
+            records = verification_records(dispatch, device_id, record_body, request.app.state.runtime.clock.now())
+            await dispatch.set_capabilities(device_id, records)
+        except CapabilityConflict as exc:
+            raise _conflict(exc) from exc
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
         _sessions(request).pop(device_id, None)
-        raise HTTPException(409, "The inverter identification changed during the verification. Start again.")
-    assert session.code is not None and session.soc_target_unit is not None  # guaranteed by can_commit
-    note = (
-        f"Guided: battery sign by {session.battery_evidence}; grid sign by {session.grid_evidence}; "
-        f"{session.test_evidence}"
-    )[:200]
-    record_body = HardwareVerificationBody(
-        verified_device_model=model,
-        verified_firmware=firmware,
-        note=note,
-        soc_strategy_external_code=session.code,
-        enum_byte_width=session.enum_byte_width,
-        bool_byte_width=session.bool_byte_width,
-        write_frame_layout_verified=True,
-        apply_sequence_verified=True,
-        battery_discharge_positive=session.battery_discharge_positive,
-        grid_import_positive=session.grid_import_positive,
-        soc_target_unit=session.soc_target_unit,
-    )
-    dispatch = _dispatch_or_503(request)
-    try:
-        records = verification_records(dispatch, device_id, record_body, request.app.state.runtime.clock.now())
-        await dispatch.set_capabilities(device_id, records)
-    except CapabilityConflict as exc:
-        raise _conflict(exc) from exc
-    except ValueError as exc:
-        raise HTTPException(422, str(exc)) from exc
-    _sessions(request).pop(device_id, None)
-    log.warning(
-        "Energy hardware verification saved by the guided assistant: device=%s model=%s firmware=%s admin=%s",
-        device_id, model, firmware, _ADMIN_ACTOR,
-    )  # fmt: skip
-    return await _admin_status(request, device_id)
+        log.warning(
+            "Energy hardware verification saved by the guided assistant: device=%s model=%s firmware=%s admin=%s",
+            device_id, model, firmware, _ADMIN_ACTOR,
+        )  # fmt: skip
+        return await _admin_status(request, device_id)

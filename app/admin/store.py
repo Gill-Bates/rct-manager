@@ -177,10 +177,22 @@ _SCHEMA: dict[str, str] = {
     ),
 }
 
-_CONSUMPTION_PRUNE_INDEX = (
-    "CREATE INDEX consumption_history_intervals_interval_start_idx "
-    "ON consumption_history_intervals(interval_start)"
-)
+# Retention prunes several consumption tables by a non-PK-leading timestamp column. Only the two
+# where EXPLAIN QUERY PLAN showed a table scan over a continuously growing, append-only ledger get a
+# supporting index: the 15-minute history buckets (interval_start) and the applied-batch ledger
+# (batch_time, a new marker per non-empty 30 s drain that is never consolidated). The other pruned
+# tables — meter intervals, counter readings, forecast values/runs — are bounded by upsert, thinning
+# or a daily cadence to at most low tens of thousands of rows per device, so they are left unindexed.
+_CONSUMPTION_PRUNE_INDEXES = {
+    "consumption_history_intervals_interval_start_idx": (
+        "CREATE INDEX consumption_history_intervals_interval_start_idx "
+        "ON consumption_history_intervals(interval_start)"
+    ),
+    "consumption_applied_batches_batch_time_idx": (
+        "CREATE INDEX consumption_applied_batches_batch_time_idx "
+        "ON consumption_applied_batches(batch_time)"
+    ),
+}
 
 
 def _schema_sql(sql: str) -> str:
@@ -308,19 +320,20 @@ class AdminStore:
                     f"admin database table {table!r} does not match the current schema; this build "
                     "does not migrate an older database — delete it and restart"
                 )
-        name = "consumption_history_intervals_interval_start_idx"
-        row = db.execute(
-            "SELECT sql FROM sqlite_schema WHERE type='index' AND name=?", (name,)
-        ).fetchone()
-        if row is None:
-            db.execute(_CONSUMPTION_PRUNE_INDEX)
+        created_any = False
+        for name, create in _CONSUMPTION_PRUNE_INDEXES.items():
+            row = db.execute(
+                "SELECT sql FROM sqlite_schema WHERE type='index' AND name=?", (name,)
+            ).fetchone()
+            if row is None:
+                db.execute(create)
+                created_any = True
+            elif row["sql"] is None or _schema_sql(row["sql"]) != _schema_sql(create):
+                raise ValueError(
+                    f"admin database index {name!r} does not match the current schema"
+                )
+        if created_any:
             db.execute("PRAGMA optimize")
-        elif row["sql"] is None or _schema_sql(row["sql"]) != _schema_sql(
-            _CONSUMPTION_PRUNE_INDEX
-        ):
-            raise ValueError(
-                f"admin database index {name!r} does not match the current schema"
-            )
 
     def initialize(self) -> str | None:
         """Create schema and return a one-time bootstrap password, if needed."""

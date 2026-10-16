@@ -544,3 +544,64 @@ def test_several_logger_points_for_one_local_date_log_once_and_the_last_one_wins
         asyncio.run(history.daily_consumption("main", before=before, limit=10))
     assert {r.local_date: r.energy_wh for r in first} == {date(2026, 10, 14): 200.0, date(2026, 10, 13): 300.0}
     assert len([m for m in caplog.messages if "several logger points" in m]) == 1
+
+
+# --- F2: retention prune indexes exist after init (review finding 2) ---------------------------
+
+
+def _index_names(store: AdminStore) -> set[str]:
+    with store.connect() as db:
+        return {row["name"] for row in db.execute("SELECT name FROM sqlite_schema WHERE type='index'").fetchall()}
+
+
+def test_init_creates_the_batch_time_prune_index(tmp_path: Path) -> None:
+    # Retention deletes consumption_applied_batches by batch_time, which does not lead the
+    # (device_id, batch_id) primary key. Without this index the hourly prune full-scans an
+    # append-only ledger that grows unbounded on an active install. It is created and
+    # startup-verified by the same mechanism as the interval_start prune index.
+    store = _store(tmp_path)
+    names = _index_names(store)
+    assert "consumption_applied_batches_batch_time_idx" in names
+    assert "consumption_history_intervals_interval_start_idx" in names
+
+
+def test_prune_index_survives_a_store_reopen(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    store.close()
+    reopened = AdminStore(tmp_path / "rct.db", SECRET)
+    reopened.initialize()
+    assert "consumption_applied_batches_batch_time_idx" in _index_names(reopened)
+
+
+# --- F3: the counter buffer logs its drops like the power buffer (review finding 3) ------------
+
+
+def test_counter_buffer_is_bounded_and_counts_and_logs_its_drops(caplog) -> None:
+    from app.admin.consumption import MAX_BUFFERED_COUNTER_READINGS
+    from app.optimizer.meter import TOTAL_COUNTER
+
+    sink = ConsumptionSampleSink()
+    overflow = 1200
+    with caplog.at_level("WARNING", logger="app.admin.consumption"):
+        for i in range(MAX_BUFFERED_COUNTER_READINGS + overflow):
+            sink.sample("main", TOTAL_COUNTER, float(i), BASE + timedelta(seconds=i))
+
+    drained = sink.drain_counters()["main"][TOTAL_COUNTER]
+    assert len(drained) == MAX_BUFFERED_COUNTER_READINGS  # never exceeds the bound
+    assert sink.dropped_counters == overflow  # every reading past the bound is accounted
+    assert drained[0][1] == pytest.approx(float(overflow))  # oldest-first eviction
+
+    # Sparse logging mirrors the power buffer: the 1st drop and every 1000th -> {1, 1000} = 2 records.
+    warnings = [r for r in caplog.records if "counter buffer full" in r.getMessage()]
+    assert len(warnings) == 2
+
+
+def test_restore_counters_trim_also_counts_drops() -> None:
+    from app.admin.consumption import MAX_BUFFERED_COUNTER_READINGS
+    from app.optimizer.meter import TOTAL_COUNTER
+
+    sink = ConsumptionSampleSink()
+    series = [(BASE + timedelta(seconds=i), float(i)) for i in range(MAX_BUFFERED_COUNTER_READINGS + 5)]
+    sink.restore_counters("main", {TOTAL_COUNTER: series})
+    assert sink.dropped_counters == 5
+    assert len(sink.drain_counters()["main"][TOTAL_COUNTER]) == MAX_BUFFERED_COUNTER_READINGS
