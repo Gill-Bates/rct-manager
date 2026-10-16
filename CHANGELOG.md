@@ -1,13 +1,16 @@
 ## [1.2.2] - 2026-xx-xx
 
+- ``New`` The Charging plan's Expert diagnostics show a battery calibration history: the usable capacity measured by the BMS over time against the datasheet capacity, kept per inverter serial and read from the local store only. A commissioning date derived from the inverter energy logs (not verified on hardware) or entered by hand starts the curve; a replaced battery (new BMS serial) starts a new series.
+- ``Change`` The usable battery capacity is capped by the BMS ratio of measured to rated Ah (never above the datasheet value); the two Ah registers are refreshed in the background about once a day. A single tower accepts 2 to 6 modules, two towers only 4+4, 5+5 or 6+6.
+- ``Change`` The Charging plan reloads on its own (every 5 minutes, when the tab becomes visible again, every 10 s while an input is pending); the Refresh button is gone. The next-charge figures sit in one row and the status cards have no frame.
+- ``Change`` A device without configured or stored power limits falls back to 3 kW charge and discharge power for dispatch; Expert mode can store its own values. An inverter that does not answer shows its host instead of "n/a" in the Energy page hardware summary.
 - ``Fix`` The site timezone lookup no longer reuses a cached zone for nearby coordinates (a timezone boundary could yield the wrong zone for up to 24 h), and a place search no longer shows a postal code taken from a postcode-area hit unless the query matched it exactly.
 - ``Fix`` A write cancelled during its quiet window now drops the connection, so a late write echo cannot answer the next request; a failed connection setup closes its socket.
 - ``Fix`` Write allowlist bounds and step must be finite numbers, and a spot-price day (today, tomorrow, yesterday) is only accepted when it covers a complete local day (DST days included); an empty next-day feed counts as not yet published.
 - ``Fix`` Reading the bidding-zone list no longer waits for a running provider refresh, and a damaged stored zone catalog is ignored and reloaded.
-
 - ``Fix`` The Energy page no longer floods the log with errors while write support is off: the expected 503 from the energy device poll is logged at DEBUG, and the page polls every 30 s instead of 3 s until the next success.
 - ``Fix`` The Charging plan no longer shows the "Please wait …" spinner for good: a missing or unverifiable battery state shows its explanation at once, a pending input that is still pending after the 30 polls keeps its status card instead of returning to the spinner every 5 minutes, and the text for a missing consumption estimate matches the baseline fallback. Several logger points for one local date in the inverter day history are now logged once.
-
+- ``Fix`` Non-finite floats are rejected when decoding a reply or encoding a write, and a device host is stored in its canonical form (IP address normalized, host name lower-cased).
 
 <details markdown="1">
 <summary>Previous versions...</summary>

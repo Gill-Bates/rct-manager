@@ -129,44 +129,117 @@ function harness({ apiImpl } = {}) {
   context.addEventListener = () => { }; // initDryRunPlan stops polling on pagehide
   vm.runInNewContext(SOURCE, context);
   context.element('div').id = 'energy-plan-schedule'; // the full-width chart host of the Charging plan tab
-  return { context, byId, calls, toasts, cleanup: () => {
-    for (const timer of timers) { clearTimeout(timer); clearInterval(timer); }
-    timers.clear();
-  } };
+  return {
+    context, byId, calls, toasts, cleanup: () => {
+      for (const timer of timers) { clearTimeout(timer); clearInterval(timer); }
+      timers.clear();
+    }
+  };
 }
 
 const flush = () => new Promise((resolve) => setImmediate(resolve));
 
-test('BMS calibration history shows dated measurements, cycles, kWh and remaining percent', () => {
+function calibrationView(overrides = {}) {
+  return {
+    device_id: 'dev-1', inverter_serial: 'SN-A', battery_bms_sn: 'BMS-1', battery_replaced: false,
+    commissioning: { commissioned_at: '2021-05-01T00:00:00Z', source: 'logger_derived', determined_at: '2026-10-16T00:00:00Z' },
+    baseline: {
+      date: '2021-05-01T00:00:00Z', battery_cycles: 0, rated_usable_capacity_wh: 10368,
+      current_usable_capacity_wh: 10368, remaining_capacity_percent: 100, source: 'logger_derived',
+    },
+    baseline_unavailable_reason: null,
+    points: [{
+      measured_at: '2026-10-16T12:00:00+00:00', battery_cycles: 128,
+      current_usable_capacity_wh: 8538.35, rated_usable_capacity_wh: 10368, remaining_capacity_percent: 82.35,
+    }],
+    ...overrides,
+  };
+}
+
+function calibrationHarness() {
   const h = harness();
+  const host = h.context.element('div');
+  host.id = 'energy-plan-calibration';
+  const details = h.context.element('details');
+  details.id = 'energy-plan-diagnostics';
+  details.open = true;
+  const charts = [];
+  h.context.getComputedStyle = () => ({ getPropertyValue: () => '#456789' });
+  h.context.Chart = class {
+    constructor(canvas, config) { charts.push(config); }
+    destroy() { }
+  };
+  const text = () => flatten(host).map((node) => node.textContent).join(' ');
+  return { h, host, charts, text };
+}
+
+test('BMS calibration history starts at the commissioning baseline and shows date, cycles, kWh and percent', () => {
+  const { h, host, charts, text } = calibrationHarness();
+  try {
+    h.context.renderBatteryCalibrationHistory(calibrationView());
+    const table = flatten(host).find((node) => node.tagName === 'table');
+    assert.ok(table);
+    const tableText = flatten(table).map((node) => node.textContent).join(' ');
+    assert.match(tableText, /commissioning/);
+    assert.match(tableText, /128/);
+    assert.match(tableText, /82[.,]35/);
+    assert.match(text(), /SN-A/);
+    assert.match(text(), /not verified on hardware/);
+    const [measured, datasheet] = charts[0].data.datasets;
+    assert.deepEqual(Array.from(measured.data, (p) => [p.x, p.y]),
+      [[Date.parse('2021-05-01T00:00:00Z'), 10.368], [Date.parse('2026-10-16T12:00:00+00:00'), 8.53835]]);
+    assert.equal(datasheet.data[0].y, 10.368);
+    assert.equal(charts[0].options.scales.x.type, 'linear');
+    const callbacks = charts[0].options.plugins.tooltip.callbacks;
+    assert.deepEqual(Array.from(callbacks.afterBody([{ dataIndex: 0, datasetIndex: 0 }])), ['Cycles: 0', 'Remaining: 100 %']);
+    assert.deepEqual(Array.from(callbacks.afterBody([{ dataIndex: 1, datasetIndex: 0 }])), ['Cycles: 128', 'Remaining: 82.35 %']);
+    assert.deepEqual(Array.from(callbacks.afterBody([{ dataIndex: 0, datasetIndex: 1 }])), []);
+  } finally { h.cleanup(); }
+});
+
+test('BMS calibration history without a commissioning date has no baseline point and says so', () => {
+  const { h, host, charts, text } = calibrationHarness();
+  try {
+    h.context.renderBatteryCalibrationHistory(calibrationView({
+      commissioning: null, baseline: null, baseline_unavailable_reason: 'no_commissioning_date',
+    }));
+    assert.equal(charts[0].data.datasets[0].data.length, 1);
+    assert.match(text(), /No commissioning date is known/);
+    assert.ok(flatten(host).some((node) => node.tagName === 'input' && node.type === 'date'));
+  } finally { h.cleanup(); }
+});
+
+test('BMS calibration history empty states: no measurement, unknown serial', () => {
+  const { h, text } = calibrationHarness();
+  try {
+    h.context.renderBatteryCalibrationHistory(calibrationView({ points: [], baseline: null, baseline_unavailable_reason: 'no_measurement' }));
+    assert.match(text(), /No BMS calibration/);
+    h.context.renderBatteryCalibrationHistory(calibrationView({
+      inverter_serial: null, commissioning: null, baseline: null, points: [], baseline_unavailable_reason: 'inverter_serial_unknown',
+    }));
+    assert.match(text(), /serial number is not known yet/);
+    assert.ok(!/Save date/.test(text()));
+  } finally { h.cleanup(); }
+});
+
+test('saving the commissioning date PUTs it for the selected device and re-renders the result', async () => {
+  const calls = [];
+  const h = harness({ apiImpl: async (p, options) => { calls.push({ path: p, options }); return calibrationView(); } });
   try {
     const host = h.context.element('div');
     host.id = 'energy-plan-calibration';
-    const details = h.context.element('details');
-    details.id = 'energy-plan-diagnostics';
-    details.open = true;
-    const charts = [];
-    h.context.getComputedStyle = () => ({ getPropertyValue: () => '#456789' });
-    h.context.Chart = class {
-      constructor(canvas, config) { charts.push(config); }
-      destroy() { }
-    };
-    h.context.renderBatteryCalibrationHistory([{
-      measured_at: '2026-10-16T12:00:00+00:00', battery_cycles: 128,
-      current_usable_capacity_wh: 8538.35, rated_usable_capacity_wh: 10368,
-      remaining_capacity_percent: 82.35,
-    }]);
-    const table = flatten(host).find((node) => node.tagName === 'table');
-    assert.ok(table);
-    const text = flatten(table).map((node) => node.textContent).join(' ');
-    assert.match(text, /128/);
-    assert.match(text, /82[.,]35/);
-    assert.equal(charts[0].data.datasets[0].data[0], 8.53835);
-    assert.equal(charts[0].data.datasets[1].data[0], 10.368);
-    assert.deepEqual(Array.from(charts[0].options.plugins.tooltip.callbacks.afterBody([{ dataIndex: 0 }])),
-      ['Cycles: 128', 'Remaining: 82.35 %']);
-    h.context.renderBatteryCalibrationHistory([]);
-    assert.match(flatten(host).map((node) => node.textContent).join(' '), /No BMS calibration/);
+    const select = h.context.element('select');
+    select.id = 'energy-plan-device';
+    select.value = 'dev-1';
+    h.context.renderBatteryCalibrationHistory(calibrationView({ commissioning: null, baseline: null }));
+    const form = flatten(host).find((node) => node.tagName === 'form');
+    const input = flatten(form).find((node) => node.tagName === 'input');
+    input.value = '2021-06-15';
+    form._listeners.submit({ preventDefault() { } });
+    await flush();
+    assert.equal(calls[0].path, 'energy/devices/dev-1/battery-commissioning');
+    assert.equal(calls[0].options.method, 'PUT');
+    assert.deepEqual(JSON.parse(calls[0].options.body), { commissioned_on: '2021-06-15' });
   } finally { h.cleanup(); }
 });
 

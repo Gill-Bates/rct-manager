@@ -16,6 +16,7 @@ import json
 import math
 import re
 import struct
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -32,7 +33,7 @@ from app.api.problems import _is_write_path
 from app.catalog.base import is_numeric
 from app.catalog.registry import RegistryCatalog
 from app.energy.models import EnergyMode
-from app.gateway.battery_inventory import CapacityCalibrationSample
+from app.gateway.battery_inventory import CapacityCalibrationSample, MeasuredBatteryCapacity
 from app.protocol.types import WRITE_COMMANDS
 from app.protocol.values import encode_value
 from app.scheduling.shutdown import ShutdownPlan
@@ -429,34 +430,156 @@ async def test_battery_characterization_is_authorized_cache_only_and_never_deriv
         assert len(harness.net.frames) == frames
 
 
+def _calibration_sample(serial: str = "SN-A", bms: str | None = "BMS-1", at: datetime | None = None, ah: float = 14.0):
+    return CapacityCalibrationSample(
+        device_id="main", inverter_serial=serial, battery_bms_sn=bms,
+        measured_at=at or datetime(2026, 10, 16, 12, tzinfo=UTC), battery_cycles=128,
+        reference_ah=17.0, measured_ah=ah, rated_usable_capacity_wh=10368.0,
+        current_usable_capacity_wh=8538.35, remaining_capacity_percent=82.35,
+        module_counts=(6,), source_contract="bms_ah_ratio_v1",
+    )
+
+
 async def test_battery_calibration_history_is_authorized_local_only_and_bounded(tmp_path: Path) -> None:
     settings = characterization_settings(tmp_path, enable_write_support=False, enable_periodic_reads=False)
     async with running_app(settings) as harness:
         path = "/admin/api/energy/devices/main/battery-calibration-history"
         assert (await harness.client.get(path)).status_code == 401
-        sample = CapacityCalibrationSample(
-            device_id="main", measured_at=datetime(2026, 10, 16, 12, tzinfo=UTC), battery_cycles=128,
-            reference_ah=17.0, measured_ah=14.0, rated_usable_capacity_wh=10368.0,
-            current_usable_capacity_wh=8538.35, remaining_capacity_percent=82.35,
-            module_counts=(6,), source_contract="bms_ah_ratio_v1",
-        )
-        harness.app.state.admin_store.record_battery_calibration(sample)
         headers = await admin_session(harness)
+        store = harness.app.state.admin_store
+        store.record_battery_calibration(_calibration_sample())
         before = harness.runtime.gateway.device_status("main").transactions
         frames = len(harness.net.frames)
 
+        # Without a known inverter serial nothing is returned: there is no device_id fallback.
+        unknown = (await harness.client.get(path, headers=headers)).json()
+        assert unknown["inverter_serial"] is None and unknown["points"] == [] and unknown["baseline"] is None
+        assert unknown["baseline_unavailable_reason"] == "inverter_serial_unknown"
+
+        harness.runtime.gateway.set_reported_serial("main", "SN-A")
         response = await harness.client.get(path, headers=headers)
 
         assert response.status_code == 200, response.text
-        point = response.json()["points"][0]
+        body = response.json()
+        assert (body["device_id"], body["inverter_serial"], body["battery_bms_sn"]) == ("main", "SN-A", "BMS-1")
+        assert body["battery_replaced"] is False
+        point = body["points"][0]
         assert point["battery_cycles"] == 128
         assert point["current_usable_capacity_wh"] == pytest.approx(8538.35)
         assert point["remaining_capacity_percent"] == pytest.approx(82.35)
         assert point["module_counts"] == [6]
+        assert body["baseline"] is None and body["commissioning"] is None
+        assert body["baseline_unavailable_reason"] == "no_commissioning_date"
         assert (await harness.client.get(path + "?limit=5001", headers=headers)).status_code == 422
         assert (await harness.client.get("/admin/api/energy/devices/missing/battery-calibration-history", headers=headers)).status_code == 404
         assert harness.runtime.gateway.device_status("main").transactions == before
         assert len(harness.net.frames) == frames
+
+
+async def test_battery_calibration_baseline_shape_and_manual_override(tmp_path: Path) -> None:
+    settings = characterization_settings(tmp_path, enable_write_support=False, enable_periodic_reads=False)
+    async with running_app(settings) as harness:
+        path = "/admin/api/energy/devices/main/battery-calibration-history"
+        commissioning = "/admin/api/energy/devices/main/battery-commissioning"
+        headers = await admin_session(harness)
+        store = harness.app.state.admin_store
+        harness.runtime.gateway.set_reported_serial("main", "SN-A")
+        store.record_battery_calibration(_calibration_sample())
+        store.set_inverter_commissioning("SN-A", datetime(2021, 5, 1, tzinfo=UTC), "logger_derived")
+
+        body = (await harness.client.get(path, headers=headers)).json()
+        assert body["baseline_unavailable_reason"] is None
+        assert body["baseline"] == {
+            "date": "2021-05-01T00:00:00Z", "battery_cycles": 0, "rated_usable_capacity_wh": 10368.0,
+            "current_usable_capacity_wh": 10368.0, "remaining_capacity_percent": 100.0, "source": "logger_derived",
+        }
+        assert body["commissioning"]["source"] == "logger_derived"
+        assert len(body["points"]) == 1  # the baseline is not inserted as a measurement row
+
+        assert (await harness.client.put(commissioning, json={"commissioned_on": "2021-06-15"})).status_code in (401, 403)
+        put = await harness.client.put(commissioning, json={"commissioned_on": "2021-06-15"}, headers=headers)
+        assert put.status_code == 200, put.text
+        assert put.json()["baseline"]["date"].startswith("2021-06-15") and put.json()["baseline"]["source"] == "manual"
+        for bad in ("2009-12-31", "2999-01-01"):
+            rejected = await harness.client.put(commissioning, json={"commissioned_on": bad}, headers=headers)
+            assert rejected.status_code == 422
+        deleted = await harness.client.delete(commissioning, headers=headers)
+        assert deleted.json()["baseline"]["source"] == "logger_derived"
+
+        # A swapped battery: the derived date belongs to the first battery, so no baseline for the new series.
+        store.record_battery_calibration(_calibration_sample(bms="BMS-2", at=datetime(2026, 11, 1, tzinfo=UTC)))
+        replaced = (await harness.client.get(path, headers=headers)).json()
+        assert replaced["battery_replaced"] is True and replaced["baseline"] is None
+        assert replaced["baseline_unavailable_reason"] == "battery_replaced"
+        manual = await harness.client.put(commissioning, json={"commissioned_on": "2022-01-01"}, headers=headers)
+        assert manual.json()["baseline"]["source"] == "manual"
+
+
+async def test_commissioning_override_needs_a_known_serial(tmp_path: Path) -> None:
+    settings = characterization_settings(tmp_path, enable_write_support=False, enable_periodic_reads=False)
+    async with running_app(settings) as harness:
+        headers = await admin_session(harness)
+        response = await harness.client.put(
+            "/admin/api/energy/devices/main/battery-commissioning", json={"commissioned_on": "2021-06-15"}, headers=headers
+        )
+        assert response.status_code == 409
+
+
+async def test_calibration_is_recorded_while_the_energy_manager_is_disabled(tmp_path: Path) -> None:
+    """The producer path has no dispatch dependency: write support off still records every calibration."""
+    from types import SimpleNamespace
+
+    from app.api.app_factory import _inventory_loop
+    from app.gateway.base import DeviceState
+
+    settings = characterization_settings(tmp_path, enable_write_support=False, enable_periodic_reads=False)
+    async with running_app(settings) as harness:
+        runtime = harness.runtime
+        assert runtime.dispatch is None  # the Energy Manager is off
+        assert isinstance(runtime.battery_capacity, MeasuredBatteryCapacity)
+        store = harness.app.state.admin_store
+        stub = SimpleNamespace(
+            calibration_sample=lambda device_id, at: _calibration_sample(at=at)
+        )
+
+        class StopLoop(Exception):
+            pass
+
+        class LoopClock:
+            elapsed = 0.0
+
+            def monotonic(self):
+                return self.elapsed
+
+            def now(self):
+                return datetime(2026, 10, 16, tzinfo=UTC)
+
+            async def sleep(self, seconds):
+                self.elapsed += seconds
+                if self.elapsed > 15:
+                    raise StopLoop
+
+        async def read_system(device_id, name):
+            return None
+
+        async def inventory(*_args):
+            return 0
+
+        gateway = SimpleNamespace(
+            read_module_inventory=inventory,
+            device_status=lambda _d: SimpleNamespace(state=DeviceState.OK, queue_length=0),
+            read_system=read_system,
+        )
+
+        async def persist(sample):
+            await asyncio.to_thread(store.record_battery_calibration, sample)
+
+        with pytest.raises(StopLoop):
+            await _inventory_loop(
+                gateway, "main", LoopClock(), capacity_ah_names=("battery_ah_capacity",),
+                capacity_source=stub, on_capacity_calibration=persist,
+            )
+        assert [p["measured_ah"] for p in store.get_battery_calibration_history("SN-A")["points"]] == [14.0]
 
 
 async def test_battery_characterization_refresh_is_bounded_to_requested_numeric_reads(tmp_path: Path) -> None:

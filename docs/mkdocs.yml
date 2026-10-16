@@ -134,6 +134,7 @@ extra_css:
 # a blocked or offline CDN leaves diagrams as plain code. Self-hosting (pinned 11.4.1) avoids that.
 extra_javascript:
   - javascripts/mermaid.min.js
+  - javascripts/mermaid-zoom.js
 
 nav:
   - Home: index.md

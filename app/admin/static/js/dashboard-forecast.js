@@ -225,6 +225,7 @@
 
   function sync() {
     window.RCTDashboardChargingSchedule?.sync();
+    window.RCTDashboardBatteryHealth?.sync();
     for (const id of chartIds) if (!visible(id)) destroy(id);
     if (controller && requestedParts().join(',') !== selection) {
       controller.abort(); controller = null; generation++;
@@ -235,7 +236,7 @@
 
   window.RCTDashboardForecast = Object.freeze({
     sync, chartLibrary: ensureChartLibrary,
-    resize: () => { charts.forEach((chart) => chart.resize()); window.RCTDashboardChargingSchedule?.resize(); },
+    resize: () => { charts.forEach((chart) => chart.resize()); window.RCTDashboardChargingSchedule?.resize(); window.RCTDashboardBatteryHealth?.resize(); },
   });
   setInterval(() => { if (ids.some(visible)) void refresh(); }, 5 * 60 * 1000);
   sync();

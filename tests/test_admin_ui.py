@@ -1103,8 +1103,8 @@ def test_dashboard_template_positions_equal_the_factory_default_layout():
             r'<div class="grid-stack-item( d-none)?" gs-id="([\w-]+)"\s+gs-x="(\d+)" gs-y="(\d+)" gs-w="(\d+)" gs-h="(\d+)"',
             html):
         template[m[2]] = (*map(int, m.group(3, 4, 5, 6)), not m[1])
-    # Sixteen widgets after the two Open-Meteo solar tiles were added next to the spot-market ones. The charging-schedule widget is the 16th.
-    assert template == default and len(default) == 16
+    # Twenty-two widgets: the sixteen up to the charging schedule plus five battery-health tiles and the degradation chart.
+    assert template == default and len(default) == 22
     # Off-by-default (visible:false) but still addable through the "Add widget" library.
     assert not default["days-to-calibration"][4]
     # Factory default: one row of six 2-column tiles, the inverter overview directly below it.

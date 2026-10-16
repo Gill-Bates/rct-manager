@@ -273,17 +273,20 @@ slot's time range, action, power, target SoC and plain-language reason; the canv
 and a visually hidden list of the charge slots for assistive technology. `GET /admin/api/energy/planning-devices` reports
 `battery_capacity_source` as `verified`, `expert_override`, or `unavailable`;
 `verified` means the topology- and BMS-Ah-capped capacity above. While an
-input is only pending (battery state, spot prices, solar forecast, consumption model), Basic mode shows
-nothing but a rotating "Please wait …" spinner and re-requests the plan every 10 s (at most 30 times, then
-the status text with the readiness checklist stays); a new load, a device change, a hidden tab or a
-changed status stops the polling. Configuration states that waiting cannot fix (spot market disabled,
+input is only pending (spot prices, solar forecast, consumption model), Basic mode shows
+nothing but a rotating "Please wait …" spinner and re-requests the plan every 10 s (at most 30 times per
+status, then the status text with the readiness checklist stays); a new load, a device change or a hidden tab
+stops the polling, and a changed status restarts the count. A missing or unverifiable battery state is not
+pending: its explanation ("Check that the inverter is connected and reports its battery state and
+capacity") shows at once and the plan is re-requested quietly in the same way. Configuration states that waiting cannot fix (spot market disabled,
 solar forecast not configured) and errors keep an explanatory text with the readiness checklist (battery
 capacity, spot prices, solar forecast, consumption model, each with a text state such as "disabled in
 settings"). Expert mode additionally shows that checklist, including "Battery data could not be verified
 automatically.", below the spinner. The plan loads
-automatically when an inverter is selected; the secondary **Refresh** button reloads it. In
-Expert mode, **Advanced diagnostics** groups Battery capacity (status, source, override), Power
-limits (charge, discharge) and Forecast inputs (consumption, solar, prices). The
+automatically when an inverter is selected and then reloads by itself every 5 minutes and whenever the
+browser tab becomes visible again; there is no Refresh button. The "Next grid charge" hero metrics sit in one
+row (stacked on narrow screens). In Expert mode, **Advanced diagnostics** groups Battery capacity (status, source, override), Power
+limits (charge, discharge), Battery calibration history and Forecast inputs (consumption, solar, prices). The
 **Battery data override** form appears only after enabling Expert mode. It accepts
 verified charge and discharge power (kW) and usable capacity (kWh), then saves them
 through `PUT /admin/api/energy/devices/{device_id}/planning-limits` into the same
@@ -422,8 +425,28 @@ never derives usable Wh from them.
 
 The [RCT serial protocol](reference/protocol.md) labels `battery_ah_capacity` as battery
 capacity in Ah, `power_mng_amp_hours_measured` as measured battery capacity in Ah, and
-`battery_soh` as State of Health. The comparison with the RCT app must establish how these
-relate to its displayed usable kWh before an automatic capacity source can be enabled.
+`battery_soh` as State of Health. Only the ratio of the two Ah registers is used for the
+usable capacity (see above); the comparison with the RCT app must still establish how they
+relate to its displayed usable kWh.
+
+### Battery calibration history
+
+Each time the background Ah read yields a changed BMS capacity measurement, the service stores it
+permanently, keyed by the inverter serial (and the BMS serial, so a replaced battery starts a new
+series). The Charging plan shows it in Expert mode under **Advanced diagnostics** as a chart and
+table of usable capacity against the datasheet capacity (100 %). The curve starts at a
+commissioning date: a background service derives it once per inverter serial from the earliest
+energy in the inverter's year and month logs (`logger_year_eac_log_ts`, `logger_month_eac_log_ts`),
+retrying with backoff; this derivation is unverified on hardware. A date entered by an operator always wins.
+After a battery replacement a derived date is not used for the new series; enter the replacement date.
+
+| Method | Path | Effect |
+|---|---|---|
+| `GET` | `/admin/api/energy/devices/{device_id}/battery-calibration-history` | History, commissioning date and baseline for the inverter's current battery series (`limit` 1 to 5000, default 1200). Local store only, no device I/O. `baseline_unavailable_reason` is `inverter_serial_unknown`, `no_commissioning_date`, `no_measurement` or `battery_replaced` when there is no baseline. |
+| `PUT` | `/admin/api/energy/devices/{device_id}/battery-commissioning` | Sets the manual commissioning date (body `{"commissioned_on": "YYYY-MM-DD"}`, between 2010-01-01 and today; 409 while the inverter serial is unknown, 422 outside the range). |
+| `DELETE` | `/admin/api/energy/devices/{device_id}/battery-commissioning` | Removes the manual date; the derived one applies again. |
+
+All three need an admin session (read-only for `GET`; `PUT` and `DELETE` need the CSRF header).
 
 ## How it works
 
@@ -533,7 +556,9 @@ An action whose hardware capability is unverified reports `available: false` wit
 The dashboard shows the full live energy-flow graphic (PV, grid, battery, house). The Energy Manager
 shows a compact grid–house–battery view beside the controls when space allows. Both use measured,
 sign-normalized readings. The dashboard refreshes approximately every 10 s; the Energy Manager page
-polls every 3 s.
+polls every 3 s; while write support is off the energy device list answers the expected
+503 (logged at DEBUG) and the page polls every 30 s until the next success. An inverter that does not answer
+is listed by its configured host.
 
 Two orthogonal facts are kept separate on the page:
 

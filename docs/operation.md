@@ -26,7 +26,7 @@ read succeeds.
 - Logs are text on stdout; Compose rotates them (50 MB, 5 files).
 - The access log level depends on the request: GUI pages, assets, session polls and successful
   `/metrics` requests are `DEBUG`; mutating admin actions (login, password, settings, tokens),
-  `/api/` and `/health` requests are `INFO`; any 4xx is `WARNING` and any 5xx is `ERROR`.
+  `/api/` and `/health` requests are `INFO`; any 4xx is `WARNING` and any 5xx is `ERROR`. The one exception is the Energy page's device poll, whose 503 while write support is off is expected and logged at `DEBUG`.
 - The boxed block printed to stdout after the server has started shows the generated admin
   password in clear text (a deliberate operator choice, so it can be copied straight from the
   console on first start). It appears only on the initial bootstrap. Console output is persisted

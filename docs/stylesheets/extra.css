@@ -39,7 +39,7 @@
 }
 
 /* Feature cards on the home page. */
-.md-typeset .grid.cards > ul {
+.md-typeset .grid.cards>ul {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr));
     gap: 1rem;
@@ -48,7 +48,7 @@
     list-style: none;
 }
 
-.md-typeset .grid.cards > ul > li {
+.md-typeset .grid.cards>ul>li {
     margin: 0;
     padding: 1rem;
     border: 0.05rem solid var(--md-default-fg-color--lightest);
@@ -56,7 +56,7 @@
     transition: box-shadow 0.25s, border-color 0.25s;
 }
 
-.md-typeset .grid.cards > ul > li:hover {
+.md-typeset .grid.cards>ul>li:hover {
     border-color: var(--rct-accent);
     box-shadow: 0 0.2rem 0.5rem rgba(0, 0, 0, 0.15);
 }
@@ -90,4 +90,58 @@
 
 .mermaid {
     background: transparent;
+}
+
+/* Mermaid diagrams: click to enlarge (see javascripts/mermaid-zoom.js). */
+.md-typeset .mermaid[role="button"] {
+    cursor: zoom-in;
+}
+
+.md-typeset .mermaid[role="button"]:focus-visible {
+    outline: 2px solid var(--md-accent-fg-color);
+    outline-offset: 2px;
+}
+
+.rct-zoom-open {
+    overflow: hidden;
+}
+
+.rct-zoom {
+    position: fixed;
+    inset: 0;
+    z-index: 10;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-sizing: border-box;
+    padding: 2.5rem 0.5rem 0.5rem;
+    background: var(--md-default-bg-color);
+    color: var(--md-default-fg-color);
+    cursor: zoom-out;
+}
+
+.rct-zoom__stage {
+    width: 100%;
+    max-width: 100%;
+    height: 100%;
+}
+
+.rct-zoom__close {
+    position: absolute;
+    top: 0.4rem;
+    right: 0.6rem;
+    width: 2rem;
+    height: 2rem;
+    padding: 0;
+    border: 0;
+    border-radius: 50%;
+    background: var(--md-default-bg-color--light);
+    color: var(--md-default-fg-color);
+    font-size: 1.5rem;
+    line-height: 2rem;
+    cursor: pointer;
+}
+
+.rct-zoom__close:focus-visible {
+    outline: 2px solid var(--md-accent-fg-color);
 }

@@ -112,8 +112,8 @@ try {
     if (r.method() !== 'PUT' || !r.url().endsWith('/admin/api/settings')) return;
     try { const body = JSON.parse(r.postData() || '{}'); if (Object.hasOwn(body, 'devices')) devicePuts.push(body); } catch { /* not JSON */ }
   });
-  // Two animation frames let a resize or navigation reflow finish before geometry is measured.
-  const layoutSettled = () => page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  // Fonts plus two animation frames let a resize or navigation reflow finish before geometry is measured.
+  const layoutSettled = () => page.evaluate(async () => { await document.fonts.ready; await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))); });
   const shot = (name) => page.screenshot({ path: path.join(OUT, `${name}.png`), fullPage: true });
   const toastText = async () => (await page.locator('#toast-region').innerText()).trim();
   const overflow = async () => page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
@@ -961,7 +961,7 @@ try {
   check('theme toggle is square at the smaller size', Math.abs(nav.theme.w - nav.theme.h) < 1, JSON.stringify(nav.theme));
   await shot('navbar-desktop');
   await page.setViewportSize({ width: 390, height: 844 });
-  await sleep(200);
+  await layoutSettled();
   nav = await navbar();
   check('hamburger shares the smaller header button height', nav.menu && Math.abs(nav.menu.h - nav.theme.h) < 1, JSON.stringify([nav.menu, nav.theme]));
   check('logo still fits the header at mobile width', nav.logo.h <= nav.header.h, `${nav.logo.h} <= ${nav.header.h}`);

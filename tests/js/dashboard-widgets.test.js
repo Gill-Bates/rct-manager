@@ -41,6 +41,8 @@ const EXPECTED_ID_ORDER = [
   'metric-count', 'devices', 'device-count', 'connected-count', 'days-to-calibration',
   'spot-price-current', 'spot-market-status', 'spot-price-curve',
   'solar-forecast-status', 'pv-forecast-curve', 'charging-schedule',
+  'battery-usable-kwh', 'battery-remaining-percent', 'battery-cycles', 'battery-last-calibration',
+  'battery-commissioning-date', 'battery-degradation',
 ];
 
 // --- Production layout helpers -------------------------------------------------------------------
