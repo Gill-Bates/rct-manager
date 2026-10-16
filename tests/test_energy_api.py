@@ -83,6 +83,7 @@ def energy_settings(tmp_path: Path, *, unpinned: bool = True, **overrides):
     password = store.initialize()
     assert password is not None
     assert store.change_password(password, PASSWORD)
+    store.accept_disclaimer()
     store.put_many({"write_names": list(PRE_APPROVED), "exposed_names": EXPOSED})
     store.close()
     base = {
@@ -1877,6 +1878,7 @@ def spot_market_settings(tmp_path: Path):
     password = store.initialize()
     assert password is not None
     assert store.change_password(password, PASSWORD)
+    store.accept_disclaimer()
     store.close()
     return make_settings(hmac_secret=SECRET, admin_db_path=admin_path)
 

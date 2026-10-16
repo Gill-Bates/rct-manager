@@ -136,6 +136,33 @@ function confirmAction({ title, message, confirmLabel, danger = false }) {
   });
 }
 
+// Mandatory one-time usage disclaimer. The server (require_admin) is what actually locks the app
+// until acceptance is stored; this only surfaces that state. Called once with the session state on
+// the dashboard. The modal has a static backdrop, no keyboard dismiss and no close/cancel control,
+// so it cannot be dismissed; hiding it in the browser still leaves every API call server-refused.
+function initDisclaimerGate(state) {
+  if (!state || state.disclaimer_required !== true) return;
+  const modalElement = $('disclaimer-modal');
+  const accept = $('disclaimer-accept');
+  if (!modalElement || !accept) return;
+  const modal = window.bootstrap.Modal.getOrCreateInstance(modalElement);
+  const errorBox = $('disclaimer-error');
+  accept.addEventListener('click', async () => {
+    accept.disabled = true; // block a double-click issuing two POSTs
+    if (errorBox) errorBox.hidden = true;
+    try {
+      await api('accept-disclaimer', { method: 'POST' });
+      // The server state is now unlocked; reload so the UI re-fetches it and every page works.
+      location.reload();
+    } catch (error) {
+      // Keep the modal open and show the reason; re-enable so the operator can retry.
+      if (errorBox) { errorBox.textContent = messageFrom(error); errorBox.hidden = false; }
+      accept.disabled = false;
+    }
+  });
+  modal.show();
+}
+
 // navigator.clipboard requires a secure context (HTTPS or localhost) and is undefined on a
 // plain-HTTP LAN deployment, so fall back to the classic textarea + execCommand('copy') trick.
 async function copyToClipboard(text) {

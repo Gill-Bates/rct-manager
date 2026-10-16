@@ -40,7 +40,10 @@ async def _logged_in(tmp_path) -> AsyncIterator[tuple[httpx.AsyncClient, str]]:
         csrf = login.json()["csrf_token"]
         changed = await client.post("/admin/api/change-password", headers={"X-CSRF-Token": csrf},
                                     json={"current_password": password, "new_password": "a much stronger password"})
-        yield client, changed.json()["csrf_token"]
+        csrf = changed.json()["csrf_token"]
+        accepted = await client.post("/admin/api/accept-disclaimer", headers={"X-CSRF-Token": csrf})
+        assert accepted.status_code == 200
+        yield client, csrf
 
 
 _VALID_WIDGET = {"id": "pv-power", "x": 0, "y": 0, "w": 3, "h": 2, "visible": True}
@@ -330,6 +333,7 @@ async def test_stored_layout_survives_a_new_app_and_store_access(tmp_path):
         changed = await client.post("/admin/api/change-password", headers={"X-CSRF-Token": csrf},
                                     json={"current_password": password, "new_password": "a much stronger password"})
         csrf = changed.json()["csrf_token"]
+        await client.post("/admin/api/accept-disclaimer", headers={"X-CSRF-Token": csrf})
         await client.put("/admin/api/dashboard-layout", headers={"X-CSRF-Token": csrf}, json=body)
 
     restarted = create_app(Settings(_env_file=None, hmac_secret="s" * 48, admin_db_path=db_path))

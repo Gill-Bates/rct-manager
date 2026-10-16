@@ -177,6 +177,11 @@ def install_ui(app: FastAPI) -> None:
         destination = _destination(request)
         if destination != "/ui/dashboard":
             return _redirect(destination)
+        # While the mandatory disclaimer is unaccepted the dashboard is the only reachable page; it
+        # hosts the non-dismissable modal, so a direct /ui/<page> cannot bypass it.
+        session = admin_session(request)
+        if page != "dashboard" and session is not None and session.get("disclaimer_required"):
+            return _redirect("/ui/dashboard")
         context = {"page": page}
         if page == "about":
             context.update(_about_context())

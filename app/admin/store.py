@@ -187,6 +187,11 @@ def _schema_sql(sql: str) -> str:
     return sql.strip().rstrip(";")
 
 
+def _utc_timestamp() -> str:
+    """Server-generated UTC acceptance instant, second precision (e.g. ``2026-10-16T14:42:31Z``)."""
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def _bootstrap_password(length: int = 8) -> str:
     """Short one-time password with one special character; it must be replaced at first login."""
     chars = [secrets.choice(_BOOTSTRAP_ALPHABET) for _ in range(length - 1)]
@@ -1094,20 +1099,20 @@ class AdminStore:
             if row is None:
                 return False
             try:
-                if not _PASSWORDS.verify(
-                    self._decode("admin", row["encrypted"])["password_hash"], current
-                ):
+                record = self._decode("admin", row["encrypted"])
+                if not _PASSWORDS.verify(record["password_hash"], current):
                     return False
             except _PASSWORD_ERRORS:
                 return False
             hashed = _PASSWORDS.hash(new)
+            updated = {"password_hash": hashed, "must_change": False}
+            # A later regular password change must never drop an already-given disclaimer acceptance.
+            accepted_at = record.get("disclaimer_accepted_at")
+            if accepted_at is not None:
+                updated["disclaimer_accepted_at"] = accepted_at
             db.execute(
                 "UPDATE admin_user SET encrypted=? WHERE username='admin'",
-                (
-                    self._encode(
-                        "admin", {"password_hash": hashed, "must_change": False}
-                    ),
-                ),
+                (self._encode("admin", updated),),
             )
             db.execute("DELETE FROM sessions")
         return True
@@ -1121,6 +1126,45 @@ class AdminStore:
         return row is None or bool(
             self._decode("admin", row["encrypted"])["must_change"]
         )
+
+    def disclaimer_accepted_at(self) -> str | None:
+        """The stored UTC acceptance timestamp, or ``None`` while the disclaimer is not accepted."""
+        with self.connect() as db:
+            row = db.execute(
+                "SELECT encrypted FROM admin_user WHERE username='admin'"
+            ).fetchone()
+        if row is None:
+            return None
+        return self._decode("admin", row["encrypted"]).get("disclaimer_accepted_at")
+
+    def disclaimer_required(self) -> bool:
+        """True while no acceptance timestamp is stored (a missing field counts as not accepted)."""
+        return self.disclaimer_accepted_at() is None
+
+    def accept_disclaimer(self) -> str:
+        """Persist the mandatory disclaimer acceptance; server-generated timestamp, idempotent.
+
+        A second call keeps and returns the first stored timestamp instead of overwriting it, so a
+        repeated accept request can never corrupt or reset the recorded consent.
+        """
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute(
+                "SELECT encrypted FROM admin_user WHERE username='admin'"
+            ).fetchone()
+            if row is None:
+                raise ValueError("admin user is not initialized")
+            record = self._decode("admin", row["encrypted"])
+            existing = record.get("disclaimer_accepted_at")
+            if existing is not None:
+                return existing
+            accepted_at = _utc_timestamp()
+            record["disclaimer_accepted_at"] = accepted_at
+            db.execute(
+                "UPDATE admin_user SET encrypted=? WHERE username='admin'",
+                (self._encode("admin", record),),
+            )
+        return accepted_at
 
     def new_session(self) -> tuple[str, str]:
         token, csrf = secrets.token_urlsafe(40), secrets.token_urlsafe(32)
@@ -1168,13 +1212,17 @@ class AdminStore:
             return None
         try:
             payload = self._decode(self._digest(token), row["encrypted"])
-            must_change = bool(self._decode("admin", user["encrypted"])["must_change"])
+            admin_record = self._decode("admin", user["encrypted"])
+            must_change = bool(admin_record["must_change"])
         except ValueError:
             return None  # tampered or swapped records never authenticate
         if payload["expires_at"] <= int(time.time()):
             return None
+        accepted_at = admin_record.get("disclaimer_accepted_at")
         return {
             "must_change_password": must_change,
+            "disclaimer_required": accepted_at is None,
+            "disclaimer_accepted_at": accepted_at,
             "csrf_digest": payload["csrf_digest"],
         }
 

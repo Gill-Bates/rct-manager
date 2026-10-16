@@ -134,7 +134,10 @@ def _login(service: _Service) -> tuple[httpx.Client, dict[str, str]]:
         json={"current_password": service.bootstrap_password, "new_password": PASSWORD},
     )
     assert changed.status_code == 200, changed.text
-    return client, {"X-CSRF-Token": changed.json()["csrf_token"]}
+    headers = {"X-CSRF-Token": changed.json()["csrf_token"]}
+    accepted = client.post("/admin/api/accept-disclaimer", headers=headers)
+    assert accepted.status_code == 200, accepted.text
+    return client, headers
 
 
 def test_listener_change_replaces_the_process_image_and_serves_on_the_new_port(service):

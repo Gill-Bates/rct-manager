@@ -48,8 +48,9 @@ async def _logged_in(tmp_path):
     csrf = (await client.get("/admin/api/session")).json()["csrf_token"]
     login = await client.post("/admin/api/login", headers={"X-CSRF-Token": csrf},
                               json={"username": "admin", "password": password})
-    await client.post("/admin/api/change-password", headers={"X-CSRF-Token": login.json()["csrf_token"]},
-                      json={"current_password": password, "new_password": "a much stronger password"})
+    changed = await client.post("/admin/api/change-password", headers={"X-CSRF-Token": login.json()["csrf_token"]},
+                                json={"current_password": password, "new_password": "a much stronger password"})
+    await client.post("/admin/api/accept-disclaimer", headers={"X-CSRF-Token": changed.json()["csrf_token"]})
     return client
 
 

@@ -39,6 +39,7 @@ def _spot_market_settings(tmp_path: Path):
     password = store.initialize()
     assert password is not None
     assert store.change_password(password, PASSWORD)
+    store.accept_disclaimer()
     store.close()
     return make_settings(hmac_secret=SECRET, admin_db_path=admin_path)
 

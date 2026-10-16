@@ -350,6 +350,9 @@ def _bearer_admin(request: Request, privileged: bool) -> bool:
     # Tokens stay inert until the first-login password change completed.
     if store.password_change_pending():
         raise HTTPException(403, "Password change required")
+    # A PAT must never bypass the mandatory one-time disclaimer acceptance either.
+    if store.disclaimer_required():
+        raise HTTPException(403, "Disclaimer acceptance required")
     if privileged and entry.role != TokenRole.READ_WRITE:
         raise HTTPException(403, "Read/write token required")
     return True
@@ -360,6 +363,7 @@ def require_admin(
     *,
     mutation: bool = False,
     allow_password_change: bool = False,
+    allow_disclaimer: bool = False,
     session_only: bool = False,
     sensitive: bool = False,
 ) -> dict | None:
@@ -369,9 +373,14 @@ def require_admin(
 
     ``session_only`` refuses a PAT outright: security-relevant changes (tokens, trust and
     authentication settings) must not be reachable with a leaked automation token.
+
+    ``allow_disclaimer`` marks an endpoint that is part of the mandatory-disclaimer flow itself
+    (logout, password change, the acceptance endpoint); every other endpoint stays locked while the
+    disclaimer is unaccepted, so the modal cannot be bypassed by calling the API directly.
     """
     bearer = (
         not allow_password_change
+        and not allow_disclaimer
         and "authorization" in request.headers
         and not request.cookies.get(_COOKIE)
     )
@@ -388,6 +397,8 @@ def require_admin(
         _csrf(request, session)
     if session["must_change_password"] and not allow_password_change:
         raise HTTPException(403, "Password change required")
+    if session["disclaimer_required"] and not allow_disclaimer:
+        raise HTTPException(403, "Disclaimer acceptance required")
     return session
 
 
@@ -460,11 +471,15 @@ def session(request: Request, response: Response) -> dict:
         return {
             "authenticated": False,
             "must_change_password": False,
+            "disclaimer_required": False,
+            "disclaimer_accepted_at": None,
             "csrf_token": csrf,
         }
     return {
         "authenticated": True,
         "must_change_password": state["must_change_password"],
+        "disclaimer_required": state["disclaimer_required"],
+        "disclaimer_accepted_at": state["disclaimer_accepted_at"],
         "csrf_token": csrf,
     }
 
@@ -553,13 +568,17 @@ def login(body: Login, request: Request, response: Response) -> dict:
     return {
         "authenticated": True,
         "must_change_password": state["must_change_password"],
+        "disclaimer_required": state["disclaimer_required"],
+        "disclaimer_accepted_at": state["disclaimer_accepted_at"],
         "csrf_token": csrf,
     }
 
 
 @router.post("/change-password")
 def change_password(body: PasswordChange, request: Request, response: Response) -> dict:
-    require_admin(request, mutation=True, allow_password_change=True)
+    require_admin(
+        request, mutation=True, allow_password_change=True, allow_disclaimer=True
+    )
     ctx = request.app.state.security
     address = source_address(request, ctx)
     ctx.limiter.check_auth_blocked(address)
@@ -570,16 +589,40 @@ def change_password(body: PasswordChange, request: Request, response: Response) 
         raise HTTPException(401, "Invalid credentials")
     token, csrf = _store(request).new_session()
     _set_cookies(response, request, token, csrf)
-    return {"authenticated": True, "must_change_password": False, "csrf_token": csrf}
+    state = _store(request).session(token)
+    return {
+        "authenticated": True,
+        "must_change_password": False,
+        "disclaimer_required": state["disclaimer_required"],
+        "disclaimer_accepted_at": state["disclaimer_accepted_at"],
+        "csrf_token": csrf,
+    }
 
 
 @router.post("/logout")
 def logout(request: Request, response: Response) -> dict:
-    require_admin(request, mutation=True, allow_password_change=True)
+    require_admin(
+        request, mutation=True, allow_password_change=True, allow_disclaimer=True
+    )
     _store(request).delete_session(request.cookies.get(_COOKIE))
     response.delete_cookie(_COOKIE, path="/")
     response.delete_cookie(_CSRF_COOKIE, path="/")
     return {"authenticated": False}
+
+
+@router.post("/accept-disclaimer")
+def accept_disclaimer(request: Request) -> dict:
+    # Session-only (no PAT), CSRF-protected and exempt from the disclaimer gate itself; the server
+    # generates the timestamp. Idempotent: a repeated accept keeps the first stored timestamp.
+    require_admin(
+        request,
+        mutation=True,
+        allow_password_change=True,
+        allow_disclaimer=True,
+        session_only=True,
+    )
+    accepted_at = _store(request).accept_disclaimer()
+    return {"accepted": True, "accepted_at": accepted_at}
 
 
 def _settings_view(settings: Settings) -> dict[str, Any]:

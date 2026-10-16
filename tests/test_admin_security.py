@@ -56,14 +56,17 @@ async def _login(client, password, csrf=None, **headers):
 
 @asynccontextmanager
 async def _ready(app, password):
-    """Log in, change the initial password and yield a client with a usable session."""
+    """Log in, change the initial password, accept the disclaimer and yield a usable session."""
     async with _client(app) as client:
         login = await _login(client, password)
         changed = await client.post("/admin/api/change-password",
                                     headers={"X-CSRF-Token": login.json()["csrf_token"]},
                                     json={"current_password": password, "new_password": PASSWORD2})
         assert changed.status_code == 200
-        yield client, changed.json()["csrf_token"]
+        csrf = changed.json()["csrf_token"]
+        accepted = await client.post("/admin/api/accept-disclaimer", headers={"X-CSRF-Token": csrf})
+        assert accepted.status_code == 200
+        yield client, csrf
 
 
 @pytest.fixture
@@ -102,6 +105,9 @@ async def test_sessions_rotate_and_old_ones_die(booted):
                                     json={"current_password": password, "new_password": PASSWORD2})
         assert changed.status_code == 200
         assert client.cookies["rct_admin_session"] != old_cookie
+        accepted = await client.post("/admin/api/accept-disclaimer",
+                                     headers={"X-CSRF-Token": changed.json()["csrf_token"]})
+        assert accepted.status_code == 200
         assert (await client.get("/admin/api/settings")).status_code == 200
         async with _client(app) as stale:
             stale.cookies.set("rct_admin_session", old_cookie)
@@ -592,3 +598,94 @@ def test_wal_mode_permissions_close_and_parallel_writes(tmp_path):
     store.close()  # idempotent
     assert not path.with_name(path.name + "-wal").exists() or path.with_name(path.name + "-wal").stat().st_size == 0
     assert not path.with_name(path.name + "-shm").exists()
+
+
+# --- Mandatory usage-disclaimer persistence (store level) --------------------------------------
+
+_UTC_STAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+
+
+def test_new_admin_has_no_disclaimer_acceptance(tmp_path):
+    store = AdminStore(tmp_path / "rct.db", "s" * 48)
+    store.initialize()
+    assert store.disclaimer_accepted_at() is None
+    assert store.disclaimer_required() is True
+
+
+def test_password_change_leaves_the_disclaimer_still_required(tmp_path):
+    store = AdminStore(tmp_path / "rct.db", "s" * 48)
+    password = store.initialize()
+    assert store.change_password(password, PASSWORD2) is True
+    assert store.password_change_pending() is False
+    assert store.disclaimer_required() is True
+
+
+def test_accepting_persists_a_server_generated_utc_timestamp(tmp_path):
+    store = AdminStore(tmp_path / "rct.db", "s" * 48)
+    store.initialize()
+    stamp = store.accept_disclaimer()
+    assert _UTC_STAMP.match(stamp)
+    assert store.disclaimer_accepted_at() == stamp
+    assert store.disclaimer_required() is False
+
+
+def test_accepting_is_idempotent_and_keeps_the_first_timestamp(tmp_path):
+    store = AdminStore(tmp_path / "rct.db", "s" * 48)
+    store.initialize()
+    first = store.accept_disclaimer()
+    assert store.accept_disclaimer() == first  # a second accept never overwrites or resets
+    assert store.disclaimer_accepted_at() == first
+
+
+def test_a_later_password_change_keeps_the_acceptance(tmp_path):
+    store = AdminStore(tmp_path / "rct.db", "s" * 48)
+    password = store.initialize()
+    assert store.change_password(password, PASSWORD2) is True
+    stamp = store.accept_disclaimer()
+    assert store.change_password(PASSWORD2, PASSWORD2 + "!") is True
+    assert store.disclaimer_accepted_at() == stamp  # a normal change must not drop consent
+    assert store.disclaimer_required() is False
+
+
+def test_acceptance_survives_a_store_restart(tmp_path):
+    path = tmp_path / "rct.db"
+    store = AdminStore(path, "s" * 48)
+    store.initialize()
+    stamp = store.accept_disclaimer()
+    store.close()
+    restarted = AdminStore(path, "s" * 48)
+    restarted.initialize()
+    assert restarted.disclaimer_accepted_at() == stamp
+    assert restarted.disclaimer_required() is False
+    restarted.close()
+
+
+def test_record_without_the_field_is_treated_as_not_accepted(tmp_path):
+    store = AdminStore(tmp_path / "rct.db", "s" * 48)
+    store.initialize()
+    store.accept_disclaimer()
+    # Simulate an older record whose decoded dict never had the field.
+    with store.connect() as db:
+        row = db.execute("SELECT encrypted FROM admin_user WHERE username='admin'").fetchone()
+        record = store._decode("admin", row["encrypted"])
+        record.pop("disclaimer_accepted_at", None)
+        db.execute("UPDATE admin_user SET encrypted=? WHERE username='admin'",
+                   (store._encode("admin", record),))
+    assert store.disclaimer_accepted_at() is None
+    assert store.disclaimer_required() is True
+
+
+def test_session_exposes_the_disclaimer_state(tmp_path):
+    store = AdminStore(tmp_path / "rct.db", "s" * 48)
+    password = store.initialize()
+    assert store.change_password(password, PASSWORD2) is True
+    token, _csrf = store.new_session()
+    state = store.session(token)
+    assert state["must_change_password"] is False
+    assert state["disclaimer_required"] is True
+    assert state["disclaimer_accepted_at"] is None
+    stamp = store.accept_disclaimer()
+    state = store.session(token)
+    assert state["disclaimer_required"] is False
+    assert state["disclaimer_accepted_at"] == stamp
+    store.close()

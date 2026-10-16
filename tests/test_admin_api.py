@@ -6,6 +6,7 @@
 
 """Admin bootstrap, browser session, PAT and encrypted persistence behavior."""
 
+import re
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
@@ -73,6 +74,10 @@ async def test_admin_first_login_change_and_pat(tmp_path):
                                     json={"current_password": password, "new_password": "a much stronger password"})
         assert changed.status_code == 200
         csrf = changed.json()["csrf_token"]
+        # The disclaimer must still be accepted before any normal admin endpoint is usable.
+        assert (await client.get("/admin/api/settings")).status_code == 403
+        accepted = await client.post("/admin/api/accept-disclaimer", headers={"X-CSRF-Token": csrf})
+        assert accepted.status_code == 200 and accepted.json()["accepted"] is True
         assert (await client.get("/admin/api/settings")).status_code == 200
         saved = await client.put("/admin/api/settings", headers={"X-CSRF-Token": csrf},
                                  json={"docs_public": True, "influxdb_token": "private-influx-token"})
@@ -114,6 +119,7 @@ async def test_live_charge_limit_freshness_persists_and_reaches_dispatch_config_
     settings = Settings(_env_file=None, hmac_secret="s" * 48, admin_db_path=tmp_path / "rct.db")
     app = create_app(settings)
     assert app.state.admin_store.change_password(app.state.first_start_password, "a much stronger password")
+    app.state.admin_store.accept_disclaimer()  # a PAT stays inert until the disclaimer is accepted
     token = app.state.admin_store.create_token("settings", "read/write", None)[1]
     headers = {"Authorization": f"Bearer {token}"}
     key = "dispatch_live_charge_limit_max_age_seconds"
@@ -199,6 +205,8 @@ async def test_get_tokens_returns_suffix(tmp_path):
         changed = await client.post("/admin/api/change-password", headers={"X-CSRF-Token": csrf},
                                     json={"current_password": password, "new_password": "a much stronger password"})
         csrf = changed.json()["csrf_token"]
+        assert (await client.post("/admin/api/accept-disclaimer",
+                                  headers={"X-CSRF-Token": csrf})).status_code == 200
         made = await client.post("/admin/api/tokens", headers={"X-CSRF-Token": csrf},
                                  json={"name": "test", "role": "read"})
         assert made.status_code == 201
@@ -295,6 +303,7 @@ async def test_admin_writes_need_admin_session_or_read_write_pat(tmp_path, auth_
         assert (await client.put("/admin/api/settings", json=change, headers=bearer(early))).status_code == 403
         assert (await client.get("/admin/api/settings", headers=bearer(early))).status_code == 403
         assert store.change_password(password, "a much stronger password")
+        store.accept_disclaimer()  # PATs stay inert until the disclaimer is accepted too
         write_pat = store.create_token("rw", "read/write", None)[1]
         read_pat = store.create_token("ro", "read", None)[1]
         for method, url, body in (("PUT", "/admin/api/settings", change),
@@ -434,6 +443,7 @@ async def test_resaving_an_unchanged_export_field_does_not_restart_the_exporter(
         changed = await client.post("/admin/api/change-password", headers={"X-CSRF-Token": login.json()["csrf_token"]},
                                     json={"current_password": password, "new_password": "a much stronger password"})
         headers = {"X-CSRF-Token": changed.json()["csrf_token"]}
+        assert (await client.post("/admin/api/accept-disclaimer", headers=headers)).status_code == 200
         base = await client.put("/admin/api/settings", headers=headers,
                                 json={"db_type": "questdb", "questdb_hostname": "localhost"})
         assert base.status_code == 200
@@ -465,6 +475,7 @@ async def test_switching_db_type_still_restarts_the_exporter(tmp_path):
         changed = await client.post("/admin/api/change-password", headers={"X-CSRF-Token": login.json()["csrf_token"]},
                                     json={"current_password": password, "new_password": "a much stronger password"})
         headers = {"X-CSRF-Token": changed.json()["csrf_token"]}
+        assert (await client.post("/admin/api/accept-disclaimer", headers=headers)).status_code == 200
 
         with patch("app.admin.api._restart_export") as mocked:
             first_type = await client.put("/admin/api/settings", headers=headers,
@@ -498,6 +509,7 @@ async def test_a_busy_transition_rejects_a_live_settings_change_before_persistin
         changed = await client.post("/admin/api/change-password", headers={"X-CSRF-Token": login.json()["csrf_token"]},
                                     json={"current_password": password, "new_password": "a much stronger password"})
         headers = {"X-CSRF-Token": changed.json()["csrf_token"]}
+        assert (await client.post("/admin/api/accept-disclaimer", headers=headers)).status_code == 200
 
         before = app.state.admin_desired_settings
         assert before.enable_write_support is False
@@ -523,6 +535,7 @@ async def test_a_busy_transition_rejects_a_parameter_selection_change_before_per
         changed = await client.post("/admin/api/change-password", headers={"X-CSRF-Token": login.json()["csrf_token"]},
                                     json={"current_password": password, "new_password": "a much stronger password"})
         headers = {"X-CSRF-Token": changed.json()["csrf_token"]}
+        assert (await client.post("/admin/api/accept-disclaimer", headers=headers)).status_code == 200
 
         store = app.state.admin_store
         exposed_before = store.get("exposed_names")
@@ -759,3 +772,109 @@ def test_enabling_the_metrics_endpoint_is_session_only_where_it_would_serve_with
         "enable_metrics_endpoint", "metrics_require_token",
     }
     assert _changed_session_only(request(metrics_require_token=False), {"enable_metrics_endpoint": False}) == set()
+
+
+# --- Mandatory usage-disclaimer HTTP enforcement -----------------------------------------------
+
+_DISCLAIMER_PW = "a much stronger password"
+
+
+def _api_client(app):
+    return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver",
+                             headers={"Origin": "http://testserver"})
+
+
+async def _changed_not_accepted(client, password):
+    """Log in and change the initial password WITHOUT accepting the disclaimer; return the CSRF."""
+    csrf = (await client.get("/admin/api/session")).json()["csrf_token"]
+    login = await client.post("/admin/api/login", headers={"X-CSRF-Token": csrf},
+                              json={"username": "admin", "password": password})
+    changed = await client.post("/admin/api/change-password", headers={"X-CSRF-Token": login.json()["csrf_token"]},
+                                json={"current_password": password, "new_password": _DISCLAIMER_PW})
+    assert changed.status_code == 200
+    body = changed.json()
+    assert body["must_change_password"] is False and body["disclaimer_required"] is True
+    return changed.json()["csrf_token"]
+
+
+@pytest.mark.asyncio
+async def test_disclaimer_gate_blocks_normal_admin_api_before_acceptance(tmp_path):
+    app = create_app(Settings(_env_file=None, hmac_secret="s" * 48, admin_db_path=tmp_path / "rct.db"))
+    password = app.state.first_start_password
+    async with _api_client(app) as client:
+        csrf = await _changed_not_accepted(client, password)
+        h = {"X-CSRF-Token": csrf}
+        assert (await client.get("/admin/api/settings")).status_code == 403
+        assert (await client.get("/admin/api/tokens")).status_code == 403
+        assert (await client.put("/admin/api/settings", headers=h, json={"docs_public": True})).status_code == 403
+        assert (await client.post("/admin/api/tokens", headers=h,
+                                  json={"name": "x", "role": "read"})).status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_accept_endpoint_needs_a_session_and_valid_csrf(tmp_path):
+    app = create_app(Settings(_env_file=None, hmac_secret="s" * 48, admin_db_path=tmp_path / "rct.db"))
+    password = app.state.first_start_password
+    async with _api_client(app) as client:
+        csrf = await _changed_not_accepted(client, password)
+        # No CSRF token -> refused (mutation).
+        assert (await client.post("/admin/api/accept-disclaimer")).status_code == 403
+        # Wrong CSRF token -> refused.
+        assert (await client.post("/admin/api/accept-disclaimer",
+                                  headers={"X-CSRF-Token": "wrong"})).status_code == 403
+        good = await client.post("/admin/api/accept-disclaimer", headers={"X-CSRF-Token": csrf})
+        assert good.status_code == 200
+        assert good.json()["accepted"] is True
+        assert re.match(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$", good.json()["accepted_at"])
+        # Idempotent: a second accept keeps the same timestamp and the state stays unlocked.
+        again = await client.post("/admin/api/accept-disclaimer", headers={"X-CSRF-Token": csrf})
+        assert again.status_code == 200 and again.json()["accepted_at"] == good.json()["accepted_at"]
+
+
+@pytest.mark.asyncio
+async def test_accept_endpoint_requires_the_authenticated_state(tmp_path):
+    app = create_app(Settings(_env_file=None, hmac_secret="s" * 48, admin_db_path=tmp_path / "rct.db"))
+    async with _api_client(app) as client:
+        csrf = (await client.get("/admin/api/session")).json()["csrf_token"]
+        # No session at all -> login required.
+        assert (await client.post("/admin/api/accept-disclaimer",
+                                  headers={"X-CSRF-Token": csrf})).status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_session_endpoint_reflects_acceptance_and_the_modal_does_not_reappear(tmp_path):
+    app = create_app(Settings(_env_file=None, hmac_secret="s" * 48, admin_db_path=tmp_path / "rct.db"))
+    password = app.state.first_start_password
+    async with _api_client(app) as client:
+        csrf = await _changed_not_accepted(client, password)
+        state = (await client.get("/admin/api/session")).json()
+        assert state["disclaimer_required"] is True and state["disclaimer_accepted_at"] is None
+        accepted = await client.post("/admin/api/accept-disclaimer", headers={"X-CSRF-Token": csrf})
+        stamp = accepted.json()["accepted_at"]
+        state = (await client.get("/admin/api/session")).json()
+        assert state["disclaimer_required"] is False and state["disclaimer_accepted_at"] == stamp
+        # A later log out + log in must not bring the modal back for this user.
+        assert (await client.post("/admin/api/logout", headers={"X-CSRF-Token": csrf})).status_code == 200
+        relogin_csrf = (await client.get("/admin/api/session")).json()["csrf_token"]
+        await client.post("/admin/api/login", headers={"X-CSRF-Token": relogin_csrf},
+                          json={"username": "admin", "password": _DISCLAIMER_PW})
+        state = (await client.get("/admin/api/session")).json()
+        assert state["disclaimer_required"] is False and state["disclaimer_accepted_at"] == stamp
+
+
+@pytest.mark.asyncio
+async def test_pat_cannot_bypass_the_disclaimer(tmp_path):
+    app = create_app(Settings(_env_file=None, hmac_secret="s" * 48, admin_db_path=tmp_path / "rct.db"))
+    store = app.state.admin_store
+    assert store.change_password(app.state.first_start_password, _DISCLAIMER_PW)  # disclaimer still pending
+    write_pat = store.create_token("rw", "read/write", None)[1]
+    bearer = {"Authorization": "Bearer " + write_pat}
+    async with _api_client(app) as client:
+        # A valid read/write PAT is refused for every normal admin call while unaccepted...
+        assert (await client.get("/admin/api/settings", headers=bearer)).status_code == 403
+        assert (await client.put("/admin/api/settings", headers=bearer,
+                                 json={"metrics_rate_limit_requests": 120})).status_code == 403
+        # ...and a PAT may not reach the acceptance endpoint at all: the flow endpoints are
+        # session-only, so the PAT header is ignored and a session is demanded (401, never 200).
+        assert (await client.post("/admin/api/accept-disclaimer", headers=bearer)).status_code in (401, 403)
+        assert store.disclaimer_required() is True  # nothing was accepted via the PAT path

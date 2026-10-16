@@ -29,8 +29,11 @@
       return;
     }
     try {
-      await session();
+      const state = await session();
       if (page === 'dashboard') {
+        // Mandatory disclaimer: open the non-dismissable modal from server-delivered state before
+        // the dashboard data loads. The server lock enforces it; this only surfaces it.
+        initDisclaimerGate(state);
         initDashboardPolling();
         // dashboard.js owns the GridStack layout; it is independent of the polling above and of
         // data loading, so it is started without awaiting it.

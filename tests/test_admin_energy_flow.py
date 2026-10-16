@@ -43,6 +43,7 @@ def bootstrapped_settings(tmp_path: Path, **overrides):
     store = AdminStore(admin_db_path, SECRET)
     password = store.initialize()
     assert store.change_password(password, PASSWORD)
+    store.accept_disclaimer()
     token = store.create_token("read test token", "read", None)[1]
     store.close()
     settings = make_settings(hmac_secret=SECRET, admin_db_path=admin_db_path, **overrides)

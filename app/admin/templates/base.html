@@ -110,6 +110,39 @@
       </div>
     </div>
   </div>
+  {% if page not in ('login', 'change-password') %}
+  {# Mandatory one-time usage disclaimer. Opened from server-delivered session state on the
+  dashboard; static backdrop and disabled keyboard mean no Escape/backdrop dismiss, and there is no
+  close/cancel control. The server lock (require_admin) is what actually enforces acceptance. #}
+  <div class="modal fade" id="disclaimer-modal" tabindex="-1" role="dialog" aria-labelledby="disclaimer-title"
+    aria-describedby="disclaimer-body" data-bs-backdrop="static" data-bs-keyboard="false">
+    <div class="modal-dialog modal-dialog-centered modal-dialog-scrollable modal-lg">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h2 id="disclaimer-title" class="modal-title h5 d-flex align-items-center gap-2"><span
+              class="material-icons" aria-hidden="true">gavel</span>Important Usage Notice</h2>
+        </div>
+        <div class="modal-body" id="disclaimer-body">
+          <p>Use of RCT Manager is at your own risk.</p>
+          <p>RCT Manager is an independent project and is not affiliated with RCT or RCT Power. In particular, it is
+            not an official application and is not a product provided or supported by RCT.</p>
+          <p>To the extent permitted by law, no liability is accepted for any damage, misconfiguration, data loss, or
+            other consequences arising directly or indirectly from the use of this application.</p>
+          <p>Changes to settings of the inverter, battery storage, energy management, or other components may affect
+            the operation of the system.</p>
+          <p class="mb-0">If you are unsure or in doubt, consult your responsible solar installer or qualified
+            technician.</p>
+        </div>
+        <div class="modal-footer flex-column align-items-stretch gap-2">
+          <p class="fw-semibold mb-0 text-center">I have read the notice and accept.</p>
+          <div id="disclaimer-error" class="alert alert-danger mb-0" role="alert" hidden></div>
+          <button id="disclaimer-accept" type="button" class="btn btn-primary w-100">I have read the notice and
+            accept</button>
+        </div>
+      </div>
+    </div>
+  </div>
+  {% endif %}
   <script src="/admin/static/vendor/bootstrap.bundle.min.js" defer></script>
   <script src="/admin/static/js/connection.js" defer></script>
   <script src="/admin/static/js/admin-core.js" defer></script>

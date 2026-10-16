@@ -191,8 +191,9 @@ async def _logged_in(tmp_path) -> AsyncIterator[httpx.AsyncClient]:
         csrf = (await client.get("/admin/api/session")).json()["csrf_token"]
         login = await client.post("/admin/api/login", headers={"X-CSRF-Token": csrf},
                                   json={"username": "admin", "password": password})
-        await client.post("/admin/api/change-password", headers={"X-CSRF-Token": login.json()["csrf_token"]},
-                          json={"current_password": password, "new_password": "a much stronger password"})
+        changed = await client.post("/admin/api/change-password", headers={"X-CSRF-Token": login.json()["csrf_token"]},
+                                    json={"current_password": password, "new_password": "a much stronger password"})
+        await client.post("/admin/api/accept-disclaimer", headers={"X-CSRF-Token": changed.json()["csrf_token"]})
         yield client
 
 
@@ -1043,6 +1044,9 @@ async def test_about_requires_session_and_renders_project_details(tmp_path, monk
             json={"current_password": password, "new_password": "a much stronger password"},
         )
         assert changed.status_code == 200
+        accepted = await client.post("/admin/api/accept-disclaimer",
+                                     headers={"X-CSRF-Token": changed.json()["csrf_token"]})
+        assert accepted.status_code == 200
 
         response = await client.get("/ui/about")
         assert response.status_code == 200
@@ -1847,3 +1851,72 @@ def test_dry_run_schedule_chart_series_keep_uneven_slots_and_gaps_on_a_time_axis
     assert [point["y"] for point in power] == [2.0, 2.0, None, 0, 0]  # a gap breaks the line, idle reads 0
     assert [point["y"] for point in soc] == [70.0, 70.0, None, None, None]
     assert power[4]["x"] - power[3]["x"] == 13 * 3600 * 1000  # the long slot keeps its true length
+
+
+# --- Mandatory usage-disclaimer UI (markup, navigation gate, client contract) -------------------
+
+@contextlib.asynccontextmanager
+async def _changed_not_accepted(tmp_path) -> AsyncIterator[httpx.AsyncClient]:
+    """Like _logged_in, but stops after the password change WITHOUT accepting the disclaimer."""
+    app = create_app(Settings(_env_file=None, hmac_secret="s" * 48, admin_db_path=tmp_path / "rct.db"))
+    password = app.state.first_start_password
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver",
+                          headers={"Origin": "http://testserver"}) as client,
+    ):
+        csrf = (await client.get("/admin/api/session")).json()["csrf_token"]
+        login = await client.post("/admin/api/login", headers={"X-CSRF-Token": csrf},
+                                  json={"username": "admin", "password": password})
+        changed = await client.post("/admin/api/change-password",
+                                    headers={"X-CSRF-Token": login.json()["csrf_token"]},
+                                    json={"current_password": password, "new_password": "a much stronger password"})
+        assert changed.json()["disclaimer_required"] is True
+        yield client
+
+
+@pytest.mark.asyncio
+async def test_other_ui_pages_cannot_bypass_a_pending_disclaimer(tmp_path):
+    async with _changed_not_accepted(tmp_path) as client:
+        # The dashboard renders (that is where the modal lives)...
+        assert (await client.get("/ui/dashboard")).status_code == 200
+        # ...every other page funnels back to the dashboard instead of serving its content.
+        for page in ("settings", "energy", "inverters", "tokens", "tsdb", "prometheus"):
+            response = await client.get(f"/ui/{page}", follow_redirects=False)
+            assert response.status_code == 303, page
+            assert response.headers["location"] == "/ui/dashboard", page
+
+
+def test_disclaimer_modal_markup_is_mandatory_and_not_dismissable():
+    base = (TEMPLATES / "base.html").read_text(encoding="utf-8")
+    start = base.index('id="disclaimer-modal"')
+    # The modal element and its dialog/content/body/footer block.
+    block = base[base.rindex("<div", 0, start):]
+    block = block[: block.index("{% endif %}")]
+    # Static backdrop and no keyboard dismiss (mirrors reconnect-modal).
+    assert 'data-bs-backdrop="static"' in block
+    assert 'data-bs-keyboard="false"' in block
+    # No dismiss affordance at all: no close button, no cancel, no backdrop/escape dismiss hook.
+    assert "data-bs-dismiss" not in block
+    assert "btn-close" not in block
+    assert "Cancel" not in block and "Abbrechen" not in block
+    # A single explicit accept control carries the consent.
+    assert 'id="disclaimer-accept"' in block
+    assert "I have read the notice and accept" in block
+    # Accessible dialog semantics and a hidden error region for save failures.
+    assert 'aria-labelledby="disclaimer-title"' in block
+    assert 'id="disclaimer-error"' in block and 'role="alert"' in block
+
+
+def test_disclaimer_client_accepts_and_handles_errors():
+    js = _admin_js()
+    assert "initDisclaimerGate" in js
+    # Posts to the dedicated endpoint through the shared, CSRF-injecting api() helper.
+    assert "accept-disclaimer" in js
+    # Opens from server-delivered state only.
+    assert "disclaimer_required" in js
+    # Disables the button against a double-click.
+    assert "accept.disabled = true" in js
+    # On failure the modal stays open and the error is shown; the button is re-enabled.
+    assert "disclaimer-error" in js
+    assert "accept.disabled = false" in js

@@ -119,6 +119,7 @@ async def running_app(
         store = AdminStore(Path(directory) / "admin.db", "s" * 48)
         password = store.initialize()
         assert store.change_password(password, "replacement-test-password")
+        store.accept_disclaimer()  # a fully set-up admin: PAT/admin calls are no longer gated
         with patch("app.admin.store.generate_pat", side_effect=[READ_TOKEN, WRITE_TOKEN]):
             store.create_token("read test token", "read", None)
             store.create_token("write test token", "read/write", None)
@@ -276,4 +277,7 @@ async def admin_session_headers(client, password: str) -> dict[str, str]:
         "/admin/api/login", headers={"X-CSRF-Token": csrf}, json={"username": "admin", "password": password}
     )
     assert login.status_code == 200, login.text
-    return {"X-CSRF-Token": login.json()["csrf_token"]}
+    headers = {"X-CSRF-Token": login.json()["csrf_token"]}
+    # A fully set-up admin: accept the one-time disclaimer (idempotent) so normal admin calls work.
+    await client.post("/admin/api/accept-disclaimer", headers=headers)
+    return headers
