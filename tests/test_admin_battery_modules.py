@@ -46,7 +46,10 @@ from app.gateway.rct import REFRESH_FAILURES_CONFIRMED
 
 
 def _runtime(
-    serials: dict[str, str], *, known: set[str] | None = None, unanswered: frozenset[str] = frozenset(),
+    serials: dict[str, str],
+    *,
+    known: set[str] | None = None,
+    unanswered: frozenset[str] = frozenset(),
     ah_samples: dict[str, tuple[float | str, CacheFreshness]] | None = None,
     inverter_serial: str | None = "SN-INV-1",
 ):
@@ -72,11 +75,15 @@ def _runtime(
         sample = (ah_samples or {}).get(name)
         return None if sample is None else (sample[0], 0.0, sample[1])
 
-    return SimpleNamespace(catalog=SimpleNamespace(exists=exists),
-                           gateway=SimpleNamespace(cached_reading=cached_reading,
-                                                   cached_sample=cached_sample,
-                                                   reported_serial=lambda _device_id: inverter_serial,
-                                                   read_failed=lambda _device_id, name: name in unanswered))
+    return SimpleNamespace(
+        catalog=SimpleNamespace(exists=exists),
+        gateway=SimpleNamespace(
+            cached_reading=cached_reading,
+            cached_sample=cached_sample,
+            reported_serial=lambda _device_id: inverter_serial,
+            read_failed=lambda _device_id, name: name in unanswered,
+        ),
+    )
 
 
 def _slots(prefix: str, count: int) -> dict[str, str]:
@@ -86,7 +93,10 @@ def _slots(prefix: str, count: int) -> dict[str, str]:
     build a snapshot that still has UNKNOWN slots."""
     populated_slots = count
     populated = {f"{prefix}_module_sn_{i}": f"SN-{i}" for i in range(populated_slots)}
-    rest_empty = {f"{prefix}_module_sn_{i}": "" for i in range(populated_slots, RCT_MODULE_SN_SLOTS)}
+    rest_empty = {
+        f"{prefix}_module_sn_{i}": ""
+        for i in range(populated_slots, RCT_MODULE_SN_SLOTS)
+    }
     return {**populated, **rest_empty}
 
 
@@ -104,7 +114,9 @@ def _report(runtime, prefix: str = "battery") -> dict:
 
 def test_catalog_slots_and_hardware_limit_are_separate_numbers() -> None:
     assert RCT_MODULE_SN_SLOTS == 7  # size of the battery_module_sn_0..6 array
-    assert RCT_MAX_MODULES_PER_TOWER == 6  # documented modules per tower (RCT Power Battery / BMS V2)
+    assert (
+        RCT_MAX_MODULES_PER_TOWER == 6
+    )  # documented modules per tower (RCT Power Battery / BMS V2)
     assert RCT_MODULE_SN_SLOTS > RCT_MAX_MODULES_PER_TOWER
 
 
@@ -125,9 +137,15 @@ def test_no_serial_read_yet_is_pending_not_zero_modules() -> None:
 
 def test_blank_serials_do_not_count_as_populated() -> None:
     # All seven slots READ (completeness gate satisfied): one real serial, the rest read as blank.
-    serials = {"battery_module_sn_0": "SN-0", "battery_module_sn_1": "   ", "battery_module_sn_2": "",
-               "battery_module_sn_3": "", "battery_module_sn_4": "", "battery_module_sn_5": "",
-               "battery_module_sn_6": ""}
+    serials = {
+        "battery_module_sn_0": "SN-0",
+        "battery_module_sn_1": "   ",
+        "battery_module_sn_2": "",
+        "battery_module_sn_3": "",
+        "battery_module_sn_4": "",
+        "battery_module_sn_5": "",
+        "battery_module_sn_6": "",
+    }
     report = _report(_runtime(serials), "battery")
     assert report["module_count"] == 1, "only the one real serial counts as a module"
     assert report["module_count_status"] == "ok"
@@ -142,7 +160,9 @@ def test_null_and_control_byte_garbage_does_not_count_as_populated() -> None:
         "battery_module_sn_0": "SN-0",
         "battery_module_sn_1": "\x00\x00\x00\x00",
         "battery_module_sn_2": "\x01\x02\x03",
-        "battery_module_sn_3": "", "battery_module_sn_4": "", "battery_module_sn_5": "",
+        "battery_module_sn_3": "",
+        "battery_module_sn_4": "",
+        "battery_module_sn_5": "",
         "battery_module_sn_6": "",
     }
     report = _report(_runtime(serials), "battery")
@@ -165,9 +185,15 @@ def test_all_seven_slots_populated_is_an_anomaly() -> None:
     assert report["module_count_status"] == "anomaly"
 
 
-_GAPPED_SERIALS = {"battery_module_sn_0": "a", "battery_module_sn_1": "b", "battery_module_sn_4": "e",
-                   "battery_module_sn_2": "", "battery_module_sn_3": "", "battery_module_sn_5": "",
-                   "battery_module_sn_6": ""}
+_GAPPED_SERIALS = {
+    "battery_module_sn_0": "a",
+    "battery_module_sn_1": "b",
+    "battery_module_sn_4": "e",
+    "battery_module_sn_2": "",
+    "battery_module_sn_3": "",
+    "battery_module_sn_5": "",
+    "battery_module_sn_6": "",
+}
 
 
 def test_a_gap_in_the_middle_is_an_anomaly() -> None:
@@ -179,9 +205,15 @@ def test_a_gap_in_the_middle_is_an_anomaly() -> None:
 
 
 def test_a_populated_slot_six_alone_is_an_anomaly() -> None:
-    serials = {"battery_module_sn_6": "x", "battery_module_sn_0": "", "battery_module_sn_1": "",
-               "battery_module_sn_2": "", "battery_module_sn_3": "", "battery_module_sn_4": "",
-               "battery_module_sn_5": ""}
+    serials = {
+        "battery_module_sn_6": "x",
+        "battery_module_sn_0": "",
+        "battery_module_sn_1": "",
+        "battery_module_sn_2": "",
+        "battery_module_sn_3": "",
+        "battery_module_sn_4": "",
+        "battery_module_sn_5": "",
+    }
     report = _report(_runtime(serials), "battery")
     assert report["module_count"] is None
     assert report["module_count_status"] == "anomaly"
@@ -205,20 +237,35 @@ def test_first_tower_carries_the_device_wide_roles_and_the_second_does_not() -> 
     # The catalog has battery_cycles and battery_soc_target but no battery_placeholder_0_* equivalent,
     # and power_mng_bat_next_calib_date belongs to the power manager; those roles are therefore
     # reported once instead of being invented for the second tower.
-    known = {"battery_soc", "battery_temperature", "battery_status2", "battery_cycles",
-             "battery_soc_target", "power_mng_bat_next_calib_date",
-             "battery_placeholder_0_soc", "battery_placeholder_0_temperature",
-             "battery_placeholder_0_status2"}
+    known = {
+        "battery_soc",
+        "battery_temperature",
+        "battery_status2",
+        "battery_cycles",
+        "battery_soc_target",
+        "power_mng_bat_next_calib_date",
+        "battery_placeholder_0_soc",
+        "battery_placeholder_0_temperature",
+        "battery_placeholder_0_status2",
+    }
     runtime = _runtime({}, known=known)
     first = _battery_metric_names(runtime, "battery", include_device_wide=True)
-    second = _battery_metric_names(runtime, "battery_placeholder_0", include_device_wide=False)
-    assert first == {"soc": "battery_soc", "temperature": "battery_temperature",
-                     "status": "battery_status2", "cycles": "battery_cycles",
-                     "soc_target": "battery_soc_target",
-                     "next_calibration": "power_mng_bat_next_calib_date"}
-    assert second == {"soc": "battery_placeholder_0_soc",
-                      "temperature": "battery_placeholder_0_temperature",
-                      "status": "battery_placeholder_0_status2"}
+    second = _battery_metric_names(
+        runtime, "battery_placeholder_0", include_device_wide=False
+    )
+    assert first == {
+        "soc": "battery_soc",
+        "temperature": "battery_temperature",
+        "status": "battery_status2",
+        "cycles": "battery_cycles",
+        "soc_target": "battery_soc_target",
+        "next_calibration": "power_mng_bat_next_calib_date",
+    }
+    assert second == {
+        "soc": "battery_placeholder_0_soc",
+        "temperature": "battery_placeholder_0_temperature",
+        "status": "battery_placeholder_0_status2",
+    }
     # No shared name leaks into the second tower: that was the two-identical-towers bug.
     assert not set(second.values()) & set(first.values())
 
@@ -229,15 +276,30 @@ def test_placeholder_tower_needs_a_module_serial_but_the_primary_one_does_not() 
     # TRUSTED (stabilized) report's populated_module_slots, same as devices() does.
     readings = {"battery_soc": "0.5", "battery_placeholder_0_soc": "0.0"}
     runtime = _runtime(readings)
-    primary_slots = _battery_populated_module_slots(_battery_module_slot_states(runtime, "dev", "battery"))
+    primary_slots = _battery_populated_module_slots(
+        _battery_module_slot_states(runtime, "dev", "battery")
+    )
     placeholder_slots = _battery_populated_module_slots(
-        _battery_module_slot_states(runtime, "dev", "battery_placeholder_0"))
+        _battery_module_slot_states(runtime, "dev", "battery_placeholder_0")
+    )
     assert _battery_tower_present(runtime, "dev", "battery", primary_slots) is True
-    assert _battery_tower_present(runtime, "dev", "battery_placeholder_0", placeholder_slots) is False
+    assert (
+        _battery_tower_present(
+            runtime, "dev", "battery_placeholder_0", placeholder_slots
+        )
+        is False
+    )
     with_serial = _runtime({**readings, **_slots("battery_placeholder_0", 4)})
     trusted = _report(with_serial, "battery_placeholder_0")
-    assert _battery_tower_present(with_serial, "dev", "battery_placeholder_0",
-                                   trusted["populated_module_slots"]) is True
+    assert (
+        _battery_tower_present(
+            with_serial,
+            "dev",
+            "battery_placeholder_0",
+            trusted["populated_module_slots"],
+        )
+        is True
+    )
 
 
 def test_second_tower_does_not_vanish_on_a_single_transient_missing_serial() -> None:
@@ -246,21 +308,32 @@ def test_second_tower_does_not_vanish_on_a_single_transient_missing_serial() -> 
     serials = {**_slots("battery", 5), **_slots("battery_placeholder_0", 4)}
     runtime = _runtime(serials)
     trusted = _report(runtime, "battery_placeholder_0")
-    assert _battery_tower_present(runtime, "dev", "battery_placeholder_0",
-                                   trusted["populated_module_slots"]) is True
+    assert (
+        _battery_tower_present(
+            runtime, "dev", "battery_placeholder_0", trusted["populated_module_slots"]
+        )
+        is True
+    )
     # One poll loses every placeholder serial (transient read failure/mid-refresh).
     for i in range(RCT_MODULE_SN_SLOTS):
         serials.pop(f"battery_placeholder_0_module_sn_{i}", None)
     flaky = _report(runtime, "battery_placeholder_0")
-    assert flaky["module_count"] == 4, "last-known-good must be held, not dropped to pending"
-    assert _battery_tower_present(runtime, "dev", "battery_placeholder_0",
-                                   flaky["populated_module_slots"]) is True, \
-        "the second tower card must not vanish on a transient missing serial"
+    assert (
+        flaky["module_count"] == 4
+    ), "last-known-good must be held, not dropped to pending"
+    assert (
+        _battery_tower_present(
+            runtime, "dev", "battery_placeholder_0", flaky["populated_module_slots"]
+        )
+        is True
+    ), "the second tower card must not vanish on a transient missing serial"
 
 
 def test_metric_names_skip_roles_the_catalog_does_not_carry() -> None:
     runtime = _runtime({}, known={"battery_soc"})
-    assert _battery_metric_names(runtime, "battery", include_device_wide=True) == {"soc": "battery_soc"}
+    assert _battery_metric_names(runtime, "battery", include_device_wide=True) == {
+        "soc": "battery_soc"
+    }
 
 
 #
@@ -270,7 +343,9 @@ def test_metric_names_skip_roles_the_catalog_does_not_carry() -> None:
 
 
 def test_an_unread_slot_is_unknown_not_empty() -> None:
-    states = _battery_module_slot_states(_runtime({"battery_module_sn_0": "SN-0"}), "dev", "battery")
+    states = _battery_module_slot_states(
+        _runtime({"battery_module_sn_0": "SN-0"}), "dev", "battery"
+    )
     assert states[0] == "populated"
     assert states[1] == "unknown"  # never read - cached_reading() returned None
     assert all(state == "unknown" for state in states[2:])
@@ -314,7 +389,9 @@ def test_an_established_topology_is_held_while_a_later_scan_is_incomplete() -> N
     # which must never happen for a read that was never complete.
     for _ in range(_BATTERY_MODULE_STABILITY_READS + 1):
         held = _report(runtime, "battery")
-        assert held["module_count"] == 6, "an incomplete re-scan must hold the established topology"
+        assert (
+            held["module_count"] == 6
+        ), "an incomplete re-scan must hold the established topology"
         assert held["module_count_status"] == "ok"
 
 
@@ -323,9 +400,13 @@ def test_a_single_complete_but_different_read_is_not_enough_either() -> None:
     # from the trusted one must still repeat _BATTERY_MODULE_STABILITY_READS times.
     runtime = _runtime(_slots("battery", 6))
     assert _report(runtime, "battery")["module_count"] == 6
-    runtime.gateway.cached_reading = _runtime(_slots("battery", 3)).gateway.cached_reading
+    runtime.gateway.cached_reading = _runtime(
+        _slots("battery", 3)
+    ).gateway.cached_reading
     once = _report(runtime, "battery")
-    assert once["module_count"] == 6, "one complete-but-different read must not override immediately"
+    assert (
+        once["module_count"] == 6
+    ), "one complete-but-different read must not override immediately"
 
 
 #
@@ -350,7 +431,9 @@ def test_a_single_flaky_read_does_not_flip_an_already_trusted_count() -> None:
     # completeness gate rather than debounced as a changed-but-complete reading.
     del serials["battery_module_sn_3"]
     flaky = _report(runtime, "battery")
-    assert flaky["module_count"] == 5, "an incomplete re-read must hold the trusted count"
+    assert (
+        flaky["module_count"] == 5
+    ), "an incomplete re-read must hold the trusted count"
     assert flaky["module_count_status"] == "ok"
     assert flaky["populated_module_slots"] == [0, 1, 2, 3, 4]
     # The next poll sees the real (unchanged) hardware again; the trusted count is unaffected by the
@@ -370,7 +453,9 @@ def test_alternating_reads_never_settle_on_either_alternative() -> None:
     trusted = _report(runtime, "battery")
     assert trusted["module_count"] == 6
     for _ in range(6):
-        del serials["battery_module_sn_5"]  # makes slot 5 UNKNOWN again -> incomplete, held
+        del serials[
+            "battery_module_sn_5"
+        ]  # makes slot 5 UNKNOWN again -> incomplete, held
         report = _report(runtime, "battery")
         assert report["module_count"] == 6, "must not flip to the alternative reading"
         serials["battery_module_sn_5"] = "SN-5"
@@ -390,13 +475,19 @@ def test_a_sustained_new_reading_eventually_updates_the_trusted_count() -> None:
     for i in range(_BATTERY_MODULE_STABILITY_READS):
         report = _report(runtime, "battery")
         if i < _BATTERY_MODULE_STABILITY_READS - 1:
-            assert report["module_count"] == 4, "must not update before the new reading is confirmed"
-    assert report["module_count"] == 5, "a sustained new reading must eventually be trusted"
+            assert (
+                report["module_count"] == 4
+            ), "must not update before the new reading is confirmed"
+    assert (
+        report["module_count"] == 5
+    ), "a sustained new reading must eventually be trusted"
     # And it stays trusted afterwards, without needing to keep re-confirming it.
     assert _report(runtime, "battery")["module_count"] == 5
 
 
-def test_the_very_first_read_is_trusted_immediately_with_no_history_to_compare_against() -> None:
+def test_the_very_first_read_is_trusted_immediately_with_no_history_to_compare_against() -> (
+    None
+):
     # No prior poll exists yet (startup), so there is nothing to debounce against: the first read
     # for a given tower is reported as-is.
     runtime = _runtime(_slots("battery", 3))
@@ -416,7 +507,9 @@ def test_towers_and_devices_each_keep_their_own_stability_state() -> None:
     assert _report(runtime, "battery_placeholder_0")["module_count"] == 3
 
 
-def test_anomaly_is_only_logged_once_the_transition_is_actually_confirmed(caplog) -> None:
+def test_anomaly_is_only_logged_once_the_transition_is_actually_confirmed(
+    caplog,
+) -> None:
     # A tower trusted as "ok" that then reads back as anomalous once must not log a warning yet -
     # same debounce as the module count itself, see test_a_single_flaky_read_does_not_flip_an_
     # already_trusted_count - and must log it once the anomalous reading repeats enough to be
@@ -427,9 +520,12 @@ def test_anomaly_is_only_logged_once_the_transition_is_actually_confirmed(caplog
     serials["battery_module_sn_6"] = "x"  # turns the read into a gap anomaly: 0,1,2,3,6
     with caplog.at_level("WARNING"):
         unconfirmed = _report(runtime, "battery")
-    assert unconfirmed["module_count"] == 4, "still the trusted count while the anomaly is unconfirmed"
-    assert not any(record.levelname == "WARNING" for record in caplog.records), \
-        "must not warn about an anomaly that has not been confirmed yet"
+    assert (
+        unconfirmed["module_count"] == 4
+    ), "still the trusted count while the anomaly is unconfirmed"
+    assert not any(
+        record.levelname == "WARNING" for record in caplog.records
+    ), "must not warn about an anomaly that has not been confirmed yet"
     caplog.clear()
     with caplog.at_level("WARNING"):
         confirmed = _report(runtime, "battery")
@@ -438,7 +534,9 @@ def test_anomaly_is_only_logged_once_the_transition_is_actually_confirmed(caplog
     assert any(record.levelname == "WARNING" for record in caplog.records)
 
 
-def test_slots_the_device_repeatedly_leaves_unanswered_do_not_hold_pending_forever() -> None:
+def test_slots_the_device_repeatedly_leaves_unanswered_do_not_hold_pending_forever() -> (
+    None
+):
     serials = _partial_slots("battery", 3)
     runtime = _runtime(serials)
     unanswered = {f"battery_module_sn_{i}" for i in range(3, RCT_MODULE_SN_SLOTS)}
@@ -461,7 +559,9 @@ def test_a_slot_not_yet_confirmed_unanswered_still_counts_as_unknown() -> None:
 # These tests use the PRODUCTION registry, which carries the module_sn slots the
 # tests/fixtures/objects.json fixture does not.
 
-_PROD_REGISTRY = Path(__file__).resolve().parent.parent / "app" / "catalog" / "objects.json"
+_PROD_REGISTRY = (
+    Path(__file__).resolve().parent.parent / "app" / "catalog" / "objects.json"
+)
 
 
 def test_module_serials_are_not_in_the_periodic_read_set() -> None:
@@ -476,16 +576,22 @@ def test_module_serials_are_not_in_the_periodic_read_set() -> None:
     catalog = RegistryCatalog.from_file(_PROD_REGISTRY)
     periodic = _effective_periodic_names(settings, catalog, None)
 
-    assert not [n for n in periodic if "module_sn" in n], "module serials must be out of the periodic set"
+    assert not [
+        n for n in periodic if "module_sn" in n
+    ], "module serials must be out of the periodic set"
     # Optional second-tower live metrics join only after the topology confirmed the tower.
     assert not set(SECOND_TOWER_METRIC_NAMES) & set(periodic)
-    assert len(periodic) == 43  # 39 preselected numeric + energy/card pins, minus serials and tower 2
+    assert (
+        len(periodic) == 43
+    )  # 39 preselected numeric + energy/card pins, minus serials and tower 2
     # The inventory names cover both towers' seven slots, exactly what devices() needs.
     assert len(_MODULE_INVENTORY_NAMES) == 2 * RCT_MODULE_SN_SLOTS
     assert set(_MODULE_INVENTORY_NAMES) <= set(catalog.names())
 
 
-async def test_inventory_read_feeds_devices_module_count_without_the_periodic_set() -> None:
+async def test_inventory_read_feeds_devices_module_count_without_the_periodic_set() -> (
+    None
+):
     """End to end for FIX 1: read_module_inventory populates the cache for the slots the device
     answers and settles the ones it never answers via read_failed(), so admin's devices()
     derivation (_battery_module_report) reports the correct module count for a populated tower - the
@@ -527,12 +633,23 @@ async def test_inventory_read_feeds_devices_module_count_without_the_periodic_se
     # readable.
     cache = MemoryCache(100_000, 100_000)
     gateway = RctGateway(
-        catalog, cache, clock, Allowlist({}, catalog), retry=RetryConfig(response_timeout_seconds=0.01)
+        catalog,
+        cache,
+        clock,
+        Allowlist({}, catalog),
+        retry=RetryConfig(response_timeout_seconds=0.01),
     )
     device = DeviceEntry(device_id="main", host="10.0.0.5")
     cfg = EndpointConfig(response_timeout_seconds=0.01, min_interval=timedelta(0))
-    endpoint = TransportEndpoint("endpoint-1", device.key.endpoint, cfg, clock, connector=net.connect)
-    serializer = AccessSerializer(endpoint, gateway.handler(endpoint), queue_max_length=10, queue_max_wait_seconds=10)
+    endpoint = TransportEndpoint(
+        "endpoint-1", device.key.endpoint, cfg, clock, connector=net.connect
+    )
+    serializer = AccessSerializer(
+        endpoint,
+        gateway.handler(endpoint),
+        queue_max_length=10,
+        queue_max_wait_seconds=10,
+    )
     serializer.start()
     gateway.add_device(DeviceBinding(device, endpoint, serializer))
     runtime = SimpleNamespace(catalog=catalog, gateway=gateway)
@@ -543,7 +660,9 @@ async def test_inventory_read_feeds_devices_module_count_without_the_periodic_se
         # again on a timer - the whole point of the lifecycle correction.
         total_sent = 0
         for _ in range(4):
-            total_sent += await gateway.read_module_inventory("main", _MODULE_INVENTORY_NAMES)
+            total_sent += await gateway.read_module_inventory(
+                "main", _MODULE_INVENTORY_NAMES
+            )
             for _ in range(_BATTERY_MODULE_STABILITY_READS):
                 report = _battery_module_report(runtime, "main", "battery")
 
@@ -561,7 +680,9 @@ async def test_inventory_read_feeds_devices_module_count_without_the_periodic_se
         await serializer.stop()
 
 
-async def test_settled_inventory_slots_are_not_re_read_across_later_loop_ticks() -> None:
+async def test_settled_inventory_slots_are_not_re_read_across_later_loop_ticks() -> (
+    None
+):
     """Regression for the lifecycle correction: a never-answering slot (a dead tower slot) must NOT
     be re-read once settled, no matter how many inventory-loop ticks run afterwards. This is what
     removes the recurring timeout -> _drop_connection exposure in steady state. Positives stay warm
@@ -597,30 +718,50 @@ async def test_settled_inventory_slots_are_not_re_read_across_later_loop_ticks()
 
     cache = MemoryCache(100_000, 100_000)
     gateway = RctGateway(
-        catalog, cache, clock, Allowlist({}, catalog), retry=RetryConfig(response_timeout_seconds=0.01)
+        catalog,
+        cache,
+        clock,
+        Allowlist({}, catalog),
+        retry=RetryConfig(response_timeout_seconds=0.01),
     )
     device = DeviceEntry(device_id="main", host="10.0.0.5")
     cfg = EndpointConfig(response_timeout_seconds=0.01, min_interval=timedelta(0))
-    endpoint = TransportEndpoint("endpoint-1", device.key.endpoint, cfg, clock, connector=net.connect)
-    serializer = AccessSerializer(endpoint, gateway.handler(endpoint), queue_max_length=10, queue_max_wait_seconds=10)
+    endpoint = TransportEndpoint(
+        "endpoint-1", device.key.endpoint, cfg, clock, connector=net.connect
+    )
+    serializer = AccessSerializer(
+        endpoint,
+        gateway.handler(endpoint),
+        queue_max_length=10,
+        queue_max_wait_seconds=10,
+    )
     serializer.start()
     gateway.add_device(DeviceBinding(device, endpoint, serializer))
-    placeholder_sn_0 = catalog.object_entry("battery_placeholder_0_module_sn_0").object_id
+    placeholder_sn_0 = catalog.object_entry(
+        "battery_placeholder_0_module_sn_0"
+    ).object_id
     higher_placeholder_ids = {
-        catalog.object_entry(f"battery_placeholder_0_module_sn_{i}").object_id for i in range(1, RCT_MODULE_SN_SLOTS)
+        catalog.object_entry(f"battery_placeholder_0_module_sn_{i}").object_id
+        for i in range(1, RCT_MODULE_SN_SLOTS)
     }
     try:
         # Drive discovery to the settled state (no clock advance: the lifecycle has no re-gate).
         for _ in range(6):
             await gateway.read_module_inventory("main", _MODULE_INVENTORY_NAMES)
-        assert gateway.read_failed("main", "battery_module_sn_6")  # dead slot settled empty
-        assert gateway.cached_reading("main", "battery_module_sn_0") is not None  # positive kept warm
+        assert gateway.read_failed(
+            "main", "battery_module_sn_6"
+        )  # dead slot settled empty
+        assert (
+            gateway.cached_reading("main", "battery_module_sn_0") is not None
+        )  # positive kept warm
 
         # Baseline the device frames, then run several MORE inventory-loop-equivalent passes.
         frames_before = len(net.frames)
         extra_sent = 0
         for _ in range(5):
-            extra_sent += await gateway.read_module_inventory("main", _MODULE_INVENTORY_NAMES)
+            extra_sent += await gateway.read_module_inventory(
+                "main", _MODULE_INVENTORY_NAMES
+            )
         # No settled slot is probed again: no new device frame, nothing sent.
         assert extra_sent == 0
         assert len(net.frames) == frames_before
@@ -637,7 +778,9 @@ async def test_settled_inventory_slots_are_not_re_read_across_later_loop_ticks()
         await serializer.stop()
 
 
-async def test_single_tower_with_a_silent_placeholder_yields_capacity_after_the_real_inventory_scan() -> None:
+async def test_single_tower_with_a_silent_placeholder_yields_capacity_after_the_real_inventory_scan() -> (
+    None
+):
     """Regression: the scan reads only placeholder slot 0 and never its higher slots; the capacity
     must not stay unavailable because those slots remain unread."""
     from datetime import timedelta
@@ -658,40 +801,67 @@ async def test_single_tower_with_a_silent_placeholder_yields_capacity_after_the_
     catalog = RegistryCatalog.from_file(_PROD_REGISTRY)
     answered = {f"battery_module_sn_{i}": f"SN-{i}" for i in range(6)}
     answered_ids = {catalog.object_entry(n).object_id for n in answered}
-    net = FakeNetwork(clock, behavior=lambda frame: "respond" if frame.object_id in answered_ids else "ignore")
+    net = FakeNetwork(
+        clock,
+        behavior=lambda frame: (
+            "respond" if frame.object_id in answered_ids else "ignore"
+        ),
+    )
     for name, serial in answered.items():
         net.payloads[catalog.object_entry(name).object_id] = serial.encode("latin-1")
     gateway = RctGateway(
-        catalog, MemoryCache(100_000, 100_000), clock, Allowlist({}, catalog),
+        catalog,
+        MemoryCache(100_000, 100_000),
+        clock,
+        Allowlist({}, catalog),
         retry=RetryConfig(response_timeout_seconds=0.01),
     )
     device = DeviceEntry(device_id="main", host="10.0.0.5")
     cfg = EndpointConfig(response_timeout_seconds=0.01, min_interval=timedelta(0))
-    endpoint = TransportEndpoint("endpoint-1", device.key.endpoint, cfg, clock, connector=net.connect)
-    serializer = AccessSerializer(endpoint, gateway.handler(endpoint), queue_max_length=10, queue_max_wait_seconds=10)
+    endpoint = TransportEndpoint(
+        "endpoint-1", device.key.endpoint, cfg, clock, connector=net.connect
+    )
+    serializer = AccessSerializer(
+        endpoint,
+        gateway.handler(endpoint),
+        queue_max_length=10,
+        queue_max_wait_seconds=10,
+    )
     serializer.start()
     gateway.add_device(DeviceBinding(device, endpoint, serializer))
     runtime = SimpleNamespace(catalog=catalog, gateway=gateway)
     higher_placeholder_ids = {
-        catalog.object_entry(f"battery_placeholder_0_module_sn_{i}").object_id for i in range(1, RCT_MODULE_SN_SLOTS)
+        catalog.object_entry(f"battery_placeholder_0_module_sn_{i}").object_id
+        for i in range(1, RCT_MODULE_SN_SLOTS)
     }
     try:
         for _ in range(8):
             await gateway.read_module_inventory("main", _MODULE_INVENTORY_NAMES)
         assert gateway.read_failed("main", "battery_placeholder_0_module_sn_0")
-        assert not higher_placeholder_ids & {frame.object_id for _ts, frame in net.frames}
+        assert not higher_placeholder_ids & {
+            frame.object_id for _ts, frame in net.frames
+        }
         primary = _battery_module_report(runtime, "main", "battery")
         assert primary["module_count_status"] == "ok" and primary["module_count"] == 6
         second = _battery_module_report(runtime, "main", "battery_placeholder_0")
-        assert second["module_count_status"] == "pending" and second["populated_module_slots"] == []
-        assert not _battery_tower_present(runtime, "main", "battery_placeholder_0", second["populated_module_slots"])
+        assert (
+            second["module_count_status"] == "pending"
+            and second["populated_module_slots"] == []
+        )
+        assert not _battery_tower_present(
+            runtime, "main", "battery_placeholder_0", second["populated_module_slots"]
+        )
     finally:
         await serializer.stop()
 
 
-def test_second_tower_is_confirmed_only_by_module_serials_not_by_numeric_readings() -> None:
+def test_second_tower_is_confirmed_only_by_module_serials_not_by_numeric_readings() -> (
+    None
+):
     """A placeholder soc/temperature value proves nothing (an unwired register reads back as 0)."""
-    numeric_only = _runtime({"battery_placeholder_0_soc": 0.0, "battery_placeholder_0_temperature": 0.0})
+    numeric_only = _runtime(
+        {"battery_placeholder_0_soc": 0.0, "battery_placeholder_0_temperature": 0.0}
+    )
     assert second_tower_confirmed(numeric_only, "dev-a") is False
     with_serials = _runtime(_slots("battery_placeholder_0", 3))
     assert second_tower_confirmed(with_serials, "dev-b") is True
@@ -702,7 +872,9 @@ def test_second_tower_is_not_confirmed_while_the_inventory_scan_is_incomplete() 
     assert second_tower_confirmed(_runtime({}), "dev-c") is False
 
 
-async def test_second_tower_metrics_join_the_periodic_set_only_after_confirmation() -> None:
+async def test_second_tower_metrics_join_the_periodic_set_only_after_confirmation() -> (
+    None
+):
     from datetime import timedelta
 
     from app.api.app_factory import _activate_second_tower
@@ -720,30 +892,53 @@ async def test_second_tower_metrics_join_the_periodic_set_only_after_confirmatio
     base_id = catalog.object_entry("battery_soc").object_id
     key = EndpointKey("10.0.0.5", 8899)
     # A single-tower inverter: the second tower's registers are never answered.
-    net = FakeNetwork(clock, behavior=lambda f: "ignore" if f.object_id in tower2_ids else "respond")
+    net = FakeNetwork(
+        clock, behavior=lambda f: "ignore" if f.object_id in tower2_ids else "respond"
+    )
     cfg = EndpointConfig(response_timeout_seconds=0.01, min_interval=timedelta(0))
     endpoint = TransportEndpoint("endpoint-1", key, cfg, clock, connector=net.connect)
-    serializer = AccessSerializer(endpoint, lambda r: endpoint.execute(r), queue_max_length=10, queue_max_wait_seconds=10)
+    serializer = AccessSerializer(
+        endpoint,
+        lambda r: endpoint.execute(r),
+        queue_max_length=10,
+        queue_max_wait_seconds=10,
+    )
     serializer.start()
-    manager = PeriodicManager(endpoint, serializer, DeviceKey(key), [base_id], 30, clock)
+    manager = PeriodicManager(
+        endpoint, serializer, DeviceKey(key), [base_id], 30, clock
+    )
     try:
         assert await manager.ensure() is True
         epoch = endpoint.connection_epoch
         # No tower 2 in the inventory: nothing is added, nothing is read, the connection stays.
-        single = SimpleNamespace(catalog=catalog, gateway=SimpleNamespace(
-            cached_reading=lambda d, n: None, read_failed=lambda d, n: True))
+        single = SimpleNamespace(
+            catalog=catalog,
+            gateway=SimpleNamespace(
+                cached_reading=lambda d, n: None, read_failed=lambda d, n: True
+            ),
+        )
         assert _activate_second_tower(single, manager, "dev-d") is False
         assert await manager.ensure() is True
         assert set(manager.object_ids) == {base_id}
         assert endpoint.connection_epoch == epoch
-        assert not tower2_ids & {frame.object_id for _t, frame in net.frames}  # never sent to the device
+        assert not tower2_ids & {
+            frame.object_id for _t, frame in net.frames
+        }  # never sent to the device
         assert net.connects == 1  # no reconnect
 
         # Tower 2 confirmed via its serials: the metrics are registered by the next ensure().
         net.behavior = lambda f: "respond"
-        pair = SimpleNamespace(catalog=catalog, gateway=SimpleNamespace(
-            cached_reading=lambda d, n: (f"SN-{n}", CacheFreshness.FRESH) if "placeholder_0_module_sn" in n else None,
-            read_failed=lambda d, n: False))
+        pair = SimpleNamespace(
+            catalog=catalog,
+            gateway=SimpleNamespace(
+                cached_reading=lambda d, n: (
+                    (f"SN-{n}", CacheFreshness.FRESH)
+                    if "placeholder_0_module_sn" in n
+                    else None
+                ),
+                read_failed=lambda d, n: False,
+            ),
+        )
         assert _activate_second_tower(pair, manager, "dev-d") is True
         assert await manager.ensure() is True
         assert tower2_ids <= set(manager.object_ids)
@@ -752,12 +947,16 @@ async def test_second_tower_metrics_join_the_periodic_set_only_after_confirmatio
         await serializer.stop()
 
 
-def test_a_placeholder_inventory_with_no_populated_serial_does_not_confirm_a_second_tower() -> None:
+def test_a_placeholder_inventory_with_no_populated_serial_does_not_confirm_a_second_tower() -> (
+    None
+):
     # The gate confirms the second tower from a POPULATED module serial, not merely from the
     # placeholder registers existing and answering. A single-tower device whose placeholder prefix
     # the catalog carries but whose slots all read back blank/garbage (physically no second tower)
     # must stay unconfirmed - the "a transient/partial inventory does not activate" half of FEAT-002.
-    blanks = {f"battery_placeholder_0_module_sn_{i}": "" for i in range(RCT_MODULE_SN_SLOTS)}
+    blanks = {
+        f"battery_placeholder_0_module_sn_{i}": "" for i in range(RCT_MODULE_SN_SLOTS)
+    }
     answered_blank = _runtime(blanks)
     report = _report(answered_blank, "battery_placeholder_0")
     assert report["populated_module_slots"] == []
@@ -766,7 +965,9 @@ def test_a_placeholder_inventory_with_no_populated_serial_does_not_confirm_a_sec
     assert second_tower_confirmed(_runtime({}), "dev-unread") is False
 
 
-async def test_a_placeholder_tower_with_no_serial_never_adds_or_reads_the_second_tower_metrics() -> None:
+async def test_a_placeholder_tower_with_no_serial_never_adds_or_reads_the_second_tower_metrics() -> (
+    None
+):
     # End to end against a real PeriodicManager: while the placeholder inventory shows no populated
     # module serial, _activate_second_tower must refuse - no add_object_ids, no device read of the
     # placeholder registers, and therefore no reconnect that an unanswered optional read would cause.
@@ -786,30 +987,48 @@ async def test_a_placeholder_tower_with_no_serial_never_adds_or_reads_the_second
     tower2_ids = {catalog.object_entry(n).object_id for n in SECOND_TOWER_METRIC_NAMES}
     base_id = catalog.object_entry("battery_soc").object_id
     key = EndpointKey("10.0.0.5", 8899)
-    net = FakeNetwork(clock, behavior=lambda f: "ignore" if f.object_id in tower2_ids else "respond")
+    net = FakeNetwork(
+        clock, behavior=lambda f: "ignore" if f.object_id in tower2_ids else "respond"
+    )
     cfg = EndpointConfig(response_timeout_seconds=0.01, min_interval=timedelta(0))
     endpoint = TransportEndpoint("endpoint-1", key, cfg, clock, connector=net.connect)
-    serializer = AccessSerializer(endpoint, lambda r: endpoint.execute(r), queue_max_length=10, queue_max_wait_seconds=10)
+    serializer = AccessSerializer(
+        endpoint,
+        lambda r: endpoint.execute(r),
+        queue_max_length=10,
+        queue_max_wait_seconds=10,
+    )
     serializer.start()
-    manager = PeriodicManager(endpoint, serializer, DeviceKey(key), [base_id], 30, clock)
+    manager = PeriodicManager(
+        endpoint, serializer, DeviceKey(key), [base_id], 30, clock
+    )
     try:
         assert await manager.ensure() is True
         epoch = endpoint.connection_epoch
         # The placeholder slots all read back blank (device answers, but no second tower is wired):
         # the stabilized report has no populated slot -> second_tower_confirmed False.
-        blank_serials = {f"battery_placeholder_0_module_sn_{i}": "" for i in range(RCT_MODULE_SN_SLOTS)}
+        blank_serials = {
+            f"battery_placeholder_0_module_sn_{i}": ""
+            for i in range(RCT_MODULE_SN_SLOTS)
+        }
 
         def cached_reading(device_id, name):
             if name in blank_serials:
                 return (blank_serials[name], CacheFreshness.FRESH)
             return None
 
-        transient = SimpleNamespace(catalog=catalog, gateway=SimpleNamespace(cached_reading=cached_reading))
+        transient = SimpleNamespace(
+            catalog=catalog, gateway=SimpleNamespace(cached_reading=cached_reading)
+        )
         assert _activate_second_tower(transient, manager, "dev-blank") is False
         assert await manager.ensure() is True
-        assert set(manager.object_ids) == {base_id}  # the placeholder metrics were NOT added
+        assert set(manager.object_ids) == {
+            base_id
+        }  # the placeholder metrics were NOT added
         assert endpoint.connection_epoch == epoch  # no reconnect
-        assert not tower2_ids & {frame.object_id for _t, frame in net.frames}  # never read from the device
+        assert not tower2_ids & {
+            frame.object_id for _t, frame in net.frames
+        }  # never read from the device
         assert net.connects == 1
     finally:
         await serializer.stop()
@@ -832,8 +1051,11 @@ def _measured_capacity(runtime) -> float | None:
     return MeasuredBatteryCapacity(runtime).verified_usable_capacity_wh("dev")
 
 
-def _ah_samples(reference: float = 17.82485008239746, measured: float = 14.450748443603516,
-                freshness: CacheFreshness = CacheFreshness.FRESH):
+def _ah_samples(
+    reference: float = 17.82485008239746,
+    measured: float = 14.450748443603516,
+    freshness: CacheFreshness = CacheFreshness.FRESH,
+):
     return {
         "battery_ah_capacity": (reference, freshness),
         "power_mng_amp_hours_measured": (measured, freshness),
@@ -847,20 +1069,48 @@ def test_module_count_alone_never_releases_current_usable_capacity() -> None:
 
 
 def test_measured_ah_caps_single_tower_capacity_below_rated_value() -> None:
-    runtime = _runtime(_single_tower(6), unanswered=_PLACEHOLDER_SILENT, ah_samples=_ah_samples())
-    assert _measured_capacity(runtime) == pytest.approx(10_368 * 14.450748443603516 / 17.82485008239746)
+    runtime = _runtime(
+        _single_tower(6), unanswered=_PLACEHOLDER_SILENT, ah_samples=_ah_samples()
+    )
+    assert _measured_capacity(runtime) == pytest.approx(
+        10_368 * 14.450748443603516 / 17.82485008239746
+    )
 
 
-def test_calibration_sample_carries_rated_and_current_capacity_with_raw_cycles() -> None:
+def test_verified_capacity_follows_the_debounced_topology_not_a_single_read() -> None:
+    serials = _single_tower(5)
+    runtime = _runtime(
+        serials, unanswered=_PLACEHOLDER_SILENT, ah_samples=_ah_samples()
+    )
+    ratio = 14.450748443603516 / 17.82485008239746
+    assert _measured_capacity(runtime) == pytest.approx(5 * 1920 * 0.9 * ratio)
+    serials.update(_single_tower(6))  # one complete 6-module read: not yet trusted
+    assert _measured_capacity(runtime) == pytest.approx(5 * 1920 * 0.9 * ratio)
+    assert _measured_capacity(runtime) == pytest.approx(
+        6 * 1920 * 0.9 * ratio
+    )  # repeated read
+
+
+def test_calibration_sample_carries_rated_and_current_capacity_with_raw_cycles() -> (
+    None
+):
     readings = {**_ah_samples(), "battery_cycles": (42, CacheFreshness.FRESH)}
-    runtime = _runtime(_single_tower(6), unanswered=_PLACEHOLDER_SILENT, ah_samples=readings)
-    sample = MeasuredBatteryCapacity(runtime).calibration_sample("dev", datetime(2026, 10, 16, tzinfo=UTC))
+    runtime = _runtime(
+        _single_tower(6), unanswered=_PLACEHOLDER_SILENT, ah_samples=readings
+    )
+    sample = MeasuredBatteryCapacity(runtime).calibration_sample(
+        "dev", datetime(2026, 10, 16, tzinfo=UTC)
+    )
     assert sample is not None
     assert sample.module_counts == (6,)
     assert sample.battery_cycles == 42
     assert sample.rated_usable_capacity_wh == pytest.approx(10_368)
-    assert sample.current_usable_capacity_wh == pytest.approx(_measured_capacity(runtime))
-    assert sample.remaining_capacity_percent == pytest.approx(100 * 14.450748443603516 / 17.82485008239746)
+    assert sample.current_usable_capacity_wh == pytest.approx(
+        _measured_capacity(runtime)
+    )
+    assert sample.remaining_capacity_percent == pytest.approx(
+        100 * 14.450748443603516 / 17.82485008239746
+    )
     assert sample.source_contract == "bms_ah_ratio_v1"
     assert sample.inverter_serial == "SN-INV-1"
     assert sample.battery_bms_sn is None  # no fresh BMS serial in the cache
@@ -868,18 +1118,37 @@ def test_calibration_sample_carries_rated_and_current_capacity_with_raw_cycles()
 
 def test_calibration_sample_carries_fresh_bms_serial_only() -> None:
     at = datetime(2026, 10, 16, tzinfo=UTC)
-    readings = {**_ah_samples(), "battery_bms_sn": ("BMS\x0012345 ", CacheFreshness.FRESH)}
-    sample = MeasuredBatteryCapacity(_runtime(_single_tower(6), unanswered=_PLACEHOLDER_SILENT, ah_samples=readings)).calibration_sample("dev", at)
+    readings = {
+        **_ah_samples(),
+        "battery_bms_sn": ("BMS\x0012345 ", CacheFreshness.FRESH),
+    }
+    sample = MeasuredBatteryCapacity(
+        _runtime(_single_tower(6), unanswered=_PLACEHOLDER_SILENT, ah_samples=readings)
+    ).calibration_sample("dev", at)
     assert sample is not None and sample.battery_bms_sn == "BMS12345"
     stale = {**_ah_samples(), "battery_bms_sn": ("BMS12345", CacheFreshness.GRACE)}
-    sample = MeasuredBatteryCapacity(_runtime(_single_tower(6), unanswered=_PLACEHOLDER_SILENT, ah_samples=stale)).calibration_sample("dev", at)
+    sample = MeasuredBatteryCapacity(
+        _runtime(_single_tower(6), unanswered=_PLACEHOLDER_SILENT, ah_samples=stale)
+    ).calibration_sample("dev", at)
     assert sample is not None and sample.battery_bms_sn is None
 
 
 @pytest.mark.parametrize("serial", [None, ""])
-def test_calibration_sample_needs_the_inverter_serial_and_never_falls_back_to_device_id(serial) -> None:
-    runtime = _runtime(_single_tower(6), unanswered=_PLACEHOLDER_SILENT, ah_samples=_ah_samples(), inverter_serial=serial)
-    assert MeasuredBatteryCapacity(runtime).calibration_sample("dev", datetime(2026, 10, 16, tzinfo=UTC)) is None
+def test_calibration_sample_needs_the_inverter_serial_and_never_falls_back_to_device_id(
+    serial,
+) -> None:
+    runtime = _runtime(
+        _single_tower(6),
+        unanswered=_PLACEHOLDER_SILENT,
+        ah_samples=_ah_samples(),
+        inverter_serial=serial,
+    )
+    assert (
+        MeasuredBatteryCapacity(runtime).calibration_sample(
+            "dev", datetime(2026, 10, 16, tzinfo=UTC)
+        )
+        is None
+    )
 
 
 def test_bms_ah_cache_remains_fresh_between_daily_background_reads() -> None:
@@ -894,32 +1163,54 @@ def test_bms_ah_cache_remains_fresh_between_daily_background_reads() -> None:
     cache = MemoryCache(10, 10)
     RctGateway(catalog, cache, clock, Allowlist({}, catalog))
     key = ("dev", "power_mng_amp_hours_measured")
-    cache.put(key, 14.45, measured_at=clock.now(), received_monotonic=clock.monotonic(), origin="transaction")
+    cache.put(
+        key,
+        14.45,
+        measured_at=clock.now(),
+        received_monotonic=clock.monotonic(),
+        origin="transaction",
+    )
     entry = cache.get(key)
     assert entry is not None
-    assert cache.classify(key, entry, now_monotonic=clock.monotonic() + 24 * 60 * 60) is CacheFreshness.FRESH
-    assert cache.classify(key, entry, now_monotonic=clock.monotonic() + 49 * 60 * 60) is CacheFreshness.EXPIRED
+    assert (
+        cache.classify(key, entry, now_monotonic=clock.monotonic() + 24 * 60 * 60)
+        is CacheFreshness.FRESH
+    )
+    assert (
+        cache.classify(key, entry, now_monotonic=clock.monotonic() + 49 * 60 * 60)
+        is CacheFreshness.EXPIRED
+    )
 
 
 def test_measured_ah_above_reference_never_exceeds_rated_ceiling() -> None:
-    runtime = _runtime(_single_tower(6), unanswered=_PLACEHOLDER_SILENT,
-                       ah_samples=_ah_samples(reference=15.0, measured=18.0))
+    runtime = _runtime(
+        _single_tower(6),
+        unanswered=_PLACEHOLDER_SILENT,
+        ah_samples=_ah_samples(reference=15.0, measured=18.0),
+    )
     assert _measured_capacity(runtime) == pytest.approx(10_368)
 
 
-@pytest.mark.parametrize("bad_samples", [
-    {"battery_ah_capacity": (17.0, CacheFreshness.FRESH)},
-    _ah_samples(freshness=CacheFreshness.GRACE),
-    _ah_samples(reference=0),
-    _ah_samples(measured=float("nan")),
-])
+@pytest.mark.parametrize(
+    "bad_samples",
+    [
+        {"battery_ah_capacity": (17.0, CacheFreshness.FRESH)},
+        _ah_samples(freshness=CacheFreshness.GRACE),
+        _ah_samples(reference=0),
+        _ah_samples(measured=float("nan")),
+    ],
+)
 def test_missing_stale_or_invalid_ah_fails_closed(bad_samples) -> None:
-    runtime = _runtime(_single_tower(6), unanswered=_PLACEHOLDER_SILENT, ah_samples=bad_samples)
+    runtime = _runtime(
+        _single_tower(6), unanswered=_PLACEHOLDER_SILENT, ah_samples=bad_samples
+    )
     assert _measured_capacity(runtime) is None
 
 
 @pytest.mark.parametrize("failure", [None, "battery_ah_capacity", "battery_bms_sn"])
-async def test_background_capacity_refresh_reads_both_metrics_and_isolates_failure(failure: str | None) -> None:
+async def test_background_capacity_refresh_reads_both_metrics_and_isolates_failure(
+    failure: str | None,
+) -> None:
     from app.api.app_factory import _inventory_loop
     from app.errors import DeviceApiError
     from app.gateway.base import DeviceState
@@ -954,7 +1245,9 @@ async def test_background_capacity_refresh_reads_both_metrics_and_isolates_failu
 
     gateway = SimpleNamespace(
         read_module_inventory=lambda *_args: _done(),
-        device_status=lambda _device_id: SimpleNamespace(state=DeviceState.OK, queue_length=0),
+        device_status=lambda _device_id: SimpleNamespace(
+            state=DeviceState.OK, queue_length=0
+        ),
         read_system=read_system,
     )
 
@@ -963,13 +1256,19 @@ async def test_background_capacity_refresh_reads_both_metrics_and_isolates_failu
 
     with pytest.raises(StopCycle):
         await _inventory_loop(
-            gateway, "dev", Clock(), capacity_ah_names=("battery_ah_capacity", "power_mng_amp_hours_measured"),
+            gateway,
+            "dev",
+            Clock(),
+            capacity_ah_names=("battery_ah_capacity", "power_mng_amp_hours_measured"),
             capacity_source=SimpleNamespace(calibration_sample=lambda *_args: "sample"),
-            on_capacity_calibration=persist, bms_serial_name="battery_bms_sn",
+            on_capacity_calibration=persist,
+            bms_serial_name="battery_bms_sn",
         )
     # The BMS serial is best effort: its failure still persists the sample, an Ah failure does not.
     ah_reads = ["battery_ah_capacity", "power_mng_amp_hours_measured"]
-    assert reads == (ah_reads if failure == "battery_ah_capacity" else [*ah_reads, "battery_bms_sn"])
+    assert reads == (
+        ah_reads if failure == "battery_ah_capacity" else [*ah_reads, "battery_bms_sn"]
+    )
     assert persisted == ([] if failure == "battery_ah_capacity" else ["sample"])
 
 
@@ -980,21 +1279,31 @@ def test_power_battery_11_5_six_modules_are_reported_as_topology_only() -> None:
 
 
 @pytest.mark.parametrize("modules", [4, 5, 6])
-def test_symmetric_two_towers_keep_their_separate_diagnostic_counts(modules: int) -> None:
+def test_symmetric_two_towers_keep_their_separate_diagnostic_counts(
+    modules: int,
+) -> None:
     serials = {**_slots("battery", modules), **_slots("battery_placeholder_0", modules)}
     runtime = _runtime(serials)
     assert _battery_module_report(runtime, "dev", "battery")["module_count"] == modules
-    assert _battery_module_report(runtime, "dev", "battery_placeholder_0")["module_count"] == modules
+    assert (
+        _battery_module_report(runtime, "dev", "battery_placeholder_0")["module_count"]
+        == modules
+    )
     measured = _runtime(serials, ah_samples=_ah_samples(reference=18.0, measured=18.0))
     assert _measured_capacity(measured) == pytest.approx(2 * modules * 1920 * 0.9)
 
 
 @pytest.mark.parametrize(("primary", "second"), [(6, 5), (3, 3), (4, 5), (2, 2)])
-def test_mixed_or_small_two_towers_remain_diagnostic_only(primary: int, second: int) -> None:
+def test_mixed_or_small_two_towers_remain_diagnostic_only(
+    primary: int, second: int
+) -> None:
     serials = {**_slots("battery", primary), **_slots("battery_placeholder_0", second)}
     runtime = _runtime(serials)
     assert _battery_module_report(runtime, "dev", "battery")["module_count"] == primary
-    assert _battery_module_report(runtime, "dev", "battery_placeholder_0")["module_count"] == second
+    assert (
+        _battery_module_report(runtime, "dev", "battery_placeholder_0")["module_count"]
+        == second
+    )
     measured = _runtime(serials, ah_samples=_ah_samples())
     assert _measured_capacity(measured) is None
 
@@ -1016,24 +1325,40 @@ def test_replace_devices_drops_the_trusted_battery_topology() -> None:
     from tests.conftest import AutoClock
 
     clock = AutoClock()
-    catalog = RegistryCatalog.from_file(Path(__file__).resolve().parent / "fixtures" / "objects.json")
+    catalog = RegistryCatalog.from_file(
+        Path(__file__).resolve().parent / "fixtures" / "objects.json"
+    )
     cache = MemoryCache(30, 30)
     gateway = RctGateway(catalog, cache, clock, Allowlist({}, catalog))
-    runtime = SimpleNamespace(catalog=SimpleNamespace(exists=lambda _name: True), gateway=gateway)
+    runtime = SimpleNamespace(
+        catalog=SimpleNamespace(exists=lambda _name: True), gateway=gateway
+    )
 
     def scan(serials: dict[str, str]) -> None:
-        for name in [f"{p}_module_sn_{i}" for p in ("battery", "battery_placeholder_0")
-                     for i in range(RCT_MODULE_SN_SLOTS)]:
+        for name in [
+            f"{p}_module_sn_{i}"
+            for p in ("battery", "battery_placeholder_0")
+            for i in range(RCT_MODULE_SN_SLOTS)
+        ]:
             cache.invalidate(("dev", name))
         for name, value in serials.items():
-            cache.put(("dev", name), value, measured_at=clock.now(),
-                      received_monotonic=clock.monotonic(), origin="transaction")
+            cache.put(
+                ("dev", name),
+                value,
+                measured_at=clock.now(),
+                received_monotonic=clock.monotonic(),
+                origin="transaction",
+            )
 
     scan(_single_tower(6))
-    gateway._refresh_failures[("dev", "battery_placeholder_0_module_sn_0")] = REFRESH_FAILURES_CONFIRMED
+    gateway._refresh_failures[("dev", "battery_placeholder_0_module_sn_0")] = (
+        REFRESH_FAILURES_CONFIRMED
+    )
     assert _battery_module_report(runtime, "dev", "battery")["module_count"] == 6
 
-    gateway.replace_devices([])  # same device id, re-addressed hardware: nothing may be inherited
+    gateway.replace_devices(
+        []
+    )  # same device id, re-addressed hardware: nothing may be inherited
     scan(_partial_slots("battery", 3))  # the new device's scan has only just begun
 
     report = _battery_module_report(runtime, "dev", "battery")

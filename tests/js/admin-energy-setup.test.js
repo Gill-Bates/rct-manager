@@ -530,6 +530,38 @@ test('an exhausted pending plan is not replaced by the spinner on a background r
   h.cleanup();
 });
 
+// A transient error during a background poll keeps the pending card and re-arms the poll timer,
+// so the plan still appears once the API answers again.
+test('a failing background poll keeps the pending card and keeps polling', async () => {
+  let mode = 'pending';
+  const h = harness({
+    apiImpl: async (p) => {
+      if (p === 'energy/planning-devices') return [];
+      if (mode === 'throw') { mode = 'ok'; throw new Error('transient'); }
+      if (mode === 'pending') return { status: 'spot_prices_unavailable', slots: [], window: {} };
+      return { status: 'ok', slots: [], window: {} };
+    },
+  });
+  const select = h.context.element('select');
+  select.id = 'energy-plan-device';
+  select.value = 'dev-1';
+  const result = h.context.element('div');
+  result.id = 'energy-plan-result';
+  const failures = () => result.children.some((c) => (c.className || '').includes('text-danger'));
+
+  await h.context.loadDryRunPlan();
+  h.context.stopPlanPolling();
+  mode = 'throw';
+  await h.context.loadDryRunPlan({ poll: true });
+  assert.equal(failures(), false, 'the transient error text does not replace the card');
+  assert.ok(vm.runInContext('planPollTimer !== null', h.context), 'the next poll is armed');
+  h.context.stopPlanPolling();
+  await h.context.loadDryRunPlan({ poll: true });
+  assert.equal(vm.runInContext('planLastStatus', h.context), 'ok', 'the next poll delivers the plan');
+  h.context.stopPlanPolling();
+  h.cleanup();
+});
+
 // P3.1: nextGridCharge must only merge adjacent charge slots of EQUAL power, so the "Next grid
 // charge" summary never reports one slot's power for a window charged at another. The planner keeps
 // adjacent charge slots with different power separate (test_dynamic_optimizer::

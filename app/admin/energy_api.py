@@ -31,6 +31,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, ValidationError
 
 from app.admin.api import (
+    _BATTERY_TOWER_PREFIXES,
     _battery_module_report,
     _battery_tower_present,
     _csrf,
@@ -76,6 +77,7 @@ from app.energy.soc_window import effective_target_window
 from app.errors import DeviceApiError, DeviceUnreachable
 from app.gateway.base import DeviceState
 from app.gateway.cache import CacheFreshness
+from app.gateway.rct_history import MIN_COMMISSIONING_DATE
 from app.limits import TARGET_SOC_MAX_PERCENT, TARGET_SOC_MIN_PERCENT
 from app.optimizer.adapters import (
     DryRunInputs,
@@ -2333,7 +2335,7 @@ def _battery_characterization_view(
     runtime, device_id: str
 ) -> BatteryCharacterizationView:
     towers = []
-    for prefix in ("battery", "battery_placeholder_0"):
+    for prefix in _BATTERY_TOWER_PREFIXES:
         report = _battery_module_report(runtime, device_id, prefix)
         towers.append(
             BatteryTowerModulesView(
@@ -2460,9 +2462,6 @@ async def battery_calibration_history(
     return await asyncio.to_thread(
         _calibration_view, _spotmarket_store(request), device_id, serial, limit
     )
-
-
-MIN_COMMISSIONING_DATE = date(2010, 1, 1)
 
 
 @router.put("/devices/{device_id}/battery-commissioning")

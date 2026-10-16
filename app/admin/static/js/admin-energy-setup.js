@@ -1794,7 +1794,13 @@ async function loadDryRunPlan({ poll = false } = {}) {
     renderDryRunPlan(plan, { waiting: !exhausted });
     if (PLAN_RETRY_STATUSES.has(plan.status) && !exhausted) armPlanPolling();
   } catch (error) {
-    if (generation === planGeneration) host.replaceChildren(element('p', 'text-danger', messageFrom(error)));
+    if (generation !== planGeneration) return;
+    // A background poll that fails transiently keeps what is shown and keeps a pending plan polling.
+    if (poll && planLastStatus !== null) {
+      if (PLAN_RETRY_STATUSES.has(planLastStatus) && planPollAttempts < PLAN_POLL_MAX) armPlanPolling();
+      return;
+    }
+    host.replaceChildren(element('p', 'text-danger', messageFrom(error)));
   }
 }
 

@@ -14,7 +14,7 @@ is assumed). The productive backfill that uses this class is therefore disabled 
 import logging
 import math
 from collections.abc import Awaitable, Callable, Sequence
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, time
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from app.gateway.history import DailyConsumptionReading
@@ -71,7 +71,8 @@ class RctDailyConsumptionHistory:
 YEAR_ENERGY_LOG_METRIC = "logger_year_eac_log_ts"
 MONTH_ENERGY_LOG_METRIC = "logger_month_eac_log_ts"
 # Entries older than this are an unset device clock (epoch 0), not a commissioning date.
-MIN_PLAUSIBLE_COMMISSIONING = datetime(2010, 1, 1, tzinfo=UTC)
+MIN_COMMISSIONING_DATE = date(2010, 1, 1)
+MIN_PLAUSIBLE_COMMISSIONING = datetime.combine(MIN_COMMISSIONING_DATE, time.min, UTC)
 MAX_COMMISSIONING_PAGES = 24  # hard cap per logger, whatever the device answers
 
 

@@ -3,20 +3,14 @@
 // Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
 //
 
-// Browser E2E for the REAL (unstubbed) freshness of /admin/api/energy/hardware-strategies, whose
-// value is served from the gateway's in-memory metric cache. That cache has a 10 s TTL
-// (Settings.cache_ttl_seconds = 10.0) plus a grace window; a reading is reported fresh (stale=false)
-// while it is within the window and ages to stale=true once it is older than TTL+grace and no
-// refresh has arrived. This driver drives the admin GUI (no page.route stub of this endpoint) and
-// observes the endpoint across a span longer than the 10 s TTL, recording the code/stale pair over
-// time so the real refresh/expiry behaviour is captured rather than asserted from source.
+// Browser E2E for the cache-only contract of /admin/api/energy/hardware-strategies (no stub): the
+// endpoint is served from the gateway's in-memory metric cache and never starts inverter I/O on a
+// page load, so repeated polls over ~16 s answer 200 with a well-formed device entry (device_id,
+// boolean stale flag), never a crash or a broken payload.
 //
-// Because the simulated inverter answers periodic reads about once a second, the strategy register
-// is normally refreshed inside the 10 s window and stays fresh — the test asserts the OBSERVED
-// behaviour: the endpoint keeps answering 200 with a defined code across > 10 s (the refresh path
-// holds the value fresh), and never returns a crash or a broken payload. If, in this environment,
-// the register is not in the periodic set, the same loop records the stale flip instead; either
-// way the real 10 s-window behaviour is captured in the artifact.
+// NOT covered: the 10 s cache TTL and the stale flip. The strategy register only enters the cache
+// through an explicit mode/action path that needs a hardware-verified Energy Manager setup, which the
+// simulated inverter does not provide, so `code` stays null here.
 // Usage: PLAYWRIGHT_DIR=<dir> PYTHON=<venv python> BROWSER=chromium node tests/e2e/hardware_strategies_cache.mjs <artifact-dir>
 import fs from 'node:fs';
 import path from 'node:path';
@@ -86,31 +80,15 @@ try {
   }
   fs.writeFileSync(path.join(OUT, 'hardware-strategies-samples.json'), JSON.stringify(samples, null, 2));
 
-  const spanSeconds = samples.length ? samples[samples.length - 1].t - samples[0].t : 0;
-  check('the sampling span exceeds the 10 s cache TTL', spanSeconds >= 12, `${spanSeconds} s across ${samples.length} samples`);
-  check('/hardware-strategies answers 200 on every real poll across the TTL window',
-    samples.every((s) => s.status === 200), JSON.stringify(samples.map((s) => s.status)));
-  check('every response carries a well-formed device entry (device_id, defined stale flag), never a broken payload',
+  const spanSeconds = samples[samples.length - 1].t - samples[0].t;
+  check('/hardware-strategies answers 200 on every real poll over the sampling span',
+    samples.every((s) => s.status === 200), `${spanSeconds} s, ${JSON.stringify(samples.map((s) => s.status))}`);
+  check('every response carries a well-formed device entry (device_id, boolean stale flag), never a broken payload',
     samples.every((s) => s.device && s.device.device_id === 'sim' && typeof s.device.stale === 'boolean'),
     JSON.stringify(samples.map((s) => s.device && { code: s.device.code, stale: s.device.stale })));
-
-  // The real freshness outcome, recorded for the report: did the cached value stay fresh across the
-  // 10 s window (periodic refresh held it), or did it age to stale? Either is a valid real result.
   const codes = samples.map((s) => s.device?.code);
   const staleFlags = samples.map((s) => s.device?.stale);
-  const refreshedThroughWindow = samples.filter((s) => s.device && Number.isInteger(s.device.code)).length;
-  console.log(`INFO hardware-strategies over ${spanSeconds}s: codes=${JSON.stringify(codes)} stale=${JSON.stringify(staleFlags)} samplesWithCode=${refreshedThroughWindow}/${samples.length}`);
-  // The endpoint is deliberately cache-only: it never starts an inverter transaction on a page load,
-  // so power_mng_soc_strategy only enters the 10 s-TTL cache once an explicit mode/action path reads
-  // it — which needs a hardware-verified Energy Manager setup not reachable in this simulated
-  // environment. The real, observable behaviour here is therefore the cache-only contract itself:
-  // across > 10 s the endpoint keeps serving fresh (never a crash, never a broken payload), and an
-  // unread register reports code=null ("unknown right now") rather than a stale guess. This is the
-  // real behaviour without any stub; the populated-value expiry/refresh needs the full setup and is
-  // recorded as such in the report.
-  const cacheOnlyContract = samples.length >= 7 && samples.every((s) => s.device && typeof s.device.stale === 'boolean');
-  check('the live cache-only /hardware-strategies contract holds across > 10 s without a stub (code populates only via an explicit action)',
-    cacheOnlyContract, `samplesWithCode=${refreshedThroughWindow}, anyStale=${staleFlags.some((s) => s === true)}, codesNull=${codes.every((c) => c === null)}`);
+  console.log(`INFO hardware-strategies over ${spanSeconds}s: codes=${JSON.stringify(codes)} stale=${JSON.stringify(staleFlags)}`);
 } finally {
   if (browser) await browser.close();
   for (const proc of [server.proc, fake.proc]) if (proc.exitCode === null) proc.kill('SIGTERM');

@@ -443,19 +443,21 @@ series). The Charging plan shows it in Expert mode under **Advanced diagnostics*
 table of usable capacity against the datasheet capacity (100 %). The curve starts at a
 commissioning date: a background service derives it once per inverter serial from the earliest
 energy in the inverter's year and month logs (`logger_year_eac_log_ts`, `logger_month_eac_log_ts`),
-retrying with backoff; this derivation is unverified on hardware. A date entered by an operator always wins.
+retrying with backoff. This derivation is unverified on hardware (logger history query contract), so the service is
+switched off by default (`battery_commissioning_derivation_enabled`, an internal switch like
+`consumption_daily_backfill_enabled`, not an environment variable). A date entered by an operator always works and wins.
 After a battery replacement a derived date is not used for the new series; enter the replacement date.
 
 | Method | Path | Effect |
 |---|---|---|
 | `GET` | `/admin/api/energy/devices/{device_id}/battery-calibration-history` | History, commissioning date and baseline for the inverter's current battery series (`limit` 1 to 5000, default 1200). Local store only, no device I/O. `baseline_unavailable_reason` is `inverter_serial_unknown`, `no_commissioning_date`, `no_measurement` or `battery_replaced` when there is no baseline. |
 | `PUT` | `/admin/api/energy/devices/{device_id}/battery-commissioning` | Sets the manual commissioning date (body `{"commissioned_on": "YYYY-MM-DD"}`, between 2010-01-01 and today; 409 while the inverter serial is unknown, 422 outside the range). |
-| `DELETE` | `/admin/api/energy/devices/{device_id}/battery-commissioning` | Removes the manual date; the derived one applies again. |
+| `DELETE` | `/admin/api/energy/devices/{device_id}/battery-commissioning` | Removes the manual date; a derived one (only with the derivation enabled) applies again. |
 
 All three need an admin session (read-only for `GET`; `PUT` and `DELETE` need the CSRF header).
 
 Recording does not depend on the Energy Manager: the background Ah read, the calibration history and the
-commissioning-date derivation run whenever the gateway polls the device, also with write support off. A
+commissioning-date derivation (when enabled) run whenever the gateway polls the device, also with write support off. A
 calibration is only recorded once the inverter serial is known (never under the device id).
 
 The dashboard offers the data as selectable widgets (off by default, added through **Edit Widgets**): the

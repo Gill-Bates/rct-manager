@@ -353,10 +353,9 @@ class MeasuredBatteryCapacity:
 
         counts = []
         for prefix in _BATTERY_TOWER_PREFIXES:
-            states = _battery_module_slot_states(self._runtime, device_id, prefix)
-            if _SLOT_UNKNOWN in states:
-                return None
-            report = _raw_battery_module_report(states)
+            # Stabilized topology, same source as the module display: one flipped read must not
+            # change the verified capacity.
+            report = _battery_module_report(self._runtime, device_id, prefix)
             if not _battery_tower_present(
                 self._runtime, device_id, prefix, report["populated_module_slots"]
             ):
