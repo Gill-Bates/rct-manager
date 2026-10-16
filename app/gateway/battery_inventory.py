@@ -4,18 +4,20 @@
 # Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
 #
 
-"""Battery tower topology and verified usable capacity, derived from cached module serials.
+"""Battery tower topology derived from cached module serials.
 
-Cache-only: nothing here reads a device. The admin dashboard and the planning port
-(`ModuleCountVerifiedCapacity`) share one classification of the module-serial slots, so the
-topology rules live outside the admin HTTP module. The last-known-good state is owned by the
+Cache-only: nothing here reads a device. The admin dashboard uses one classification of the
+module-serial slots. The last-known-good state is owned by the
 gateway (`module_topology_state`), which drops it whenever it invalidates its module inventory.
 """
 
 import logging
+import math
 import re
 import threading
 import time
+
+from app.gateway.cache import CacheFreshness
 
 log = logging.getLogger(__name__)
 
@@ -24,6 +26,8 @@ log = logging.getLogger(__name__)
 # prefixes unconditionally, so catalog presence alone cannot tell whether a given tower actually
 # exists on this device; _battery_tower_present answers that from readings.
 _BATTERY_TOWER_PREFIXES = ("battery", "battery_placeholder_0")
+CAPACITY_AH_METRICS = ("battery_ah_capacity", "power_mng_amp_hours_measured")
+CAPACITY_AH_FRESH_SECONDS = 2 * 24 * 60 * 60
 
 # RCT_MAX_MODULES_PER_TOWER is hardware (2 to 6 modules per tower, per RCT docs).
 # RCT_MODULE_SN_SLOTS is the protocol array size (indices 0-6), not an installable module count.
@@ -254,36 +258,49 @@ def _battery_module_report(runtime, device_id: str, prefix: str) -> dict:
     return {k: v for k, v in report.items() if k != "_complete"}
 
 
-# RCT Power Battery datasheet (EU 2024 V1.01): every model is a stack of identical 1.92 kWh battery
-# units (7.6 = 4, 9.6 = 5, 11.5 = 6) with 90 % usable depth of discharge, e.g. 11.5 -> 10.37 kWh usable.
-RCT_USABLE_WH_PER_MODULE = 1920 * 0.9
+# RCT Power Battery 2024: a module has 1.92 kWh rated energy and 90 % rated usable depth.
+# This is an upper baseline, never the present-day capacity by itself.
+_RATED_USABLE_WH_PER_MODULE = 1920 * 0.9
 
 
-class ModuleCountVerifiedCapacity:
-    """Usable capacity = module count x the datasheet's usable Wh per battery unit.
-
-    Cache-only (module serials, never a device read). Reports nothing unless every tower's serial
-    scan is complete and every present tower has an "ok" module count, so a mid-scan or anomalous tower never yields a capacity. Rated
-    capacity: state of health is not applied.
-    """
+class MeasuredBatteryCapacity:
+    """Cache-only usable Wh from trusted topology capped by the BMS measured/reference Ah ratio."""
 
     def __init__(self, runtime) -> None:
         self._runtime = runtime
 
     def verified_usable_capacity_wh(self, device_id: str) -> float | None:
-        modules = 0
+        samples = [
+            self._runtime.gateway.cached_sample(device_id, name)
+            for name in CAPACITY_AH_METRICS
+        ]
+        for sample in samples:
+            if sample is None or sample[2] is not CacheFreshness.FRESH:
+                return None
+            value = sample[0]
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+                return None
+        reference_ah, measured_ah = (sample[0] for sample in samples)
+
+        counts = []
         for prefix in _BATTERY_TOWER_PREFIXES:
-            # A tower whose serial scan has not finished may still turn out to be present, so no
-            # partial (too small) capacity is reported until every slot of every tower is settled.
             states = _battery_module_slot_states(self._runtime, device_id, prefix)
             if _SLOT_UNKNOWN in states:
                 return None
-            # The inventory settles each serial slot exactly once, so a complete snapshot is final:
-            # the dashboard's two-read debounce would only delay this until enough callers polled.
             report = _raw_battery_module_report(states)
             if not _battery_tower_present(self._runtime, device_id, prefix, report["populated_module_slots"]):
+                if prefix == "battery":
+                    return None
                 continue
-            if report["module_count_status"] != "ok" or not report["module_count"]:
+            if report["module_count_status"] != "ok":
                 return None
-            modules += report["module_count"]
-        return modules * RCT_USABLE_WH_PER_MODULE if modules else None
+            counts.append(report["module_count"])
+        if len(counts) == 1 and counts[0] not in range(2, 7):
+            return None
+        if len(counts) == 2 and (counts[0] != counts[1] or counts[0] not in (4, 5, 6)):
+            return None
+        if not counts:
+            return None
+        return sum(counts) * _RATED_USABLE_WH_PER_MODULE * min(1.0, measured_ah / reference_ah)
+
+

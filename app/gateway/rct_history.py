@@ -11,6 +11,7 @@ load counter) and which calendar day an entry timestamp describes (the local dat
 is assumed). The productive backfill that uses this class is therefore disabled by default.
 """
 
+import logging
 import math
 from collections.abc import Callable, Sequence
 from datetime import datetime
@@ -23,11 +24,14 @@ DAY_LOAD_LOG_METRIC = "logger_day_eload_log_ts"
 # Plausibility ceiling for one household day; anything above is a corrupt entry, not consumption.
 MAX_PLAUSIBLE_DAY_WH = 1_000_000.0
 
+log = logging.getLogger(__name__)
+
 
 class RctDailyConsumptionHistory:
     def __init__(self, gateway: RctGateway, timezone: Callable[[], str]) -> None:
         self._gateway = gateway
         self._timezone = timezone
+        self._warned_dates: set[tuple[str, object]] = set()  # one log line per device and local date
 
     async def daily_consumption(
         self, device_id: str, *, before: datetime, limit: int
@@ -43,6 +47,14 @@ class RctDailyConsumptionHistory:
                 continue
             if point.timestamp >= before:
                 continue  # the query asks for data before this instant
-            by_date[point.timestamp.astimezone(zone).date()] = float(point.value)
+            day = point.timestamp.astimezone(zone).date()
+            if day in by_date and (device_id, day) not in self._warned_dates:
+                self._warned_dates.add((device_id, day))
+                # The last point wins (unchanged); the day assignment is still unverified on hardware.
+                log.warning(
+                    "Inverter day history of %s has several logger points for %s; the last one is used",
+                    device_id, day,
+                )
+            by_date[day] = float(point.value)
         newest_first = sorted(by_date.items(), reverse=True)[: max(0, limit)]
         return [DailyConsumptionReading(day, wh) for day, wh in newest_first]

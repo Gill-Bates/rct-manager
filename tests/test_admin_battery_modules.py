@@ -32,7 +32,6 @@ from app.gateway.battery_inventory import (
     _BATTERY_MODULE_STABILITY_READS,
     RCT_MAX_MODULES_PER_TOWER,
     RCT_MODULE_SN_SLOTS,
-    ModuleCountVerifiedCapacity,
     _battery_module_report,
     _battery_module_slot_states,
     _battery_populated_module_slots,
@@ -667,8 +666,8 @@ async def test_single_tower_with_a_silent_placeholder_yields_capacity_after_the_
             await gateway.read_module_inventory("main", _MODULE_INVENTORY_NAMES)
         assert gateway.read_failed("main", "battery_placeholder_0_module_sn_0")
         assert not higher_placeholder_ids & {frame.object_id for _ts, frame in net.frames}
-        capacity = ModuleCountVerifiedCapacity(runtime).verified_usable_capacity_wh("main")
-        assert capacity is not None and round(capacity) == 10_368
+        primary = _battery_module_report(runtime, "main", "battery")
+        assert primary["module_count_status"] == "ok" and primary["module_count"] == 6
         second = _battery_module_report(runtime, "main", "battery_placeholder_0")
         assert second["module_count_status"] == "pending" and second["populated_module_slots"] == []
         assert not _battery_tower_present(runtime, "main", "battery_placeholder_0", second["populated_module_slots"])
@@ -815,41 +814,32 @@ def _single_tower(count: int) -> dict[str, str]:
     return _slots("battery", count)
 
 
-def test_power_battery_11_5_six_modules_yield_the_datasheet_usable_capacity() -> None:
+def test_power_battery_11_5_six_modules_are_reported_as_topology_only() -> None:
     runtime = _runtime(_single_tower(6), unanswered=_PLACEHOLDER_SILENT)
-    capacity = ModuleCountVerifiedCapacity(runtime).verified_usable_capacity_wh("dev")
-    assert round(capacity) == 10_368  # datasheet: 11.52 kWh nominal, 10.37 kWh usable at 90 % DoD
+    report = _battery_module_report(runtime, "dev", "battery")
+    assert report["module_count_status"] == "ok" and report["module_count"] == 6
 
 
-def test_a_second_tower_adds_its_own_modules() -> None:
-    serials = {**_slots("battery", 6), **_slots("battery_placeholder_0", 5)}
-    capacity = ModuleCountVerifiedCapacity(_runtime(serials)).verified_usable_capacity_wh("dev")
-    assert round(capacity) == round(11 * 1920 * 0.9)
-
-
-def test_no_capacity_while_the_module_scan_is_incomplete() -> None:
-    capacity = ModuleCountVerifiedCapacity(_runtime(_partial_slots("battery", 3))).verified_usable_capacity_wh("dev")
-    assert capacity is None
-
-
-def test_no_capacity_from_an_anomalous_tower() -> None:
-    capacity = ModuleCountVerifiedCapacity(_runtime(_GAPPED_SERIALS)).verified_usable_capacity_wh("dev")
-    assert capacity is None
-
-
-def test_no_partial_capacity_while_the_second_tower_scan_is_unfinished() -> None:
-    capacity = ModuleCountVerifiedCapacity(_runtime(_slots("battery", 6))).verified_usable_capacity_wh("dev")
-    assert capacity is None
-
-
-def test_capacity_is_available_on_the_first_call_after_the_scan_completes() -> None:
-    # The planner may call only every few minutes; it must not need repeated calls to "settle".
-    serials = {f"battery_placeholder_0_module_sn_{i}": "" for i in range(RCT_MODULE_SN_SLOTS)}
+@pytest.mark.parametrize("modules", [4, 5, 6])
+def test_symmetric_two_towers_keep_their_separate_diagnostic_counts(modules: int) -> None:
+    serials = {**_slots("battery", modules), **_slots("battery_placeholder_0", modules)}
     runtime = _runtime(serials)
-    capacity = ModuleCountVerifiedCapacity(runtime)
-    assert capacity.verified_usable_capacity_wh("dev") is None  # primary tower still unread
-    serials.update(_slots("battery", 6))
-    assert round(capacity.verified_usable_capacity_wh("dev")) == 10_368
+    assert _battery_module_report(runtime, "dev", "battery")["module_count"] == modules
+    assert _battery_module_report(runtime, "dev", "battery_placeholder_0")["module_count"] == modules
+
+
+@pytest.mark.parametrize(("primary", "second"), [(6, 5), (3, 3), (4, 5), (2, 2)])
+def test_mixed_or_small_two_towers_remain_diagnostic_only(primary: int, second: int) -> None:
+    serials = {**_slots("battery", primary), **_slots("battery_placeholder_0", second)}
+    runtime = _runtime(serials)
+    assert _battery_module_report(runtime, "dev", "battery")["module_count"] == primary
+    assert _battery_module_report(runtime, "dev", "battery_placeholder_0")["module_count"] == second
+
+
+@pytest.mark.parametrize("modules", range(2, 7))
+def test_single_tower_module_range_keeps_diagnostic_count(modules: int) -> None:
+    runtime = _runtime(_single_tower(modules), unanswered=_PLACEHOLDER_SILENT)
+    assert _battery_module_report(runtime, "dev", "battery")["module_count"] == modules
 
 
 # ---- Live reconfiguration must not carry the old hardware's topology forward ---------------------
@@ -879,7 +869,6 @@ def test_replace_devices_drops_the_trusted_battery_topology() -> None:
     scan(_single_tower(6))
     gateway._refresh_failures[("dev", "battery_placeholder_0_module_sn_0")] = REFRESH_FAILURES_CONFIRMED
     assert _battery_module_report(runtime, "dev", "battery")["module_count"] == 6
-    assert ModuleCountVerifiedCapacity(runtime).verified_usable_capacity_wh("dev") is not None
 
     gateway.replace_devices([])  # same device id, re-addressed hardware: nothing may be inherited
     scan(_partial_slots("battery", 3))  # the new device's scan has only just begun
@@ -887,4 +876,3 @@ def test_replace_devices_drops_the_trusted_battery_topology() -> None:
     report = _battery_module_report(runtime, "dev", "battery")
     assert report["module_count"] is None
     assert report["module_count_status"] == "pending"
-    assert ModuleCountVerifiedCapacity(runtime).verified_usable_capacity_wh("dev") is None

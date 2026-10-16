@@ -522,3 +522,25 @@ def _compound_names() -> list[str]:
     entries = json.loads(ROOT_CATALOG.read_text(encoding="utf-8"))
     entries = entries["entries"] if isinstance(entries, dict) else entries
     return [e["name"] for e in entries if e.get("response_type")]
+
+
+def test_several_logger_points_for_one_local_date_log_once_and_the_last_one_wins(caplog) -> None:
+    from app.gateway.rct_history import RctDailyConsumptionHistory
+    from app.protocol.timeseries import TimeSeriesPoint
+
+    class _Gateway:
+        async def query_history_series(self, device_id, name, before):
+            # Two points on 2026-10-14 in Berlin (UTC+2) and one on the 13th.
+            return (
+                TimeSeriesPoint(datetime(2026, 10, 14, 6, 0, tzinfo=UTC), 100.0),
+                TimeSeriesPoint(datetime(2026, 10, 14, 18, 0, tzinfo=UTC), 200.0),
+                TimeSeriesPoint(datetime(2026, 10, 13, 12, 0, tzinfo=UTC), 300.0),
+            )
+
+    history = RctDailyConsumptionHistory(_Gateway(), lambda: "Europe/Berlin")
+    before = datetime(2026, 10, 15, 0, 0, tzinfo=UTC)
+    with caplog.at_level("WARNING", logger="app.gateway.rct_history"):
+        first = asyncio.run(history.daily_consumption("main", before=before, limit=10))
+        asyncio.run(history.daily_consumption("main", before=before, limit=10))
+    assert {r.local_date: r.energy_wh for r in first} == {date(2026, 10, 14): 200.0, date(2026, 10, 13): 300.0}
+    assert len([m for m in caplog.messages if "several logger points" in m]) == 1

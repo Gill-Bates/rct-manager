@@ -41,7 +41,7 @@ function makeNode(tag, byId) {
     set className(v) { this._class = v; }, get className() { return this._class || ''; },
     set textContent(v) { this._text = String(v); this.children = []; }, get textContent() { return this._text; },
     set htmlFor(v) { this._htmlFor = v; }, get htmlFor() { return this._htmlFor || ''; },
-    append(...kids) { for (const k of kids) { k.parentNode = node; k.parentElement = node; node.children.push(k); } },
+    append(...kids) { for (let k of kids) { if (typeof k === 'string') { const text = k; k = makeNode('#text', byId); k._text = text; } k.parentNode = node; k.parentElement = node; node.children.push(k); } },
     replaceChildren(...kids) { node.children = []; node.append(...kids); },
     after(...sibs) { const parent = node.parentNode; if (!parent) return; const at = parent.children.indexOf(node); for (let i = 0; i < sibs.length; i += 1) { sibs[i].parentNode = parent; sibs[i].parentElement = parent; parent.children.splice(at + 1 + i, 0, sibs[i]); } },
     setAttribute(k, v) { node.attributes[k] = String(v); }, getAttribute(k) { return node.attributes[k] ?? null; },
@@ -85,10 +85,13 @@ function harness({ apiImpl } = {}) {
   const byId = new Map();
   const calls = [];
   const toasts = [];
+  const timers = new Set();
   const document = {
     body: makeNode('body', byId),
     getElementById: (id) => byId.get(id) || null,
     createElement: (tag) => makeNode(tag, byId),
+    addEventListener() { },
+    hidden: false,
   };
   const context = {
     document,
@@ -108,14 +111,28 @@ function harness({ apiImpl } = {}) {
     ENERGY_POLICY_MODES: [['target', 'Target'], ['below', 'Below current SoC']],
     missingRequiredWrites: () => [],
     energyChecklist: () => ({ hardwareVerified: true }),
-    setTimeout, clearTimeout, setInterval, clearInterval,
+    setTimeout(callback, delay) {
+      const timer = setTimeout(() => { timers.delete(timer); callback(); }, delay);
+      timers.add(timer);
+      return timer;
+    },
+    clearTimeout(timer) { timers.delete(timer); clearTimeout(timer); },
+    setInterval(callback, delay) {
+      const timer = setInterval(callback, delay);
+      timers.add(timer);
+      return timer;
+    },
+    clearInterval(timer) { timers.delete(timer); clearInterval(timer); },
     AbortController, Number, Array, Object, Boolean, String, Math, Date, Set, Intl,
   };
   context.window = context;
   context.addEventListener = () => { }; // initDryRunPlan stops polling on pagehide
   vm.runInNewContext(SOURCE, context);
   context.element('div').id = 'energy-plan-schedule'; // the full-width chart host of the Charging plan tab
-  return { context, byId, calls, toasts };
+  return { context, byId, calls, toasts, cleanup: () => {
+    for (const timer of timers) { clearTimeout(timer); clearInterval(timer); }
+    timers.clear();
+  } };
 }
 
 const flush = () => new Promise((resolve) => setImmediate(resolve));
@@ -373,6 +390,8 @@ test('P2.3: switching the plan device requests a fresh dynamic-plan', async () =
 
   const after = paths.filter((p) => p.includes('dynamic-plan')).length;
   assert.ok(after > before, 'the device-change handler requests the dynamic plan');
+  h.context.stopPlanPolling();
+  h.cleanup();
 });
 
 // A pending plan that stayed pending past the poll limit keeps its readiness card: the periodic
@@ -397,6 +416,8 @@ test('an exhausted pending plan is not replaced by the spinner on a background r
   status = 'solar_forecast_unavailable';
   await h.context.loadDryRunPlan({ poll: true });
   assert.equal(spinners(), 1, 'a status change restarts the wait');
+  h.context.stopPlanPolling(); // the armed 10 s timer would keep the runner alive
+  h.cleanup();
 });
 
 // P3.1: nextGridCharge must only merge adjacent charge slots of EQUAL power, so the "Next grid

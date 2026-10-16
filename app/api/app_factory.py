@@ -59,7 +59,7 @@ from app.dispatch.store import DispatchStore
 from app.energy.manager import EnergyManager
 from app.energy.models import EnergyMode, ModeRecord
 from app.errors import ConfigError, DeviceApiError, ReconfigurationBuildError
-from app.gateway.battery_inventory import RCT_MODULE_SN_SLOTS, ModuleCountVerifiedCapacity
+from app.gateway.battery_inventory import RCT_MODULE_SN_SLOTS, MeasuredBatteryCapacity
 from app.gateway.cache import MemoryCache
 from app.gateway.energy_readings import RctEnergyReadings
 from app.gateway.live_charge_limit import RctLiveChargeLimitProvider
@@ -1497,7 +1497,7 @@ def create_app(settings: Settings, *, clock: Clock | None = None, connector: Con
         gateway,
     )
     runtime.dispatch_control_registers = frozenset(RctDispatchGateway.REQUIRED_WRITES)
-    runtime.battery_capacity = ModuleCountVerifiedCapacity(runtime)
+    runtime.battery_capacity = MeasuredBatteryCapacity(runtime)
     # Built unconditionally and shared with the Energy Manager: it publishes the effective target
     # window from the same bounds the controller validates against, with or without dispatch.
     dispatch_config = DispatchConfig(

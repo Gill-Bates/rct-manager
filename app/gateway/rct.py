@@ -48,6 +48,7 @@ from app.gateway.base import (
     WriteOutcome,
 )
 from app.gateway.cache import CacheEntry, CacheFreshness, ValueStore, age_seconds
+from app.gateway.battery_inventory import CAPACITY_AH_FRESH_SECONDS, CAPACITY_AH_METRICS
 from app.gateway.sample_sink import MetricSampleSink
 from app.gateway.vendor import SlaveDiscovery, TransportInfo
 from app.observability.stats import Histogram
@@ -199,6 +200,8 @@ class RctGateway:
 
     def _fresh_window(self, key: tuple[str, str]) -> float | None:
         """Cache hook: bounded freshness window of a live periodic registration (Requirement 17.29)."""
+        if key[1] in CAPACITY_AH_METRICS:
+            return CAPACITY_AH_FRESH_SECONDS
         binding = self._devices.get(key[0])
         if binding is None or binding.periodic is None:
             return None
