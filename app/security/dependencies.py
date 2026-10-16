@@ -73,8 +73,7 @@ async def require_write_enabled(ctx: Context) -> None:
 
 async def require_write(principal: Annotated[Principal, Depends(require_read)], ctx: Context) -> Principal:
     """Write support first, then the token role; allowlist and value checks follow in the handler."""
-    if not ctx.write_enabled:
-        raise WriteDisabled()
+    await require_write_enabled(ctx)
     if principal.role is not TokenRole.READ_WRITE:
         raise InsufficientScope()
     return principal

@@ -16,6 +16,7 @@ import threading
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from urllib.error import HTTPError
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -59,7 +60,19 @@ def _v2_payload(timestamps, prices, *, unit="EUR / MWh", series_unit=None, inter
 
 # Three contiguous 15-minute intervals in Europe/Berlin (summer, +02:00), EUR/MWh.
 _STARTS = ["2026-07-21T00:00:00+02:00", "2026-07-21T00:15:00+02:00", "2026-07-21T00:30:00+02:00"]
-_PRICE_PAYLOAD = _v2_payload(_STARTS, [178.73, 177.82, 176.58])
+
+
+def _day_starts(day: str = "2026-07-21", offset: str = "+02:00", count: int = 96) -> list[str]:
+    """Quarter-hour starts from local midnight of ``day``; the offset must hold for the whole day."""
+    return [f"{day}T{(i * 15) // 60:02d}:{(i * 15) % 60:02d}:00{offset}" for i in range(count)]
+
+
+def _day_prices(head, count: int = 96) -> list[float]:
+    return [*head, *([100.0] * (count - len(head)))]
+
+
+# A complete local day: only the first three prices matter to the tests that read them back.
+_PRICE_PAYLOAD = _v2_payload(_day_starts(), _day_prices([178.73, 177.82, 176.58]))
 # The same first start as a tz-aware UTC instant: +02:00 00:00 == 22:00 UTC the previous day.
 _FIRST_START_UTC = datetime.fromisoformat(_STARTS[0]).astimezone(UTC)
 
@@ -98,7 +111,7 @@ def test_day_ahead_normalises_eur_per_mwh_to_eur_per_kwh(monkeypatch):
     assert snapshot.provider is SpotMarketProvider.ENERGY_CHARTS
     # Currency is provider metadata, read from the provider, not from operator config.
     assert snapshot.currency == "EUR"
-    assert len(snapshot.intervals) == 3
+    assert len(snapshot.intervals) == 96
     # 178.73 EUR/MWh -> 0.17873 EUR/kWh, exact in Decimal (no binary-float drift).
     assert snapshot.intervals[0].price_eur_per_kwh == Decimal("178.73") / Decimal(1000)
     assert snapshot.intervals[0].price_eur_per_kwh == Decimal("0.17873")
@@ -120,14 +133,14 @@ def test_intervals_are_timezone_aware_and_fifteen_minutes_long(monkeypatch):
 def test_a_series_level_unit_overrides_the_envelope_unit(monkeypatch):
     # The envelope declares EUR/MWh but the series overrides to EUR/kWh; the override wins, so the
     # price must NOT be divided by 1000 a second time.
-    payload = _v2_payload(_STARTS, [0.17, 0.18, 0.19], unit="EUR/MWh", series_unit="EUR/kWh")
+    payload = _v2_payload(_day_starts(), _day_prices([0.17, 0.18, 0.19]), unit="EUR/MWh", series_unit="EUR/kWh")
     _patch_opener(monkeypatch, payload=payload)
     intervals = EnergyChartsProvider().fetch_day_ahead(SpotMarketConfig()).intervals
     assert intervals[0].price_eur_per_kwh == Decimal("0.17")
 
 
 def test_already_eur_per_kwh_is_not_divided(monkeypatch):
-    payload = _v2_payload(_STARTS, [0.17, 0.18, 0.19], unit="EUR/kWh")
+    payload = _v2_payload(_day_starts(), _day_prices([0.17, 0.18, 0.19]), unit="EUR/kWh")
     _patch_opener(monkeypatch, payload=payload)
     intervals = EnergyChartsProvider().fetch_day_ahead(SpotMarketConfig()).intervals
     assert intervals[0].price_eur_per_kwh == Decimal("0.17")
@@ -200,10 +213,65 @@ def test_a_missing_price_series_is_rejected(monkeypatch):
         EnergyChartsProvider().fetch_day_ahead(SpotMarketConfig())
 
 
-def test_an_empty_series_is_an_empty_snapshot_not_an_error(monkeypatch):
+def test_an_empty_next_day_series_means_not_published_yet(monkeypatch):
     _patch_opener(monkeypatch, payload=_v2_payload([], []))
+    with pytest.raises(SpotMarketNotAvailableYet):
+        EnergyChartsProvider().fetch_day_ahead(SpotMarketConfig())
+
+
+def _fetch_day(provider, kind):
+    config = SpotMarketConfig()
+    if kind == "day_ahead":
+        return provider.fetch_day_ahead(config)
+    if kind == "today":
+        return provider.fetch_today(config)
+    return provider.fetch_yesterday(config, "Europe/Berlin")
+
+
+@pytest.mark.parametrize("kind", ["day_ahead", "today", "yesterday"])
+@pytest.mark.parametrize(
+    ("starts", "match"),
+    [
+        (_day_starts(count=50), "complete local day"),  # starts at midnight, ends early
+        (_day_starts()[4:], "complete local day"),  # starts after midnight
+        (_day_starts()[:-1], "complete local day"),  # last slot missing
+    ],
+)
+def test_a_partial_day_is_rejected(monkeypatch, kind, starts, match):
+    _patch_opener(monkeypatch, payload=_v2_payload(starts, [1.0] * len(starts)))
+    with pytest.raises(SpotMarketResponseError, match=match):
+        _fetch_day(EnergyChartsProvider(), kind)
+
+
+@pytest.mark.parametrize("kind", ["today", "yesterday"])
+def test_an_empty_today_or_yesterday_series_is_a_response_error(monkeypatch, kind):
+    _patch_opener(monkeypatch, payload=_v2_payload([], []))
+    with pytest.raises(SpotMarketResponseError, match="no price intervals"):
+        _fetch_day(EnergyChartsProvider(), kind)
+
+
+@pytest.mark.parametrize("kind", ["day_ahead", "today"])
+def test_a_series_without_a_timezone_cannot_prove_a_full_day(monkeypatch, kind):
+    payload = _v2_payload(_day_starts(), [1.0] * 96)
+    del payload["timezone"]
+    _patch_opener(monkeypatch, payload=payload)
+    with pytest.raises(SpotMarketResponseError, match="timezone"):
+        _fetch_day(EnergyChartsProvider(), kind)
+
+
+@pytest.mark.parametrize(("day", "count"), [("2026-03-29", 92), ("2026-10-25", 100)])
+def test_dst_days_with_92_or_100_intervals_are_complete(monkeypatch, day, count):
+    # Spring: 23 local hours; autumn: 25. Built from UTC instants so the offset flip is exact.
+    zone = ZoneInfo("Europe/Berlin")
+    midnight = datetime.fromisoformat(f"{day}T00:00:00").replace(tzinfo=zone).astimezone(UTC)
+    starts = [(midnight + timedelta(minutes=15 * i)).astimezone(zone).isoformat() for i in range(count)]
+    _patch_opener(monkeypatch, payload=_v2_payload(starts, [1.0] * count))
     snapshot = EnergyChartsProvider().fetch_day_ahead(SpotMarketConfig())
-    assert snapshot.intervals == ()
+    assert len(snapshot.intervals) == count
+    # One slot more or less is a different day boundary and must be rejected.
+    _patch_opener(monkeypatch, payload=_v2_payload(starts[:-1], [1.0] * (count - 1)))
+    with pytest.raises(SpotMarketResponseError, match="complete local day"):
+        EnergyChartsProvider().fetch_day_ahead(SpotMarketConfig())
 
 
 def test_config_defaults_match_energy_charts_de_lu():
@@ -319,7 +387,7 @@ def test_a_same_origin_redirect_is_allowed():
 def test_a_clean_fifteen_minute_series_parses(monkeypatch):
     _patch_opener(monkeypatch, payload=_PRICE_PAYLOAD)
     intervals = EnergyChartsProvider().fetch_day_ahead(SpotMarketConfig()).intervals
-    assert len(intervals) == 3
+    assert len(intervals) == 96
     assert all((item.end - item.start).total_seconds() == 900 for item in intervals)
 
 
@@ -441,7 +509,7 @@ def test_provider_retains_source_timestamps_and_timezone(monkeypatch):
 
 
 def test_provider_rejects_naive_source_timestamp(monkeypatch):
-    payload = _v2_payload(_STARTS, [178.73, 177.82, 176.58])
+    payload = _v2_payload(_day_starts(), _day_prices([178.73, 177.82, 176.58]))
     payload["generated_at"] = "2026-07-20T13:00:00"
     _patch_opener(monkeypatch, payload=payload)
     with pytest.raises(SpotMarketResponseError, match="generated_at"):
@@ -661,7 +729,7 @@ def test_a_429_is_retried_then_succeeds_and_honours_retry_after(monkeypatch):
     monkeypatch.setattr(energy_charts._OPENER, "open", fake_open)
     provider = EnergyChartsProvider(sleep=slept.append)
     snapshot = provider.fetch_day_ahead(SpotMarketConfig())
-    assert len(snapshot.intervals) == 3
+    assert len(snapshot.intervals) == 96
     assert calls["n"] == 2
     assert slept == [2.0]  # the Retry-After delay was honoured exactly once
 
@@ -795,3 +863,64 @@ def test_zone_list_survives_a_restart_through_the_admin_database(tmp_path):
 def test_bidding_zone_catalog_rejects_a_default_not_in_the_list():
     with pytest.raises(ValueError, match="default"):
         BiddingZoneCatalog(zones=("DE-LU",), default="AT", fetched_at=_CACHE_T0)
+
+
+@pytest.mark.parametrize(
+    ("zones", "default"),
+    [(("DE-LU", ""), "DE-LU"), (("DE-LU", 5), "DE-LU"), (["DE-LU"], "DE-LU"), (("DE-LU",), ""), (("",), "")],
+)
+def test_bidding_zone_catalog_rejects_empty_or_non_string_entries(zones, default):
+    with pytest.raises(ValueError):
+        BiddingZoneCatalog(zones=zones, default=default, fetched_at=_CACHE_T0)
+
+
+@pytest.mark.parametrize(
+    "stored",
+    [
+        {"zones": ["DE-LU", ""], "default": "DE-LU", "fetched_at": _CACHE_T0.isoformat()},
+        {"zones": ["DE-LU"], "default": 7, "fetched_at": _CACHE_T0.isoformat()},
+        {"zones": ["DE-LU"], "default": "DE-LU", "fetched_at": "not-a-date"},
+        {"zones": ["DE-LU"]},
+    ],
+)
+def test_a_damaged_stored_zone_catalog_is_ignored_and_refetched(tmp_path, stored):
+    from app.admin.store import AdminStore
+    from app.spotmarket.metadata import ZONE_CATALOG_KEY, zone_catalog_persistence
+
+    store = AdminStore(tmp_path / "admin.db", "f" * 48)
+    store.initialize()
+    store.put(ZONE_CATALOG_KEY, stored)
+    load, save = zone_catalog_persistence(store)
+    cache = BiddingZoneMetadataCache(lambda: _catalog(fetched_at=_CACHE_T0), load=load, save=save)
+    with pytest.raises(SpotMarketError):
+        cache.get()  # the damaged copy is not served
+    assert cache.refresh().zones == ("DE-LU", "AT")
+    store.close()
+
+
+def test_get_does_not_block_while_a_refresh_is_fetching():
+    entered, release = threading.Event(), threading.Event()
+    calls = {"n": 0}
+
+    def slow_fetch():
+        calls["n"] += 1
+        if calls["n"] == 2:
+            entered.set()
+            assert release.wait(5)
+        return _catalog(fetched_at=_CACHE_T0)
+
+    cache = BiddingZoneMetadataCache(slow_fetch)
+    cache.refresh()
+    worker = threading.Thread(target=cache.refresh)
+    worker.start()
+    try:
+        assert entered.wait(5)
+        result: list = []
+        reader = threading.Thread(target=lambda: result.append(cache.get()))
+        reader.start()
+        reader.join(2)
+        assert not reader.is_alive(), "get() blocked behind the running refresh"
+        assert result[0].zones == ("DE-LU", "AT")
+    finally:
+        release.set()
+        worker.join(5)

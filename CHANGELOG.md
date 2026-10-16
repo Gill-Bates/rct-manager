@@ -1,6 +1,9 @@
 ## [1.2.2] - 2026-xx-xx
 
 - ``Fix`` The site timezone lookup no longer reuses a cached zone for nearby coordinates (a timezone boundary could yield the wrong zone for up to 24 h), and a place search no longer shows a postal code taken from a postcode-area hit unless the query matched it exactly.
+- ``Fix`` A write cancelled during its quiet window now drops the connection, so a late write echo cannot answer the next request; a failed connection setup closes its socket.
+- ``Fix`` Write allowlist bounds and step must be finite numbers, and a spot-price day (today, tomorrow, yesterday) is only accepted when it covers a complete local day (DST days included); an empty next-day feed counts as not yet published.
+- ``Fix`` Reading the bidding-zone list no longer waits for a running provider refresh, and a damaged stored zone catalog is ignored and reloaded.
 
 
 

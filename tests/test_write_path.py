@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from app.config import DeviceKey, EndpointKey
+from app.config import DeviceKey, EndpointKey, TokenRole
 from app.errors import DeviceTimeout, WriteRejected
 from app.protocol.frames import Frame, encode_frame
 from app.protocol.stream import StreamParser
@@ -72,6 +72,49 @@ async def test_unanswered_write_keeps_the_connection() -> None:
     # was taken, independent of how fast the CI runner is.
     assert advanced == pytest.approx(EndpointConfig().write_quiet_window_seconds)
     assert endpoint.connection_epoch == 1 and net.connects == 1 and net.open_now == 1
+    await endpoint.close()
+
+
+async def test_cancel_in_the_write_quiet_window_drops_the_connection() -> None:
+    """A late write echo carries no transaction id, so a cancelled write must not leave its connection."""
+    entered = asyncio.Event()
+
+    class CancellableQuietWindow(AutoClock):
+        async def sleep(self, seconds: float) -> None:
+            if seconds == EndpointConfig().write_quiet_window_seconds:
+                entered.set()
+                await asyncio.Event().wait()  # parked until the task is cancelled
+            await super().sleep(seconds)
+
+    clock = CancellableQuietWindow()
+    net = FakeNetwork(clock)
+    net.behavior = lambda frame: "ignore"
+    endpoint = _endpoint(net, clock)
+    task = asyncio.create_task(endpoint.execute(_request(Command.WRITE)))
+    await asyncio.wait_for(entered.wait(), 5)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert net.open_now == 0
+    net.behavior = lambda frame: "respond"
+    result = await endpoint.execute(_request(Command.READ))
+    assert result.ok and net.connects == 2
+    await endpoint.close()
+
+
+async def test_arrival_ledger_failure_closes_the_fresh_connection(monkeypatch) -> None:
+    import app.transport.endpoint as endpoint_module
+
+    def broken(*_args, **_kwargs):
+        raise RuntimeError("ArrivalLedger could not install its feed_data wrapper")
+
+    monkeypatch.setattr(endpoint_module, "ArrivalLedger", broken)
+    clock = AutoClock()
+    net = FakeNetwork(clock)
+    endpoint = _endpoint(net, clock)
+    with pytest.raises(RuntimeError):
+        await endpoint.execute(_request(Command.READ))
+    assert net.open_now == 0 and all(w.closed for w in net.writers)
     await endpoint.close()
 
 
@@ -702,3 +745,33 @@ def test_load_allowlist_ignores_a_broken_file_when_write_support_is_off(tmp_path
     enabled = make_settings(enable_write_support=True, write_allowlist_path=broken)
     with pytest.raises(ConfigError):
         load_allowlist(enabled, catalog)
+
+
+@pytest.mark.parametrize("field", ["minimum", "maximum", "step"])
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+def test_allowlist_entry_rejects_non_finite_bounds(field, bad) -> None:
+    fields = {"minimum": 0, "maximum": 10, "step": 1} | {field: bad}
+    with pytest.raises(ValidationError):
+        AllowlistEntry(name="x", data_type=DataType.FLOAT, **fields)
+    AllowlistEntry(name="x", data_type=DataType.FLOAT, minimum=-1.5, maximum=10.5, step=0.5)
+
+
+@pytest.mark.parametrize("write_enabled", [True, False])
+@pytest.mark.parametrize("role", [TokenRole.READ, TokenRole.READ_WRITE])
+async def test_require_write_checks_write_support_before_the_role(write_enabled, role) -> None:
+    from types import SimpleNamespace
+
+    from app.errors import InsufficientScope, WriteDisabled
+    from app.security.dependencies import require_write
+    from app.security.tokens import Principal
+
+    principal = Principal("t", role)
+    ctx = SimpleNamespace(write_enabled=write_enabled)
+    if not write_enabled:
+        with pytest.raises(WriteDisabled):  # also for a READ token: support is checked first
+            await require_write(principal, ctx)
+    elif role is TokenRole.READ:
+        with pytest.raises(InsufficientScope):
+            await require_write(principal, ctx)
+    else:
+        assert await require_write(principal, ctx) is principal

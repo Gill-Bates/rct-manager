@@ -1206,9 +1206,9 @@ def test_energy_mode_is_a_three_state_radio_group_with_mode_dependent_controls()
 def test_energy_controls_are_locked_while_the_inverter_is_not_connected():
     js = _admin_js()
     setup = (ADMIN_DIR / "static/js/admin-energy-setup.js").read_text(encoding="utf-8")
-    # Header and strategy summary show n/a instead of the internal device id.
+    # The header shows n/a instead of the internal device id; the strategy summary shows the configured host.
     assert "nameNode.textContent = device.connected ? device.device_name : NOT_AVAILABLE;" in js
-    assert "energyPanels.get(device.device_id)?.isConnected() ? device.device_name : NOT_AVAILABLE" in setup
+    assert "energyPanels.get(device.device_id)?.isConnected() ? device.device_name : device.host" in setup
     # Mode buttons get the disabled attribute plus a visible hint, and every handler is guarded.
     assert "button.disabled = !device.connected;" in js and "modeOffline.hidden = device.connected;" in js
     assert "!device.connected || (wanted === device.mode" in js

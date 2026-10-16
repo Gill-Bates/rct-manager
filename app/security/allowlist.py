@@ -36,9 +36,9 @@ class AllowlistEntry(BaseModel):
 
     name: str
     data_type: DataType
-    minimum: float | None = None
-    maximum: float | None = None
-    step: float | None = Field(None, gt=0)
+    minimum: float | None = Field(None, allow_inf_nan=False)
+    maximum: float | None = Field(None, allow_inf_nan=False)
+    step: float | None = Field(None, gt=0, allow_inf_nan=False)
     allowed_values: list[int] = Field(default_factory=list)
 
     @model_validator(mode="after")

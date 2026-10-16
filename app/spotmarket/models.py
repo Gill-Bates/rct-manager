@@ -128,8 +128,12 @@ class BiddingZoneCatalog:
 
     def __post_init__(self) -> None:
         _require_aware(self.fetched_at, "fetched_at")
-        if not self.zones:
+        if not isinstance(self.zones, tuple) or not self.zones:
             raise ValueError("a bidding-zone catalog must list at least one zone")
+        if not all(isinstance(zone, str) and zone for zone in self.zones):
+            raise ValueError("bidding zones must be non-empty strings")
+        if not isinstance(self.default, str) or not self.default:
+            raise ValueError("the default bidding zone must be a non-empty string")
         if self.default not in self.zones:
             raise ValueError("the default bidding zone must be one of the listed zones")
 
