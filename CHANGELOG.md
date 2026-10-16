@@ -1,5 +1,7 @@
 ## [1.2.2] - 2026-xx-xx
 
+- ``New`` After the first forced password change, you must accept a one-time usage and liability disclaimer before the admin interface can be used; once accepted it never asks again and survives later password changes.
+- ``New`` The battery health dashboard widgets now show one line per inverter when several are configured, each with the inverter's name and its serial on hover, instead of merging them into a single value.
 - ``New`` The Charging plan's Expert diagnostics show a battery calibration history: the usable capacity measured by the BMS over time against the datasheet capacity, kept per inverter serial and read from the local store only. A commissioning date entered by hand starts the curve; deriving it from the inverter energy logs is unverified on hardware and off by default (`battery_commissioning_derivation_enabled`); a replaced battery (new BMS serial) starts a new series.
 - ``New`` The dashboard has battery health widgets (usable kWh, remaining % vs datasheet, cycles, last calibration, commissioning date, and a degradation chart), off by default and shown per inverter serial. The calibration history is recorded independently of the Energy Manager.
 - ``Change`` The usable battery capacity is capped by the BMS ratio of measured to rated Ah (never above the datasheet value); the two Ah registers are refreshed in the background about once a day. A single tower accepts 2 to 6 modules, two towers only 4+4, 5+5 or 6+6.
@@ -17,6 +19,7 @@
 - ``Fix`` Non-finite floats are rejected when decoding a reply or encoding a write, and a device host is stored in its canonical form (IP address normalized, host name lower-cased).
 - ``Fix`` The outline-secondary buttons (e.g. "Edit dashboard") use the theme's secondary text colour in the light theme, so their label reaches the 4.5:1 contrast ratio.
 - ``Fix`` The Charging plan no longer announces a "Next grid charge" while the Energy Manager is off for the inverter; it states that no grid charge will be started.
+- ``Security`` The usage disclaimer is enforced on the server, not just in the browser: until it is accepted every admin request is refused (including personal access tokens), and opening any page by its direct URL only shows the acceptance prompt.
 
 <details markdown="1">
 <summary>Previous versions...</summary>

@@ -2216,7 +2216,10 @@ try {
         });
         await ep.locator('.energy-setup-step button', { hasText: 'Verify hardware' }).click();
         await dialog.waitFor({ timeout: 5000 });
+        // Start and the balance check are ~15 paced device reads (~5 s and ~10 s); wait for both before the 15 s render budget.
+        const phaseDone = ['start', 'auto-check'].map((step) => ep.waitForResponse((response) => response.url().endsWith(`/verification-assistant/${step}`), { timeout: 60000 }));
         await dialog.getByRole('button', { name: 'Start verification' }).click();
+        await Promise.all(phaseDone);
         await dialog.getByRole('heading', { name: 'Battery direction?' }).waitFor({ timeout: 15000 });
         const controlResponse = ep.waitForResponse((response) => response.url().endsWith('/verification-assistant/control-test'), { timeout: 90000 });  // ~35 paced device sends take ~25 s
         await dialog.getByRole('button', { name: /^The battery is discharging/ }).click();

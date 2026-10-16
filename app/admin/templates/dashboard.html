@@ -193,8 +193,8 @@
   </div>
   {% endfor %}
   {% for id, x, y, title, unit in [
-  ('spot-price-curve', 0, 12, 'Day-ahead prices', 'ct/kWh'),
-  ('pv-forecast-curve', 6, 12, 'PV forecast', 'kW'),
+  ('spot-price-curve', 0, 13, 'Day-ahead prices', 'ct/kWh'),
+  ('pv-forecast-curve', 6, 13, 'PV forecast', 'kW'),
   ('charging-schedule', 0, 16, 'Charging schedule', 'kW · %')
   ] %}
   <div class="grid-stack-item d-none" gs-id="{{ id }}" gs-x="{{ x }}" gs-y="{{ y }}" gs-w="6" gs-h="4"
@@ -225,7 +225,7 @@
   <div class="grid-stack-item d-none" gs-id="{{ id }}" gs-x="{{ x }}" gs-y="10" gs-w="2" gs-h="2"
     data-widget-id="{{ id }}">
     <div class="grid-stack-item-content">
-      <div class="card kpi-card h-100">
+      <div class="card kpi-card battery-tile h-100">
         <div class="dashboard-widget-header d-none"><span class="dashboard-drag-handle material-icons"
             aria-hidden="true">drag_indicator</span></div>
         <div class="card-body"><span class="material-icons {{ color }}" aria-hidden="true">{{ icon }}</span>
@@ -238,7 +238,7 @@
     </div>
   </div>
   {% endfor %}
-  <div class="grid-stack-item d-none" gs-id="battery-degradation" gs-x="0" gs-y="12" gs-w="6" gs-h="4"
+  <div class="grid-stack-item d-none" gs-id="battery-degradation" gs-x="0" gs-y="13" gs-w="6" gs-h="4"
     data-widget-id="battery-degradation">
     <div class="grid-stack-item-content">
       <section class="card dashboard-forecast-card h-100" aria-label="Battery degradation">

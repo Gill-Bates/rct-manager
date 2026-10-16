@@ -1312,7 +1312,7 @@ function renderDryRunPlan(plan, { waiting = true } = {}) {
   }
   // While the Energy Manager is off for this inverter no grid charge will ever be started, so the
   // plan must not announce one.
-  const selectedDevice = planDevices.find((item) => item.device_id === $('energy-plan-device')?.value);
+  const selectedDevice = (typeof planDevices === 'undefined' ? [] : planDevices).find((item) => item.device_id === $('energy-plan-device')?.value);
   const managerOff = selectedDevice?.mode === 'off';
   const next = managerOff ? null : nextGridCharge(plan.slots || []);
   const card = managerOff

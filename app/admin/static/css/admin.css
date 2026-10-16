@@ -457,26 +457,48 @@ body {
     white-space: nowrap;
 }
 
-/* Battery health tiles with several inverters: one row per inverter. The name shrinks with an
-   ellipsis (the title holds the serial), the figure never clips. */
-.kpi-card strong .battery-tile-row {
-    display: flex;
-    align-items: baseline;
-    justify-content: space-between;
+/* Battery health tiles show dates and per-inverter figures in a 2-column tile: compact padding,
+   a smaller figure that may wrap (a wrapped value beats a clipped one; the tile height follows). */
+.kpi-card.battery-tile .card-body {
+    padding: .75rem;
     gap: .5rem;
-    font-size: clamp(.9rem, 3.4vw, 1.05rem);
-    line-height: 1.35;
+}
+
+.kpi-card.battery-tile .material-icons {
+    font-size: 1.6rem;
+}
+
+.kpi-card.battery-tile strong {
+    display: block;
+    font-size: clamp(.9rem, 4vw, 1.05rem);
+    overflow-wrap: anywhere;
+    white-space: normal;
+}
+
+/* Several inverters: one block per inverter, the name above its figure. The name ellipsizes
+   (the title holds the serial), the figure never clips. */
+.kpi-card strong .battery-tile-row {
+    display: block;
+    min-width: 0;
+}
+
+.kpi-card strong .battery-tile-row+.battery-tile-row {
+    margin-top: .25rem;
 }
 
 .kpi-card strong .battery-tile-label {
-    min-width: 0;
+    display: block;
     overflow: hidden;
+    color: var(--bs-secondary-color);
+    font-size: .8125rem;
     font-weight: 400;
+    line-height: 1.2;
     text-overflow: ellipsis;
+    white-space: nowrap;
 }
 
 .kpi-card strong .battery-tile-text {
-    flex: none;
+    display: block;
 }
 
 /* A text status ("Not configured") may wrap between words, unlike a number with its unit. */
@@ -1850,6 +1872,7 @@ body {
 }
 
 @media (max-width: 575.98px) {
+
     .energy-plan-head-controls,
     .energy-plan-device-field {
         width: 100%;

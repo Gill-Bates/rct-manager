@@ -1902,7 +1902,8 @@ def test_disclaimer_modal_markup_is_mandatory_and_not_dismissable():
     assert "Cancel" not in block and "Abbrechen" not in block
     # A single explicit accept control carries the consent.
     assert 'id="disclaimer-accept"' in block
-    assert "I have read the notice and accept" in block
+    # Source line wrapping must not matter: compare the whitespace-normalised markup.
+    assert "I have read the notice and accept" in " ".join(block.split())
     # Accessible dialog semantics and a hidden error region for save failures.
     assert 'aria-labelledby="disclaimer-title"' in block
     assert 'id="disclaimer-error"' in block and 'role="alert"' in block
