@@ -107,19 +107,12 @@ Pulled from `implementation-evidence.md` and `integration-verification.md` (both
 
 ## 3. Remaining assumptions
 
-1. **Feature is dormant in the production assembly.** `PlanningService` and `PlanDispatchHandoff` are
-   defined and exported but **never instantiated in `app/`**; `app_factory` registers an empty
-   `planning_services = {}`, and the config knobs (`enable_automatic_dispatch`, `plan_*`,
-   `baseline_household_load_w`, the `*_max_age_seconds`, the percentiles) are not consumed by any
-   production path — only by tests injecting services. The read-only plan route therefore always
-   answers `available=False` at runtime. This is consistent with the default-OFF / not-yet-released
-   intent and makes the hard invariant hold trivially, but the end-to-end runtime path (service
-   construction -> handoff -> Energy Manager) is proven **only by tests, not by app assembly**.
-2. **Handoff docstring overstates the enable flag.** `PlanDispatchHandoff.__init__` says
-   `enable_automatic_dispatch` is "read live (a callable or a plain bool)", but the constructor
-   accepts a plain `bool` and stores it once; there is no callable support and no live re-read.
-   Doc/behavior mismatch only; behavior is correct (OFF by default). Worth correcting when the
-   feature is activated.
+1. **`PlanDispatchHandoff` is still not instantiated in `app/`.** `PlanningService` is now built per device
+   by `build_runtime_planning_service` in `app/api/app_factory.py` (`start_planning_tasks`), so the read-only
+   plan route is live. The handoff (`app/energy/plan_handoff.py`, moved from `app/optimizer/handoff.py`) is
+   exercised only by `tests/test_energy_plan_handoff.py`; the runtime path plan -> handoff -> Energy Manager is
+   proven by tests, not by app assembly. This is intended while `enable_automatic_dispatch` stays `False`.
+2. ~~Handoff docstring overstates the enable flag.~~ Fixed: the docstring states a plain `bool` captured once.
 3. **Battery-state inputs assume operator configuration is correct.** Usable capacity and the static
    per-device power limits are taken from operator config as declared; the optimizer never
    cross-checks them against hardware. A misconfigured capacity would skew the planned SoC trajectory
@@ -133,10 +126,9 @@ Pulled from `implementation-evidence.md` and `integration-verification.md` (both
 satisfied and signed off. It is intentionally code-switch-only (not in `OPERATOR_FIELDS`), so it
 cannot be flipped from the operator surface.
 
-- [ ] **Wire the feature into the production assembly.** Instantiate `PlanningService` (with the real
-      `ReadingsBatteryStateProvider`, price/solar/consumption sources, scheduler, and clock) and
-      `PlanDispatchHandoff` in `app/` and register them in `app_factory`, so the runtime path is
-      actually exercised — not only the injected-service tests (assumption 1).
+- [ ] **Wire `PlanDispatchHandoff` into the production assembly** (`PlanningService` is already wired in
+      `app_factory`), so the plan -> handoff -> Energy Manager path is exercised at runtime and not only by
+      `tests/test_energy_plan_handoff.py` (assumption 1).
 - [ ] **Validate operator config against the physical system:** `battery_usable_capacity_wh` and the
       per-device static `DeviceLimits` (max charge/discharge power) match the installed hardware's
       real ratings and safe operating limits (assumption 3).

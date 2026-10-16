@@ -1344,26 +1344,52 @@ function renderDryRunPlan(plan, { waiting = true } = {}) {
 
 let planDevices = [];
 let calibrationHistoryGeneration = 0;
-let calibrationHistoryPoints = [];
+let calibrationHistoryRows = [];
 let calibrationChart = null;
+
+const CALIBRATION_BASELINE_NOTES = {
+  inverter_serial_unknown: 'The inverter serial number is not known yet, so no calibration is recorded.',
+  no_commissioning_date: 'No commissioning date is known yet, so the curve has no starting point. '
+    + 'It is read from the inverter logs when they hold energy data; you can also enter it below.',
+  no_measurement: 'The commissioning date is known; the curve starts once the first BMS measurement is recorded.',
+  battery_replaced: 'The battery was replaced (new BMS serial). The derived commissioning date belongs to the '
+    + 'first battery, so the new series has no starting point; enter the replacement date below to add one.',
+};
+
+// Baseline (datasheet capacity at commissioning, 0 cycles) first, then the dated BMS measurements.
+function calibrationRows(history) {
+  const rows = history.points.map((point) => ({
+    at: point.measured_at, cycles: point.battery_cycles, wh: point.current_usable_capacity_wh,
+    rated: point.rated_usable_capacity_wh, percent: point.remaining_capacity_percent, baseline: false,
+  }));
+  const base = history.baseline;
+  if (base) {
+    rows.unshift({
+      at: base.date, cycles: 0, wh: base.current_usable_capacity_wh, rated: base.rated_usable_capacity_wh,
+      percent: base.remaining_capacity_percent, baseline: true,
+    });
+  }
+  return rows;
+}
 
 function drawBatteryCalibrationChart() {
   calibrationChart?.destroy();
   calibrationChart = null;
   const details = $('energy-plan-diagnostics');
   const canvas = $('energy-plan-calibration-chart');
-  if (!details?.open || !canvas || !globalThis.Chart || !calibrationHistoryPoints.length) return;
-  const points = calibrationHistoryPoints;
+  if (!details?.open || !canvas || !globalThis.Chart || !calibrationHistoryRows.length) return;
+  const rows = calibrationHistoryRows;
   const { label, grid, power } = planChartColors($('energy-plan-calibration'));
-  const labels = points.map((point) => new Date(point.measured_at).toLocaleDateString());
+  const times = rows.map((row) => Date.parse(row.at));
+  const dateText = (value) => new Date(value).toLocaleDateString();
   calibrationChart = new globalThis.Chart(canvas, {
     type: 'line',
     data: {
-      labels,
       datasets: [
-        { label: 'Usable capacity (kWh)', data: points.map((point) => point.current_usable_capacity_wh / 1000),
+        { label: 'Usable capacity (kWh)', data: rows.map((row, index) => ({ x: times[index], y: row.wh / 1000 })),
           borderColor: power, backgroundColor: power, pointRadius: 4, tension: 0 },
-        { label: 'Datasheet capacity (100%)', data: points.map((point) => point.rated_usable_capacity_wh / 1000),
+        { label: 'Datasheet capacity (100%)',
+          data: [{ x: times[0], y: rows[0].rated / 1000 }, { x: times[times.length - 1], y: rows[rows.length - 1].rated / 1000 }],
           borderColor: label, backgroundColor: label, borderDash: [5, 4], pointRadius: 0, tension: 0 },
       ],
     },
@@ -1371,13 +1397,17 @@ function drawBatteryCalibrationChart() {
       responsive: true, maintainAspectRatio: false, animation: false,
       plugins: {
         legend: { labels: { color: label } },
-        tooltip: { callbacks: { afterBody: (items) => {
-          const point = points[items[0]?.dataIndex];
-          return point ? [`Cycles: ${point.battery_cycles ?? 'n/a'}`, `Remaining: ${point.remaining_capacity_percent} %`] : [];
-        } } },
+        tooltip: { callbacks: {
+          title: (items) => (items[0] ? dateText(items[0].parsed?.x ?? times[items[0].dataIndex]) : ''),
+          afterBody: (items) => {
+            if (items[0]?.datasetIndex === 1) return [];
+            const row = rows[items[0]?.dataIndex];
+            return row ? [`Cycles: ${row.cycles ?? 'n/a'}`, `Remaining: ${row.percent} %`] : [];
+          },
+        } },
       },
       scales: {
-        x: { ticks: { color: label }, grid: { color: grid } },
+        x: { type: 'linear', ticks: { color: label, callback: dateText, maxTicksLimit: 8 }, grid: { color: grid } },
         y: { beginAtZero: true, title: { display: true, text: 'kWh', color: label },
           ticks: { color: label }, grid: { color: grid } },
       },
@@ -1385,18 +1415,69 @@ function drawBatteryCalibrationChart() {
   });
 }
 
-function renderBatteryCalibrationHistory(points) {
+function calibrationCommissioningForm(history, deviceId) {
+  const form = element('form', 'd-flex flex-wrap align-items-end gap-2 mb-2');
+  const field = element('div');
+  const label = element('label', 'form-label small mb-1', 'Commissioning date');
+  label.htmlFor = 'energy-plan-commissioning-date';
+  const input = element('input', 'form-control form-control-sm');
+  input.type = 'date';
+  input.id = 'energy-plan-commissioning-date';
+  input.min = '2010-01-01';
+  input.value = history.commissioning ? history.commissioning.commissioned_at.slice(0, 10) : '';
+  field.append(label, input);
+  const save = element('button', 'btn btn-sm btn-outline-primary', 'Save date');
+  save.type = 'submit';
+  form.append(field, save);
+  const submit = async (request) => {
+    save.disabled = true;
+    try {
+      const result = await api(`energy/devices/${encodeURIComponent(deviceId)}/battery-commissioning`, request);
+      toast('Commissioning date saved.');
+      if ($('energy-plan-device')?.value === deviceId) renderBatteryCalibrationHistory(result);
+    } catch (error) { toast(messageFrom(error), 'danger'); } finally { save.disabled = false; }
+  };
+  form.addEventListener('submit', (event) => {
+    event.preventDefault();
+    if (!input.value) return;
+    void submit({ method: 'PUT', body: JSON.stringify({ commissioned_on: input.value }) });
+  });
+  if (history.commissioning?.source === 'manual') {
+    const clear = element('button', 'btn btn-sm btn-outline-secondary', 'Use derived date');
+    clear.type = 'button';
+    clear.addEventListener('click', () => { void submit({ method: 'DELETE' }); });
+    form.append(clear);
+  }
+  return form;
+}
+
+function renderBatteryCalibrationHistory(history) {
   const host = $('energy-plan-calibration');
   if (!host) return;
   calibrationChart?.destroy();
   calibrationChart = null;
-  calibrationHistoryPoints = points;
-  if (!points.length) {
-    host.replaceChildren(element('p', 'small text-secondary', 'No BMS calibration has been recorded yet.'));
+  const rows = calibrationRows(history);
+  calibrationHistoryRows = rows;
+  const deviceId = $('energy-plan-device')?.value || history.device_id;
+  const parts = [];
+  if (history.inverter_serial) {
+    const bms = history.battery_bms_sn ? `, BMS ${history.battery_bms_sn}` : '';
+    parts.push(element('p', 'small text-secondary mb-2', `Inverter ${history.inverter_serial}${bms}`));
+  }
+  if (history.baseline_unavailable_reason) {
+    parts.push(element('p', 'small text-secondary mb-2', CALIBRATION_BASELINE_NOTES[history.baseline_unavailable_reason] || ''));
+  } else if (history.baseline?.source === 'logger_derived') {
+    parts.push(element('p', 'small text-secondary mb-2',
+      'The commissioning date was derived from the inverter energy logs and is not verified on hardware.'));
+  }
+  if (history.inverter_serial) parts.push(calibrationCommissioningForm(history, deviceId));
+  if (!history.points.length) {
+    parts.push(element('p', 'small text-secondary', 'No BMS calibration has been recorded yet.'));
+    host.replaceChildren(...parts);
     return;
   }
-  const heading = element('p', 'small text-secondary mb-2',
-    'The datasheet usable capacity is the fixed 100% reference. Dated points come from BMS measurements.');
+  parts.push(element('p', 'small text-secondary mb-2',
+    'The datasheet usable capacity is the fixed 100% reference. Dated points come from BMS measurements.'));
   const box = element('div', 'spot-market-chart-box mb-2');
   const canvas = element('canvas');
   canvas.id = 'energy-plan-calibration-chart';
@@ -1409,16 +1490,19 @@ function renderBatteryCalibrationHistory(points) {
   for (const title of ['Date', 'Cycles', 'Usable kWh', 'Remaining %']) headerRow.append(element('th', '', title));
   header.append(headerRow);
   const body = element('tbody');
-  for (const point of points) {
-    const row = element('tr');
-    const values = [new Date(point.measured_at).toLocaleString(), point.battery_cycles ?? 'n/a',
-      (point.current_usable_capacity_wh / 1000).toLocaleString(undefined, { maximumFractionDigits: 2 }),
-      point.remaining_capacity_percent.toLocaleString(undefined, { maximumFractionDigits: 2 })];
-    for (const value of values) row.append(element('td', '', String(value)));
-    body.append(row);
+  for (const row of rows) {
+    const tr = element('tr');
+    const when = new Date(row.at);
+    const values = [row.baseline ? `${when.toLocaleDateString()} (commissioning)` : when.toLocaleString(),
+      row.cycles ?? 'n/a',
+      (row.wh / 1000).toLocaleString(undefined, { maximumFractionDigits: 2 }),
+      row.percent.toLocaleString(undefined, { maximumFractionDigits: 2 })];
+    for (const value of values) tr.append(element('td', '', String(value)));
+    body.append(tr);
   }
   table.append(caption, header, body);
-  host.replaceChildren(heading, box, table);
+  parts.push(box, table);
+  host.replaceChildren(...parts);
   drawBatteryCalibrationChart();
 }
 
@@ -1428,12 +1512,12 @@ async function loadBatteryCalibrationHistory(deviceId) {
   const generation = ++calibrationHistoryGeneration;
   calibrationChart?.destroy();
   calibrationChart = null;
-  calibrationHistoryPoints = [];
+  calibrationHistoryRows = [];
   host.replaceChildren(element('p', 'small text-secondary', 'Loading BMS calibration history …'));
   try {
     const history = await api(`energy/devices/${encodeURIComponent(deviceId)}/battery-calibration-history`);
     if (generation !== calibrationHistoryGeneration || $('energy-plan-device')?.value !== deviceId) return;
-    renderBatteryCalibrationHistory(Array.isArray(history.points) ? history.points : []);
+    renderBatteryCalibrationHistory({ ...history, points: Array.isArray(history.points) ? history.points : [] });
   } catch (error) {
     if (generation === calibrationHistoryGeneration) {
       host.replaceChildren(element('p', 'small text-danger', `Could not load battery calibration history: ${messageFrom(error)}`));

@@ -21,7 +21,7 @@ import asyncio
 import logging
 import math
 from dataclasses import replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Annotated, Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -2021,6 +2021,7 @@ class BatteryCharacterizationView(BaseModel):
 
 class BatteryCalibrationHistoryPoint(BaseModel):
     measured_at: datetime
+    battery_bms_sn: str | None
     battery_cycles: int | None
     reference_ah: float
     measured_ah: float
@@ -2031,9 +2032,41 @@ class BatteryCalibrationHistoryPoint(BaseModel):
     source_contract: str
 
 
+class BatteryCommissioningView(BaseModel):
+    commissioned_at: datetime
+    # 'logger_derived' is UNVERIFIED on hardware (see RctCommissioningHistory); 'manual' always wins.
+    source: Literal["logger_derived", "manual"]
+    determined_at: datetime
+
+
+class BatteryCalibrationBaseline(BaseModel):
+    """Synthetic first point of the curve: the datasheet capacity at commissioning, not a measurement."""
+
+    date: datetime
+    battery_cycles: Literal[0]
+    rated_usable_capacity_wh: float
+    current_usable_capacity_wh: float
+    remaining_capacity_percent: float
+    source: Literal["logger_derived", "manual"]
+
+
 class BatteryCalibrationHistoryView(BaseModel):
     device_id: str
+    inverter_serial: str | None
+    battery_bms_sn: str | None
+    battery_replaced: bool
+    commissioning: BatteryCommissioningView | None
+    baseline: BatteryCalibrationBaseline | None
+    baseline_unavailable_reason: (
+        Literal["inverter_serial_unknown", "no_commissioning_date", "no_measurement", "battery_replaced"] | None
+    )
     points: list[BatteryCalibrationHistoryPoint]
+
+
+class BatteryCommissioningBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    commissioned_on: date
 
 
 class BatteryCharacterizationRefreshBody(BaseModel):
@@ -2087,6 +2120,38 @@ async def battery_characterization(
     return _battery_characterization_view(request.app.state.runtime, device_id)
 
 
+def _calibration_view(store, device_id: str, serial: str | None, limit: int) -> BatteryCalibrationHistoryView:
+    """History of the inverter's current battery series plus the commissioning baseline (store reads only)."""
+    if not serial:
+        return BatteryCalibrationHistoryView(
+            device_id=device_id, inverter_serial=None, battery_bms_sn=None, battery_replaced=False,
+            commissioning=None, baseline=None, baseline_unavailable_reason="inverter_serial_unknown", points=[],
+        )
+    history = store.get_battery_calibration_history(serial, limit)
+    points = history["points"]
+    commissioning = store.get_inverter_commissioning(serial)
+    baseline = None
+    reason = None
+    if commissioning is None:
+        reason = "no_commissioning_date"
+    elif not points:
+        reason = "no_measurement"
+    elif history["battery_replaced"] and commissioning["source"] != "manual":
+        reason = "battery_replaced"  # a derived date describes the first battery, not the present one
+    else:
+        rated = points[-1]["rated_usable_capacity_wh"]
+        baseline = BatteryCalibrationBaseline(
+            date=commissioning["commissioned_at"], battery_cycles=0, rated_usable_capacity_wh=rated,
+            current_usable_capacity_wh=rated, remaining_capacity_percent=100.0, source=commissioning["source"],
+        )
+    return BatteryCalibrationHistoryView(
+        device_id=device_id, inverter_serial=serial, battery_bms_sn=history["battery_bms_sn"],
+        battery_replaced=history["battery_replaced"],
+        commissioning=None if commissioning is None else BatteryCommissioningView(**commissioning),
+        baseline=baseline, baseline_unavailable_reason=reason, points=points,
+    )
+
+
 @router.get("/devices/{device_id}/battery-calibration-history")
 async def battery_calibration_history(
     request: Request,
@@ -2094,11 +2159,57 @@ async def battery_calibration_history(
     admin: Annotated[dict | None, Depends(_require_admin_read)],
     limit: Annotated[int, Query(ge=1, le=5000)] = 1200,
 ) -> BatteryCalibrationHistoryView:
-    """Read permanent local BMS calibration records without contacting the inverter."""
+    """Read permanent local BMS calibration records without contacting the inverter.
+
+    The device_id only addresses the inverter; the history is stored and returned per inverter serial.
+    """
     del admin
     _device_or_404(request, device_id)
-    points = await asyncio.to_thread(_spotmarket_store(request).get_battery_calibration_history, device_id, limit)
-    return BatteryCalibrationHistoryView(device_id=device_id, points=points)
+    serial = request.app.state.runtime.gateway.reported_serial(device_id)
+    return await asyncio.to_thread(_calibration_view, _spotmarket_store(request), device_id, serial, limit)
+
+
+MIN_COMMISSIONING_DATE = date(2010, 1, 1)
+
+
+@router.put("/devices/{device_id}/battery-commissioning")
+async def put_battery_commissioning(
+    request: Request,
+    device_id: str,
+    body: BatteryCommissioningBody,
+    admin: Annotated[dict | None, Depends(_require_admin_write)],
+) -> BatteryCalibrationHistoryView:
+    """Operator-entered commissioning date; it overrides the one derived from the inverter loggers."""
+    del admin
+    _device_or_404(request, device_id)
+    runtime = request.app.state.runtime
+    serial = runtime.gateway.reported_serial(device_id)
+    if not serial:
+        raise HTTPException(409, "The inverter serial number is not known yet")
+    if not MIN_COMMISSIONING_DATE <= body.commissioned_on <= runtime.clock.now().astimezone(UTC).date():
+        raise HTTPException(422, "The commissioning date must lie between 2010-01-01 and today")
+    store = _spotmarket_store(request)
+    moment = datetime(body.commissioned_on.year, body.commissioned_on.month, body.commissioned_on.day, tzinfo=UTC)
+    await asyncio.to_thread(store.set_inverter_commissioning, serial, moment, "manual")
+    log.warning("Battery commissioning date set manually: device=%s date=%s admin=%s",
+                device_id, body.commissioned_on, _ADMIN_ACTOR)
+    return await asyncio.to_thread(_calibration_view, store, device_id, serial, 1200)
+
+
+@router.delete("/devices/{device_id}/battery-commissioning")
+async def delete_battery_commissioning(
+    request: Request, device_id: str, admin: Annotated[dict | None, Depends(_require_admin_write)]
+) -> BatteryCalibrationHistoryView:
+    """Remove the operator override; a date derived from the loggers applies again."""
+    del admin
+    _device_or_404(request, device_id)
+    serial = request.app.state.runtime.gateway.reported_serial(device_id)
+    if not serial:
+        raise HTTPException(409, "The inverter serial number is not known yet")
+    store = _spotmarket_store(request)
+    await asyncio.to_thread(store.delete_inverter_commissioning, serial, "manual")
+    log.warning("Battery commissioning date override removed: device=%s admin=%s", device_id, _ADMIN_ACTOR)
+    return await asyncio.to_thread(_calibration_view, store, device_id, serial, 1200)
 
 
 def _require_admin_device_refresh(request: Request) -> dict | None:

@@ -54,6 +54,31 @@ _BOOTSTRAP_ALPHABET = string.ascii_letters + string.digits
 # The current baseline admin schema, created directly (the application is unreleased: no deployed
 # database to migrate). Keyed by table name so initialize() can create a table only when absent and
 # otherwise verify its on-disk definition against the current shape.
+_BATTERY_CALIBRATION_SQL = (
+    "CREATE TABLE battery_calibration_history ("
+    "id INTEGER PRIMARY KEY, device_id TEXT NOT NULL, inverter_serial TEXT, battery_bms_sn TEXT, "
+    "measured_at TEXT NOT NULL, "
+    "battery_cycles INTEGER CHECK (battery_cycles >= 0), "
+    "reference_ah REAL NOT NULL CHECK (reference_ah > 0), "
+    "measured_ah REAL NOT NULL CHECK (measured_ah > 0), "
+    "rated_usable_capacity_wh REAL NOT NULL CHECK (rated_usable_capacity_wh > 0), "
+    "current_usable_capacity_wh REAL NOT NULL CHECK (current_usable_capacity_wh > 0), "
+    "module_counts TEXT NOT NULL, source_contract TEXT NOT NULL, "
+    "UNIQUE (inverter_serial, measured_at)) STRICT;"
+)
+# Shape written by the first calibration-history build (keyed by device_id); migrated, never dropped.
+_LEGACY_BATTERY_CALIBRATION_SQL = (
+    "CREATE TABLE battery_calibration_history ("
+    "id INTEGER PRIMARY KEY, device_id TEXT NOT NULL, measured_at TEXT NOT NULL, "
+    "battery_cycles INTEGER CHECK (battery_cycles >= 0), "
+    "reference_ah REAL NOT NULL CHECK (reference_ah > 0), "
+    "measured_ah REAL NOT NULL CHECK (measured_ah > 0), "
+    "rated_usable_capacity_wh REAL NOT NULL CHECK (rated_usable_capacity_wh > 0), "
+    "current_usable_capacity_wh REAL NOT NULL CHECK (current_usable_capacity_wh > 0), "
+    "module_counts TEXT NOT NULL, source_contract TEXT NOT NULL, "
+    "UNIQUE (device_id, measured_at)) STRICT;"
+)
+
 _SCHEMA: dict[str, str] = {
     "settings": "CREATE TABLE settings (key TEXT PRIMARY KEY, encrypted BLOB NOT NULL) STRICT;",
     "admin_user": "CREATE TABLE admin_user (username TEXT PRIMARY KEY, encrypted BLOB NOT NULL) STRICT;",
@@ -139,16 +164,16 @@ _SCHEMA: dict[str, str] = {
         "energy_wh REAL NOT NULL CHECK (energy_wh >= 0), "
         "PRIMARY KEY (device_id, created_at, method, interval_start)) STRICT;"
     ),
-    "battery_calibration_history": (
-        "CREATE TABLE battery_calibration_history ("
-        "id INTEGER PRIMARY KEY, device_id TEXT NOT NULL, measured_at TEXT NOT NULL, "
-        "battery_cycles INTEGER CHECK (battery_cycles >= 0), "
-        "reference_ah REAL NOT NULL CHECK (reference_ah > 0), "
-        "measured_ah REAL NOT NULL CHECK (measured_ah > 0), "
-        "rated_usable_capacity_wh REAL NOT NULL CHECK (rated_usable_capacity_wh > 0), "
-        "current_usable_capacity_wh REAL NOT NULL CHECK (current_usable_capacity_wh > 0), "
-        "module_counts TEXT NOT NULL, source_contract TEXT NOT NULL, "
-        "UNIQUE (device_id, measured_at)) STRICT;"
+    # Keyed by the inverter serial (never by device_id, which is only a local alias). The serial is
+    # nullable solely for rows that predate it; the writer always sets it. battery_bms_sn tells a
+    # swapped battery apart: a new BMS serial starts a new series.
+    "battery_calibration_history": _BATTERY_CALIBRATION_SQL,
+    # Commissioning date per inverter serial. 'manual' (operator) wins over 'logger_derived'.
+    "inverter_commissioning": (
+        "CREATE TABLE inverter_commissioning ("
+        "inverter_serial TEXT NOT NULL, commissioned_at TEXT NOT NULL, "
+        "source TEXT NOT NULL CHECK (source IN ('logger_derived', 'manual')), "
+        "determined_at TEXT NOT NULL, PRIMARY KEY (inverter_serial, source)) STRICT;"
     ),
 }
 
@@ -180,10 +205,16 @@ class AdminStore:
         # Serialises forecast-table writes of the background refresh against a config save, so a
         # refresh that started under the old config cannot write rows back after the save cleared them.
         self.forecast_write_lock = threading.Lock()
-        self._touch_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="pat-last-used")
-        key = HKDF(algorithm=hashes.SHA256(), length=32, salt=None, info=b"rct-admin-db-v1").derive(secret.encode())
+        self._touch_pool = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="pat-last-used"
+        )
+        key = HKDF(
+            algorithm=hashes.SHA256(), length=32, salt=None, info=b"rct-admin-db-v1"
+        ).derive(secret.encode())
         self._fernet = Fernet(base64.urlsafe_b64encode(key))
-        self._hmac_key = HKDF(algorithm=hashes.SHA256(), length=32, salt=None, info=b"rct-admin-auth-v1").derive(secret.encode())
+        self._hmac_key = HKDF(
+            algorithm=hashes.SHA256(), length=32, salt=None, info=b"rct-admin-auth-v1"
+        ).derive(secret.encode())
 
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:
@@ -200,7 +231,11 @@ class AdminStore:
             db.execute("PRAGMA foreign_keys = ON")
             db.execute("PRAGMA busy_timeout = 5000")
             journal_mode = db.execute("PRAGMA journal_mode").fetchone()[0].lower()
-            db.execute("PRAGMA synchronous = NORMAL" if journal_mode == "wal" else "PRAGMA synchronous = FULL")
+            db.execute(
+                "PRAGMA synchronous = NORMAL"
+                if journal_mode == "wal"
+                else "PRAGMA synchronous = FULL"
+            )
             yield db
             db.commit()
         except BaseException:
@@ -222,6 +257,33 @@ class AdminStore:
             log.debug("WAL checkpoint at shutdown failed", exc_info=True)
 
     @staticmethod
+    def _migrate_battery_calibration_history(db: sqlite3.Connection) -> None:
+        """Rebuild the device_id-keyed history of the first build, keeping every row (idempotent).
+
+        The inverter serial of those rows stays NULL until record_battery_calibration or
+        attach_inverter_serial learns it for the device_id.
+        """
+        row = db.execute(
+            "SELECT sql FROM sqlite_schema WHERE type='table' AND name='battery_calibration_history'"
+        ).fetchone()
+        if row is None or _schema_sql(row["sql"]) != _schema_sql(
+            _LEGACY_BATTERY_CALIBRATION_SQL
+        ):
+            return
+        columns = (
+            "id, device_id, measured_at, battery_cycles, reference_ah, measured_ah, "
+            "rated_usable_capacity_wh, current_usable_capacity_wh, module_counts, source_contract"
+        )
+        db.executescript(
+            "BEGIN IMMEDIATE;"
+            "ALTER TABLE battery_calibration_history RENAME TO battery_calibration_history_legacy;"
+            f"{_BATTERY_CALIBRATION_SQL}"
+            f"INSERT INTO battery_calibration_history ({columns}) SELECT {columns} "
+            "FROM battery_calibration_history_legacy;"
+            "DROP TABLE battery_calibration_history_legacy;COMMIT;"
+        )
+
+    @staticmethod
     def _create_baseline_schema(db: sqlite3.Connection) -> None:
         """Create any missing baseline table; reject one whose on-disk shape is not the current one.
 
@@ -229,8 +291,11 @@ class AdminStore:
         expected definition and does nothing; an incompatible old database fails clearly rather than
         being migrated.
         """
+        AdminStore._migrate_battery_calibration_history(db)
         for table, create in _SCHEMA.items():
-            row = db.execute("SELECT sql FROM sqlite_schema WHERE type='table' AND name=?", (table,)).fetchone()
+            row = db.execute(
+                "SELECT sql FROM sqlite_schema WHERE type='table' AND name=?", (table,)
+            ).fetchone()
             if row is None:
                 db.executescript(f"BEGIN IMMEDIATE;{create}COMMIT;")
             elif _schema_sql(row["sql"]) != _schema_sql(create):
@@ -239,19 +304,27 @@ class AdminStore:
                     "does not migrate an older database — delete it and restart"
                 )
         name = "consumption_history_intervals_interval_start_idx"
-        row = db.execute("SELECT sql FROM sqlite_schema WHERE type='index' AND name=?", (name,)).fetchone()
+        row = db.execute(
+            "SELECT sql FROM sqlite_schema WHERE type='index' AND name=?", (name,)
+        ).fetchone()
         if row is None:
             db.execute(_CONSUMPTION_PRUNE_INDEX)
             db.execute("PRAGMA optimize")
-        elif row["sql"] is None or _schema_sql(row["sql"]) != _schema_sql(_CONSUMPTION_PRUNE_INDEX):
-            raise ValueError(f"admin database index {name!r} does not match the current schema")
+        elif row["sql"] is None or _schema_sql(row["sql"]) != _schema_sql(
+            _CONSUMPTION_PRUNE_INDEX
+        ):
+            raise ValueError(
+                f"admin database index {name!r} does not match the current schema"
+            )
 
     def initialize(self) -> str | None:
         """Create schema and return a one-time bootstrap password, if needed."""
         with self.connect() as db:
             # Persistent; readers no longer block the writer, so autosaves and last-used updates can overlap.
             if db.execute("PRAGMA journal_mode = WAL").fetchone()[0].lower() != "wal":
-                log.warning("SQLite WAL mode is unavailable (network file system?); using the default journal")
+                log.warning(
+                    "SQLite WAL mode is unavailable (network file system?); using the default journal"
+                )
             else:
                 db.execute("PRAGMA synchronous = NORMAL")
             # The application is unreleased: there is no deployed database to migrate. Create the
@@ -261,25 +334,38 @@ class AdminStore:
             # developer must delete it before start — there is no migration path.
             self._create_baseline_schema(db)
             db.execute("BEGIN IMMEDIATE")
-            check = db.execute("SELECT encrypted FROM settings WHERE key='__key_check__'").fetchone()
+            check = db.execute(
+                "SELECT encrypted FROM settings WHERE key='__key_check__'"
+            ).fetchone()
             if check:
                 self._decode("__key_check__", check["encrypted"])
             else:
                 if db.execute("SELECT 1 FROM admin_user").fetchone():
                     raise ValueError("admin database has no key verifier")
-                db.execute("INSERT INTO settings(key,encrypted) VALUES (?,?)",
-                           ("__key_check__", self._encode("__key_check__", "rct-admin-v1")))
+                db.execute(
+                    "INSERT INTO settings(key,encrypted) VALUES (?,?)",
+                    ("__key_check__", self._encode("__key_check__", "rct-admin-v1")),
+                )
             if db.execute("SELECT 1 FROM admin_user WHERE username='admin'").fetchone():
                 return None
             password = _bootstrap_password()
             db.execute(
                 "INSERT INTO admin_user(username, encrypted) VALUES ('admin', ?)",
-                (self._encode("admin", {"password_hash": _PASSWORDS.hash(password), "must_change": True}),),
+                (
+                    self._encode(
+                        "admin",
+                        {
+                            "password_hash": _PASSWORDS.hash(password),
+                            "must_change": True,
+                        },
+                    ),
+                ),
             )
             return password
 
-    def _insert_token(self, db: sqlite3.Connection, name: str, role: str,
-                      expires_at: datetime | None) -> tuple[dict, str]:
+    def _insert_token(
+        self, db: sqlite3.Connection, name: str, role: str, expires_at: datetime | None
+    ) -> tuple[dict, str]:
         if not 1 <= len(name) <= 64 or any(ord(char) < 32 for char in name):
             raise ValueError("invalid token name")
         if role not in (TokenRole.READ, TokenRole.READ_WRITE):
@@ -290,7 +376,9 @@ class AdminStore:
             raise ValueError("token expiry must be in the future")
         token = generate_pat()
         record = {
-            "id": secrets.token_hex(16), "name": name, "role": role,
+            "id": secrets.token_hex(16),
+            "name": name,
+            "role": role,
             "suffix": token[-4:],
             "created_at": datetime.now(UTC).isoformat(),
             "expires_at": expires_at.isoformat() if expires_at else None,
@@ -299,8 +387,11 @@ class AdminStore:
             raise ValueError("at most 32 API tokens are allowed")
         db.execute(
             "INSERT INTO pats(id,digest,encrypted) VALUES (?,?,?)",
-            (record["id"], self._pat_digest(hashlib.sha256(token.encode()).hexdigest()),
-             self._encode(record["id"], record)),
+            (
+                record["id"],
+                self._pat_digest(hashlib.sha256(token.encode()).hexdigest()),
+                self._encode(record["id"], record),
+            ),
         )
         return record, token
 
@@ -311,27 +402,34 @@ class AdminStore:
         return self._digest("pat:" + sha256_hex)
 
     def _encode(self, key: str, value) -> bytes:
-        return self._fernet.encrypt(json.dumps({"key": key, "value": value}, separators=(",", ":")).encode())
+        return self._fernet.encrypt(
+            json.dumps({"key": key, "value": value}, separators=(",", ":")).encode()
+        )
 
     def _decode(self, key: str, encrypted: bytes):
         try:
             data = json.loads(self._fernet.decrypt(encrypted))
         except (InvalidToken, UnicodeError, ValueError) as exc:
-            raise ValueError("admin database cannot be decrypted with HMAC_SECRET") from exc
+            raise ValueError(
+                "admin database cannot be decrypted with HMAC_SECRET"
+            ) from exc
         if not isinstance(data, dict) or data.get("key") != key:
             raise ValueError("admin database record integrity check failed")
         return data["value"]
 
     def get(self, key: str):
         with self.connect() as db:
-            row = db.execute("SELECT encrypted FROM settings WHERE key=?", (key,)).fetchone()
+            row = db.execute(
+                "SELECT encrypted FROM settings WHERE key=?", (key,)
+            ).fetchone()
         if row is None:
             return None
         return self._decode(key, row["encrypted"])
 
     def get_refresh_status(self, key: str):
         """Read a background-refresh status record; a dedicated accessor so a dashboard projection
-        can annotate data with a refresh error without being counted as a data-cache read."""
+        can annotate data with a refresh error without being counted as a data-cache read.
+        """
         return self.get(key)
 
     def put(self, key: str, value) -> None:
@@ -359,14 +457,25 @@ class AdminStore:
                 "INSERT INTO spot_market_intervals "
                 "(config_key, local_date, interval_start, interval_end, price_eur_per_kwh, timezone, fetched_at) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                [(
-                    row["config_key"], row["local_date"], row["interval_start"], row["interval_end"],
-                    row["price_eur_per_kwh"], row["timezone"], row["fetched_at"],
-                ) for row in rows],
+                [
+                    (
+                        row["config_key"],
+                        row["local_date"],
+                        row["interval_start"],
+                        row["interval_end"],
+                        row["price_eur_per_kwh"],
+                        row["timezone"],
+                        row["fetched_at"],
+                    )
+                    for row in rows
+                ],
             )
 
     def get_spot_market_intervals(
-        self, config_key: str, first_date: str | None = None, last_date: str | None = None
+        self,
+        config_key: str,
+        first_date: str | None = None,
+        last_date: str | None = None,
     ) -> list[dict]:
         with self.connect() as db:
             if first_date is not None and last_date is not None:
@@ -379,7 +488,8 @@ class AdminStore:
             else:
                 rows = db.execute(
                     "SELECT config_key, local_date, interval_start, interval_end, price_eur_per_kwh, timezone, fetched_at "
-                    "FROM spot_market_intervals WHERE config_key=? ORDER BY interval_start", (config_key,)
+                    "FROM spot_market_intervals WHERE config_key=? ORDER BY interval_start",
+                    (config_key,),
                 ).fetchall()
         return [dict(row) for row in rows]
 
@@ -387,7 +497,9 @@ class AdminStore:
         with self.connect() as db:
             db.execute("DELETE FROM spot_market_intervals")
 
-    def prune_spot_market_intervals(self, config_key: str, first_date: str, last_date: str) -> None:
+    def prune_spot_market_intervals(
+        self, config_key: str, first_date: str, last_date: str
+    ) -> None:
         with self.connect() as db:
             db.execute(
                 "DELETE FROM spot_market_intervals WHERE config_key=? AND (local_date < ? OR local_date > ?)",
@@ -403,13 +515,23 @@ class AdminStore:
                 "INSERT INTO solar_forecast_intervals "
                 "(config_key, local_date, interval_start, interval_end, energy_wh, timezone, fetched_at) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                [(
-                    row["config_key"], row["local_date"], row["interval_start"], row["interval_end"],
-                    row["energy_wh"], row["timezone"], row["fetched_at"],
-                ) for row in rows],
+                [
+                    (
+                        row["config_key"],
+                        row["local_date"],
+                        row["interval_start"],
+                        row["interval_end"],
+                        row["energy_wh"],
+                        row["timezone"],
+                        row["fetched_at"],
+                    )
+                    for row in rows
+                ],
             )
 
-    def get_solar_forecast_intervals(self, config_key: str, first_date: str, last_date: str) -> list[dict]:
+    def get_solar_forecast_intervals(
+        self, config_key: str, first_date: str, last_date: str
+    ) -> list[dict]:
         with self.connect() as db:
             rows = db.execute(
                 "SELECT local_date, interval_start, interval_end, energy_wh, timezone, fetched_at "
@@ -423,7 +545,9 @@ class AdminStore:
         with self.connect() as db:
             db.execute("DELETE FROM solar_forecast_intervals")
 
-    def prune_solar_forecast_intervals(self, config_key: str, first_date: str, last_date: str) -> None:
+    def prune_solar_forecast_intervals(
+        self, config_key: str, first_date: str, last_date: str
+    ) -> None:
         with self.connect() as db:
             db.execute(
                 "DELETE FROM solar_forecast_intervals WHERE config_key=? AND (local_date < ? OR local_date > ?)",
@@ -450,8 +574,10 @@ class AdminStore:
         a batch already applied (a retry after an ambiguous failure) changes nothing and returns False.
         """
         batch_time = max(
-            [b["interval_start"] for b in buckets] + [b["interval_start"] for b in meter_buckets]
-            + [at for _, at, _ in counter_state] or [""]
+            [b["interval_start"] for b in buckets]
+            + [b["interval_start"] for b in meter_buckets]
+            + [at for _, at, _ in counter_state]
+            or [""]
         )
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
@@ -510,7 +636,10 @@ class AdminStore:
             db.executemany(
                 "INSERT OR IGNORE INTO consumption_counter_readings (device_id, metric, measured_at, value_wh) "
                 "VALUES (?, ?, ?, ?)",
-                [(device_id, metric, at, value) for metric, at, value in counter_readings],
+                [
+                    (device_id, metric, at, value)
+                    for metric, at, value in counter_readings
+                ],
             )
             db.executemany(
                 "INSERT INTO consumption_counter_state (device_id, metric, measured_at, value_wh) "
@@ -533,7 +662,9 @@ class AdminStore:
             ).fetchall()
         return [dict(row) for row in rows]
 
-    def get_consumption_counter_state(self, device_id: str) -> dict[str, tuple[str, float]]:
+    def get_consumption_counter_state(
+        self, device_id: str
+    ) -> dict[str, tuple[str, float]]:
         """The newest stored reading per counter metric: ``{metric: (measured_at, value_wh)}``."""
         with self.connect() as db:
             rows = db.execute(
@@ -554,7 +685,12 @@ class AdminStore:
         return [(row["measured_at"], row["value_wh"]) for row in rows]
 
     def record_consumption_forecast(
-        self, device_id: str, created_at: str, target_date: str, method: str, explanation: str,
+        self,
+        device_id: str,
+        created_at: str,
+        target_date: str,
+        method: str,
+        explanation: str,
         values: Sequence[tuple[str, float]],
     ) -> bool:
         """Store one timestamped forecast run (idempotent per device, creation instant and method)."""
@@ -570,11 +706,16 @@ class AdminStore:
             db.executemany(
                 "INSERT OR IGNORE INTO consumption_forecast_values "
                 "(device_id, created_at, method, interval_start, energy_wh) VALUES (?, ?, ?, ?, ?)",
-                [(device_id, created_at, method, start, energy) for start, energy in values],
+                [
+                    (device_id, created_at, method, start, energy)
+                    for start, energy in values
+                ],
             )
         return True
 
-    def get_consumption_forecast_runs(self, device_id: str, first_created: str, last_created: str) -> list[dict]:
+    def get_consumption_forecast_runs(
+        self, device_id: str, first_created: str, last_created: str
+    ) -> list[dict]:
         """Forecast runs created in the window, each with its quarter-hour ``values`` list."""
         with self.connect() as db:
             runs = db.execute(
@@ -589,10 +730,19 @@ class AdminStore:
                     "WHERE device_id=? AND created_at=? AND method=? ORDER BY interval_start",
                     (device_id, run["created_at"], run["method"]),
                 ).fetchall()
-                result.append({**dict(run), "values": [(v["interval_start"], v["energy_wh"]) for v in values]})
+                result.append(
+                    {
+                        **dict(run),
+                        "values": [
+                            (v["interval_start"], v["energy_wh"]) for v in values
+                        ],
+                    }
+                )
         return result
 
-    def has_consumption_forecast_run(self, device_id: str, target_date: str, method: str) -> bool:
+    def has_consumption_forecast_run(
+        self, device_id: str, target_date: str, method: str
+    ) -> bool:
         with self.connect() as db:
             row = db.execute(
                 "SELECT 1 FROM consumption_forecast_runs WHERE device_id=? AND target_date=? AND method=? LIMIT 1",
@@ -601,7 +751,10 @@ class AdminStore:
         return row is not None
 
     def get_consumption_intervals(
-        self, device_id: str, first_start: str | None = None, last_start: str | None = None
+        self,
+        device_id: str,
+        first_start: str | None = None,
+        last_start: str | None = None,
     ) -> list[dict]:
         """One device's consumption buckets, ordered by start; optionally bounded to a start window.
 
@@ -647,12 +800,21 @@ class AdminStore:
                 "energy_wh=excluded.energy_wh, source=excluded.source, timezone=excluded.timezone, "
                 "fetched_at=excluded.fetched_at",
                 [
-                    (device_id, r["local_date"], r["energy_wh"], r["source"], r["timezone"], r["fetched_at"])
+                    (
+                        device_id,
+                        r["local_date"],
+                        r["energy_wh"],
+                        r["source"],
+                        r["timezone"],
+                        r["fetched_at"],
+                    )
                     for r in rows
                 ],
             )
 
-    def get_consumption_daily(self, device_id: str, first_date: str, last_date: str) -> list[dict]:
+    def get_consumption_daily(
+        self, device_id: str, first_date: str, last_date: str
+    ) -> list[dict]:
         """Day totals with ``first_date <= local_date <= last_date`` (ISO dates), oldest first."""
         with self.connect() as db:
             rows = db.execute(
@@ -662,65 +824,200 @@ class AdminStore:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def attach_inverter_serial(self, device_id: str, inverter_serial: str) -> int:
+        """Give history rows that predate the serial their inverter serial; returns the rows updated."""
+        if not inverter_serial:
+            return 0
+        with self.connect() as db:
+            return db.execute(
+                "UPDATE battery_calibration_history SET inverter_serial=? "
+                "WHERE device_id=? AND inverter_serial IS NULL",
+                (inverter_serial, device_id),
+            ).rowcount
+
     def record_battery_calibration(self, sample) -> bool:
-        """Keep each changed BMS capacity measurement permanently; return whether a row was added."""
+        """Keep each changed BMS capacity measurement permanently; return whether a row was added.
+
+        Rows belong to the inverter serial. A measurement is skipped when the Ah value is unchanged
+        for the same battery; a new BMS serial always starts a new series.
+        """
         if sample.measured_at.tzinfo is None or sample.measured_at.utcoffset() is None:
             raise ValueError("battery calibration timestamp must be timezone-aware")
+        serial = sample.inverter_serial
+        if not isinstance(serial, str) or not serial.strip():
+            raise ValueError("battery calibration needs the inverter serial")
+        bms_sn = sample.battery_bms_sn or None
         measured_at = sample.measured_at.astimezone(UTC).isoformat()
         values = (
-            sample.reference_ah, sample.measured_ah,
-            sample.rated_usable_capacity_wh, sample.current_usable_capacity_wh,
+            sample.reference_ah,
+            sample.measured_ah,
+            sample.rated_usable_capacity_wh,
+            sample.current_usable_capacity_wh,
         )
         if any(not math.isfinite(value) or value <= 0 for value in values):
-            raise ValueError("battery calibration capacities must be finite and positive")
-        if sample.battery_cycles is not None and (isinstance(sample.battery_cycles, bool) or sample.battery_cycles < 0):
+            raise ValueError(
+                "battery calibration capacities must be finite and positive"
+            )
+        if sample.battery_cycles is not None and (
+            isinstance(sample.battery_cycles, bool) or sample.battery_cycles < 0
+        ):
             raise ValueError("battery calibration cycle count must be nonnegative")
         counts = tuple(sample.module_counts)
-        if not counts or any(isinstance(count, bool) or not isinstance(count, int) or count <= 0 for count in counts):
-            raise ValueError("battery calibration topology must contain positive module counts")
+        if not counts or any(
+            isinstance(count, bool) or not isinstance(count, int) or count <= 0
+            for count in counts
+        ):
+            raise ValueError(
+                "battery calibration topology must contain positive module counts"
+            )
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
+            db.execute(
+                "UPDATE battery_calibration_history SET inverter_serial=? WHERE device_id=? AND inverter_serial IS NULL",
+                (serial, sample.device_id),
+            )
             latest = db.execute(
-                "SELECT measured_ah FROM battery_calibration_history WHERE device_id=? ORDER BY id DESC LIMIT 1",
-                (sample.device_id,),
+                "SELECT measured_ah FROM battery_calibration_history WHERE inverter_serial=? ORDER BY id DESC LIMIT 1",
+                (serial,),
             ).fetchone()
-            if latest is not None and abs(latest["measured_ah"] - sample.measured_ah) < 0.01:
+            known_bms = db.execute(
+                "SELECT battery_bms_sn FROM battery_calibration_history "
+                "WHERE inverter_serial=? AND battery_bms_sn IS NOT NULL ORDER BY id DESC LIMIT 1",
+                (serial,),
+            ).fetchone()
+            new_series = bms_sn is not None and (
+                known_bms is None or known_bms["battery_bms_sn"] != bms_sn
+            )
+            if (
+                not new_series
+                and latest is not None
+                and abs(latest["measured_ah"] - sample.measured_ah) < 0.01
+            ):
                 return False
             inserted = db.execute(
                 "INSERT OR IGNORE INTO battery_calibration_history ("
-                "device_id, measured_at, battery_cycles, reference_ah, measured_ah, "
-                "rated_usable_capacity_wh, current_usable_capacity_wh, module_counts, source_contract"
-                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "device_id, inverter_serial, battery_bms_sn, measured_at, battery_cycles, reference_ah, "
+                "measured_ah, rated_usable_capacity_wh, current_usable_capacity_wh, module_counts, source_contract"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
-                    sample.device_id, measured_at, sample.battery_cycles, sample.reference_ah,
-                    sample.measured_ah, sample.rated_usable_capacity_wh, sample.current_usable_capacity_wh,
-                    json.dumps(counts), sample.source_contract,
+                    sample.device_id,
+                    serial,
+                    bms_sn,
+                    measured_at,
+                    sample.battery_cycles,
+                    sample.reference_ah,
+                    sample.measured_ah,
+                    sample.rated_usable_capacity_wh,
+                    sample.current_usable_capacity_wh,
+                    json.dumps(counts),
+                    sample.source_contract,
                 ),
             )
             return inserted.rowcount == 1
 
-    def get_battery_calibration_history(self, device_id: str, limit: int = 1200) -> list[dict]:
-        """Return the newest bounded portion of the permanent history, oldest first."""
+    def get_battery_calibration_history(
+        self, inverter_serial: str, limit: int = 1200
+    ) -> dict:
+        """Newest bounded part of the inverter's current battery series, oldest first.
+
+        ``battery_replaced`` is true when the inverter also recorded a different BMS serial earlier;
+        those older rows belong to the previous battery and are not returned.
+        """
         if not 1 <= limit <= 5000:
-            raise ValueError("battery calibration history limit must be between 1 and 5000")
+            raise ValueError(
+                "battery calibration history limit must be between 1 and 5000"
+            )
         with self.connect() as db:
+            current = db.execute(
+                "SELECT battery_bms_sn FROM battery_calibration_history "
+                "WHERE inverter_serial=? AND battery_bms_sn IS NOT NULL ORDER BY id DESC LIMIT 1",
+                (inverter_serial,),
+            ).fetchone()
+            bms_sn = current["battery_bms_sn"] if current is not None else None
+            cut = 0
+            if bms_sn is not None:
+                cut = db.execute(
+                    "SELECT COALESCE(MAX(id), 0) FROM battery_calibration_history "
+                    "WHERE inverter_serial=? AND battery_bms_sn IS NOT NULL AND battery_bms_sn != ?",
+                    (inverter_serial, bms_sn),
+                ).fetchone()[0]
             rows = db.execute(
-                "SELECT measured_at, battery_cycles, reference_ah, measured_ah, "
+                "SELECT measured_at, battery_bms_sn, battery_cycles, reference_ah, measured_ah, "
                 "rated_usable_capacity_wh, current_usable_capacity_wh, module_counts, source_contract "
-                "FROM battery_calibration_history WHERE device_id=? ORDER BY id DESC LIMIT ?",
-                (device_id, limit),
+                "FROM battery_calibration_history WHERE inverter_serial=? AND id>? ORDER BY id DESC LIMIT ?",
+                (inverter_serial, cut, limit),
             ).fetchall()
-        return [
-            {**dict(row), "module_counts": json.loads(row["module_counts"]),
-             "remaining_capacity_percent": round(min(100.0, row["current_usable_capacity_wh"]
-                / row["rated_usable_capacity_wh"] * 100), 2)}
-            for row in reversed(rows)
-        ]
+        return {
+            "battery_bms_sn": bms_sn,
+            "battery_replaced": cut > 0,
+            "points": [
+                {
+                    **dict(row),
+                    "module_counts": json.loads(row["module_counts"]),
+                    "remaining_capacity_percent": round(
+                        min(
+                            100.0,
+                            row["current_usable_capacity_wh"]
+                            / row["rated_usable_capacity_wh"]
+                            * 100,
+                        ),
+                        2,
+                    ),
+                }
+                for row in reversed(rows)
+            ],
+        }
+
+    def set_inverter_commissioning(
+        self, inverter_serial: str, commissioned_at: datetime, source: str
+    ) -> None:
+        """Persist the commissioning date of one inverter; one row per source, a repeat replaces it."""
+        if not inverter_serial:
+            raise ValueError("inverter serial is required")
+        if source not in ("logger_derived", "manual"):
+            raise ValueError("unknown commissioning source")
+        if commissioned_at.tzinfo is None or commissioned_at.utcoffset() is None:
+            raise ValueError("commissioning timestamp must be timezone-aware")
+        with self.connect() as db:
+            db.execute(
+                "INSERT INTO inverter_commissioning (inverter_serial, commissioned_at, source, determined_at) "
+                "VALUES (?, ?, ?, ?) ON CONFLICT(inverter_serial, source) DO UPDATE SET "
+                "commissioned_at=excluded.commissioned_at, determined_at=excluded.determined_at",
+                (
+                    inverter_serial,
+                    commissioned_at.astimezone(UTC).isoformat(),
+                    source,
+                    datetime.now(UTC).isoformat(),
+                ),
+            )
+
+    def delete_inverter_commissioning(self, inverter_serial: str, source: str) -> bool:
+        with self.connect() as db:
+            return (
+                db.execute(
+                    "DELETE FROM inverter_commissioning WHERE inverter_serial=? AND source=?",
+                    (inverter_serial, source),
+                ).rowcount
+                > 0
+            )
+
+    def get_inverter_commissioning(self, inverter_serial: str) -> dict | None:
+        """The effective commissioning date: the manual entry if present, else the derived one."""
+        with self.connect() as db:
+            row = db.execute(
+                "SELECT commissioned_at, source, determined_at FROM inverter_commissioning "
+                "WHERE inverter_serial=? ORDER BY (source='manual') DESC LIMIT 1",
+                (inverter_serial,),
+            ).fetchone()
+        return None if row is None else dict(row)
 
     def prune_consumption_daily(self, cutoff_date: str) -> None:
         """Drop day totals older than the ISO local date ``cutoff_date``."""
         with self.connect() as db:
-            db.execute("DELETE FROM consumption_daily_history WHERE local_date < ?", (cutoff_date,))
+            db.execute(
+                "DELETE FROM consumption_daily_history WHERE local_date < ?",
+                (cutoff_date,),
+            )
 
     def prune_consumption_intervals(self, cutoff_start: str) -> None:
         """Drop consumption data older than ``cutoff_start`` (inclusive-exclusive at the cutoff).
@@ -729,31 +1026,58 @@ class AdminStore:
         rows. ``cutoff_start`` is a UTC ISO-8601 instant.
         """
         with self.connect() as db:
-            db.execute("DELETE FROM consumption_history_intervals WHERE interval_start < ?", (cutoff_start,))
-            db.execute("DELETE FROM consumption_meter_intervals WHERE interval_start < ?", (cutoff_start,))
-            db.execute("DELETE FROM consumption_counter_readings WHERE measured_at < ?", (cutoff_start,))
-            db.execute("DELETE FROM consumption_applied_batches WHERE batch_time < ?", (cutoff_start,))
-            db.execute("DELETE FROM consumption_forecast_values WHERE created_at < ?", (cutoff_start,))
-            db.execute("DELETE FROM consumption_forecast_runs WHERE created_at < ?", (cutoff_start,))
+            db.execute(
+                "DELETE FROM consumption_history_intervals WHERE interval_start < ?",
+                (cutoff_start,),
+            )
+            db.execute(
+                "DELETE FROM consumption_meter_intervals WHERE interval_start < ?",
+                (cutoff_start,),
+            )
+            db.execute(
+                "DELETE FROM consumption_counter_readings WHERE measured_at < ?",
+                (cutoff_start,),
+            )
+            db.execute(
+                "DELETE FROM consumption_applied_batches WHERE batch_time < ?",
+                (cutoff_start,),
+            )
+            db.execute(
+                "DELETE FROM consumption_forecast_values WHERE created_at < ?",
+                (cutoff_start,),
+            )
+            db.execute(
+                "DELETE FROM consumption_forecast_runs WHERE created_at < ?",
+                (cutoff_start,),
+            )
 
     def merge_operator_settings(self, current, changes: dict):
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
-            row = db.execute("SELECT encrypted FROM settings WHERE key='operator_settings'").fetchone()
+            row = db.execute(
+                "SELECT encrypted FROM settings WHERE key='operator_settings'"
+            ).fetchone()
             saved = self._decode("operator_settings", row["encrypted"]) if row else {}
             merged = {**saved, **changes}
             updated = Settings.model_validate({**current.model_dump(), **merged})
-            db.execute(_UPSERT_SETTING, ("operator_settings", self._encode("operator_settings", merged)))
+            db.execute(
+                _UPSERT_SETTING,
+                ("operator_settings", self._encode("operator_settings", merged)),
+            )
             return updated
 
     def verify_password(self, username: str, password: str) -> bool:
         if len(password.encode()) > 4096:
             return False
         with self.connect() as db:
-            row = db.execute("SELECT encrypted FROM admin_user WHERE username=?", (username,)).fetchone()
+            row = db.execute(
+                "SELECT encrypted FROM admin_user WHERE username=?", (username,)
+            ).fetchone()
         try:
             password_hash = (
-                self._decode(username, row["encrypted"])["password_hash"] if row else _DUMMY_PASSWORD_HASH
+                self._decode(username, row["encrypted"])["password_hash"]
+                if row
+                else _DUMMY_PASSWORD_HASH
             )
             verified = _PASSWORDS.verify(password_hash, password)
             return bool(row is not None and verified)
@@ -764,25 +1088,39 @@ class AdminStore:
     def change_password(self, current: str, new: str) -> bool:
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
-            row = db.execute("SELECT encrypted FROM admin_user WHERE username='admin'").fetchone()
+            row = db.execute(
+                "SELECT encrypted FROM admin_user WHERE username='admin'"
+            ).fetchone()
             if row is None:
                 return False
             try:
-                if not _PASSWORDS.verify(self._decode("admin", row["encrypted"])["password_hash"], current):
+                if not _PASSWORDS.verify(
+                    self._decode("admin", row["encrypted"])["password_hash"], current
+                ):
                     return False
             except _PASSWORD_ERRORS:
                 return False
             hashed = _PASSWORDS.hash(new)
-            db.execute("UPDATE admin_user SET encrypted=? WHERE username='admin'",
-                       (self._encode("admin", {"password_hash": hashed, "must_change": False}),))
+            db.execute(
+                "UPDATE admin_user SET encrypted=? WHERE username='admin'",
+                (
+                    self._encode(
+                        "admin", {"password_hash": hashed, "must_change": False}
+                    ),
+                ),
+            )
             db.execute("DELETE FROM sessions")
         return True
 
     def password_change_pending(self) -> bool:
         """True while the admin still uses the generated bootstrap password."""
         with self.connect() as db:
-            row = db.execute("SELECT encrypted FROM admin_user WHERE username='admin'").fetchone()
-        return row is None or bool(self._decode("admin", row["encrypted"])["must_change"])
+            row = db.execute(
+                "SELECT encrypted FROM admin_user WHERE username='admin'"
+            ).fetchone()
+        return row is None or bool(
+            self._decode("admin", row["encrypted"])["must_change"]
+        )
 
     def new_session(self) -> tuple[str, str]:
         token, csrf = secrets.token_urlsafe(40), secrets.token_urlsafe(32)
@@ -791,8 +1129,16 @@ class AdminStore:
             self._purge_sessions(db)
             db.execute(
                 "INSERT INTO sessions(digest,encrypted) VALUES (?,?)",
-                (digest, self._encode(digest, {"csrf_digest": self._digest(csrf),
-                                              "expires_at": int(time.time()) + SESSION_SECONDS})),
+                (
+                    digest,
+                    self._encode(
+                        digest,
+                        {
+                            "csrf_digest": self._digest(csrf),
+                            "expires_at": int(time.time()) + SESSION_SECONDS,
+                        },
+                    ),
+                ),
             )
         return token, csrf
 
@@ -800,7 +1146,9 @@ class AdminStore:
         now = int(time.time())
         for row in db.execute("SELECT digest, encrypted FROM sessions").fetchall():
             try:
-                expired = self._decode(row["digest"], row["encrypted"])["expires_at"] <= now
+                expired = (
+                    self._decode(row["digest"], row["encrypted"])["expires_at"] <= now
+                )
             except ValueError:
                 expired = True  # unreadable session rows are useless and are dropped
             if expired:
@@ -813,7 +1161,9 @@ class AdminStore:
             row = db.execute(
                 "SELECT encrypted FROM sessions WHERE digest=?", (self._digest(token),)
             ).fetchone()
-            user = db.execute("SELECT encrypted FROM admin_user WHERE username='admin'").fetchone()
+            user = db.execute(
+                "SELECT encrypted FROM admin_user WHERE username='admin'"
+            ).fetchone()
         if row is None or user is None:
             return None
         try:
@@ -823,30 +1173,51 @@ class AdminStore:
             return None  # tampered or swapped records never authenticate
         if payload["expires_at"] <= int(time.time()):
             return None
-        return {"must_change_password": must_change, "csrf_digest": payload["csrf_digest"]}
+        return {
+            "must_change_password": must_change,
+            "csrf_digest": payload["csrf_digest"],
+        }
 
     def verify_csrf(self, session: dict, submitted: str | None) -> bool:
-        return bool(submitted and hmac.compare_digest(session["csrf_digest"], self._digest(submitted)))
+        return bool(
+            submitted
+            and hmac.compare_digest(session["csrf_digest"], self._digest(submitted))
+        )
 
     def delete_session(self, token: str | None) -> None:
         if token:
             with self.connect() as db:
-                db.execute("DELETE FROM sessions WHERE digest=?", (self._digest(token),))
+                db.execute(
+                    "DELETE FROM sessions WHERE digest=?", (self._digest(token),)
+                )
 
     def list_tokens(self) -> list[dict]:
         with self.connect() as db:
             rows = db.execute("SELECT id,encrypted FROM pats").fetchall()
-        records = [{"last_used_at": None, "suffix": None, **self._decode(row["id"], row["encrypted"])} for row in rows]
+        records = [
+            {
+                "last_used_at": None,
+                "suffix": None,
+                **self._decode(row["id"], row["encrypted"]),
+            }
+            for row in rows
+        ]
         return sorted(records, key=lambda row: row["created_at"], reverse=True)
 
-    def create_token(self, name: str, role: str, expires_at: datetime | None) -> tuple[dict, str]:
+    def create_token(
+        self, name: str, role: str, expires_at: datetime | None
+    ) -> tuple[dict, str]:
         with self.connect() as db:
-            db.execute("BEGIN IMMEDIATE")  # the 32-token cap is count-then-insert: take the write lock first
+            db.execute(
+                "BEGIN IMMEDIATE"
+            )  # the 32-token cap is count-then-insert: take the write lock first
             return self._insert_token(db, name, role, expires_at)
 
     def delete_token(self, token_id: str) -> bool:
         with self.connect() as db:
-            deleted = bool(db.execute("DELETE FROM pats WHERE id=?", (token_id,)).rowcount)
+            deleted = bool(
+                db.execute("DELETE FROM pats WHERE id=?", (token_id,)).rowcount
+            )
         if deleted:
             with self._touch_lock:
                 self._last_touch.pop(token_id, None)
@@ -857,15 +1228,21 @@ class AdminStore:
             return None
         sha256 = hashlib.sha256(token.encode()).hexdigest()
         with self.connect() as db:
-            row = db.execute("SELECT * FROM pats WHERE digest=?", (self._pat_digest(sha256),)).fetchone()
+            row = db.execute(
+                "SELECT * FROM pats WHERE digest=?", (self._pat_digest(sha256),)
+            ).fetchone()
         if row is None:
             return None
         try:
             record = self._decode(row["id"], row["encrypted"])
         except ValueError:
-            log.warning("Rejected an unreadable token record")  # tampered or encrypted under another HMAC_SECRET
+            log.warning(
+                "Rejected an unreadable token record"
+            )  # tampered or encrypted under another HMAC_SECRET
             return None
-        if record["expires_at"] and datetime.fromisoformat(record["expires_at"]) <= datetime.now(UTC):
+        if record["expires_at"] and datetime.fromisoformat(
+            record["expires_at"]
+        ) <= datetime.now(UTC):
             return None
         self._note_use(record)
         return FileToken(record["id"], record["role"])
@@ -875,10 +1252,19 @@ class AdminStore:
         try:
             now = time.monotonic()
             with self._touch_lock:
-                if now - self._last_touch.get(record["id"], -_TOUCH_SECONDS) < _TOUCH_SECONDS:
+                if (
+                    now - self._last_touch.get(record["id"], -_TOUCH_SECONDS)
+                    < _TOUCH_SECONDS
+                ):
                     return
                 stored = record.get("last_used_at")
-                recent = bool(stored) and (datetime.now(UTC) - datetime.fromisoformat(stored)).total_seconds() < _TOUCH_SECONDS
+                recent = (
+                    bool(stored)
+                    and (
+                        datetime.now(UTC) - datetime.fromisoformat(stored)
+                    ).total_seconds()
+                    < _TOUCH_SECONDS
+                )
                 self._last_touch[record["id"]] = now
             if not recent:
                 self._touch_pool.submit(self._write_last_used, record["id"])
@@ -889,11 +1275,16 @@ class AdminStore:
         try:
             with self.connect() as db:
                 db.execute("BEGIN IMMEDIATE")
-                row = db.execute("SELECT encrypted FROM pats WHERE id=?", (token_id,)).fetchone()
+                row = db.execute(
+                    "SELECT encrypted FROM pats WHERE id=?", (token_id,)
+                ).fetchone()
                 if row is None:  # revoked meanwhile
                     return
                 record = self._decode(token_id, row["encrypted"])
                 record["last_used_at"] = datetime.now(UTC).isoformat()
-                db.execute("UPDATE pats SET encrypted=? WHERE id=?", (self._encode(token_id, record), token_id))
+                db.execute(
+                    "UPDATE pats SET encrypted=? WHERE id=?",
+                    (self._encode(token_id, record), token_id),
+                )
         except Exception:
             log.debug("Could not store the last-used time of a token", exc_info=True)

@@ -47,7 +47,8 @@ from app.gateway.rct import REFRESH_FAILURES_CONFIRMED
 
 def _runtime(
     serials: dict[str, str], *, known: set[str] | None = None, unanswered: frozenset[str] = frozenset(),
-    ah_samples: dict[str, tuple[float, CacheFreshness]] | None = None,
+    ah_samples: dict[str, tuple[float | str, CacheFreshness]] | None = None,
+    inverter_serial: str | None = "SN-INV-1",
 ):
     """Runtime stub whose catalog knows `known` (default: every battery name used here).
 
@@ -74,6 +75,7 @@ def _runtime(
     return SimpleNamespace(catalog=SimpleNamespace(exists=exists),
                            gateway=SimpleNamespace(cached_reading=cached_reading,
                                                    cached_sample=cached_sample,
+                                                   reported_serial=lambda _device_id: inverter_serial,
                                                    read_failed=lambda _device_id, name: name in unanswered))
 
 
@@ -860,6 +862,24 @@ def test_calibration_sample_carries_rated_and_current_capacity_with_raw_cycles()
     assert sample.current_usable_capacity_wh == pytest.approx(_measured_capacity(runtime))
     assert sample.remaining_capacity_percent == pytest.approx(100 * 14.450748443603516 / 17.82485008239746)
     assert sample.source_contract == "bms_ah_ratio_v1"
+    assert sample.inverter_serial == "SN-INV-1"
+    assert sample.battery_bms_sn is None  # no fresh BMS serial in the cache
+
+
+def test_calibration_sample_carries_fresh_bms_serial_only() -> None:
+    at = datetime(2026, 10, 16, tzinfo=UTC)
+    readings = {**_ah_samples(), "battery_bms_sn": ("BMS\x0012345 ", CacheFreshness.FRESH)}
+    sample = MeasuredBatteryCapacity(_runtime(_single_tower(6), unanswered=_PLACEHOLDER_SILENT, ah_samples=readings)).calibration_sample("dev", at)
+    assert sample is not None and sample.battery_bms_sn == "BMS12345"
+    stale = {**_ah_samples(), "battery_bms_sn": ("BMS12345", CacheFreshness.GRACE)}
+    sample = MeasuredBatteryCapacity(_runtime(_single_tower(6), unanswered=_PLACEHOLDER_SILENT, ah_samples=stale)).calibration_sample("dev", at)
+    assert sample is not None and sample.battery_bms_sn is None
+
+
+@pytest.mark.parametrize("serial", [None, ""])
+def test_calibration_sample_needs_the_inverter_serial_and_never_falls_back_to_device_id(serial) -> None:
+    runtime = _runtime(_single_tower(6), unanswered=_PLACEHOLDER_SILENT, ah_samples=_ah_samples(), inverter_serial=serial)
+    assert MeasuredBatteryCapacity(runtime).calibration_sample("dev", datetime(2026, 10, 16, tzinfo=UTC)) is None
 
 
 def test_bms_ah_cache_remains_fresh_between_daily_background_reads() -> None:
@@ -898,7 +918,7 @@ def test_missing_stale_or_invalid_ah_fails_closed(bad_samples) -> None:
     assert _measured_capacity(runtime) is None
 
 
-@pytest.mark.parametrize("failure", [None, "battery_ah_capacity"])
+@pytest.mark.parametrize("failure", [None, "battery_ah_capacity", "battery_bms_sn"])
 async def test_background_capacity_refresh_reads_both_metrics_and_isolates_failure(failure: str | None) -> None:
     from app.api.app_factory import _inventory_loop
     from app.errors import DeviceApiError
@@ -945,10 +965,12 @@ async def test_background_capacity_refresh_reads_both_metrics_and_isolates_failu
         await _inventory_loop(
             gateway, "dev", Clock(), capacity_ah_names=("battery_ah_capacity", "power_mng_amp_hours_measured"),
             capacity_source=SimpleNamespace(calibration_sample=lambda *_args: "sample"),
-            on_capacity_calibration=persist,
+            on_capacity_calibration=persist, bms_serial_name="battery_bms_sn",
         )
-    assert reads == ["battery_ah_capacity", "power_mng_amp_hours_measured"]
-    assert persisted == ([] if failure else ["sample"])
+    # The BMS serial is best effort: its failure still persists the sample, an Ah failure does not.
+    ah_reads = ["battery_ah_capacity", "power_mng_amp_hours_measured"]
+    assert reads == (ah_reads if failure == "battery_ah_capacity" else [*ah_reads, "battery_bms_sn"])
+    assert persisted == ([] if failure == "battery_ah_capacity" else ["sample"])
 
 
 def test_power_battery_11_5_six_modules_are_reported_as_topology_only() -> None:

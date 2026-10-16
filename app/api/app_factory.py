@@ -60,6 +60,7 @@ from app.energy.manager import EnergyManager
 from app.energy.models import EnergyMode, ModeRecord
 from app.errors import ConfigError, DeviceApiError, ReconfigurationBuildError
 from app.gateway.battery_inventory import (
+    BMS_SERIAL_METRIC,
     CAPACITY_AH_METRICS,
     RCT_MODULE_SN_SLOTS,
     CapacityCalibrationSample,
@@ -715,6 +716,7 @@ async def _inventory_loop(
     capacity_ah_names: tuple[str, ...] = (),
     capacity_source: MeasuredBatteryCapacity | None = None,
     on_capacity_calibration: Callable[[CapacityCalibrationSample], Awaitable[object]] | None = None,
+    bms_serial_name: str | None = None,
 ) -> None:
     """Drive the bounded initial discovery of the static module-serial inventory, then idle.
 
@@ -751,6 +753,14 @@ async def _inventory_loop(
                 except Exception:
                     failed = True
                     log.exception("Battery Ah background read failed: device=%s metric=%s", device_id, name)
+            if not failed and bms_serial_name is not None:
+                # Best effort: without a fresh BMS serial the sample just carries none.
+                try:
+                    await gateway.read_system(device_id, bms_serial_name)
+                except DeviceApiError:
+                    log.debug("Battery BMS serial background read failed: device=%s", device_id)
+                except Exception:
+                    log.exception("Battery BMS serial background read failed: device=%s", device_id)
             if not failed and capacity_source is not None and on_capacity_calibration is not None:
                 sample = capacity_source.calibration_sample(device_id, clock.now())
                 if sample is not None:
@@ -874,6 +884,7 @@ def _lifespan(
                     CAPACITY_AH_METRICS if all(runtime.catalog.exists(name) for name in CAPACITY_AH_METRICS) else (),
                     runtime.battery_capacity,
                     record_capacity if store is not None else None,
+                    BMS_SERIAL_METRIC if runtime.catalog.exists(BMS_SERIAL_METRIC) else None,
                 ))
                 refresh_tasks.append(inv_task)  # same per-device lifecycle as the refresh loop
                 tasks.append(inv_task)
@@ -938,6 +949,15 @@ def _lifespan(
                 tasks.append(asyncio.create_task(ConsumptionHistoryBackfillService(
                     RctDailyConsumptionHistory(gateway, site_timezone), store, runtime.clock, site_timezone,
                     lambda: list(runtime.devices),
+                    lambda device_id: gateway.device_status(device_id).state in READY_STATES,
+                ).run()))
+            if store is not None:
+                from app.admin.battery_commissioning import BatteryCommissioningService
+                from app.gateway.rct_history import RctCommissioningHistory
+
+                tasks.append(asyncio.create_task(BatteryCommissioningService(
+                    RctCommissioningHistory(gateway, runtime.clock.sleep), store, runtime.clock,
+                    lambda: list(runtime.devices), gateway.reported_serial,
                     lambda device_id: gateway.device_status(device_id).state in READY_STATES,
                 ).run()))
             start_polling_tasks()
