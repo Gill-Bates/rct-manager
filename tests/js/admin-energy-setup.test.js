@@ -725,24 +725,44 @@ function planTiles(plan) {
     .map((n) => [n.className.split('-').pop(), n.textContent])));
 }
 
-test('Charging plan shows four KPI tiles with Battery remaining first', () => {
-  const tiles = planTiles({
+// Battery remaining is a tertiary device-state line rendered outside the plan-KPI grid.
+function planBatteryLine(plan) {
+  const h = harness();
+  h.context.formatPower = (w) => `${w} W`;
+  const host = h.context.element('div');
+  host.id = 'energy-plan-result';
+  h.context.renderDryRunPlan({ status: 'ok', horizon_hours: 24, slots: [], energy: {}, window: {}, ...plan });
+  const line = flatten(host).find((n) => (n.className || '').split(/\s+/).includes('energy-plan-battery'));
+  const strip = flatten(host).find((n) => (n.className || '').split(/\s+/).includes('energy-plan-highlights'));
+  const inGrid = strip ? flatten(strip).includes(line) : false;
+  // The harness's textContent getter does not concatenate children, so read the text span only
+  // (the glyph span carries the Material Icon ligature, not label text).
+  const textSpan = line ? flatten(line).find((n) => n.tagName === 'span' && !(n.className || '').split(/\s+/).includes('material-icons')) : null;
+  const text = textSpan ? textSpan.textContent : null;
+  return { text, inGrid, isTile: line ? (line.className || '').split(/\s+/).includes('spot-market-highlight') : false };
+}
+test('Charging plan shows three plan KPI tiles with Battery remaining as a separate tertiary line', () => {
+  const plan = {
     battery: { soc_percent: 33, usable_capacity_wh: 10370, remaining_energy_wh: 3422.1 },
     energy: { grid_charge_energy_wh: 4000 },
     slots: [{ action: 'charge', start: '2026-01-01T10:00:00Z', end: '2026-01-01T10:15:00Z', max_power_w: 2000, target_soc_percent: 80 }],
-  });
-  assert.equal(tiles.length, 4);
-  assert.deepEqual(tiles.map((t) => t.caption), ['Battery remaining', 'Target SoC', 'Charge power', 'Total plan grid energy']);
-  assert.match(tiles[0].value, /^3[.,]42 kWh$/);
-  assert.match(tiles[0].sub, /^33 % SoC · 10[.,]37 kWh usable$/);
+  };
+  const tiles = planTiles(plan);
+  assert.equal(tiles.length, 3);
+  assert.deepEqual(tiles.map((t) => t.caption), ['Target SoC', 'Charge power', 'Total plan grid energy']);
+  const battery = planBatteryLine(plan);
+  assert.equal(battery.inGrid, false, 'Battery remaining must not live inside the plan-KPI grid');
+  assert.equal(battery.isTile, false, 'Battery remaining must not be a .spot-market-highlight tile');
+  assert.match(battery.text, /Battery remaining 3[.,]42 kWh · 33 % SoC · 10[.,]37 kWh usable/);
 });
 
 test('Battery remaining shows a dash, never NaN or undefined, without a snapshot', () => {
   for (const battery of [undefined, null, { soc_percent: null }]) {
     const tiles = planTiles({ battery });
-    assert.equal(tiles.length, 4, 'the strip keeps its structure');
-    assert.equal(tiles[0].value, '—');
-    assert.ok(tiles.every((t) => !/NaN|undefined|null/.test(`${t.value} ${t.sub || ''}`)));
+    assert.equal(tiles.length, 3, 'the plan-KPI grid keeps its three tiles');
+    const line = planBatteryLine({ battery });
+    assert.equal(line.text, 'Battery remaining — · Not available');
+    assert.ok(!/NaN|undefined|null/.test(line.text));
   }
 });
 

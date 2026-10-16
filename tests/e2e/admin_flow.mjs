@@ -2580,17 +2580,17 @@ try {
           (await ep.locator('#energy-plan-schedule table, #energy-plan-schedule details').count()) === 0
           && (await ep.locator('#energy-plan-schedule ul.visually-hidden li').count()) === 2);
         const hero = await ep.locator('#energy-plan-result .energy-plan-highlights .spot-market-highlight-caption').allInnerTexts();
-        check('plan summary shows four KPI tiles with Battery remaining first',
-          hero.map((t) => t.toLowerCase()).join('|') === 'battery remaining|target soc|charge power|total plan grid energy', hero.join('|'));
-        const batteryTile = await ep.locator('#energy-plan-result .energy-plan-highlights .spot-market-highlight').first().innerText();
-        check('Battery remaining shows kWh, SoC and usable capacity from the plan snapshot',
-          /3[.,]42 kWh/.test(batteryTile) && /33 % SoC · 10[.,]37 kWh usable/.test(batteryTile), batteryTile);
+        check('plan summary shows three plan KPI tiles in the pinned order',
+          hero.map((t) => t.toLowerCase()).join('|') === 'target soc|charge power|total plan grid energy', hero.join('|'));
+        const batteryLine = await ep.locator('#energy-plan-result .energy-plan-battery').first().innerText();
+        check('Battery remaining shows kWh, SoC and usable capacity as a separate tertiary line',
+          /3[.,]42 kWh/.test(batteryLine) && /33 % SoC · 10[.,]37 kWh usable/.test(batteryLine), batteryLine);
         const columnsAt = async (width) => {
           await ep.setViewportSize({ width, height: 844 });
           return ep.evaluate(() => new Set([...document.querySelectorAll('.energy-plan-highlights .spot-market-highlight')].map((t) => Math.round(t.getBoundingClientRect().left))).size);
         };
-        check('KPI tiles: 4 columns on desktop, 2 on tablet, stacked on mobile',
-          (await columnsAt(1280)) === 4 && (await columnsAt(800)) === 2 && (await columnsAt(390)) === 1);
+        check('KPI tiles: 3 columns on desktop, 2 on tablet, stacked on mobile',
+          (await columnsAt(1280)) === 3 && (await columnsAt(800)) === 2 && (await columnsAt(390)) === 1);
         await ep.setViewportSize({ width: 1280, height: 844 });
         const widths = await ep.evaluate(() => {
           const w = (id) => Math.round(document.getElementById(id).getBoundingClientRect().width);

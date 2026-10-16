@@ -1823,11 +1823,11 @@ body {
     }
 }
 
-/* Charging plan KPI strip: four equal tiles (reuses .spot-market-highlight); 2 x 2 on tablets,
+/* Charging plan KPI strip: three plan tiles (reuses .spot-market-highlight); 2 on tablet,
    stacked on phones. Spot Market and Weather keep their own two-column .spot-market-highlights. */
 .energy-plan-highlights {
     display: grid;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
+    grid-template-columns: repeat(3, minmax(0, 1fr));
     gap: .75rem;
 }
 
@@ -1866,6 +1866,19 @@ body {
     justify-content: space-between;
     align-items: flex-end;
     gap: .75rem 1.5rem;
+}
+
+/* Identity group: stacks the title+badge line over the sub-line and shrinks without overflow when
+   the controls share the header row. */
+.energy-plan-head-title {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+}
+
+/* Tertiary Battery-remaining line: the leading glyph matches the KPI tile glyph's visual weight. */
+.energy-plan-battery .material-icons {
+    font-size: 1.1rem;
 }
 
 .energy-plan-head-controls {

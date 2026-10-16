@@ -1686,7 +1686,11 @@ def test_energy_page_wires_the_read_only_dry_run_plan_preview():
     # Plan-specific KPI grid; the shared two-column Spot Market grid and its tiles stay untouched.
     css = (ADMIN_DIR / "static/css/admin.css").read_text(encoding="utf-8")
     assert "energy-plan-highlights" in js and "spot-market-highlights-row" not in js + css
-    assert "repeat(4, minmax(0, 1fr))" in css[css.index(".energy-plan-highlights {"):]
+    assert "repeat(3, minmax(0, 1fr))" in css[css.index(".energy-plan-highlights {"):]
+    # The static header reads as a card: a neutral "Preview" qualifier badge beside the title and
+    # the inverter select + Expert switch grouped as one labelled controls block.
+    assert 'id="energy-plan-qualifier"' in plan_pane and "status-badge-neutral" in plan_pane
+    assert 'role="group"' in plan_pane and 'aria-label="Charging plan controls"' in plan_pane
 
 
 _PLAN_RENDER_DRIVER = r"""
@@ -1713,6 +1717,7 @@ const schedule = new Node('div');
 const context = vm.createContext({
   NOT_AVAILABLE: 'n/a', formatPower: (w) => `${w} W`, $: (id) => ({ 'energy-plan-technical': technical, 'energy-plan-schedule': schedule })[id] || host,
   element: (tag, className, value) => { const node = new Node(tag); node.className = className || ''; if (value !== undefined) node.text = String(value); return node; },
+  planDevices: [],
 });
 vm.runInContext(`${block}; this.renderDryRunPlan = renderDryRunPlan; this.labels = PLAN_ACTION_LABELS; this.planChartSeries = planChartSeries;`, context);
 const plan = JSON.parse(fs.readFileSync(planPath, 'utf8'));

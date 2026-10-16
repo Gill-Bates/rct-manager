@@ -1320,7 +1320,8 @@ function renderDryRunPlan(plan, { waiting = true } = {}) {
     : next
       ? planStatusCard('Next grid charge', `${planDateTime(next.start)} – ${planDateTime(next.end)}`)
       : planStatusCard('No grid charge planned', 'The current plan does not schedule a grid charge.');
-  // Four equal KPI tiles built from the plan's own battery snapshot (no second data source).
+  // Three plan-KPI tiles (plan outputs) built from the plan's own snapshot (no second data source).
+  // Battery remaining is a live device state, so it renders as a weaker tertiary line below the grid.
   const summary = element('div', 'spot-market-highlights energy-plan-highlights mt-3');
   const add = (caption, value, icon, sub) => {
     const block = element('div', 'spot-market-highlight');
@@ -1333,12 +1334,19 @@ function renderDryRunPlan(plan, { waiting = true } = {}) {
   const known = (value) => value !== null && value !== undefined && Number.isFinite(Number(value));
   const battery = plan.battery;
   const hasBattery = known(battery?.remaining_energy_wh) && known(battery?.soc_percent) && known(battery?.usable_capacity_wh);
-  add('Battery remaining', hasBattery ? planKwh(battery.remaining_energy_wh) : '—', 'battery_5_bar',
-    hasBattery ? `${Math.round(battery.soc_percent)} % SoC · ${planKwh(battery.usable_capacity_wh)} usable` : 'Not available');
   add('Target SoC', next && known(next.target_soc_percent) ? `${Math.round(next.target_soc_percent)} %` : '—', 'battery_charging_full');
   add('Charge power', next && known(next.max_power_w) ? formatPower(next.max_power_w) : '—', 'bolt');
   add('Total plan grid energy', known(plan.energy?.grid_charge_energy_wh) ? planKwh(plan.energy.grid_charge_energy_wh) : '—', 'electric_meter');
   card.append(summary);
+  // Battery remaining is a live device state, not a plan output: render it as a weaker tertiary line.
+  const batteryLine = element('p', 'energy-plan-battery d-flex align-items-center gap-2 small text-secondary mt-3 mb-0');
+  const batteryGlyph = element('span', 'material-icons text-secondary', 'battery_5_bar');
+  batteryGlyph.setAttribute('aria-hidden', 'true');
+  const batteryText = hasBattery
+    ? `Battery remaining ${planKwh(battery.remaining_energy_wh)} · ${Math.round(battery.soc_percent)} % SoC · ${planKwh(battery.usable_capacity_wh)} usable`
+    : 'Battery remaining — · Not available';
+  batteryLine.append(batteryGlyph, element('span', null, batteryText));
+  card.append(batteryLine);
   if (plan.forecast_basis === 'bootstrap_baseline') {
     card.append(element('p', 'small text-secondary mt-3 mb-0', 'Preliminary plan using a conservative household baseline while consumption history is collected.'));
   } else if (plan.forecast_confidence === 'low') {
