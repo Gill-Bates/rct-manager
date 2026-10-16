@@ -41,7 +41,8 @@ def _use_test_argon2_cost() -> Iterator[None]:
 
 def settings_env_names() -> list[str]:
     """Every environment variable name Settings reads now, plus removed/legacy names it used to
-    read (``_REMOVED_ENV_NAMES``), so a deprecated export cannot leak into a test either."""
+    read (``_REMOVED_ENV_NAMES``), so a deprecated export cannot leak into a test either.
+    """
     return [name.upper() for name in Settings.model_fields] + list(_REMOVED_ENV_NAMES)
 
 

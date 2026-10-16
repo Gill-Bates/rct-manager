@@ -30,7 +30,11 @@ def response_to(frame: Frame, payload: bytes = b"\x00\x00\x00\x01") -> Frame:
     command = RESPONSE_FOR[frame.command]
     header = 4 if frame.plant_address is None else 8
     if header + len(payload) > 255:
-        command = Command.LONG_RESPONSE if frame.plant_address is None else Command.LONG_RESPONSE_M
+        command = (
+            Command.LONG_RESPONSE
+            if frame.plant_address is None
+            else Command.LONG_RESPONSE_M
+        )
     return Frame(command, frame.object_id, payload, frame.plant_address)
 
 
@@ -48,10 +52,16 @@ class FakeNetwork:
     connects: int = 0
     frames: list[tuple[float, Frame]] = field(default_factory=list)
     writes: int = 0
-    payloads: dict[int, bytes] = field(default_factory=dict)  # per object id; default is a 4-byte value
+    payloads: dict[int, bytes] = field(
+        default_factory=dict
+    )  # per object id; default is a 4-byte value
     writers: list = field(default_factory=list)
-    freeze_writes: bool = False  # the device ignores a write: a readback shows the old value
-    answer_writes: bool = False  # the real device never answers WRITE (design.md); tests opt in
+    freeze_writes: bool = (
+        False  # the device ignores a write: a readback shows the old value
+    )
+    answer_writes: bool = (
+        False  # the real device never answers WRITE (design.md); tests opt in
+    )
 
     async def connect(self, host: str, port: int):
         self.connects += 1
@@ -102,7 +112,9 @@ class FakeWriter:
                 if not net.answer_writes and action != "drop":
                     action = "ignore"
                 if action != "drop" and not net.freeze_writes:
-                    net.payloads[frame.object_id] = frame.payload  # the device stores the value anyway
+                    net.payloads[frame.object_id] = (
+                        frame.payload
+                    )  # the device stores the value anyway
             asyncio.get_running_loop().create_task(self._react(frame, action))
 
     async def _react(self, frame: Frame, action: object) -> None:
