@@ -763,3 +763,87 @@ test('Charging plan announces no grid charge while the Energy Manager is off', (
     assert.equal(/Energy Manager is off/.test(text), expectOff, `mode ${mode}`);
   }
 });
+
+// The "Inverter history" import-status badge is driven only by the already-fetched consumption
+// history: the enabled/disabled flag, the day count derived from days[], and recording_since. It
+// renders real text (no colour-only state) into #energy-consumption-import-status and must degrade
+// gracefully when fields are missing (never NaN, never a crash). Build the host, call the pure
+// render function, and assert on the produced badge text and class.
+function importStatusHarness() {
+  const h = harness();
+  const slot = h.context.element('div');
+  slot.id = 'energy-consumption-import-status';
+  const badge = () => slot.children[0] || null;
+  return { h, slot, badge };
+}
+
+function consumptionDays(available, total) {
+  return Array.from({ length: total }, (_, i) => ({
+    date: `2026-01-${String(i + 1).padStart(2, '0')}`,
+    energy_wh: i < available ? 1000 + i : null,
+    source: i < available ? 'inverter_history' : 'unavailable',
+  }));
+}
+
+test('Inverter history status: disabled shows "awaiting hardware verification" and keeps the section visible', () => {
+  const { h, slot, badge } = importStatusHarness();
+  try {
+    const shown = h.context.renderInverterHistoryStatus({ inverter_import_enabled: false, days: consumptionDays(0, 60), recording_since: null });
+    assert.equal(shown, true, 'the disabled state is a meaningful status to display');
+    assert.equal(badge().textContent, 'Inverter history: Disabled – awaiting hardware verification');
+    assert.ok((badge().className || '').includes('text-bg-secondary'), 'the disabled badge uses the neutral style');
+    assert.equal(slot.children.length, 1, 'the badge replaces rather than appends on re-render');
+    h.context.renderInverterHistoryStatus({ inverter_import_enabled: false, days: [], recording_since: null });
+    assert.equal(slot.children.length, 1);
+  } finally { h.cleanup(); }
+});
+
+test('Inverter history status: enabled shows "Enabled · N/60 days available"', () => {
+  const { h, badge } = importStatusHarness();
+  try {
+    h.context.renderInverterHistoryStatus({ inverter_import_enabled: true, days: consumptionDays(42, 60), recording_since: '2025-11-01T00:00:00Z' });
+    assert.equal(badge().textContent, 'Inverter history: Enabled · 42/60 days available');
+    assert.ok((badge().className || '').includes('text-bg-success'), 'the enabled badge uses the success style');
+  } finally { h.cleanup(); }
+});
+
+test('Inverter history status: enabled total follows days.length, not a hard-coded 60', () => {
+  const { h, badge } = importStatusHarness();
+  try {
+    h.context.renderInverterHistoryStatus({ inverter_import_enabled: true, days: consumptionDays(5, 30), recording_since: null });
+    assert.equal(badge().textContent, 'Inverter history: Enabled · 5/30 days available');
+  } finally { h.cleanup(); }
+});
+
+test('Inverter history status: enabled with no completed day but a valid recording_since shows "recording since"', () => {
+  const { h, badge } = importStatusHarness();
+  try {
+    h.context.renderInverterHistoryStatus({ inverter_import_enabled: true, days: consumptionDays(0, 60), recording_since: '2026-01-05T00:00:00Z' });
+    assert.match(badge().textContent, /^Inverter history: Enabled · recording since /);
+    assert.ok(!/NaN|undefined|Invalid/.test(badge().textContent), 'the date is formatted, never NaN');
+  } finally { h.cleanup(); }
+});
+
+test('Inverter history status: enabled with N=0 and no recording_since falls back to 0/N days', () => {
+  const { h, badge } = importStatusHarness();
+  try {
+    h.context.renderInverterHistoryStatus({ inverter_import_enabled: true, days: consumptionDays(0, 60), recording_since: null });
+    assert.equal(badge().textContent, 'Inverter history: Enabled · 0/60 days available');
+  } finally { h.cleanup(); }
+});
+
+test('Inverter history status degrades gracefully: missing days and a missing flag render the disabled text, no crash', () => {
+  const { h, slot, badge } = importStatusHarness();
+  try {
+    // inverter_import_enabled absent → treated as disabled (never imply import is on).
+    h.context.renderInverterHistoryStatus({ days: undefined, recording_since: null });
+    assert.equal(badge().textContent, 'Inverter history: Disabled – awaiting hardware verification');
+    assert.ok(!/NaN|undefined/.test(badge().textContent));
+    // enabled flag true but days missing → 0/0, no NaN.
+    h.context.renderInverterHistoryStatus({ inverter_import_enabled: true });
+    assert.equal(badge().textContent, 'Inverter history: Enabled · 0/0 days available');
+    // A null history clears the badge entirely and reports nothing to show.
+    assert.equal(h.context.renderInverterHistoryStatus(null), false);
+    assert.equal(slot.children.length, 0, 'a null history leaves no badge');
+  } finally { h.cleanup(); }
+});

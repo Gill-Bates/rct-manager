@@ -1657,6 +1657,38 @@ function setConsumptionVisible(visible) {
   if (section) section.hidden = !visible;
 }
 
+// The import-status badge is always meaningful, independent of whether the chart draws: it reports
+// whether inverter day totals are imported and, when they are, how many of the window's days have a
+// value yet. It consumes only the already-fetched history (no extra request). A null/undefined
+// history clears the badge; a missing or non-true inverter_import_enabled renders the disabled text
+// (never implying import is on when the field is absent).
+function renderInverterHistoryStatus(history) {
+  const slot = $('energy-consumption-import-status');
+  if (!slot) return false;
+  if (!history) {
+    slot.replaceChildren();
+    return false;
+  }
+  const days = Array.isArray(history.days) ? history.days : [];
+  if (history.inverter_import_enabled !== true) {
+    slot.replaceChildren(element('span', 'badge rounded-pill text-bg-secondary',
+      'Inverter history: Disabled – awaiting hardware verification'));
+    return true;
+  }
+  const total = days.length;
+  const available = days.filter((day) => Number.isFinite(day.energy_wh)).length;
+  const since = Date.parse(history.recording_since);
+  let detail;
+  if (available === 0 && Number.isFinite(since)) {
+    detail = `recording since ${new Date(since).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: '2-digit' })}`;
+  } else {
+    detail = `${available}/${total} days available`;
+  }
+  slot.replaceChildren(element('span', 'badge rounded-pill text-bg-success',
+    `Inverter history: Enabled · ${detail}`));
+  return true;
+}
+
 function drawConsumptionChart(history) {
   consumptionChart?.destroy();
   consumptionChart = null;
@@ -1664,10 +1696,13 @@ function drawConsumptionChart(history) {
   const status = $('energy-consumption-status');
   const days = Array.isArray(history?.days) ? history.days : [];
   const known = days.filter((day) => Number.isFinite(day.energy_wh));
+  const hasImportStatus = renderInverterHistoryStatus(history);
   if (!known.length) {
     status.replaceChildren();
     host.replaceChildren();
-    setConsumptionVisible(false);
+    // Keep the section visible when the import badge still has something to say (disabled, or
+    // enabled but no completed day yet), so it can explain the otherwise-empty chart.
+    setConsumptionVisible(hasImportStatus);
     return;
   }
   setConsumptionVisible(true);
@@ -1723,6 +1758,7 @@ async function loadConsumptionHistory(deviceId) {
   consumptionChart?.destroy();
   consumptionChart = null;
   $('energy-consumption-status')?.replaceChildren();
+  $('energy-consumption-import-status')?.replaceChildren();
   host.replaceChildren();
   setConsumptionVisible(false);
   try {
