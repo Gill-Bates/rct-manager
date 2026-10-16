@@ -25,7 +25,6 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from app.api.problems import ErrorCode, ProblemError, problem_responses
 from app.api.runtime import RuntimeDep
 from app.dispatch.models import PowerDirection
-from app.energy.manager import MAX_POWER_W
 from app.energy.models import (
     TARGET_SOC_MAX_PERCENT,
     TARGET_SOC_MIN_PERCENT,
@@ -38,6 +37,7 @@ from app.energy.models import (
     EnergyState,
 )
 from app.energy.readings import DeviceReading, EnergyReadings
+from app.limits import MAX_POWER_W
 from app.security.dependencies import require_write
 from app.security.tokens import Principal
 
@@ -88,12 +88,18 @@ class EnergyCommandBody(BaseModel):
     def _action_consistency(self) -> "EnergyCommandBody":
         if self.action in (EnergyAction.CHARGE, EnergyAction.DISCHARGE):
             if self.target_soc_percent is None:
-                raise ValueError("target_soc_percent is required for charge and discharge")
+                raise ValueError(
+                    "target_soc_percent is required for charge and discharge"
+                )
         else:
             if self.target_soc_percent is not None:
-                raise ValueError(f"target_soc_percent must be omitted for action {self.action.value}")
+                raise ValueError(
+                    f"target_soc_percent must be omitted for action {self.action.value}"
+                )
             if self.max_power_w is not None:
-                raise ValueError(f"max_power_w must be omitted for action {self.action.value}")
+                raise ValueError(
+                    f"max_power_w must be omitted for action {self.action.value}"
+                )
         return self
 
 
@@ -104,7 +110,9 @@ class ReadingResponse(BaseModel):
 
     @classmethod
     def from_domain(cls, reading: DeviceReading) -> "ReadingResponse":
-        return cls(value=reading.value, age_seconds=reading.age_seconds, stale=reading.stale)
+        return cls(
+            value=reading.value, age_seconds=reading.age_seconds, stale=reading.stale
+        )
 
 
 class ReadingsResponse(BaseModel):
@@ -140,11 +148,15 @@ class EnergyStatusResponse(BaseModel):
     device_id: str
     mode: EnergyMode
     armed: bool  # compatibility: mode != "off"
-    accepts_commands_from: CommandSource  # which surface the current mode accepts commands from
+    accepts_commands_from: (
+        CommandSource  # which surface the current mode accepts commands from
+    )
     state: EnergyState
     action: EnergyAction | None
     target_soc_percent: float | None
-    power_limit_w: float | None  # null while idle and while holding: no power budget applies
+    power_limit_w: (
+        float | None
+    )  # null while idle and while holding: no power budget applies
     power_limit_clamped: bool
     commanded_power_w: float  # requested by the last command; the measured value is readings.battery_power_w
     commanded_direction: PowerDirection

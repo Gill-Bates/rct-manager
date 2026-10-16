@@ -189,6 +189,114 @@ async def test_raw_control_write_rechecks_energy_mode_after_waiting_for_mode_loc
         assert blocked.json()["code"] == "dispatch_register_locked"
 
 
+def _charge_body():
+    return {
+        "mode": "charge_from_grid",
+        "target_soc_percent": 80,
+        "max_power_w": 4000,
+        "valid_until": (datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+    }
+
+
+async def test_low_level_dispatch_submit_is_refused_while_energy_manager_owns_the_device(
+    tmp_path: Path,
+) -> None:
+    """F1 ownership (P2): the low-level POST ``/battery/dispatch`` bypasses ``EnergyManager.command()``.
+    While the Energy Manager owns the device (mode != OFF) only the owning surface may command it,
+    so a write-scoped PAT hitting the raw dispatch route must be refused with the same device-wide
+    ownership error the raw metric-write path uses — in MANUAL (admin-only) and in EXTERNAL alike.
+    """
+    for mode in (EnergyMode.MANUAL, EnergyMode.EXTERNAL):
+        case_dir = tmp_path / mode.value
+        case_dir.mkdir()
+        async with running_app(settings(case_dir)) as harness:
+            seed_payloads(harness)
+            manager = harness.runtime.energy
+            assert manager is not None
+            manager._mode_states["main"] = ModeRecord("main", mode=mode)
+            response = await harness.client.post(
+                "/api/v1/devices/main/battery/dispatch",
+                headers=WRITER,
+                json=_charge_body(),
+            )
+        assert response.status_code == 409, (mode, response.text)
+        assert response.json()["code"] == "dispatch_register_locked", mode
+        # Fail-closed: the device must be left untouched (no dispatch started).
+        assert manager.mode("main") is mode
+
+
+async def test_low_level_dispatch_cancel_is_refused_while_energy_manager_owns_the_device(
+    tmp_path: Path,
+) -> None:
+    """F1 ownership (P2): the same device-wide rule applies to DELETE. A PAT must not cancel/restore
+    a dispatch the admin GUI (MANUAL) or an external app (EXTERNAL) owns through the Energy Manager.
+    """
+    for mode in (EnergyMode.MANUAL, EnergyMode.EXTERNAL):
+        case_dir = tmp_path / mode.value
+        case_dir.mkdir()
+        async with running_app(settings(case_dir)) as harness:
+            seed_payloads(harness)
+            manager = harness.runtime.energy
+            assert manager is not None
+            manager._mode_states["main"] = ModeRecord("main", mode=mode)
+            response = await harness.client.delete(
+                "/api/v1/devices/main/battery/dispatch", headers=WRITER
+            )
+        assert response.status_code == 409, (mode, response.text)
+        assert response.json()["code"] == "dispatch_register_locked", mode
+
+
+async def test_low_level_dispatch_is_allowed_when_energy_manager_mode_is_off(
+    tmp_path: Path,
+) -> None:
+    """When the Energy Manager mode is OFF nobody owns the device through it, so the low-level
+    dispatch API — the EXTERNAL/off path it legitimately serves — still works end to end.
+    """
+    async with running_app(settings(tmp_path)) as harness:
+        seed_payloads(harness)
+        manager = harness.runtime.energy
+        assert manager is not None
+        manager._mode_states["main"] = ModeRecord("main", mode=EnergyMode.OFF)
+        started = await harness.client.post(
+            "/api/v1/devices/main/battery/dispatch", headers=WRITER, json=_charge_body()
+        )
+        assert started.status_code == 200, started.text
+        assert started.json()["state"] == "charging"
+        stopped = await harness.client.delete(
+            "/api/v1/devices/main/battery/dispatch", headers=WRITER
+        )
+        assert stopped.status_code == 200, stopped.text
+        assert stopped.json()["state"] == "idle"
+
+
+async def test_low_level_dispatch_submit_runs_under_the_energy_ownership_guard(
+    tmp_path: Path,
+) -> None:
+    """F1 atomicity: the mode check and the submit are one critical section under the Energy
+    Manager mode lock. Holding ``guard_raw_write`` must block a concurrent raw dispatch submit, and
+    a mode change applied before releasing the lock must then be observed by that submit — so the
+    check cannot be a stale pre-check outside the lock (the set_mode race).
+    """
+    async with running_app(settings(tmp_path)) as harness:
+        seed_payloads(harness)
+        manager = harness.runtime.energy
+        assert manager is not None
+        async with manager.guard_raw_write("main"):
+            pending = asyncio.create_task(
+                harness.client.post(
+                    "/api/v1/devices/main/battery/dispatch",
+                    headers=WRITER,
+                    json=_charge_body(),
+                )
+            )
+            await asyncio.sleep(0)
+            assert not pending.done()  # blocked on the mode lock the guard holds
+            manager._mode_states["main"] = ModeRecord("main", mode=EnergyMode.MANUAL)
+        blocked = await asyncio.wait_for(pending, timeout=2.0)
+        assert blocked.status_code == 409
+        assert blocked.json()["code"] == "dispatch_register_locked"
+
+
 async def test_an_existing_request_body_produces_the_recorded_response(
     tmp_path: Path,
 ) -> None:
@@ -384,6 +492,26 @@ async def test_a_recovery_sweep_that_raises_leaves_the_app_not_ready_and_starts_
     assert any(
         "Battery dispatch recovery failed" in r.getMessage() for r in caplog.records
     )
+
+
+def test_routers_import_max_power_w_from_limits_not_the_manager() -> None:
+    """F2 port boundary (P3): the dispatch and energy routers, and the admin dispatch/energy API
+    modules, must take ``MAX_POWER_W`` from the owning ``app.limits`` module, not re-import it via
+    the concrete ``app.energy.manager`` service, so none keeps a dependency on the service
+    implementation purely for a constant.
+    """
+    import app.admin.dispatch_api as admin_dispatch
+    import app.admin.energy_api as admin_energy
+    import app.api.routers.dispatch as dispatch_router
+    import app.api.routers.energy as energy_router
+    from app.limits import MAX_POWER_W as limits_value
+
+    modules = (dispatch_router, energy_router, admin_dispatch, admin_energy)
+    for module in modules:
+        assert module.MAX_POWER_W is limits_value
+        src = Path(module.__file__).read_text(encoding="utf-8")
+        assert "from app.limits import MAX_POWER_W" in src
+        assert "from app.energy.manager import MAX_POWER_W" not in src
 
 
 def test_dispatch_fixture_contains_exact_write_registers(tmp_path: Path) -> None:
