@@ -1595,7 +1595,11 @@ body {
     padding: .35rem 0;
 }
 
-.weather-config-tile .setting-row {
+/* The coordinate grid lays Latitude and Longitude side by side, so the shared .setting-row
+   top border paints a stray hairline above the second column (Longitude) only. Drop it here;
+   the grid gap already provides the spacing. */
+.weather-config-tile .setting-row,
+.weather-coordinate-grid .setting-row {
     border-top: 0;
 }
 
