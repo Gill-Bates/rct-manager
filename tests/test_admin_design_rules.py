@@ -40,6 +40,12 @@ Rules:
  R12 The administration never tells the operator to restart anything: no restart notice element,
      no `restart_required` field and no "restart to apply" wording in templates, scripts or the
      admin API. Settings apply on their own; the service switches over in the background.
+ R13 Wide data tables (API tokens, the charging-schedule slot table) are made readable on a phone
+     by the shared `.data-table-stack` convention, not by squeezing the desktop columns: the token
+     table markup and the slot-table builder carry that class, and neither table's cells use
+     `overflow-wrap: anywhere` or `word-break: break-all` as the mobile layout. The stacked rule
+     and its label mechanism (`data-table-stack td::before { content: attr(data-label) }`) live
+     once in the shared CSS.
 """
 
 import re
@@ -62,9 +68,13 @@ def _line(text: str, offset: int) -> int:
 
 def _rules(css: str):
     """Yield (selector, body, line) for every rule that has a body; comments are blanked, lines kept."""
-    css = re.sub(r"/\*.*?\*/", lambda m: re.sub(r"[^\n]", " ", m.group(0)), css, flags=re.DOTALL)
+    css = re.sub(
+        r"/\*.*?\*/", lambda m: re.sub(r"[^\n]", " ", m.group(0)), css, flags=re.DOTALL
+    )
     for match in re.finditer(r"([^{}@][^{}]*)\{([^{}]*)\}", css):
-        yield " ".join(match.group(1).split()), match.group(2), _line(css, match.start())
+        yield " ".join(match.group(1).split()), match.group(2), _line(
+            css, match.start()
+        )
 
 
 def check_r1_tsdb_css(css: str, name: str = "admin.css") -> list[str]:
@@ -83,20 +93,32 @@ def check_r2_titles(templates: dict[str, str], js: str) -> list[str]:
         for match in re.finditer(r"<h2\b([^>]*)>", text):
             classes = re.search(r'class="([^"]*)"', match.group(1))
             if not classes or "h5" not in classes.group(1).split():
-                problems.append(f"{file}:{_line(text, match.start())}: R2 - h2 without class h5: use <h2 class=\"h5 ...\">")
-    for match in re.finditer(r"(?:card|groupCard)\('[A-Za-z]+',(?: '[A-Za-z]+',)? '([^']+)'", js):
+                problems.append(
+                    f'{file}:{_line(text, match.start())}: R2 - h2 without class h5: use <h2 class="h5 ...">'
+                )
+    for match in re.finditer(
+        r"(?:card|groupCard)\('[A-Za-z]+',(?: '[A-Za-z]+',)? '([^']+)'", js
+    ):
         words = re.findall(r"[A-Za-z][A-Za-z-]*", match.group(1))
         for word in words[1:]:
             if word[0].isupper() and word not in R2_NAMES:
-                problems.append(f"admin.js:{_line(js, match.start())}: R2 - title '{match.group(1)}' is not sentence case ({word})")
+                problems.append(
+                    f"admin.js:{_line(js, match.start())}: R2 - title '{match.group(1)}' is not sentence case ({word})"
+                )
     return problems
 
 
 def check_r3_tsdb_markup(render: str, template: str) -> list[str]:
     problems = []
-    for needle, why in (("material-icons", "decorative icon in a card"), ("alert-warning", "yellow banner"), ("save-hint", "banner notice")):
+    for needle, why in (
+        ("material-icons", "decorative icon in a card"),
+        ("alert-warning", "yellow banner"),
+        ("save-hint", "banner notice"),
+    ):
         if needle in render or needle in template:
-            problems.append(f"tsdb render/template: R3 - {needle} ({why}); use the toast and aria-invalid instead")
+            problems.append(
+                f"tsdb render/template: R3 - {needle} ({why}); use the toast and aria-invalid instead"
+            )
     return problems
 
 
@@ -110,13 +132,19 @@ def check_r4_unload(scripts: dict[str, str]) -> list[str]:
 
 def check_r5_apply_bar(js: str, template: str) -> list[str]:
     problems = []
-    builder = js[js.index("function buildApplyBar("):js.index("function buildGroupBody(")]
+    builder = js[
+        js.index("function buildApplyBar(") : js.index("function buildGroupBody(")
+    ]
     if "'Discard'" in builder or "badge" in builder or "status" in builder:
         problems.append("admin.js: R5 - the shared apply bar must hold the button only")
     if "element('button', 'btn btn-primary', applyLabel)" not in builder:
-        problems.append("admin.js: R5 - the apply button must use the shared primary class (btn btn-primary)")
+        problems.append(
+            "admin.js: R5 - the apply button must use the shared primary class (btn btn-primary)"
+        )
     if "applyLabel = 'Apply changes'" not in builder:
-        problems.append("admin.js: R5 - the apply label must be exactly 'Apply changes'")
+        problems.append(
+            "admin.js: R5 - the apply label must be exactly 'Apply changes'"
+        )
     if "buildApplyBar('export', {" not in js:
         problems.append("admin.js: R5 - the TSDB form must use the shared apply bar")
     if 'id="export-actions"' not in template:
@@ -130,13 +158,19 @@ def check_r6_grid(css: str) -> list[str]:
             continue
         columns = re.search(r"grid-template-columns:\s*([^;]+);", body)
         if not columns:
-            return [f"admin.css:{line}: R6 - .settings-grid has no grid-template-columns"]
+            return [
+                f"admin.css:{line}: R6 - .settings-grid has no grid-template-columns"
+            ]
         value = columns.group(1)
         fixed = re.search(r"repeat\((\d+)\b", value)
         if fixed and int(fixed.group(1)) > 4:
-            return [f"admin.css:{line}: R6 - {fixed.group(1)} columns: a card row holds at most four"]
+            return [
+                f"admin.css:{line}: R6 - {fixed.group(1)} columns: a card row holds at most four"
+            ]
         if not fixed and "/ 4)" not in value:
-            return [f"admin.css:{line}: R6 - .settings-grid tracks must not be narrower than a quarter of the row (calc(... / 4))"]
+            return [
+                f"admin.css:{line}: R6 - .settings-grid tracks must not be narrower than a quarter of the row (calc(... / 4))"
+            ]
         return []
     return ["admin.css: R6 - .settings-grid rule not found"]
 
@@ -144,29 +178,54 @@ def check_r6_grid(css: str) -> list[str]:
 def check_r7_primary_button(css: str) -> list[str]:
     for selector, body, line in _rules(css):
         if selector == ".btn-primary":
-            missing = [v for v in ("--bs-btn-disabled-bg", "--bs-btn-disabled-border-color", "--bs-btn-focus-shadow-rgb") if v not in body]
-            return [f"admin.css:{line}: R7 - .btn-primary does not set {v} (Bootstrap blue would show)" for v in missing]
+            missing = [
+                v
+                for v in (
+                    "--bs-btn-disabled-bg",
+                    "--bs-btn-disabled-border-color",
+                    "--bs-btn-focus-shadow-rgb",
+                )
+                if v not in body
+            ]
+            return [
+                f"admin.css:{line}: R7 - .btn-primary does not set {v} (Bootstrap blue would show)"
+                for v in missing
+            ]
     return ["admin.css: R7 - .btn-primary rule not found"]
 
 
 def check_r8_tokens(css: str) -> list[str]:
     problems = []
     for selector, body, line in _rules(css):
-        watched = ".settings-grid" in selector or ".btn-primary" in selector or re.search(r"\.(tsdb|export)-", selector)
+        watched = (
+            ".settings-grid" in selector
+            or ".btn-primary" in selector
+            or re.search(r"\.(tsdb|export)-", selector)
+        )
         if not watched or any(allowed in selector for allowed in R8_ALLOWED_SELECTORS):
             continue
         for color in re.findall(r"#[0-9a-fA-F]{3,8}\b|rgba?\(", body):
-            problems.append(f"admin.css:{line}: R8 - hard-coded colour {color} in '{selector}': use a design token var(--...)")
+            problems.append(
+                f"admin.css:{line}: R8 - hard-coded colour {color} in '{selector}': use a design token var(--...)"
+            )
     return problems
 
 
 def check_r9_shared_fields(js: str) -> list[str]:
-    control = js[js.index("function exportControl("):js.index("// _settings_view() never exposes")]
+    control = js[
+        js.index("function exportControl(") : js.index(
+            "// _settings_view() never exposes"
+        )
+    ]
     problems = []
     if "buildFieldControl(field, settingsDraft[field.key])" not in control:
-        problems.append("admin.js: R9 - exportControl must build fields with buildFieldControl")
+        problems.append(
+            "admin.js: R9 - exportControl must build fields with buildFieldControl"
+        )
     if re.search(r"element\('div', 'tsdb-", control) or "tsdb-field" in control:
-        problems.append("admin.js: R9 - own TSDB field wrappers: use the shared setting-row")
+        problems.append(
+            "admin.js: R9 - own TSDB field wrappers: use the shared setting-row"
+        )
     return problems
 
 
@@ -177,39 +236,71 @@ def check_r10_energy_step_buttons(js: str, css: str) -> list[str]:
         problems.append("admin.js: R10 - no energy-step-link button found")
     for cls in classes:
         if cls.split() != ["btn", "btn-primary", "energy-step-link"]:
-            problems.append(f"admin.js: R10 - '{cls}' deviates from the shared button; use 'btn btn-primary energy-step-link'")
+            problems.append(
+                f"admin.js: R10 - '{cls}' deviates from the shared button; use 'btn btn-primary energy-step-link'"
+            )
     for selector, _body, line in _rules(css):
         if "energy-step-link" in selector:
-            problems.append(f"admin.css:{line}: R10 - {selector} restyles the shared button; delete it")
+            problems.append(
+                f"admin.css:{line}: R10 - {selector} restyles the shared button; delete it"
+            )
     return problems
 
 
-R11_HEIGHT_PROPS = re.compile(r"(?:^|[;\s])(?:min-|max-)?height\s*:|\d(?:d|s|l)?vh\b|overflow(?:-y)?\s*:\s*(?:auto|scroll)")
+R11_HEIGHT_PROPS = re.compile(
+    r"(?:^|[;\s])(?:min-|max-)?height\s*:|\d(?:d|s|l)?vh\b|overflow(?:-y)?\s*:\s*(?:auto|scroll)"
+)
 R11_PAGES = ("prometheus.html", "inverters.html")
 
 
-def check_r11_param_card_height(css: str, macro: str, pages: dict[str, str]) -> list[str]:
+def check_r11_param_card_height(
+    css: str, macro: str, pages: dict[str, str]
+) -> list[str]:
     problems = []
-    if not re.search(r'<section class="card param-card"', macro) or "param-table-wrap" not in macro:
-        problems.append("_param_table.html: R11 - the macro must render <section class=\"card param-card\"> with .param-table-wrap")
+    if (
+        not re.search(r'<section class="card param-card"', macro)
+        or "param-table-wrap" not in macro
+    ):
+        problems.append(
+            '_param_table.html: R11 - the macro must render <section class="card param-card"> with .param-table-wrap'
+        )
     for name in R11_PAGES:
         text = pages.get(name, "")
         if "param_table(" not in text:
-            problems.append(f"{name}: R11 - the card must come from the shared param_table macro")
+            problems.append(
+                f"{name}: R11 - the card must come from the shared param_table macro"
+            )
         if re.search(r"style\s*=\s*\"[^\"]*(?:height|vh)", text, flags=re.IGNORECASE):
-            problems.append(f"{name}: R11 - no inline height: the height behaviour lives in the shared CSS")
-    shared = {"#main-content:has(>.param-card)", ".param-card>.card-body", "#main-content>.param-card", ".param-card .param-table-wrap"}
+            problems.append(
+                f"{name}: R11 - no inline height: the height behaviour lives in the shared CSS"
+            )
+    shared = {
+        "#main-content:has(>.param-card)",
+        ".param-card>.card-body",
+        "#main-content>.param-card",
+        ".param-card .param-table-wrap",
+    }
     seen = set()
     for selector, body, line in _rules(css):
         names = [part.strip() for part in selector.split(",")]
         compact = [re.sub(r"\s*([>+~])\s*", r"\1", n) for n in names]
         seen.update(c for c in compact if c in shared)
-        page_specific = re.search(r'data-page=|#(?:exposed|writable)\b|prometheus|inverters', selector)
+        page_specific = re.search(
+            r"data-page=|#(?:exposed|writable)\b|prometheus|inverters", selector
+        )
         param = re.search(r"param-(?:card|table-wrap|table)\b", selector)
         if (page_specific or param) and R11_HEIGHT_PROPS.search(body):
-            problems.append(f"admin.css:{line}: R11 - {selector} sets a height/vh/overflow; the param card must only grow with flex (Inverters is the reference)")
-        if page_specific and "flex" in body and re.search(r"\.card\b|main-content|param-", selector):
-            problems.append(f"admin.css:{line}: R11 - {selector} is a page-specific height rule; move it to the shared .param-card rules")
+            problems.append(
+                f"admin.css:{line}: R11 - {selector} sets a height/vh/overflow; the param card must only grow with flex (Inverters is the reference)"
+            )
+        if (
+            page_specific
+            and "flex" in body
+            and re.search(r"\.card\b|main-content|param-", selector)
+        ):
+            problems.append(
+                f"admin.css:{line}: R11 - {selector} is a page-specific height rule; move it to the shared .param-card rules"
+            )
     for missing in sorted(shared - seen):
         problems.append(f"admin.css: R11 - shared rule '{missing}' not found")
     return problems
@@ -221,12 +312,18 @@ def _read(path: Path) -> str:
 
 def _admin_js() -> str:
     base = _read(TEMPLATES / "base.html")
-    names = re.findall(r'<script src="/admin/static/js/(admin(?:-[\w-]+)?\.js)" defer></script>', base)
+    names = re.findall(
+        r'<script src="/admin/static/js/(admin(?:-[\w-]+)?\.js)" defer></script>', base
+    )
     return "\n".join(_read(JS_DIR / name) for name in names)
 
 
 def _tsdb_render(js: str) -> str:
-    return js[js.index("function renderExportSettings("):js.index("// Mirrors the server-side host plausibility")]
+    return js[
+        js.index("function renderExportSettings(") : js.index(
+            "// Mirrors the server-side host plausibility"
+        )
+    ]
 
 
 def test_r1_tsdb_has_no_own_layout_or_typography_css() -> None:
@@ -245,7 +342,9 @@ def test_r2_section_titles_are_h5_and_sentence_case() -> None:
 def test_r3_tsdb_has_no_icons_and_no_banner() -> None:
     js = _admin_js()
     assert check_r3_tsdb_markup(_tsdb_render(js), _read(TEMPLATES / "tsdb.html")) == []
-    assert check_r3_tsdb_markup("body.append(element('span', 'material-icons', 'link'))", "")
+    assert check_r3_tsdb_markup(
+        "body.append(element('span', 'material-icons', 'link'))", ""
+    )
     assert check_r3_tsdb_markup("", '<div class="alert alert-warning">')
 
 
@@ -259,14 +358,19 @@ def test_r5_tsdb_apply_bar_is_one_primary_button() -> None:
     js = _admin_js()
     template = _read(TEMPLATES / "tsdb.html")
     assert check_r5_apply_bar(js, template) == []
-    broken = js.replace("element('button', 'btn btn-primary', applyLabel)", "element('button', 'btn btn-info', applyLabel)")
+    broken = js.replace(
+        "element('button', 'btn btn-primary', applyLabel)",
+        "element('button', 'btn btn-info', applyLabel)",
+    )
     assert check_r5_apply_bar(broken, template)
 
 
 def test_r6_card_grids_have_at_most_four_columns() -> None:
     assert check_r6_grid(_read(CSS_FILE)) == []
     assert check_r6_grid(".settings-grid { grid-template-columns: repeat(5, 1fr); }")
-    assert check_r6_grid(".settings-grid { grid-template-columns: repeat(auto-fit, minmax(19rem, 1fr)); }")
+    assert check_r6_grid(
+        ".settings-grid { grid-template-columns: repeat(auto-fit, minmax(19rem, 1fr)); }"
+    )
 
 
 def test_r7_primary_button_themes_every_state() -> None:
@@ -283,7 +387,11 @@ def test_r8_colours_come_from_tokens() -> None:
 def test_r9_tsdb_fields_use_the_shared_field_builder() -> None:
     js = _admin_js()
     assert check_r9_shared_fields(js) == []
-    broken = js.replace("buildFieldControl(field, settingsDraft[field.key]);\n    // The shared", "buildOtherControl();\n    // The shared", 1)
+    broken = js.replace(
+        "buildFieldControl(field, settingsDraft[field.key]);\n    // The shared",
+        "buildOtherControl();\n    // The shared",
+        1,
+    )
     if broken != js:
         assert check_r9_shared_fields(broken)
 
@@ -291,7 +399,13 @@ def test_r9_tsdb_fields_use_the_shared_field_builder() -> None:
 def test_r10_energy_step_buttons_use_the_shared_button() -> None:
     js = _admin_js()
     assert check_r10_energy_step_buttons(js, _read(CSS_FILE)) == []
-    assert check_r10_energy_step_buttons(js.replace("'btn btn-primary energy-step-link'", "'btn btn-sm btn-primary energy-step-link'"), "")
+    assert check_r10_energy_step_buttons(
+        js.replace(
+            "'btn btn-primary energy-step-link'",
+            "'btn btn-sm btn-primary energy-step-link'",
+        ),
+        "",
+    )
     assert check_r10_energy_step_buttons(js, ".energy-step-link { min-height: 44px; }")
 
 
@@ -300,12 +414,26 @@ def test_r11_param_table_pages_share_the_inverters_viewport_height() -> None:
     macro = _read(TEMPLATES / "_param_table.html")
     pages = {name: _read(TEMPLATES / name) for name in R11_PAGES}
     assert check_r11_param_card_height(css, macro, pages) == []
-    assert check_r11_param_card_height(css + '\nbody[data-page="prometheus"] #main-content>.card { flex: 1 0 auto; }', macro, pages)
-    assert check_r11_param_card_height(css + "\n.param-table-wrap { max-height: 60vh; }", macro, pages)
-    assert check_r11_param_card_height(css + "\n.param-card { min-height: 40rem; }", macro, pages)
-    assert check_r11_param_card_height(css, macro.replace("card param-card", "card"), pages)
-    assert check_r11_param_card_height(css, macro, {**pages, "prometheus.html": '<div style="height: 30rem"></div>'})
-    assert check_r11_param_card_height(css, macro, {**pages, "inverters.html": "<section class=\"card\"></section>"})
+    assert check_r11_param_card_height(
+        css + '\nbody[data-page="prometheus"] #main-content>.card { flex: 1 0 auto; }',
+        macro,
+        pages,
+    )
+    assert check_r11_param_card_height(
+        css + "\n.param-table-wrap { max-height: 60vh; }", macro, pages
+    )
+    assert check_r11_param_card_height(
+        css + "\n.param-card { min-height: 40rem; }", macro, pages
+    )
+    assert check_r11_param_card_height(
+        css, macro.replace("card param-card", "card"), pages
+    )
+    assert check_r11_param_card_height(
+        css, macro, {**pages, "prometheus.html": '<div style="height: 30rem"></div>'}
+    )
+    assert check_r11_param_card_height(
+        css, macro, {**pages, "inverters.html": '<section class="card"></section>'}
+    )
 
 
 R12_FORBIDDEN = re.compile(
@@ -319,19 +447,92 @@ def check_r12_no_restart_instruction(sources: dict[str, str]) -> list[str]:
     problems = []
     for name, text in sources.items():
         for match in R12_FORBIDDEN.finditer(text):
-            problems.append(f"{name}:{_line(text, match.start())}: R12 - '{match.group(0)}': settings apply on their own, never ask for a restart")
+            problems.append(
+                f"{name}:{_line(text, match.start())}: R12 - '{match.group(0)}': settings apply on their own, never ask for a restart"
+            )
     return problems
 
 
 def test_r12_the_gui_never_asks_for_a_restart() -> None:
-    sources = {path.name: _read(path) for path in (*TEMPLATES.glob("*.html"), *JS_DIR.glob("*.js"), ADMIN / "api.py", CSS_FILE)}
+    sources = {
+        path.name: _read(path)
+        for path in (
+            *TEMPLATES.glob("*.html"),
+            *JS_DIR.glob("*.js"),
+            ADMIN / "api.py",
+            CSS_FILE,
+        )
+    }
     assert check_r12_no_restart_instruction(sources) == []
     for sample in (
         "Saved, but not active yet. The service must be restarted to apply: Log level.",
-        "<div id=\"restart-notice\"></div>",
+        '<div id="restart-notice"></div>',
         "After the next restart the service listens on 0.0.0.0:80.",
         "This setting requires a restart.",
         "return {'restart_required': []}",
         "Restart to apply",
     ):
         assert check_r12_no_restart_instruction({"sample.html": sample}), sample
+
+
+# R13 - responsive data tables use the shared .data-table-stack convention, never a desktop table
+# squeezed with character-level wrapping. The token table is server markup; the charging-schedule
+# slot table is built in admin-energy-setup.js.
+R13_FORBIDDEN_WRAP = re.compile(
+    r"overflow-wrap\s*:\s*anywhere|word-break\s*:\s*break-all"
+)
+
+
+def check_r13_responsive_tables(tokens_html: str, slot_js: str, css: str) -> list[str]:
+    problems = []
+    # The token table opts into the stacked layout in its markup.
+    token_table = re.search(r'<table class="([^"]*token-table[^"]*)"', tokens_html)
+    if not token_table:
+        problems.append("tokens.html: R13 - token table not found")
+    elif "data-table-stack" not in token_table.group(1).split():
+        problems.append(
+            "tokens.html: R13 - the token table must carry .data-table-stack for the stacked phone layout"
+        )
+    # The slot-table builder opts in too.
+    if "energy-plan-slot-table" in slot_js and "data-table-stack" not in slot_js:
+        problems.append(
+            "admin-energy-setup.js: R13 - the charging-schedule slot table must carry .data-table-stack"
+        )
+    # The shared stacked rule and its label mechanism live once in the CSS.
+    if (
+        ".data-table-stack td::before" not in css
+        or "content: attr(data-label)" not in css
+    ):
+        problems.append(
+            "admin.css: R13 - the shared .data-table-stack label rule (content: attr(data-label)) is missing"
+        )
+    # Neither table leans on character-level wrapping as the mobile layout.
+    for selector, body, line in _rules(css):
+        if re.search(
+            r"\.(?:token-table|energy-plan-slot-table)\b", selector
+        ) and R13_FORBIDDEN_WRAP.search(body):
+            problems.append(
+                f"admin.css:{line}: R13 - {selector} uses character-level wrapping; stack the row instead (.data-table-stack)"
+            )
+    return problems
+
+
+def test_r13_wide_tables_use_the_shared_stacked_layout() -> None:
+    tokens_html = _read(TEMPLATES / "tokens.html")
+    slot_js = _read(JS_DIR / "admin-energy-setup.js")
+    css = _read(CSS_FILE)
+    assert check_r13_responsive_tables(tokens_html, slot_js, css) == []
+    assert check_r13_responsive_tables(
+        '<table class="table token-table">', slot_js, css
+    )
+    assert check_r13_responsive_tables(
+        tokens_html, "const t = element('table', 'energy-plan-slot-table');", css
+    )
+    assert check_r13_responsive_tables(
+        tokens_html, slot_js, css + "\n.token-table td { overflow-wrap: anywhere; }"
+    )
+    assert check_r13_responsive_tables(
+        tokens_html,
+        slot_js,
+        css + "\n.energy-plan-slot-table td { word-break: break-all; }",
+    )

@@ -204,6 +204,13 @@
         padding-top: 1rem;
     }
 
+    /* Chart widgets (day-ahead prices, PV forecast, charging schedule, battery degradation) need a
+       full-width tile: a half-width chart is unreadable on a phone and the charging-schedule plot
+       would be squeezed into a narrow column. The small KPI tiles keep the compact two-column grid. */
+    .dashboard-grid>.grid-stack-item:has(.dashboard-forecast-card) {
+        grid-column: 1 / -1;
+    }
+
     .dashboard-grid>.grid-stack-item>.grid-stack-item-content {
         position: relative !important;
         inset: auto;

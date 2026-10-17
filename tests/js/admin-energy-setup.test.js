@@ -918,6 +918,17 @@ test('Charging schedule offers collapsed details with merged consecutive slots',
   assert.notEqual(details.open, true, 'collapsed by default');
   assert.equal(nodes.find((n) => n.tagName === 'summary').textContent, 'Show schedule details');
   assert.equal(nodes.filter((n) => n.tagName === 'tr' && flatten(n).some((c) => c.tagName === 'td')).length, 2);
+  // Responsive stacked layout: the table opts into .data-table-stack and every data cell carries
+  // its column name in data-label, so the phone card keeps each value tied to its field. Without
+  // this the mobile layout (admin.css) shows values with no labels, the bug this guards against.
+  const table = nodes.find((n) => n.tagName === 'table');
+  assert.ok((table.className || '').split(/\s+/).includes('data-table-stack'), 'table opts into the stacked layout');
+  const labels = ['Time', 'Action', 'Power', 'Target SoC', 'Reason'];
+  const dataRows = nodes.filter((n) => n.tagName === 'tr' && flatten(n).some((c) => c.tagName === 'td'));
+  for (const dataRow of dataRows) {
+    const cells = dataRow.children.filter((c) => c.tagName === 'td');
+    assert.deepEqual(cells.map((c) => c.dataset.label), labels, 'each cell labelled with its column');
+  }
 });
 
 test('Charging schedule details stay open across a plan refresh', () => {

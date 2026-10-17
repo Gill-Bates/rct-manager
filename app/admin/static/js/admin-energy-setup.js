@@ -1288,10 +1288,14 @@ function planScheduleDetails(slots, open = false) {
   details.id = 'energy-plan-schedule-details';
   details.open = open;
   details.append(element('summary', '', 'Show schedule details'));
-  const table = element('table', 'table table-sm energy-plan-slot-table mt-2 mb-0');
+  // data-table-stack: below the phone breakpoint the six-column table would squeeze "Power"/"162 W"
+  // character-by-character, so each row stacks into a labelled card (admin.css). The column name is
+  // carried on every cell in data-label and reused there; the desktop table is unchanged.
+  const table = element('table', 'table table-sm energy-plan-slot-table data-table-stack mt-2 mb-0');
   table.append(element('caption', 'visually-hidden', 'Charging schedule slots'));
   const head = element('tr');
-  for (const [name, numeric] of [['Time'], ['Action'], ['Power', true], ['Target SoC', true], ['Reason']]) {
+  const columns = [['Time'], ['Action'], ['Power', true], ['Target SoC', true], ['Reason']];
+  for (const [name, numeric] of columns) {
     const cell = element('th', numeric ? 'text-end' : '', name);
     cell.scope = 'col';
     head.append(cell);
@@ -1301,13 +1305,16 @@ function planScheduleDetails(slots, open = false) {
     const watts = planNumber(slot.max_power_w);
     const target = planNumber(slot.target_soc_percent);
     const row = element('tr');
-    row.append(
+    // The reason is free prose: it spans full width and wraps at word boundaries in the stacked card.
+    const cells = [
       element('td', '', planSlotTime(slot)),
       element('td', '', PLAN_ACTION_LABELS[slot.action] || slot.action),
       element('td', 'text-end', Number.isFinite(watts) && slot.action === 'charge' ? formatPower(watts) : NOT_AVAILABLE),
       element('td', 'text-end', Number.isFinite(target) ? `${Math.round(target)} %` : NOT_AVAILABLE),
-      element('td', '', slot.reason ? (PLAN_REASON_LABELS[slot.reason] || slot.reason) : NOT_AVAILABLE),
-    );
+      element('td', 'data-table-stack-prose', slot.reason ? (PLAN_REASON_LABELS[slot.reason] || slot.reason) : NOT_AVAILABLE),
+    ];
+    cells.forEach((cell, index) => { cell.dataset.label = columns[index][0]; });
+    row.append(...cells);
     body.append(row);
   }
   const thead = element('thead');
