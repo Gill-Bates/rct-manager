@@ -546,6 +546,29 @@ def test_several_logger_points_for_one_local_date_log_once_and_the_last_one_wins
     assert len([m for m in caplog.messages if "several logger points" in m]) == 1
 
 
+def test_day_logger_uses_wall_clock_date_at_local_midnight_boundary() -> None:
+    from datetime import date
+    from zoneinfo import ZoneInfo
+
+    from app.gateway.rct_history import RctDailyConsumptionHistory
+    from app.protocol.timeseries import TimeSeriesPoint
+
+    class _Gateway:
+        async def query_history_series(self, device_id, name, before):
+            return (
+                TimeSeriesPoint(datetime(2026, 10, 16, 23, 59, 59, tzinfo=UTC), 19_000.0),
+                TimeSeriesPoint(datetime(2026, 10, 15, 23, 59, 59, tzinfo=UTC), 18_018.7),
+            )
+
+    history = RctDailyConsumptionHistory(_Gateway(), lambda: "Europe/Berlin")
+    before = datetime(2026, 10, 16, tzinfo=ZoneInfo("Europe/Berlin"))
+    readings = asyncio.run(history.daily_consumption("main", before=before, limit=10))
+
+    assert [(reading.local_date, reading.energy_wh) for reading in readings] == [
+        (date(2026, 10, 15), 18_018.7)
+    ]
+
+
 # --- F2: retention prune indexes exist after init (review finding 2) ---------------------------
 
 

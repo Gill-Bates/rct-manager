@@ -15,8 +15,14 @@ function initEnergyTabs(onShown = null) {
   if (!container || !window.bootstrap) return;
   const fromHash = (location.hash || '').replace(/^#/, '');
   const initial = ENERGY_TABS.includes(fromHash) ? fromHash : 'inverter';
+  // Scrolls only the tab bar (not the page) so the active tab is never hidden in the swipe row.
+  const revealTab = (button) => {
+    const left = button.offsetLeft - (container.clientWidth - button.offsetWidth) / 2;
+    container.scrollTo({ left: Math.max(0, left), behavior: 'auto' });
+  };
   for (const button of container.querySelectorAll('[data-bs-toggle="tab"]')) {
     button.addEventListener('shown.bs.tab', () => {
+      revealTab(button);
       const name = button.dataset.tab;
       // replaceState, not a navigation: changing the fragment must not add history entries or
       // trigger the browser's own hashchange scroll.

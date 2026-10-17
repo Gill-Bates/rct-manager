@@ -16,6 +16,7 @@ const require = createRequire(path.join(process.env.PLAYWRIGHT_DIR, 'noop.js'));
 const playwright = require('playwright');
 // BROWSER=chromium|webkit|firefox, VIEWPORT_WIDTH and COLOR_SCHEME=light|dark select the matrix cell.
 export const engine = playwright[process.env.BROWSER || 'chromium'];
+export const devices = playwright.devices;
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 export const OUT = path.resolve(process.argv[2]);
 fs.mkdirSync(OUT, { recursive: true });

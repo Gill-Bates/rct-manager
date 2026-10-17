@@ -6,9 +6,8 @@
 
 """RCT implementation of the daily-consumption history port (logger.day_eload_log_ts).
 
-UNVERIFIED without hardware: the unit of the logged value (Wh is assumed, matching the cumulative
-load counter) and which calendar day an entry timestamp describes (the local date of the timestamp
-is assumed). The productive backfill that uses this class is therefore disabled by default.
+Hardware samples confirm Wh and show that day-entry timestamps encode local wall-clock dates.
+The query boundary's wire-time interpretation is still unverified, so backfill stays disabled.
 """
 
 import logging
@@ -52,12 +51,13 @@ class RctDailyConsumptionHistory:
                 or not 0.0 <= point.value <= MAX_PLAUSIBLE_DAY_WH
             ):
                 continue
-            if point.timestamp >= before:
-                continue  # the query asks for data before this instant
-            day = point.timestamp.astimezone(zone).date()
+            # The day logger encodes local wall-clock fields in a UTC-labelled timestamp.
+            day = point.timestamp.date()
+            if day >= before.astimezone(zone).date():
+                continue
             if day in by_date and (device_id, day) not in self._warned_dates:
                 self._warned_dates.add((device_id, day))
-                # The last point wins (unchanged); the day assignment is still unverified on hardware.
+                # The device can report multiple values for one day; keep the final entry.
                 log.warning(
                     "Inverter day history of %s has several logger points for %s; the last one is used",
                     device_id,

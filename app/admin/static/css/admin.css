@@ -203,20 +203,6 @@ body {
     }
 }
 
-/* Narrow viewports wrap the footer text to two lines, which grows .admin-footer past 2.75rem while
-   .app-shell still reserves only that much — measured 55.375px of footer against 44px of reserve at
-   320px, leaving the content/footer gap to chance rather than to the reserve. One variable feeds
-   both the reserve and the footer's min-height, so raising it here keeps them in sync by
-   construction. 3.75rem covers the measured wrapped height (56.4px with the build hash); the cost is up to 12px of unused space
-   below the content at widths where the text still fits on one line, which is not visible as
-   anything other than the content stopping slightly earlier above the footer. */
-@media (max-width: 420px) {
-    :root {
-        --rct-footer-height: 3.75rem;
-        /* the build hash made the wrapped footer 56.4px, above 3.5rem */
-    }
-}
-
 .app-shell {
     display: flex;
     /* Fills what the header leaves (body is a column): a hard-coded header height was ~5px short of
@@ -237,11 +223,21 @@ body {
     align-items: center;
     justify-content: center;
     padding: .5rem 1rem calc(.5rem + env(safe-area-inset-bottom));
-    font-size: .8rem;
+    /* Shrinks with the viewport so the line stays single; the ellipsis on the span is the last resort. */
+    font-size: clamp(.6rem, 2.7vw, .8rem);
     color: var(--bs-secondary-color);
     background: var(--bs-body-bg);
     border-top: 1px solid var(--rct-line);
     box-shadow: 0 -2px 8px rgb(0 0 0 / 6%);
+}
+
+.admin-footer>span {
+    min-width: 0;
+    max-width: 100%;
+    overflow: hidden;
+    text-align: center;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 
 .admin-footer a {
@@ -385,6 +381,30 @@ body {
    idle tab colour changes: hover, active and focus keep Bootstrap's values. */
 [data-bs-theme="light"] .energy-tabs {
     --bs-nav-link-color: var(--bs-link-hover-color);
+}
+
+/* One swipeable row on phones: no wrapping, hidden scrollbar, tabs snap into place. */
+.energy-tabs {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    overflow-y: hidden;
+    overscroll-behavior-x: contain;
+    scroll-snap-type: x proximity;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+}
+
+.energy-tabs::-webkit-scrollbar {
+    display: none;
+}
+
+.energy-tabs .nav-item {
+    flex: 0 0 auto;
+    scroll-snap-align: center;
+}
+
+.energy-tabs .nav-link {
+    white-space: nowrap;
 }
 
 /* Bootstrap's off-state switch outline (#dee2e6 / #495057) and knob are 1.2-2.3:1 against their

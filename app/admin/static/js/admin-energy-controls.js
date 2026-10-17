@@ -112,11 +112,13 @@
       lines[key] = { group, dots, arrow, forwardX, forwardY, reverseX, reverseY, angle };
     }
     const nodes = {};
+    // Single private-use codepoints, not ligature names: SVG text-anchor measures the unshaped
+    // string in WebKit and would shift a multi-letter ligature off its circle.
     const nodeDefs = [
-      ['pv', 210, 78, 'wb_sunny', 'PV', 'top'],
-      ['grid', 56, 190, 'factory', 'Grid', 'bottom'],
-      ['house', 210, 190, 'home', 'House', 'bottom'],
-      ['battery', 364, 190, 'battery_charging_full', 'Battery', 'bottom'],
+      ['pv', 210, 78, '\ue430', 'PV', 'top'],
+      ['grid', 56, 190, '\uebbc', 'Grid', 'bottom'],
+      ['house', 210, 190, '\ue88a', 'House', 'bottom'],
+      ['battery', 364, 190, '\ue1a3', 'Battery', 'bottom'],
     ];
     for (const [key, cx, cy, icon, label, place] of nodeDefs.filter(([key]) => !lite || key !== 'pv')) {
       const group = svgEl('g', { class: 'flow-node' });

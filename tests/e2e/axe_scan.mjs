@@ -84,9 +84,11 @@ try {
   await page.fill('#confirm-password', NEW_PASSWORD);
   await page.click('#change-password-form button[type=submit]');
   await page.waitForURL('**/ui/dashboard');
+  await page.locator('#disclaimer-modal.show').waitFor();
+  await Promise.all([page.waitForNavigation(), page.click('#disclaimer-accept')]);
 
-  // 2. Dashboard, once the simulator's cards have rendered.
-  await page.waitForSelector('.device-item');
+  // 2. Dashboard, including the empty-device state of a fresh admin database.
+  await page.waitForSelector('#dashboard-edit-toggle');
   await page.waitForFunction(() => !document.getElementById('dashboard-grid')?.classList.contains('dashboard-grid--loading'), null, { timeout: 60000 }).catch(() => { });
   await page.screenshot({ path: path.join(OUT, `axe-dashboard-${THEME}.png`), fullPage: true });
   allViolations.dashboard = await scan(page, 'dashboard');
