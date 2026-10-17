@@ -40,12 +40,11 @@ HORIZON = timedelta(hours=1)
 def _live_clock() -> ManualClock:
     """A manual clock anchored at the real wall clock.
 
-    ``InMemoryPlanScheduler`` judges plan expiry against ``datetime.now(UTC)`` directly (plan
-    validity is owned by the scheduler against the live clock, by design), so the service's injected
-    ``now`` must be close to real time for a freshly built plan not to look already expired.
+    The scheduler now shares this injected clock (see ``_service``), so plan expiry is judged on the
+    same deterministic time axis the service plans with. Anchoring near real time keeps the fixtures
+    close to production instants; advancing the clock is what expires a plan, not the wall clock.
     """
     clock = ManualClock()
-    # Anchor the manual clock at real time so the scheduler's live-clock expiry check sees a fresh plan.
     clock._wall = datetime.now(UTC)
     return clock
 
@@ -137,7 +136,9 @@ def _service(
         "device_id": DEVICE,
         "clock": clock,
         "optimizer": optimizer,
-        "scheduler": InMemoryPlanScheduler(),
+        # One shared time source: the scheduler judges plan expiry against the same injected clock
+        # the service plans with, so no wall-clock leakage can expire/accept a plan out of step.
+        "scheduler": InMemoryPlanScheduler(clock),
         "prices": prices,
         "solar": solar,
         "consumption": consumption,
@@ -458,11 +459,10 @@ async def test_expired_plan_is_reported_absent() -> None:
     assert service.current_view() is not None
 
     # current_view reads through InMemoryPlanScheduler.current_plan(), which discards an expired
-    # plan against the live clock (datetime.now(UTC) inside the scheduler). Advance that clock past
-    # the plan's validity and the plan is reported absent.
-    with patch("app.optimizer.scheduler.datetime") as scheduler_clock:
-        scheduler_clock.now.return_value = plan.valid_until + timedelta(seconds=1)
-        assert service.current_view() is None
+    # plan against the injected clock the scheduler shares with the service. Advance that one clock
+    # past the plan's validity and the plan is reported absent (no wall-clock leakage).
+    clock.advance((plan.valid_until - clock.now()).total_seconds() + 1)
+    assert service.current_view() is None
 
 
 async def _wait_for(predicate, *, timeout: float = 1.0) -> None:

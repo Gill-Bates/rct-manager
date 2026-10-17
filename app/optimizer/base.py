@@ -38,7 +38,13 @@ class BatteryStateProvider(Protocol):
 
 
 class EnergyOptimizer(Protocol):
-    """Builds a plan from a complete input snapshot; Package A supplies no implementation."""
+    """Builds a plan from a complete input snapshot; Package A supplies no implementation.
+
+    Canonical grid/horizon semantics (both implementations must agree, so they are substitutable at
+    the horizon edge): the plan grid is made of full 15-minute slots only, END-bounded by the
+    requested horizon — a slot is emitted only when its ``end`` does not exceed ``now + horizon``, so
+    no final slot overruns the horizon. See :func:`app.optimizer.align.build_grid`.
+    """
 
     def plan(self, planning_input: PlanningInput) -> EnergyPlan: ...
 

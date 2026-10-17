@@ -93,7 +93,9 @@ class EnergyAction(StrEnum):
     AUTO = "auto"
 
 
-def _require_finite(value: float, field: str, *, positive: bool = False, non_negative: bool = False) -> None:
+def _require_finite(
+    value: float, field: str, *, positive: bool = False, non_negative: bool = False
+) -> None:
     if isinstance(value, bool):
         raise ValueError(f"{field} must be a finite number")
     try:
@@ -281,9 +283,13 @@ class BatteryState:
             raise ValueError("soc_percent must be between 0 and 100")
         _require_finite(self.usable_capacity_wh, "usable_capacity_wh", positive=True)
         _require_finite(self.max_charge_power_w, "max_charge_power_w", positive=True)
-        _require_finite(self.max_discharge_power_w, "max_discharge_power_w", positive=True)
+        _require_finite(
+            self.max_discharge_power_w, "max_discharge_power_w", positive=True
+        )
         if self.live_charge_limit_w is not None:
-            _require_finite(self.live_charge_limit_w, "live_charge_limit_w", positive=True)
+            _require_finite(
+                self.live_charge_limit_w, "live_charge_limit_w", positive=True
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -396,13 +402,24 @@ class EnergyPlanSlot:
             raise ValueError("action must be an EnergyAction")
         if self.action in {EnergyAction.CHARGE, EnergyAction.DISCHARGE}:
             if self.target_soc_percent is None:
-                raise ValueError("charge and discharge actions require target_soc_percent")
+                raise ValueError(
+                    "charge and discharge actions require target_soc_percent"
+                )
             _require_finite(self.target_soc_percent, "target_soc_percent")
-            if not TARGET_SOC_MIN_PERCENT <= self.target_soc_percent <= TARGET_SOC_MAX_PERCENT:
+            if (
+                not TARGET_SOC_MIN_PERCENT
+                <= self.target_soc_percent
+                <= TARGET_SOC_MAX_PERCENT
+            ):
                 raise ValueError("target_soc_percent must be between 7 and 97")
+            if self.max_power_w is None:
+                raise ValueError("charge and discharge actions require max_power_w")
         elif self.target_soc_percent is not None:
             raise ValueError("this action forbids target_soc_percent")
-        if self.action in {EnergyAction.IDLE, EnergyAction.HOLD, EnergyAction.AUTO} and self.max_power_w is not None:
+        if (
+            self.action in {EnergyAction.IDLE, EnergyAction.HOLD, EnergyAction.AUTO}
+            and self.max_power_w is not None
+        ):
             raise ValueError("this action forbids max_power_w")
         if self.max_power_w is not None:
             _require_finite(self.max_power_w, "max_power_w", positive=True)
