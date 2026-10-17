@@ -1237,7 +1237,7 @@ function planChargeList(slots) {
 }
 
 // The chart is the schedule view; its tooltip carries the per-slot detail.
-function planSchedule(plan) {
+function planSchedule(plan, detailsOpen = false) {
   const section = element('section', 'energy-plan-section');
   section.setAttribute('aria-labelledby', 'energy-plan-schedule-title');
   const title = element('h3', 'h6', 'Charging schedule');
@@ -1258,7 +1258,7 @@ function planSchedule(plan) {
   } else {
     section.append(element('p', 'text-danger small', 'Chart library could not be loaded.'));
   }
-  section.append(planChargeList(plan.slots), planScheduleDetails(plan.slots));
+  section.append(planChargeList(plan.slots), planScheduleDetails(plan.slots, detailsOpen));
   return { section, canvas };
 }
 
@@ -1278,10 +1278,10 @@ function planSlotRuns(slots) {
 }
 
 // Collapsed lookup table next to the chart: keyboard and touch friendly, numbers right-aligned.
-function planScheduleDetails(slots) {
+function planScheduleDetails(slots, open = false) {
   const details = element('details', 'energy-plan-slot-details mt-2');
   details.id = 'energy-plan-schedule-details';
-  details.open = Boolean($('energy-plan-schedule-details')?.open);
+  details.open = open;
   details.append(element('summary', '', 'Show schedule details'));
   const table = element('table', 'table table-sm energy-plan-slot-table mt-2 mb-0');
   table.append(element('caption', 'visually-hidden', 'Charging schedule slots'));
@@ -1333,7 +1333,8 @@ function planTechnicalDetails(plan) {
   return parts;
 }
 
-const PLAN_CONFIDENCE_LABELS = { low: 'Low confidence', medium: 'Medium confidence', high: 'High confidence' };
+const PLAN_CONFIDENCE_LABELS = { low: 'Low confidence', normal: 'Normal confidence' };
+const PLAN_MANAGER_LABELS = { off: 'Energy Manager off', manual: 'Manual control', external: 'External control' };
 
 // Forecast confidence next to the execution state, from forecast_basis / forecast_confidence only.
 // The note explains a weak forecast; a missing field hides the part instead of inventing a state.
@@ -1363,6 +1364,8 @@ function renderDryRunPlan(plan, { waiting = true } = {}) {
   if (technical) technical.replaceChildren(...planTechnicalDetails(plan));
   const forecast = $('energy-plan-forecast');
   if (forecast) forecast.hidden = plan.status !== 'ok';
+  // Read before clearPlanSchedule() removes the element, so a refresh keeps an opened table open.
+  const scheduleDetailsOpen = Boolean($('energy-plan-schedule-details')?.open);
   clearPlanSchedule();
   // Energy Manager state of the selected inverter, shown as the header badge whatever the plan status.
   const selectedDevice = (typeof planDevices === 'undefined' ? [] : planDevices).find((item) => item.device_id === $('energy-plan-device')?.value);
@@ -1370,8 +1373,8 @@ function renderDryRunPlan(plan, { waiting = true } = {}) {
   const managerBadge = $('energy-plan-manager-state');
   if (managerBadge) {
     managerBadge.hidden = !selectedDevice;
-    // The plan itself is never "disabled": this only says whether the Energy Manager executes it.
-    managerBadge.textContent = managerOff ? 'Execution off' : 'Execution on';
+    // The plan has no executor: the badge only reports the Energy Manager mode of the inverter.
+    managerBadge.textContent = PLAN_MANAGER_LABELS[selectedDevice?.mode] || PLAN_MANAGER_LABELS.manual;
     managerBadge.className = `status-badge ${managerOff ? 'status-badge-neutral' : 'status-badge-success'}`;
   }
   renderPlanConfidence(plan);
@@ -1399,7 +1402,7 @@ function renderDryRunPlan(plan, { waiting = true } = {}) {
     return;
   }
   // While the Energy Manager is off for this inverter no grid charge will ever be started, so the
-  // plan must not announce one; the header badge says Disabled and no status card is shown.
+  // plan must not announce one; the header badge shows the Energy Manager as off and no status card is shown.
   const next = managerOff ? null : nextGridCharge(plan.slots || []);
   const card = managerOff
     ? element('div')
@@ -1435,7 +1438,7 @@ function renderDryRunPlan(plan, { waiting = true } = {}) {
   card.append(batteryLine);
   host.replaceChildren(card);
   const scheduleHost = $('energy-plan-schedule');
-  const { section, canvas } = planSchedule(plan);
+  const { section, canvas } = planSchedule(plan, scheduleDetailsOpen);
   scheduleHost.replaceChildren(section);
   // Drawn after attaching: Chart.js sizes the canvas from its laid-out container.
   if (canvas) drawPlanChart(canvas, plan.slots);
@@ -1784,8 +1787,8 @@ function drawConsumptionChart(history) {
   if (!known.length) {
     status.replaceChildren();
     host.replaceChildren();
-    // Keep the section visible when the import badge still has something to say (disabled, or
-    // enabled but no completed day yet), so it can explain the otherwise-empty chart.
+    // Keep the section visible while the import status still has something to say (import off, or
+    // on but no completed day yet), so it can explain the otherwise-empty chart.
     setConsumptionVisible(hasImportStatus);
     return;
   }

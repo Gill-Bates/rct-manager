@@ -209,14 +209,12 @@
   function renderTsdbTile(tsdb) {
     const icon = $('tsdb-status-icon');
     const label = $('tsdb-status-label');
-    const time = $('tsdb-status-time');
     icon.classList.remove('text-success', 'text-danger', 'text-secondary');
     if (!tsdb || !tsdb.configured) {
       icon.textContent = 'cloud_off';
       icon.classList.add('text-secondary');
       label.textContent = NOT_AVAILABLE;
       label.title = 'Not configured'; // the reason stays secondary; the value reads n/a
-      time.textContent = '';
       return;
     }
     label.title = '';
@@ -234,7 +232,8 @@
       icon.classList.add('text-danger');
       label.textContent = 'Failing';
     }
-    time.textContent = tsdb.last_success_at ? `Last sent ${hhmm(new Date(tsdb.last_success_at))}` : '';
+    // The last-sent time is a tooltip, not a third line in the tile.
+    if (tsdb.export_enabled && tsdb.last_success_at) label.title = `Last sent ${hhmm(new Date(tsdb.last_success_at))}`;
   }
 
   function renderDashboard(devices, tsdb) {

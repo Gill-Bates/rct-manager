@@ -105,6 +105,8 @@ try {
   await page.fill('#confirm-password', NEW_PASSWORD);
   await page.click('#change-password-form button[type=submit]');
   await page.waitForURL('**/ui/dashboard');
+  // The one-time usage notice locks every other admin page until it is accepted.
+  await Promise.all([page.waitForNavigation(), page.click('#disclaimer-accept')]);
 
   // The dynamic-plan response carries the DST/NaN/gap plan; the real client renders it.
   await page.route('**/dynamic-plan**', (route) => route.fulfill({ json: PLAN }));

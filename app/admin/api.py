@@ -61,30 +61,29 @@ _CSRF_COOKIE = "rct_admin_csrf"
 # RCT community observations (ioBroker RCT adapter) and are not an official vendor specification.
 _BATTERY_STATUS2_BITS: dict[int, str] = {
     0x001: "Disconnected",
-    0x002: "Synchronizing",
+    0x002: "Syncing",
     0x004: "Connecting",
-    0x008: "Calibration charging",
-    0x100: "Balancing active",
+    0x008: "Calibrating",
+    0x100: "Balancing",
     0x200: "Low voltage",
-    0x400: "Calibration discharging",
-    0x800: "Balancing required",
+    0x400: "Calibrating",
+    0x800: "Balance due",
 }
 
 
 def _battery_status2_label(value: int) -> str:
-    """Best-effort, bitwise decoding; an unrecognized bit falls back to the raw code (see above)."""
+    """Best-effort, bitwise decoding into short badge texts; an unrecognized bit keeps its raw code."""
     if value == 0:
         return "Normal"
     if value < 0:
-        return f"Status code {value}"
+        return f"Status {value}"
     labels = [label for bit, label in _BATTERY_STATUS2_BITS.items() if value & bit]
     known_mask = sum(bit for bit in _BATTERY_STATUS2_BITS if value & bit)
-    if "Balancing active" in labels and "Balancing required" in labels:
-        labels.remove(
-            "Balancing required"
-        )  # active implies required; showing both is redundant
+    if "Balancing" in labels and "Balance due" in labels:
+        labels.remove("Balance due")  # active implies due; showing both is redundant
+    labels = list(dict.fromkeys(labels))  # charging and discharging calibration share one text
     if not labels:
-        return f"Status code {value}"
+        return f"Status {value}"
     if (
         value & ~known_mask
     ):  # bits outside the known table: keep the code visible, not hidden

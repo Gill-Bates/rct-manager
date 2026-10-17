@@ -1083,7 +1083,7 @@ def test_dashboard_grid_has_the_gridstack_structure_and_stable_widget_ids():
     # The business-data DOM ids the polling code reads/writes stay intact inside the wrappers.
     for inner_id in ("device-count", "connected-count", "metric-count", "pv-power", "house-power",
                      "grid-power", "battery-soc", "days-to-calibration", "tsdb-status-icon",
-                     "tsdb-status-label", "tsdb-status-time", "devices-list"):
+                     "tsdb-status-label", "devices-list"):
         assert f'id="{inner_id}"' in html
 
 
@@ -1157,7 +1157,7 @@ def test_dashboard_js_reuses_the_shared_api_helper_and_does_not_touch_polling():
     # Tiles are moved by mouse drag on the header strip; the old Move/Resize context menu is gone.
     assert "handle: '.dashboard-widget-header'" in js
     assert "Move up" not in js and "dashboard-layout-menu" not in js
-    assert "window.RCTAdmin = Object.freeze({ api, toast, messageFrom, element, confirmAction });" in admin_js
+    assert "window.RCTAdmin = Object.freeze({ api, toast, messageFrom, element, confirmAction, pollDelay });" in admin_js
     assert "startDashboardLayout()" in admin_js and "rct:dashboard-ready" in js
     assert "initDashboardPolling()" in admin_js
     # dashboard.js never reimplements the polling helpers it must leave alone.
@@ -1698,7 +1698,7 @@ def test_energy_page_wires_the_read_only_dry_run_plan_preview():
     assert "planStatusCard('Energy Manager is off'" not in js
     # The plan is a read-only preview whose execution may be off; it is never labelled "Disabled".
     assert "Read-only preview" in plan_pane and "Preview only" not in plan_pane
-    assert 'id="energy-plan-confidence"' in plan_pane and "'Execution off'" in js
+    assert 'id="energy-plan-confidence"' in plan_pane and "'Energy Manager off'" in js
     assert "Show schedule details" in js and "element('details'" in js and "element('summary'" in js
     assert "History coverage" in js and "Live recording" not in js
     assert "Locally measured" in js and "Recovered from inverter history" in js

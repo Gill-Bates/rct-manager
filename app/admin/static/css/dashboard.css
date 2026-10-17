@@ -198,6 +198,10 @@
 
     .dashboard-grid>.grid-stack-item[data-widget-id="devices"] {
         grid-column: 1 / -1;
+        /* Hairline between the KPI tiles and the inverter list, which stack without a gap-sized cue. */
+        border-top: 1px solid var(--rct-line);
+        margin-top: .5rem;
+        padding-top: 1rem;
     }
 
     .dashboard-grid>.grid-stack-item>.grid-stack-item-content {

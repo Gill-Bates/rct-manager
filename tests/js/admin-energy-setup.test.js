@@ -787,9 +787,9 @@ test('Battery remaining shows a dash, never NaN or undefined, without a snapshot
   }
 });
 
-test('Charging plan announces no grid charge while the Energy Manager is off; the header shows Execution off, never Disabled', () => {
+test('Charging plan announces no grid charge while the Energy Manager is off; the header shows the Energy Manager mode, never Disabled', () => {
   const slots = [{ action: 'charge', start: '2026-01-01T10:00:00Z', end: '2026-01-01T10:15:00Z', max_power_w: 2000, target_soc_percent: 80 }];
-  for (const [mode, expectOff] of [['off', true], ['manual', false], [undefined, false]]) {
+  for (const [mode, expectOff] of [['off', true], ['manual', false], ['external', false]]) {
     const h = harness();
     h.context.formatPower = (w) => `${w} W`;
     const host = h.context.element('div');
@@ -804,7 +804,7 @@ test('Charging plan announces no grid charge while the Energy Manager is off; th
     const text = flatten(host).map((n) => n.textContent || '').join(' ');
     assert.equal(/Next grid charge/.test(text), !expectOff, `mode ${mode}`);
     assert.ok(!/Energy Manager is off/.test(text), `mode ${mode}: no off card, the badge carries it`);
-    assert.equal(badge.textContent, expectOff ? 'Execution off' : 'Execution on', `mode ${mode}`);
+    assert.equal(badge.textContent, { off: 'Energy Manager off', manual: 'Manual control', external: 'External control' }[mode], `mode ${mode}`);
     assert.ok(!/Disabled/.test(badge.textContent), 'the plan itself is never called disabled');
     assert.equal(badge.hidden, false);
   }
@@ -875,7 +875,7 @@ test('Coverage status degrades gracefully: missing days render 0/0, no crash', (
 test('Charging plan shows forecast confidence from the plan fields and explains a weak forecast', () => {
   const cases = [
     [{ forecast_basis: 'adaptive_history', forecast_confidence: 'low' }, 'Low confidence', /limited consumption history/i],
-    [{ forecast_basis: 'adaptive_history', forecast_confidence: 'high' }, 'High confidence', null],
+    [{ forecast_basis: 'adaptive_history', forecast_confidence: 'normal' }, 'Normal confidence', null],
     [{ forecast_basis: 'bootstrap_baseline', forecast_confidence: 'low' }, 'Baseline forecast', /baseline/i],
     [{}, '', null],
   ];
@@ -918,4 +918,17 @@ test('Charging schedule offers collapsed details with merged consecutive slots',
   assert.notEqual(details.open, true, 'collapsed by default');
   assert.equal(nodes.find((n) => n.tagName === 'summary').textContent, 'Show schedule details');
   assert.equal(nodes.filter((n) => n.tagName === 'tr' && flatten(n).some((c) => c.tagName === 'td')).length, 2);
+});
+
+test('Charging schedule details stay open across a plan refresh', () => {
+  const h = harness();
+  h.context.formatPower = (w) => `${w} W`;
+  h.context.element('div').id = 'energy-plan-result';
+  const plan = { status: 'ok', horizon_hours: 24, energy: {}, window: {}, slots: [{ start: '2026-01-01T10:00:00Z', end: '2026-01-01T10:15:00Z', action: 'charge', max_power_w: 2000, target_soc_percent: 80, reason: 'x' }] };
+  h.context.renderDryRunPlan(plan);
+  h.context.renderDryRunPlan(plan);
+  assert.notEqual(h.byId.get('energy-plan-schedule-details').open, true, 'closed stays closed');
+  h.byId.get('energy-plan-schedule-details').open = true;
+  h.context.renderDryRunPlan(plan);
+  assert.equal(h.byId.get('energy-plan-schedule-details').open, true, 'opened details survive the re-render');
 });

@@ -2507,7 +2507,7 @@ try {
         const slot = (start, end, action, watts, soc, reason) => ({ start, end, action, max_power_w: watts, target_soc_percent: soc, reason });
         const plan = {
           device_id: 'sim', status: 'ok', detail: null, created_at: '2026-10-16T11:00:00+00:00', valid_until: '2026-10-17T14:00:00+00:00',
-          horizon_hours: 26, preview_only: true, window: {}, forecast_basis: 'stored history', forecast_confidence: 'high',
+          horizon_hours: 26, preview_only: true, window: {}, forecast_basis: 'stored history', forecast_confidence: 'normal',
           battery: { soc_percent: 33, usable_capacity_wh: 10370, remaining_energy_wh: 3422.1, max_charge_power_w: 3000, max_discharge_power_w: 3000, measured_at: '2026-10-16T11:59:00+00:00' },
           slots: [
             slot('2026-10-16T12:00:00+00:00', '2026-10-16T15:15:00+00:00', 'idle', null, null, 'forecast PV covers demand'),
@@ -2585,7 +2585,7 @@ try {
           (await ep.locator('#energy-plan-schedule details table tbody tr').count()) >= 1
           && (await ep.locator('#energy-plan-schedule details th.text-end').count()) === 2);
         await ep.locator('#energy-plan-schedule details summary').click();
-        check('plan header says Read-only preview and Execution state, never Disabled',
+        check('plan header says Read-only preview and the Energy Manager mode, never Disabled',
           /Read-only preview/.test(await ep.locator('.energy-plan-head-title').innerText())
           && !/Disabled/.test(await ep.locator('.energy-plan-head-title').innerText()));
         const hero = await ep.locator('#energy-plan-result .energy-plan-highlights .spot-market-highlight-caption').allInnerTexts();

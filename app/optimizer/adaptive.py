@@ -24,8 +24,8 @@ ESTIMATED and MISSING buckets are no observation at all: they never teach the pr
 enter a detection window, and a measurement outage is therefore neither vacation nor zero
 consumption (the windows simply hold fewer observations, and every decision demands a minimum).
 
-The rules, thresholds and their justification are documented in ``docs/development/architecture.md``
-(section "Adaptive next-day consumption forecast"); the constants below carry the same names.
+The rules, thresholds and their justification are documented in ``docs/development/consumption-forecast.md``
+(sections "Rules and thresholds" and "Known limits"); the constants below carry the same names.
 """
 
 import json
@@ -91,8 +91,12 @@ RETURN_MAX_AGE = timedelta(hours=8)
 # least this much more); only those can tell "returned" from "still away".
 INFORMATIVE_FACTOR = 2.0
 INFORMATIVE_MIN_SEPARATION_WH = 15.0
-RETURN_MIN_FRACTION = 0.75  # share of them closer to the profile than to the low level (12 of 16)
-RETURN_CONFIRM_STEPS = 2  # consecutive informative buckets after which the verdict must hold
+RETURN_MIN_FRACTION = (
+    0.75  # share of them closer to the profile than to the low level (12 of 16)
+)
+RETURN_CONFIRM_STEPS = (
+    2  # consecutive informative buckets after which the verdict must hold
+)
 # A household that is back also reproduces the profile's peaks (morning, evening), not only its
 # quiet hours: at least RETURN_MIN_PEAK_BUCKETS of the evidence must be buckets where the profile
 # expects PEAK_FACTOR times the low level and the measurement reaches PEAK_POSITION of the way from
@@ -104,7 +108,9 @@ RETURN_MIN_PEAK_BUCKETS = 4
 # A bucket above this multiple of the profile is one big consumer (oven, wallbox, heater), not a
 # household going about its day: it is neither evidence for nor against a return.
 RETURN_MAX_EXCESS = 3.0
-LOW_BASE_MIN_BUCKETS = 48  # twelve hours: the standby level is re-estimated once the phase has this many
+LOW_BASE_MIN_BUCKETS = (
+    48  # twelve hours: the standby level is re-estimated once the phase has this many
+)
 LOW_BASE_REFRESH_BUCKETS = 16
 
 # --- Low-phase forecast and promotion -----------------------------------------------------------
@@ -122,7 +128,9 @@ LEVEL_MAX = 5.0
 DAY_MIN_BUCKETS = 64
 
 # --- Next-day recording and comparison ----------------------------------------------------------
-ACTUAL_MIN_SHARE = 0.90  # a day is a valid actual when this share of its slots is COMPLETE
+ACTUAL_MIN_SHARE = (
+    0.90  # a day is a valid actual when this share of its slots is COMPLETE
+)
 
 _SPREAD_DAYS = 14
 _COVERAGE_BUCKETS = 7 * 96
@@ -143,7 +151,10 @@ def usable_value(bucket: HistoryBucket) -> float | None:
     quality = bucket.quality
     if quality is BucketQuality.COMPLETE:
         return bucket.energy_wh
-    if quality is BucketQuality.PARTIAL and bucket.coverage_seconds >= MIN_PARTIAL_COVERAGE_SECONDS:
+    if (
+        quality is BucketQuality.PARTIAL
+        and bucket.coverage_seconds >= MIN_PARTIAL_COVERAGE_SECONDS
+    ):
         return bucket.normalized_wh
     return None
 
@@ -189,10 +200,17 @@ class AdaptiveAnalysis:
             "last_return_at": iso(self.last_return_at),
             "promoted_at": iso(self.promoted_at),
             "data_coverage": round(self.data_coverage, 3),
-            "daily_spread": None if self.daily_spread is None else round(self.daily_spread, 3),
-            "return_evidence": None if self.return_evidence is None else round(self.return_evidence, 3),
+            "daily_spread": (
+                None if self.daily_spread is None else round(self.daily_spread, 3)
+            ),
+            "return_evidence": (
+                None if self.return_evidence is None else round(self.return_evidence, 3)
+            ),
             "reasons": list(self.reasons),
-            "events": [{"at": iso(e.at), "kind": e.kind, "detail": e.detail} for e in self.events],
+            "events": [
+                {"at": iso(e.at), "kind": e.kind, "detail": e.detail}
+                for e in self.events
+            ],
         }
 
     def explanation(self) -> str:
@@ -228,7 +246,9 @@ def evaluate_forecast(
     Only COMPLETE buckets are actuals, and at least ACTUAL_MIN_SHARE of the forecast slots must have
     one; the comparison then uses exactly the matched slots on both sides.
     """
-    actual = {b.start: b.energy_wh for b in history if b.quality is BucketQuality.COMPLETE}
+    actual = {
+        b.start: b.energy_wh for b in history if b.quality is BucketQuality.COMPLETE
+    }
     pairs = []
     for start, energy in values:
         moment = datetime.fromisoformat(start).astimezone(UTC)
@@ -243,7 +263,9 @@ def evaluate_forecast(
         slots=len(pairs),
         forecast_wh=forecast_wh,
         actual_wh=actual_wh,
-        daily_error_pct=100.0 * (forecast_wh - actual_wh) / actual_wh if actual_wh > 0 else 0.0,
+        daily_error_pct=(
+            100.0 * (forecast_wh - actual_wh) / actual_wh if actual_wh > 0 else 0.0
+        ),
         mae_wh=sum(abs(e) for e in errors) / len(errors),
         rmse_wh=(sum(e * e for e in errors) / len(errors)) ** 0.5,
     )
@@ -269,7 +291,9 @@ class _Replay:
         self.promoted_at: datetime | None = None
         self.low: deque[tuple[datetime, float, float | None]] = deque()
         self.low_base: float | None = None
-        self.evidence: deque[tuple[datetime, bool, bool]] = deque(maxlen=RETURN_EVIDENCE_BUCKETS)
+        self.evidence: deque[tuple[datetime, bool, bool]] = deque(
+            maxlen=RETURN_EVIDENCE_BUCKETS
+        )
         self.confirm = 0
         self.last_fraction: float | None = None
         self.day = None
@@ -302,16 +326,24 @@ class _Replay:
 
     def _learn(self, moment: datetime) -> None:
         value = self.observed.get(moment)
-        if value is None or (self.quarantine_until is not None and moment < self.quarantine_until):
+        if value is None or (
+            self.quarantine_until is not None and moment < self.quarantine_until
+        ):
             return
         week_key, slot_key = self.keys(moment)
         normalized = value / self.level
-        self.week.setdefault(week_key, deque(maxlen=PROFILE_WEEK_SAMPLES)).append(normalized)
-        self.slot.setdefault(slot_key, deque(maxlen=PROFILE_DAY_SAMPLES)).append(normalized)
+        self.week.setdefault(week_key, deque(maxlen=PROFILE_WEEK_SAMPLES)).append(
+            normalized
+        )
+        self.slot.setdefault(slot_key, deque(maxlen=PROFILE_DAY_SAMPLES)).append(
+            normalized
+        )
         self.learned_per_date[moment.astimezone(self.zone).date()] += 1
 
     def profile_days(self) -> int:
-        return sum(1 for n in self.learned_per_date.values() if n >= PROFILE_DAY_MIN_BUCKETS)
+        return sum(
+            1 for n in self.learned_per_date.values() if n >= PROFILE_DAY_MIN_BUCKETS
+        )
 
     # -- replay -------------------------------------------------------------------------------
     def run(self, now: datetime) -> "_Replay":
@@ -334,7 +366,9 @@ class _Replay:
         if self.state == "learning":
             if self.profile_days() >= PROFILE_READY_DAYS:
                 self.state = "normal"
-                self._event(moment, "profile_ready", f"{self.profile_days()} learned days")
+                self._event(
+                    moment, "profile_ready", f"{self.profile_days()} learned days"
+                )
             else:
                 return
         value = self.observed.get(moment)
@@ -371,36 +405,57 @@ class _Replay:
         self.low.clear()
         # The newest twelve hours of the window are inside the phase (the ratio fell below the
         # threshold only because of them); their median is the first estimate of the standby level.
-        self.low_base = statistics.median(actual for _, actual, _ in list(self.win)[-LOW_BASE_MIN_BUCKETS:])
+        self.low_base = statistics.median(
+            actual for _, actual, _ in list(self.win)[-LOW_BASE_MIN_BUCKETS:]
+        )
         self.evidence.clear()
         self.confirm = 0
         self.last_fraction = None
         self._reset_day()
         self.level_ratios.clear()
-        self._event(moment, "low_activity_detected", f"24h consumption {ratio:.0%} of the everyday profile")
+        self._event(
+            moment,
+            "low_activity_detected",
+            f"24h consumption {ratio:.0%} of the everyday profile",
+        )
 
-    def _low_step(self, moment: datetime, value: float | None, expected: float | None) -> None:
+    def _low_step(
+        self, moment: datetime, value: float | None, expected: float | None
+    ) -> None:
         window_start = moment - RETURN_MAX_AGE
         while self.evidence and self.evidence[0][0] <= window_start:
             self.evidence.popleft()
         if value is None:
             return
         self.low.append((moment, value, expected))
-        if len(self.low) % LOW_BASE_REFRESH_BUCKETS == 0 and len(self.low) >= LOW_BASE_MIN_BUCKETS:
+        if (
+            len(self.low) % LOW_BASE_REFRESH_BUCKETS == 0
+            and len(self.low) >= LOW_BASE_MIN_BUCKETS
+        ):
             recent = [v for t, v, _ in self.low if t > moment - LOW_LEARN_WINDOW]
             self.low_base = statistics.median(recent)
-        if self.detected_at is not None and moment + BUCKET_WIDTH - self.detected_at >= PROMOTE_AFTER:
+        if (
+            self.detected_at is not None
+            and moment + BUCKET_WIDTH - self.detected_at >= PROMOTE_AFTER
+        ):
             self._promote(moment)
             return
         base = self.low_base
         if base is None or expected is None:
             return
-        if expected < INFORMATIVE_FACTOR * base or expected - base < INFORMATIVE_MIN_SEPARATION_WH:
+        if (
+            expected < INFORMATIVE_FACTOR * base
+            or expected - base < INFORMATIVE_MIN_SEPARATION_WH
+        ):
             return
         if value > RETURN_MAX_EXCESS * expected:
             return
         like = value >= base + 0.5 * (expected - base)
-        peak = like and expected >= PEAK_FACTOR * base and value >= base + PEAK_POSITION * (expected - base)
+        peak = (
+            like
+            and expected >= PEAK_FACTOR * base
+            and value >= base + PEAK_POSITION * (expected - base)
+        )
         self.evidence.append((moment, like, peak))
         fraction = sum(1 for _, liked, _ in self.evidence if liked) / len(self.evidence)
         peaks = sum(1 for _, _, peaked in self.evidence if peaked)
@@ -419,13 +474,16 @@ class _Replay:
     def _return(self, moment: datetime, fraction: float) -> None:
         self.state = "normal"
         self.last_return_at = moment + BUCKET_WIDTH
-        self.quarantine_until = moment + BUCKET_WIDTH  # nothing of the phase or its edge is learned
+        self.quarantine_until = (
+            moment + BUCKET_WIDTH
+        )  # nothing of the phase or its edge is learned
         self.win.clear()
         self.win_actual = self.win_expected = 0.0
         self._reset_day()
         self.level_ratios.clear()
         self._event(
-            moment, "return_confirmed",
+            moment,
+            "return_confirmed",
             f"{fraction:.0%} of {len(self.evidence)} newest informative buckets match the everyday profile",
         )
         self.detected_at = None
@@ -440,8 +498,12 @@ class _Replay:
         self.level = 1.0
         for start, value, _ in self.low:
             week_key, slot_key = self.keys(start)
-            self.week.setdefault(week_key, deque(maxlen=PROFILE_WEEK_SAMPLES)).append(value)
-            self.slot.setdefault(slot_key, deque(maxlen=PROFILE_DAY_SAMPLES)).append(value)
+            self.week.setdefault(week_key, deque(maxlen=PROFILE_WEEK_SAMPLES)).append(
+                value
+            )
+            self.slot.setdefault(slot_key, deque(maxlen=PROFILE_DAY_SAMPLES)).append(
+                value
+            )
             self.learned_per_date[start.astimezone(self.zone).date()] += 1
         self.state = "normal"
         self.promoted_at = moment + BUCKET_WIDTH
@@ -453,7 +515,11 @@ class _Replay:
         self.detected_at = None
         self.low.clear()
         self.evidence.clear()
-        self._event(moment, "promoted_to_normal", f"low activity lasted {PROMOTE_AFTER.days} days; profile rebuilt")
+        self._event(
+            moment,
+            "promoted_to_normal",
+            f"low activity lasted {PROMOTE_AFTER.days} days; profile rebuilt",
+        )
 
     # -- level --------------------------------------------------------------------------------
     def _reset_day(self) -> None:
@@ -461,7 +527,11 @@ class _Replay:
         self.day_buckets = 0
 
     def _close_day(self) -> None:
-        if self.state == "normal" and self.day_buckets >= DAY_MIN_BUCKETS and self.day_expected > 0.0:
+        if (
+            self.state == "normal"
+            and self.day_buckets >= DAY_MIN_BUCKETS
+            and self.day_expected > 0.0
+        ):
             ratio = self.day_actual / self.day_expected
             self.level_ratios.append(ratio)
             self.recent_ratios.append(ratio)
@@ -471,7 +541,9 @@ class _Replay:
                     new_level = min(LEVEL_MAX, max(LEVEL_MIN, median))
                     self.events.append(
                         PhaseEvent(
-                            datetime.combine(self.day, datetime.min.time(), tzinfo=self.zone).astimezone(UTC)
+                            datetime.combine(
+                                self.day, datetime.min.time(), tzinfo=self.zone
+                            ).astimezone(UTC)
                             + timedelta(days=1),
                             "level_changed",
                             f"level factor {self.level:.2f} -> {new_level:.2f} (median of {len(self.level_ratios)} daily ratios)",
@@ -520,20 +592,33 @@ class AdaptiveConsumptionForecaster:
             value = usable_value(bucket)
             if value is not None:
                 observed[bucket.start] = value
-        key = (end, len(observed), min(observed, default=None), round(sum(observed.values()), 3))
+        key = (
+            end,
+            len(observed),
+            min(observed, default=None),
+            round(sum(observed.values()), 3),
+        )
         if self._cache is not None and key == self._cache_key:
             return self._cache
         replay = _Replay(self._zone, observed).run(now)
         self._cache_key, self._cache = key, replay
         return replay
 
-    def analyze(self, history: Sequence[HistoryBucket], now: datetime) -> AdaptiveAnalysis:
+    def analyze(
+        self, history: Sequence[HistoryBucket], now: datetime
+    ) -> AdaptiveAnalysis:
         replay = self._replay(history, now)
         end = replay.end or floor_to_bucket(now)
-        recent = sum(1 for moment in replay.observed if end - timedelta(days=7) <= moment < end)
+        recent = sum(
+            1 for moment in replay.observed if end - timedelta(days=7) <= moment < end
+        )
         coverage = min(1.0, recent / _COVERAGE_BUCKETS)
         ratios = list(replay.recent_ratios)
-        spread = statistics.median(abs(r - statistics.median(ratios)) for r in ratios) if len(ratios) >= 3 else None
+        spread = (
+            statistics.median(abs(r - statistics.median(ratios)) for r in ratios)
+            if len(ratios) >= 3
+            else None
+        )
         days = replay.profile_days()
         reasons: list[str] = []
         if replay.state == "learning":
@@ -546,7 +631,9 @@ class AdaptiveConsumptionForecaster:
         elif replay.state == "low":
             phase = ConsumptionPhase.SUSPECTED_LOW_ACTIVITY
             method = METHOD_ADAPTIVE
-            reasons.append("consumption is clearly below the everyday profile; the profile is frozen")
+            reasons.append(
+                "consumption is clearly below the everyday profile; the profile is frozen"
+            )
         else:
             phase = ConsumptionPhase.NORMAL
             method = METHOD_ADAPTIVE
@@ -572,12 +659,16 @@ class AdaptiveConsumptionForecaster:
         )
 
     # -- forecast -----------------------------------------------------------------------------
-    def _slot_value(self, replay: _Replay, start: datetime, cache: dict) -> float | None:
+    def _slot_value(
+        self, replay: _Replay, start: datetime, cache: dict
+    ) -> float | None:
         if replay.state == "low":
             return replay.low_estimate(start, cache)
         return replay.expected(start)
 
-    def build(self, history: Sequence[HistoryBucket], now: datetime, horizon: timedelta) -> ConsumptionForecast:
+    def build(
+        self, history: Sequence[HistoryBucket], now: datetime, horizon: timedelta
+    ) -> ConsumptionForecast:
         now = now.astimezone(UTC)
         replay = self._replay(history, now)
         median = self._median.build(history, now, horizon)
@@ -593,11 +684,17 @@ class AdaptiveConsumptionForecaster:
             if value is None:
                 value = fallback.get(start)
             if value is not None:
-                intervals.append(ConsumptionForecastInterval(start, start + BUCKET_WIDTH, max(0.0, value)))
+                intervals.append(
+                    ConsumptionForecastInterval(
+                        start, start + BUCKET_WIDTH, max(0.0, value)
+                    )
+                )
             start += BUCKET_WIDTH
         return ConsumptionForecast(created_at=now, intervals=tuple(intervals))
 
-    def _backed(self, history: Sequence[HistoryBucket], now: datetime, horizon: timedelta) -> list[bool] | None:
+    def _backed(
+        self, history: Sequence[HistoryBucket], now: datetime, horizon: timedelta
+    ) -> list[bool] | None:
         """Per horizon slot: backed by the profile. ``None`` while the median forecaster must answer."""
         replay = self._replay(history, now)
         if replay.state == "learning":
@@ -611,13 +708,17 @@ class AdaptiveConsumptionForecaster:
             start += BUCKET_WIDTH
         return flags
 
-    def horizon_coverage_ratio(self, history: Sequence[HistoryBucket], now: datetime, horizon: timedelta) -> float:
+    def horizon_coverage_ratio(
+        self, history: Sequence[HistoryBucket], now: datetime, horizon: timedelta
+    ) -> float:
         flags = self._backed(history, now, horizon)
         if flags is None:
             return self._median.horizon_coverage_ratio(history, now, horizon)
         return sum(flags) / len(flags) if flags else 0.0
 
-    def coverage_end(self, history: Sequence[HistoryBucket], now: datetime, horizon: timedelta) -> datetime:
+    def coverage_end(
+        self, history: Sequence[HistoryBucket], now: datetime, horizon: timedelta
+    ) -> datetime:
         flags = self._backed(history, now, horizon)
         if flags is None:
             return self._median.coverage_end(history, now, horizon)
@@ -633,7 +734,11 @@ class AdaptiveConsumptionForecaster:
 
     # -- next day -----------------------------------------------------------------------------
     def next_day_forecast(
-        self, history: Sequence[HistoryBucket], now: datetime, *, method: str = METHOD_ADAPTIVE
+        self,
+        history: Sequence[HistoryBucket],
+        now: datetime,
+        *,
+        method: str = METHOD_ADAPTIVE,
     ) -> NextDayForecast | None:
         """The quarter-hour values of the next local calendar day, or ``None`` without any estimate.
 
@@ -642,7 +747,9 @@ class AdaptiveConsumptionForecaster:
         now = now.astimezone(UTC)
         local = now.astimezone(self._zone)
         target = local.date() + timedelta(days=1)
-        midnight = datetime.combine(target, datetime.min.time(), tzinfo=self._zone).astimezone(UTC)
+        midnight = datetime.combine(
+            target, datetime.min.time(), tzinfo=self._zone
+        ).astimezone(UTC)
         next_midnight = datetime.combine(
             target + timedelta(days=1), datetime.min.time(), tzinfo=self._zone
         ).astimezone(UTC)
