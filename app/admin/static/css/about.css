@@ -79,6 +79,7 @@
 .about-changelog {
   max-height: min(34rem, 60vh);
   overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .about-changelog ul {
@@ -100,8 +101,8 @@
   cursor: pointer;
 }
 
-/* Keeps a long collapsed history from pushing the card; about.js moves the body here on toggle. */
+/* about.js moves the details body here. It must not scroll itself: .about-changelog already bounds
+   the height, and a second scroller inside it is a scroll trap on iOS. */
 .changelog-details-body {
-  max-height: 20rem;
-  overflow-y: auto;
+  overflow: visible;
 }
