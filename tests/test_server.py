@@ -71,10 +71,14 @@ def _free_http_port() -> socket.socket:
     return sock
 
 
-def _fake_device(result: dict, slow_object: int, ready: threading.Event, slow_hit: threading.Event) -> None:
+def _fake_device(
+    result: dict, slow_object: int, ready: threading.Event, slow_hit: threading.Event
+) -> None:
     from app.protocol.frames import Frame
 
-    async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+    async def handle(
+        reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+    ) -> None:
         parser = StreamParser()
         while data := await reader.read(4096):
             for frame in parser.feed(data):
@@ -82,7 +86,16 @@ def _fake_device(result: dict, slow_object: int, ready: threading.Event, slow_hi
                     slow_hit.set()  # the slow request actually reached the device (Finding 2)
                     await asyncio.sleep(SLOW_DELAY)
                 payload = struct.pack(">f", 1.5) if frame.object_id != 0 else b""
-                writer.write(encode_frame(Frame(Command.RESPONSE, frame.object_id, payload, frame.plant_address)))
+                writer.write(
+                    encode_frame(
+                        Frame(
+                            Command.RESPONSE,
+                            frame.object_id,
+                            payload,
+                            frame.plant_address,
+                        )
+                    )
+                )
                 await writer.drain()
 
     async def main() -> None:
@@ -103,13 +116,17 @@ def _fake_device(result: dict, slow_object: int, ready: threading.Event, slow_hi
 def _get(url: str, token: str | None = None) -> tuple[int, dict]:
     headers = {"Authorization": f"Bearer {token}"} if token else {}
     try:
-        with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=10) as response:
+        with urllib.request.urlopen(
+            urllib.request.Request(url, headers=headers), timeout=10
+        ) as response:
             return response.status, json.loads(response.read())
     except urllib.error.HTTPError as err:
         return err.code, json.loads(err.read())
 
 
-def _wait_for_status(base: str, token: str | None, expected: int, deadline: float) -> dict:
+def _wait_for_status(
+    base: str, token: str | None, expected: int, deadline: float
+) -> dict:
     """Poll ``/health`` until it reports ``expected`` or the deadline passes (Finding 2)."""
     last: tuple[int, dict] | None = None
     while time.monotonic() < deadline:
@@ -136,12 +153,18 @@ _BOOT = (
 
 
 def test_sigterm_drains_answers_503_and_exits_cleanly(tmp_path) -> None:
-    slow = RegistryCatalog.from_file(make_settings().object_registry_path).object_entry("battery_soc").object_id
+    slow = (
+        RegistryCatalog.from_file(make_settings().object_registry_path)
+        .object_entry("battery_soc")
+        .object_id
+    )
     device_ready = threading.Event()
     slow_hit = threading.Event()
     device_result: dict = {}
     device_thread = threading.Thread(
-        target=_fake_device, args=(device_result, slow, device_ready, slow_hit), daemon=True
+        target=_fake_device,
+        args=(device_result, slow, device_ready, slow_hit),
+        daemon=True,
     )
     device_thread.start()
     store: AdminStore | None = None
@@ -154,7 +177,8 @@ def test_sigterm_drains_answers_503_and_exits_cleanly(tmp_path) -> None:
         env_file = tmp_path / "settings.env"
         secret = "k" * 48
         env_file.write_text(
-            f"BIND_PORT={http_port}\nADMIN_DB_PATH={tmp_path / 'rct.db'}\nHMAC_SECRET={secret}\n", encoding="utf-8"
+            f"BIND_PORT={http_port}\nADMIN_DB_PATH={tmp_path / 'rct.db'}\nHMAC_SECRET={secret}\n",
+            encoding="utf-8",
         )
         env_file.chmod(0o600)
         # Devices and tokens are GUI-only, so seed the admin database the way the GUI would.
@@ -163,15 +187,32 @@ def test_sigterm_drains_answers_503_and_exits_cleanly(tmp_path) -> None:
         assert store.change_password(password, "a much stronger password")
         token = store.create_token("smoke", "read", None)[1]
         store.put(
-            "operator_settings", {"devices": [{"device_id": "main", "host": "127.0.0.1", "port": device_port}]}
+            "operator_settings",
+            {
+                "devices": [
+                    {"device_id": "main", "host": "127.0.0.1", "port": device_port}
+                ]
+            },
         )
         store.close()
         store = None  # the child owns the database file from here on
         proc = subprocess.Popen(
-            [sys.executable, "-c", _BOOT, str(REGISTRY_FIXTURE), "serve", "--env-file", str(env_file)],
+            [
+                sys.executable,
+                "-c",
+                _BOOT,
+                str(REGISTRY_FIXTURE),
+                "serve",
+                "--env-file",
+                str(env_file),
+            ],
             cwd=ROOT,
             env={
-                **{k: v for k, v in os.environ.items() if k not in set(settings_env_names())},
+                **{
+                    k: v
+                    for k, v in os.environ.items()
+                    if k not in set(settings_env_names())
+                },
                 "RCT_API_BOUND_FD": str(http_sock.fileno()),
             },
             pass_fds=(http_sock.fileno(),),
@@ -189,7 +230,11 @@ def test_sigterm_drains_answers_503_and_exits_cleanly(tmp_path) -> None:
             raise AssertionError("server did not start")
         in_flight: list[int] = []
         worker = threading.Thread(
-            target=lambda: in_flight.append(_get(f"{base}/api/v1/devices/main/metrics/battery_soc?fresh=true", token)[0])
+            target=lambda: in_flight.append(
+                _get(
+                    f"{base}/api/v1/devices/main/metrics/battery_soc?fresh=true", token
+                )[0]
+            )
         )
         worker.start()
         # Wait for the slow frame to actually reach the fake device before sending SIGTERM, instead
@@ -265,7 +310,10 @@ def test_warns_on_loopback_in_container(monkeypatch, caplog) -> None:
     monkeypatch.setattr(server, "_in_container", lambda: True)
     with caplog.at_level(logging.WARNING, logger=server.log.name):
         server.warn_if_loopback_in_container(_settings("127.0.0.1"))
-    assert any("loopback" in r.getMessage() and "0.0.0.0" in r.getMessage() for r in caplog.records)
+    assert any(
+        "loopback" in r.getMessage() and "0.0.0.0" in r.getMessage()
+        for r in caplog.records
+    )
     assert any("behind reverse proxy" in r.getMessage() for r in caplog.records)
 
 
@@ -289,7 +337,11 @@ def test_marker_variable_marks_container(monkeypatch) -> None:
 
 
 def _container_ip_lines(caplog: pytest.LogCaptureFixture) -> list[str]:
-    return [r.getMessage() for r in caplog.records if r.getMessage().startswith("Container IP")]
+    return [
+        r.getMessage()
+        for r in caplog.records
+        if r.getMessage().startswith("Container IP")
+    ]
 
 
 def test_startup_log_shows_container_ip_in_a_container(monkeypatch, caplog) -> None:
@@ -300,7 +352,9 @@ def test_startup_log_shows_container_ip_in_a_container(monkeypatch, caplog) -> N
     assert _container_ip_lines(caplog) == ["Container IP: 172.17.0.5"]
 
 
-def test_startup_log_reports_unknown_when_container_ip_detection_fails(monkeypatch, caplog) -> None:
+def test_startup_log_reports_unknown_when_container_ip_detection_fails(
+    monkeypatch, caplog
+) -> None:
     monkeypatch.setattr(entry, "_in_container", lambda: True)
     monkeypatch.setattr(entry, "_container_ip", lambda: None)
     with caplog.at_level(logging.INFO, logger=entry.log.name):
@@ -308,7 +362,9 @@ def test_startup_log_reports_unknown_when_container_ip_detection_fails(monkeypat
     assert _container_ip_lines(caplog) == ["Container IP: unknown"]
 
 
-def test_startup_log_omits_container_ip_outside_a_container(monkeypatch, caplog) -> None:
+def test_startup_log_omits_container_ip_outside_a_container(
+    monkeypatch, caplog
+) -> None:
     monkeypatch.setattr(entry, "_in_container", lambda: False)
     monkeypatch.setattr(entry, "_container_ip", lambda: "172.17.0.5")
     with caplog.at_level(logging.INFO, logger=entry.log.name):
@@ -317,16 +373,24 @@ def test_startup_log_omits_container_ip_outside_a_container(monkeypatch, caplog)
 
 
 def _docs_lines(caplog: pytest.LogCaptureFixture) -> list[str]:
-    return [r.getMessage() for r in caplog.records if r.getMessage().startswith("API documentation")]
+    return [
+        r.getMessage()
+        for r in caplog.records
+        if r.getMessage().startswith("API documentation")
+    ]
 
 
 @pytest.mark.parametrize(
     ("address", "url"),
     [("127.0.0.1", "http://127.0.0.1:8123/docs"), ("::1", "http://[::1]:8123/docs")],
 )
-def test_enabled_docs_log_their_url(caplog: pytest.LogCaptureFixture, address: str, url: str) -> None:
+def test_enabled_docs_log_their_url(
+    caplog: pytest.LogCaptureFixture, address: str, url: str
+) -> None:
     with caplog.at_level(logging.INFO, logger="app.api.app_factory"):
-        create_app(make_settings(docs_public=True, bind_address=address, bind_port=8123))
+        create_app(
+            make_settings(docs_public=True, bind_address=address, bind_port=8123)
+        )
     assert _docs_lines(caplog) == [f"API documentation: {url} (OpenAPI: /openapi.json)"]
 
 
@@ -337,7 +401,9 @@ def test_disabled_docs_say_so(caplog: pytest.LogCaptureFixture) -> None:
 
 
 def test_early_signal_is_remembered_and_starts_drain_in_serve(monkeypatch) -> None:
-    server = GracefulServer(uvicorn.Config(lambda *a: None), SimpleNamespace(shutdown=None))
+    server = GracefulServer(
+        uvicorn.Config(lambda *a: None), SimpleNamespace(shutdown=None)
+    )
     server.handle_exit(signal.SIGTERM, None)
     assert server._early_signal and not server._drain_requested
 
@@ -373,11 +439,11 @@ async def test_jobs_wait_for_password_change_then_start(tmp_path, caplog, monkey
     spot_started = asyncio.Event()
     solar_started = asyncio.Event()
 
-    async def spot_loop(*args):
+    async def spot_loop(*args, **kwargs):
         spot_started.set()
         await asyncio.Future()
 
-    async def solar_loop(*args):
+    async def solar_loop(*args, **kwargs):
         solar_started.set()
         await asyncio.Future()
 
@@ -391,25 +457,35 @@ async def test_jobs_wait_for_password_change_then_start(tmp_path, caplog, monkey
         # heartbeat/periodic/refresh tasks synchronously, before the context manager above ever
         # yields: the warning log line and the STARTING state are both already settled by this
         # point, not something a fixed sleep could prove any more reliably (minor note).
-        assert _states(harness.app) == {DeviceState.STARTING}  # no heartbeat while the bootstrap password stands
+        assert _states(harness.app) == {
+            DeviceState.STARTING
+        }  # no heartbeat while the bootstrap password stands
         assert not spot_started.is_set() and not solar_started.is_set()
         assert "Initial admin password not changed yet" in caplog.text
-        assert (await harness.client.get("/login")).status_code == 200  # the admin UI stays reachable
+        assert (
+            await harness.client.get("/login")
+        ).status_code == 200  # the admin UI stays reachable
         assert harness.app.state.admin_store.change_password(password, NEW_PASSWORD)
         await wait_settled(harness.app, timeout=8)
-        await asyncio.wait_for(asyncio.gather(spot_started.wait(), solar_started.wait()), timeout=8)
+        await asyncio.wait_for(
+            asyncio.gather(spot_started.wait(), solar_started.wait()), timeout=8
+        )
         assert DeviceState.STARTING not in _states(harness.app)
 
 
 @pytest.mark.asyncio
-async def test_later_start_with_changed_password_runs_jobs_immediately(tmp_path, caplog):
+async def test_later_start_with_changed_password_runs_jobs_immediately(
+    tmp_path, caplog
+):
     settings = _gate_settings(tmp_path)
     async with running_app(settings, settle=False, authorize=False) as first:
         password = first.app.state.first_start_password
         assert first.app.state.admin_store.change_password(password, NEW_PASSWORD)
     caplog.set_level(logging.WARNING)
     caplog.clear()
-    async with running_app(settings, authorize=False) as second:  # settle=True: heartbeat ran at once
+    async with running_app(
+        settings, authorize=False
+    ) as second:  # settle=True: heartbeat ran at once
         assert DeviceState.STARTING not in _states(second.app)
     assert "Initial admin password not changed yet" not in caplog.text
 
@@ -417,13 +493,18 @@ async def test_later_start_with_changed_password_runs_jobs_immediately(tmp_path,
 BOOTSTRAP_PASSWORD = "Xk7-pw29"
 
 
-async def test_first_start_password_is_printed_to_the_console(tmp_path, capsys, monkeypatch) -> None:
+async def test_first_start_password_is_printed_to_the_console(
+    tmp_path, capsys, monkeypatch
+) -> None:
     """The one-time bootstrap password is shown directly in the startup banner on stdout; no
     password file is created anymore. Console persistence (systemd/Docker/Kubernetes) is an
     accepted operator tradeoff."""
     settings = make_settings(admin_db_path=tmp_path / "data" / "rct.db")
     app = SimpleNamespace(
-        state=SimpleNamespace(first_start_password=BOOTSTRAP_PASSWORD, runtime=SimpleNamespace(settings=settings))
+        state=SimpleNamespace(
+            first_start_password=BOOTSTRAP_PASSWORD,
+            runtime=SimpleNamespace(settings=settings),
+        )
     )
 
     async def no_listener(self, sockets=None) -> None:
@@ -450,7 +531,9 @@ def test_first_start_banner_prints_the_password_and_the_url() -> None:
 def test_first_start_banner_shows_container_ip_in_a_container(monkeypatch) -> None:
     monkeypatch.setattr(server, "_in_container", lambda: True)
     monkeypatch.setattr(server, "_container_ip", lambda: "172.17.0.5")
-    settings = make_settings(bind_address="0.0.0.0", bind_port=8123, allow_non_loopback_bind=True)
+    settings = make_settings(
+        bind_address="0.0.0.0", bind_port=8123, allow_non_loopback_bind=True
+    )
     text = first_start_banner(settings, BOOTSTRAP_PASSWORD)
     assert "http://172.17.0.5:8123/" in text and "127.0.0.1" not in text
     assert BOOTSTRAP_PASSWORD in text and "FIRST START" in text
@@ -459,21 +542,31 @@ def test_first_start_banner_shows_container_ip_in_a_container(monkeypatch) -> No
 def test_first_start_banner_keeps_bind_host_outside_a_container(monkeypatch) -> None:
     monkeypatch.setattr(server, "_in_container", lambda: False)
     monkeypatch.setattr(server, "_container_ip", lambda: "172.17.0.5")
-    settings = make_settings(bind_address="0.0.0.0", bind_port=8123, allow_non_loopback_bind=True)
+    settings = make_settings(
+        bind_address="0.0.0.0", bind_port=8123, allow_non_loopback_bind=True
+    )
     text = first_start_banner(settings, BOOTSTRAP_PASSWORD)
     assert "http://0.0.0.0:8123/" in text and "172.17.0.5" not in text
 
 
-def test_first_start_banner_falls_back_when_container_ip_detection_fails(monkeypatch) -> None:
+def test_first_start_banner_falls_back_when_container_ip_detection_fails(
+    monkeypatch,
+) -> None:
     monkeypatch.setattr(server, "_in_container", lambda: True)
     monkeypatch.setattr(server, "_container_ip", lambda: None)
-    text = first_start_banner(make_settings(bind_address="127.0.0.1", bind_port=8123), BOOTSTRAP_PASSWORD)
+    text = first_start_banner(
+        make_settings(bind_address="127.0.0.1", bind_port=8123), BOOTSTRAP_PASSWORD
+    )
     assert "http://127.0.0.1:8123/" in text  # falls back to the bind host, never raises
 
 
-def test_first_start_banner_keeps_specific_bind_address_in_a_container(monkeypatch) -> None:
+def test_first_start_banner_keeps_specific_bind_address_in_a_container(
+    monkeypatch,
+) -> None:
     monkeypatch.setattr(server, "_in_container", lambda: True)
     monkeypatch.setattr(server, "_container_ip", lambda: "172.17.0.5")
-    settings = make_settings(bind_address="10.1.2.3", bind_port=8123, allow_non_loopback_bind=True)
+    settings = make_settings(
+        bind_address="10.1.2.3", bind_port=8123, allow_non_loopback_bind=True
+    )
     text = first_start_banner(settings, BOOTSTRAP_PASSWORD)
     assert "http://10.1.2.3:8123/" in text and "172.17.0.5" not in text

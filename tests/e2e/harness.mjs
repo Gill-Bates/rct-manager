@@ -38,3 +38,15 @@ export function spawnPy(args, log) {
   procs.push(proc);
   return { proc, output: () => out };
 }
+
+// The Charging plan tab only exists while an inverter is Manual or External. Driver pages that
+// exercise the plan with a mocked plan report the simulated inverter as Manual instead of
+// configuring write support and hardware verification.
+export async function reportInverterAsManual(page) {
+  await page.route(/\/admin\/api\/energy\/(planning-)?devices$/, async (route) => {
+    const response = await route.fetch();
+    const body = await response.json().catch(() => null);
+    if (Array.isArray(body)) for (const device of body) device.mode = 'manual';
+    await route.fulfill({ response, json: body ?? undefined });
+  });
+}

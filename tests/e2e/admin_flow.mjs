@@ -8,7 +8,7 @@
 import net from 'node:net';
 import fs from 'node:fs';
 import path from 'node:path';
-import { check, engine, freePort, NEW_PASSWORD, OUT, results, sleep, spawnPy } from './harness.mjs';
+import { check, engine, freePort, NEW_PASSWORD, OUT, reportInverterAsManual, results, sleep, spawnPy } from './harness.mjs';
 
 const problems = [];
 // Must match the key written by toggleTheme() in app/admin/static/js/admin-core.js.
@@ -2528,6 +2528,7 @@ try {
         let consumptionGate = null;
         let planStatus = 'ok';
         let planRequests = 0;
+        await reportInverterAsManual(ep);
         await ep.route('**/admin/api/energy/devices/*/dynamic-plan', (route) => {
           planRequests += 1;
           return route.fulfill({ json: planStatus === 'ok' ? plan : { status: planStatus, slots: [], detail: null } });

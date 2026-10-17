@@ -729,6 +729,16 @@ function setEnergyNote(host, text, { kind = 'secondary', action = null } = {}) {
   if (energyNote.parentNode !== host) host.append(energyNote);
 }
 
+// A mode change on the Inverter tab updates the Charging plan tab without waiting for its refresh.
+function followPlanModes(devices) {
+  const modes = new Map(devices.map((device) => [device.device_id, device.mode]));
+  const changed = planDevices.some((device) => modes.has(device.device_id) && modes.get(device.device_id) !== device.mode);
+  if (!changed) return;
+  for (const device of planDevices) if (modes.has(device.device_id)) device.mode = modes.get(device.device_id);
+  syncPlanSelection();
+  if ($('energy-plan-device')?.value) void loadDryRunPlan();
+}
+
 async function pollEnergy() {
   if (energyPolling) return;
   energyPolling = true;
@@ -765,6 +775,7 @@ async function pollEnergy() {
       for (const [id, panel] of ordered) { energyPanels.set(id, panel); host.append(panel.root); }
     }
     if (energyHardwareStrategies.size) renderHardwareSummary();
+    followPlanModes(devices);
     setEnergyNote(host, devices.length ? null : 'No inverters configured yet.');
     // The absolute timestamp lives in Diagnostics now (design §13), not a top-of-page line.
     const stamp = `Updated ${new Date().toLocaleTimeString(undefined)}`;
@@ -858,7 +869,6 @@ const PLAN_STATUS_LABELS = {
   solar_not_configured: 'Solar forecast is not configured',
   solar_forecast_unavailable: 'Solar forecast is not available yet',
   battery_state_unavailable: 'Usable battery capacity is needed',
-  energy_manager_off: 'Energy Manager off',
 };
 const PLAN_ACTION_LABELS = { idle: 'No grid charging', charge: 'Grid charging', hold: 'Hold', discharge: 'Discharge', auto: 'Automatic' };
 const PLAN_POLICY_LABELS = { gentle: 'Gentle (stay in the preferred power range)', meet_deadline: 'Meet deadline (raise power up to the hard limit if needed)' };
@@ -982,14 +992,6 @@ function planWaitState() {
 // and is only re-requested quietly; every other non-ok status needs an operator action.
 const PLAN_PENDING_STATUSES = new Set(['insufficient_history', 'spot_prices_unavailable', 'solar_forecast_unavailable']);
 const PLAN_RETRY_STATUSES = new Set([...PLAN_PENDING_STATUSES, 'battery_state_unavailable']);
-
-// Off is operational rest: no spinner, no retry polling and no chart, only this compact notice.
-function planOffState() {
-  const card = element('section', 'mb-3 energy-plan-off');
-  card.setAttribute('role', 'status');
-  card.append(element('h3', 'h5 mb-1', 'Energy Manager off'), element('p', 'mb-0 text-secondary', 'Charging plan is inactive.'));
-  return card;
-}
 
 function planStatusCard(title, message) {
   const card = element('section', 'mb-3');
@@ -1388,7 +1390,7 @@ function planTechnicalDetails(plan) {
 }
 
 const PLAN_CONFIDENCE_LABELS = { low: 'Low confidence', normal: 'Normal confidence' };
-const PLAN_MANAGER_LABELS = { off: 'Energy Manager off', manual: 'Manual control', external: 'External control' };
+const PLAN_MANAGER_LABELS = { manual: 'Manual control', external: 'External control' };
 
 // Forecast confidence next to the execution state, from forecast_basis / forecast_confidence only;
 // a missing field hides the part instead of inventing a state.
@@ -1412,17 +1414,17 @@ function renderDryRunPlan(plan, { waiting = true } = {}) {
   clearPlanSchedule();
   // Energy Manager state of the selected inverter, shown as the header badge whatever the plan status.
   const selectedDevice = (typeof planDevices === 'undefined' ? [] : planDevices).find((item) => item.device_id === $('energy-plan-device')?.value);
-  const managerOff = selectedDevice?.mode === 'off';
   const managerBadge = $('energy-plan-manager-state');
   if (managerBadge) {
     managerBadge.hidden = !selectedDevice;
     // The plan has no executor: the badge only reports the Energy Manager mode of the inverter.
     managerBadge.textContent = PLAN_MANAGER_LABELS[selectedDevice?.mode] || PLAN_MANAGER_LABELS.manual;
-    managerBadge.className = `status-badge ${managerOff ? 'status-badge-neutral' : 'status-badge-success'}`;
+    managerBadge.className = `status-badge status-badge-success`;
   }
   renderPlanConfidence(plan);
   if (plan.status === 'energy_manager_off') {
-    host.replaceChildren(planOffState());
+    // The inverter was switched off meanwhile: the tab disappears with the next device sync.
+    host.replaceChildren();
     return;
   }
   if (plan.status !== 'ok') {
@@ -1448,14 +1450,10 @@ function renderDryRunPlan(plan, { waiting = true } = {}) {
     host.replaceChildren(readiness);
     return;
   }
-  // While the Energy Manager is off for this inverter no grid charge will ever be started, so the
-  // plan must not announce one; the header badge shows the Energy Manager as off and no status card is shown.
-  const next = managerOff ? null : nextGridCharge(plan.slots || []);
-  const card = managerOff
-    ? element('div')
-    : next
-      ? planStatusCard('Next grid charge', `${planDateTime(next.start)} – ${planDateTime(next.end)}`)
-      : planStatusCard('No grid charge planned', 'The current plan does not schedule a grid charge.');
+  const next = nextGridCharge(plan.slots || []);
+  const card = next
+    ? planStatusCard('Next grid charge', `${planDateTime(next.start)} – ${planDateTime(next.end)}`)
+    : planStatusCard('No grid charge planned', 'The current plan does not schedule a grid charge.');
   // Three plan-KPI tiles (plan outputs) built from the plan's own snapshot (no second data source).
   // Battery remaining is a live device state, so it renders as a weaker tertiary line below the grid.
   const summary = element('div', 'spot-market-highlights energy-plan-highlights mt-3');
@@ -1682,18 +1680,39 @@ async function loadBatteryCalibrationHistory(deviceId) {
   }
 }
 
+// The Charging plan exists only for inverters that are Manual or External (Off is operational rest).
+const planInactive = (device) => device.mode === 'off' || device.mode === null;
+
+// Offers only active inverters in the select and shows the tab only while one exists; the active
+// tab falls back to Inverter when the last active inverter is switched off.
+function syncPlanSelection() {
+  const select = $('energy-plan-device');
+  if (!select || !planDevices.length) return;
+  const choices = planDevices.filter((device) => !planInactive(device));
+  const previous = select.value;
+  select.replaceChildren(...choices.map((device) => {
+    const option = element('option', '', device.device_name || device.device_id);
+    option.value = device.device_id;
+    return option;
+  }));
+  select.value = choices.some((device) => device.device_id === previous) ? previous : (choices[0]?.device_id ?? '');
+  const tab = $('energy-tab-plan');
+  const pane = $('energy-pane-plan');
+  if (!tab || !pane) return;
+  tab.parentElement.hidden = !choices.length;
+  pane.hidden = !choices.length;
+  const inverterTab = $('energy-tab-inverter');
+  if (!choices.length && tab.classList.contains('active') && inverterTab && window.bootstrap) {
+    window.bootstrap.Tab.getOrCreateInstance(inverterTab).show();
+  }
+}
+
 // Read-only device list: independent of write support and of the dispatch controller.
 async function refreshPlanDevices() {
   const select = $('energy-plan-device');
   if (!select) return;
   planDevices = await api('energy/planning-devices');
-  const previous = select.value;
-  select.replaceChildren(...planDevices.map((device) => {
-    const option = element('option', '', device.device_name || device.device_id);
-    option.value = device.device_id;
-    return option;
-  }));
-  if (planDevices.some((device) => device.device_id === previous)) select.value = previous;
+  syncPlanSelection();
   fillPlanLimits();
 }
 
@@ -1972,14 +1991,12 @@ async function loadDryRunPlan({ poll = false } = {}) {
   }
   const generation = ++planGeneration; // a slower earlier response must not overwrite a newer one
   if (typeof energyExpertMode !== 'undefined' && energyExpertMode) void loadBatteryCalibrationHistory(select.value);
-  const knownDevice = () => planDevices.find((item) => item.device_id === select.value);
   if (!poll) {
     void loadConsumptionHistory(select.value);
-    if (knownDevice()?.mode === 'off') host.replaceChildren(planOffState());
-    else host.replaceChildren(planWaitState());
+    host.replaceChildren(planWaitState());
   }
   try {
-    // Keep the Energy Manager mode current without rebuilding the select or the limits form.
+    // Keep the Energy Manager mode current; an Off inverter drops out of the select and the tab.
     await api('energy/planning-devices', { background: poll }).then((list) => {
       for (const fresh of list) {
         const known = planDevices.find((item) => item.device_id === fresh.device_id);
@@ -1987,12 +2004,10 @@ async function loadDryRunPlan({ poll = false } = {}) {
       }
     }).catch(() => { });
     if (generation !== planGeneration) return;
-    if (knownDevice()?.mode === 'off') {
-      // Nothing to compute or retry while the Energy Manager is off; the periodic refresh notices a switch-on.
-      planLastStatus = 'energy_manager_off';
-      renderDryRunPlan({ status: 'energy_manager_off', slots: [], window: {}, energy: null }, { waiting: false });
-      return;
-    }
+    const before = select.value;
+    syncPlanSelection();
+    if (!select.value) return; // every inverter is Off: the tab is hidden and nothing is requested
+    if (select.value !== before) { fillPlanLimits(); void loadDryRunPlan(); return; }
     const plan = await api(`energy/devices/${encodeURIComponent(select.value)}/dynamic-plan`, { background: poll });
     if (generation !== planGeneration) return;
     if (plan.status !== planLastStatus) { planLastStatus = plan.status; planPollAttempts = 0; }

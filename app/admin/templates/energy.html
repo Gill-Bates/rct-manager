@@ -11,14 +11,15 @@
 
 {# Bootstrap tabs: no full-page reload, keyboard operable (arrow keys move between tabs), and the
 active tab is reflected in the URL fragment by admin.js so a reload or a shared link reopens it.
-Default tab is Inverter; Charging plan is the read-only Dry-Run preview. #}
+Default tab is Inverter; Charging plan is the read-only Dry-Run preview and stays hidden
+until an inverter is Manual or External (energy-setup.js shows it). #}
 <ul class="nav nav-tabs energy-tabs mb-3" id="energy-tabs" role="tablist">
     <li class="nav-item" role="presentation">
         <button type="button" class="nav-link active" id="energy-tab-inverter" data-bs-toggle="tab"
             data-bs-target="#energy-pane-inverter" data-tab="inverter" role="tab" aria-controls="energy-pane-inverter"
             aria-selected="true">Inverter</button>
     </li>
-    <li class="nav-item" role="presentation">
+    <li class="nav-item" role="presentation" hidden>
         <button type="button" class="nav-link" id="energy-tab-plan" data-bs-toggle="tab"
             data-bs-target="#energy-pane-plan" data-tab="plan" role="tab" aria-controls="energy-pane-plan"
             aria-selected="false">Charging plan</button>

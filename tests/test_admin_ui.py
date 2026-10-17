@@ -594,10 +594,10 @@ def test_export_group_is_withheld_as_a_group_and_revalidated_at_send_time():
 def test_tsdb_form_has_a_button_only_apply_bar_and_only_the_master_switch_autosaves():
     js = _admin_js()
     html = (TEMPLATES / "tsdb.html").read_text(encoding="utf-8")
-    # Apply changes sits at the top left, before the settings grid, left-aligned (not the old
-    # bottom-right float), so it is the first action near the first settings card.
+    # Apply changes sits below the settings grid, left-aligned, like the other save actions
+    # that follow their form content.
     assert 'id="export-actions"' in html and "align-items-start" in html
-    assert html.index('id="export-actions"') < html.index('id="settings-sections"')
+    assert html.index('id="export-actions"') > html.index('id="settings-sections"')
     # The shared bar is parameterised, not overridden: TSDB asks for the button alone.
     assert "buildApplyBar('export', {" in js
     builder = js[js.index("function buildApplyBar("):js.index("function buildGroupBody(")]
@@ -1193,9 +1193,10 @@ def test_energy_mode_is_a_three_state_radio_group_with_mode_dependent_controls()
     # Keyboard: arrows move the focus only, a selection needs Space/Enter/click; aria-disabled keeps focus.
     assert "ArrowRight: 1" in js and "'Home'" in js and "aria-disabled" in js and "aria-checked" in js
     # Controls are enabled in Manual only; External shows the info line and disabled controls.
-    assert "const enabled = operable && item.available && !busy && device.connected;" in js
+    assert "const enabled = operable && item.available && !busy && device.connected && device.mode !== 'off';" in js
     assert "This inverter is controlled by an external app through the API (PAT required)." in js
     assert "external: 'controlled by an external app'" in js and "mode_off:" in js
+    assert "device.mode === 'off' ? 'mode_off'" in js
     assert "Manual control is off for this inverter" not in js
     assert "readyState.kind === 'setup' || !readyState.text" in js
     assert "Measurements are" not in js and "'Live data unavailable.'" in js
@@ -1219,10 +1220,11 @@ def test_energy_controls_are_locked_while_the_inverter_is_not_connected():
     # Mode buttons get the disabled attribute plus a visible hint, and every handler is guarded.
     assert "button.disabled = !device.connected;" in js and "modeOffline.hidden = device.connected;" in js
     assert "!device.connected || (wanted === device.mode" in js
-    assert "if (device.connected) send({ action: 'hold' });" in js
-    assert "if (!selected || !device.connected) return;" in js
+    assert "const actionsLocked = () => !device.connected || device.mode === 'off';" in js
+    assert "if (!actionsLocked()) send({ action: 'hold' });" in js
+    assert "if (!selected || actionsLocked()) return;" in js
     charge = js[js.index("for (const action of ['charge', 'discharge']) {\n      buttons[action].addEventListener"):]
-    assert "if (!device.connected) return;" in charge[:200]
+    assert "if (actionsLocked()) return;" in charge[:200]
 
 
 def test_destructive_actions_use_the_themed_confirm_modal_not_native_confirm():
@@ -1700,7 +1702,8 @@ def test_energy_page_wires_the_read_only_dry_run_plan_preview():
     assert "Read-only preview" in plan_pane and "Preview only" not in plan_pane
     assert "Preliminary plan" not in js
     assert "energy-plan-confidence-note" not in plan_pane + js
-    assert 'id="energy-plan-confidence"' in plan_pane and "'Energy Manager off'" in js
+    assert 'id="energy-plan-confidence"' in plan_pane and "'Energy Manager off'" not in js
+    assert "function syncPlanSelection" in js and "planInactive" in js
     assert "Show all intervals" in js and "element('details'" in js and "element('summary'" in js
     assert "History coverage" in js and "Live recording" not in js
     assert "Locally measured" in js and "Recovered from inverter history" in js

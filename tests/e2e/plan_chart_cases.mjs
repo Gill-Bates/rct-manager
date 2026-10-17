@@ -19,7 +19,7 @@
 //   COLOR_SCHEME=light|dark node tests/e2e/plan_chart_cases.mjs <artifact-dir>
 import fs from 'node:fs';
 import path from 'node:path';
-import { check, engine, freePort, NEW_PASSWORD, OUT, results, sleep, spawnPy } from './harness.mjs';
+import { check, engine, freePort, NEW_PASSWORD, OUT, reportInverterAsManual, results, sleep, spawnPy } from './harness.mjs';
 
 const THEME = process.env.COLOR_SCHEME === 'dark' ? 'dark' : 'light';
 const BROWSER = process.env.BROWSER || 'chromium';
@@ -111,6 +111,7 @@ try {
   // The dynamic-plan response carries the DST/NaN/gap plan; the real client renders it.
   await page.route('**/dynamic-plan**', (route) => route.fulfill({ json: PLAN }));
 
+  await reportInverterAsManual(page);
   await page.goto(`${base}/ui/energy`);
   await page.waitForSelector('.energy-tabs .nav-link');
   await page.click('#energy-tab-plan');

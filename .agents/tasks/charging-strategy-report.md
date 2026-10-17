@@ -106,9 +106,10 @@ Current-branch check on 2026-10-17 (no code changed): `pytest tests/test_energy_
 tests/test_plan_api.py tests/test_dynamic_adapters.py tests/test_optimizer_service.py
 tests/test_config_validation.py` -> 133 passed; `pytest tests/test_admin_ui.py` -> 134 passed.
 
-Full-suite rerun on 2026-10-17 (branch `feature/v1.2.2`, HEAD `d8919da` plus uncommitted working-tree
-changes from concurrent sessions, which kept changing during the run): `python -m pytest -q -rfE`
--> 2346 passed, 2 xfailed, 0 failed (~10m); `node --test tests/js/*.test.js` -> 148 passed, 0 failed.
+Full-suite rerun on 2026-10-18 (branch `feature/v1.2.2`, HEAD `d8919da`, working tree clean —
+`git status --porcelain` empty): `python -m pytest -q -rfE`
+-> 2346 passed, 2 xfailed, 0 failed (604 s); `node --test tests/js/*.test.js` -> 148 passed, 0 failed;
+`ruff check .` -> all checks passed.
 Superseded earlier run at `81f4c45` (2331 passed / 2 xfailed; JS 147 passed, 1 failed; it does not
 cover the later optimizer commits dfa3f41, 6f09d4d, 9623590, 8994890). The earlier single JS failure (`Charging plan shows forecast confidence from the plan fields and
 explains a weak forecast`, `tests/js/admin-energy-setup.test.js:875`) is a PRE-EXISTING admin-UI
@@ -217,10 +218,10 @@ cannot be flipped from the operator surface.
       recorded against the specific hardware and configuration validated above.
 
 Triage 2026-10-18: the code-verifiable wiring item was completed and removed; the remaining boxes
-are unchecked. The earlier code-side full-suite rerun was done on the working tree of
-`feature/v1.2.2` (see section 2: HEAD `d8919da` plus uncommitted changes, Python 2346 passed /
-2 xfailed / 0 failed, JS 148/148) and the hard invariants were reconfirmed, but the release-build
-suite item stays OPEN
+are unchecked. The code-side full-suite rerun was done on a clean working tree of
+`feature/v1.2.2` (see section 2: HEAD `d8919da`, `git status` empty, Python 2346 passed /
+2 xfailed / 0 failed, JS 148/148, `ruff check` clean) and the hard invariants were reconfirmed, but
+the release-build suite item stays OPEN
 because it requires the run on the exact deployed build in the operator's release context, not an
 agent's working-tree run. The remaining items need the real installation, an isolated device,
 live providers, or the operator. The sign-off item cannot be given by an agent.

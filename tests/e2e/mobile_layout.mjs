@@ -10,7 +10,7 @@
 //   COLOR_SCHEME=light|dark node tests/e2e/mobile_layout.mjs <artifact-dir>
 import fs from 'node:fs';
 import path from 'node:path';
-import { check, devices, engine, freePort, NEW_PASSWORD, OUT, spawnPy, sleep } from './harness.mjs';
+import { check, devices, engine, freePort, NEW_PASSWORD, OUT, reportInverterAsManual, spawnPy, sleep } from './harness.mjs';
 
 const scheme = process.env.COLOR_SCHEME || 'dark';
 const tag = `${process.env.BROWSER || 'chromium'}-${scheme}`;
@@ -131,6 +131,7 @@ try {
     })).status;
   });
   check(`[${tag}] hardware verification accepted`, verified === 200, String(verified));
+  await reportInverterAsManual(page);
   await page.goto(`${base}/ui/energy`);
   await page.waitForSelector('.energy-tabs .nav-link');
   const tabs = () => page.evaluate(() => {

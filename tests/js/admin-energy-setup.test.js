@@ -787,9 +787,9 @@ test('Battery remaining shows a dash, never NaN or undefined, without a snapshot
   }
 });
 
-test('Charging plan announces no grid charge while the Energy Manager is off; the header shows the Energy Manager mode, never Disabled', () => {
+test('Charging plan header shows the Energy Manager mode of an active inverter, never Disabled', () => {
   const slots = [{ action: 'charge', start: '2026-01-01T10:00:00Z', end: '2026-01-01T10:15:00Z', max_power_w: 2000, target_soc_percent: 80 }];
-  for (const [mode, expectOff] of [['off', true], ['manual', false], ['external', false]]) {
+  for (const mode of ['manual', 'external']) {
     const h = harness();
     h.context.formatPower = (w) => `${w} W`;
     const host = h.context.element('div');
@@ -802,9 +802,8 @@ test('Charging plan announces no grid charge while the Energy Manager is off; th
     vm.runInContext(`planDevices = [{ device_id: 'main', mode: ${JSON.stringify(mode)} }]`, h.context);
     h.context.renderDryRunPlan({ status: 'ok', horizon_hours: 24, slots, energy: {}, window: {} });
     const text = flatten(host).map((n) => n.textContent || '').join(' ');
-    assert.equal(/Next grid charge/.test(text), !expectOff, `mode ${mode}`);
-    assert.ok(!/Energy Manager is off/.test(text), `mode ${mode}: no off card, the badge carries it`);
-    assert.equal(badge.textContent, { off: 'Energy Manager off', manual: 'Manual control', external: 'External control' }[mode], `mode ${mode}`);
+    assert.ok(/Next grid charge/.test(text), `mode ${mode}`);
+    assert.equal(badge.textContent, { manual: 'Manual control', external: 'External control' }[mode], `mode ${mode}`);
     assert.ok(!/Disabled/.test(badge.textContent), 'the plan itself is never called disabled');
     assert.equal(badge.hidden, false);
   }
@@ -1023,30 +1022,32 @@ test('Charging schedule without charge slots says so', () => {
   assert.ok(flatten(nodes.find((n) => n.id === 'energy-plan-charge-schedule')).some((n) => n.textContent === 'No grid charging planned.'));
 });
 
-test('Charging plan of an Off inverter shows a compact inactive notice and requests no plan', async () => {
+test('Charging plan tab and select follow the inverter modes: hidden while all are Off, no plan request', async () => {
   const paths = [];
-  const h = harness({
-    apiImpl: async (p) => {
-      paths.push(p);
-      if (p === 'energy/planning-devices') return [{ device_id: 'dev-1', device_name: 'RCT', mode: 'off' }];
-      return { status: 'ok', slots: [], window: {} };
-    },
-  });
+  let list = [{ device_id: 'a', device_name: 'A', mode: 'off' }, { device_id: 'b', device_name: 'B', mode: 'off' }];
+  const h = harness({ apiImpl: async (p) => { paths.push(p); return p === 'energy/planning-devices' ? list.map((d) => ({ ...d })) : { status: 'ok', slots: [], window: {} }; } });
   const select = h.context.element('select');
   select.id = 'energy-plan-device';
-  select.value = 'dev-1';
-  const result = h.context.element('div');
-  result.id = 'energy-plan-result';
-  vm.runInContext("planDevices = [{ device_id: 'dev-1', mode: 'off' }]", h.context);
+  const item = h.context.element('li');
+  const tab = h.context.element('button');
+  tab.id = 'energy-tab-plan';
+  item.append(tab);
+  const pane = h.context.element('div');
+  pane.id = 'energy-pane-plan';
+  h.context.element('div').id = 'energy-plan-result';
 
+  await h.context.refreshPlanDevices();
+  assert.equal(item.hidden, true, 'tab hidden while every inverter is Off');
+  assert.equal(pane.hidden, true);
+  assert.equal(select.children.length, 0);
   await h.context.loadDryRunPlan();
-  const text = flatten(result).map((n) => n.textContent).join(' ');
-  assert.match(text, /Energy Manager off/);
-  assert.match(text, /Charging plan is inactive/);
-  assert.equal(flatten(result).some((n) => (n.className || '').includes('plan-loading')), false, 'no spinner');
-  assert.equal(paths.some((p) => p.includes('dynamic-plan')), false, 'no plan is requested while off');
-  h.context.renderDryRunPlan({ status: 'energy_manager_off', slots: [], window: {}, energy: null }, { waiting: true });
-  assert.equal(vm.runInContext('planPollTimer', h.context), null, 'no retry polling is armed');
+  assert.equal(paths.some((p) => p.includes('dynamic-plan')), false, 'no plan is requested');
+
+  list = [{ device_id: 'a', device_name: 'A', mode: 'off' }, { device_id: 'b', device_name: 'B', mode: 'external' }];
+  await h.context.refreshPlanDevices();
+  assert.equal(item.hidden, false, 'tab shown once one inverter is Manual or External');
+  assert.deepEqual(select.children.map((o) => o.value), ['b'], 'only active inverters are offered');
+  assert.equal(select.value, 'b');
   h.context.stopPlanPolling();
   h.cleanup();
 });
