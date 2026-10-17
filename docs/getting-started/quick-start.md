@@ -45,6 +45,12 @@ change, without a restart.
 Create a PAT on **API tokens** and copy it to your API client; the secret is shown only once. API
 authentication is enabled by default even before a PAT exists.
 
+## Add an inverter
+
+On the **Overview** page choose **Add inverter** in the Inverters card and enter the inverter's host
+name or IP address (port 8899). **Apply changes** connects without a restart; the service assigns the
+device id (`main`, then `inverter-2`, ...). See [Devices](configuration.md#devices).
+
 ## Validate and start
 
 ```sh
@@ -52,22 +58,32 @@ python -m app validate     # configuration, object registry and write allowlist
 python -m app              # start the server (serve is the default mode)
 ```
 
-Check the service:
+Verify the connection:
 
 ```sh
 curl http://127.0.0.1:8000/health
 curl -H "Authorization: Bearer <token>" http://127.0.0.1:8000/api/v1/devices
+curl -H "Authorization: Bearer <token>" http://127.0.0.1:8000/api/v1/readiness
 ```
+
+`/health` only proves that the process runs; `readiness` is `ready: true` once every inverter answers.
+If it does not, see [Troubleshooting](../troubleshooting.md).
+
+## Optional: Energy Manager
+
+Battery control and the read-only charging plan preview are off until you enable them in the GUI.
+Start with the [Energy Manager overview](../energy-manager.md); the safety gates are described in
+[Battery Control](../energy/battery-control.md#safety-gates).
 
 ## Administration menu
 
-| Page | Purpose |
-| --- | --- |
-| Overview | Configurable widgets with live values (solar, house consumption, grid, battery, TSDB export), optional spot-price, day-ahead, solar-forecast and charging-schedule widgets, one card per inverter (energy-flow graphic, online and operating state) and one per battery tower; inverters are added, edited and removed in the Inverters dialog. Values are whole numbers in the browser locale's format; a missing value (not configured, unreachable, no reading yet, export off) reads `n/a` |
-| Inverters | Write access and the writable parameters |
-| Energy Manager | Manual battery control (charge, keep idle, discharge) per inverter; Off returns control to the inverter's Internal strategy. Read-only day-ahead price (Spot Market) and Open-Meteo solar-forecast (Weather) previews; see [Energy Manager](../energy-manager.md) |
-| TSDB | InfluxDB 2 / QuestDB export |
-| Prometheus | Metrics endpoint and the exposed metrics |
-| API tokens | Create and revoke personal access tokens |
-| Settings | Documentation, authentication, server, network and the admin password |
-| About | Version, runtime, project and dependency information. The footer of every page shows the version and the build hash `(abc1234)` (`dev` outside an image) |
+| Page           | Purpose                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Overview       | Configurable widgets with live values (solar, house consumption, grid, battery, TSDB export), optional spot-price, day-ahead, solar-forecast and charging-schedule widgets, one card per inverter (energy-flow graphic, online and operating state) and one per battery tower; inverters are added, edited and removed in the Inverters dialog. Values are whole numbers in the browser locale's format; a missing value (not configured, unreachable, no reading yet, export off) reads `n/a` |
+| Inverters      | Write access and the writable parameters                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| Energy Manager | Manual battery control (charge, keep idle, discharge) per inverter; Off returns control to the inverter's Internal strategy. Read-only day-ahead price (Spot Market) and Open-Meteo solar-forecast (Weather) previews; see [Energy Manager](../energy-manager.md) and [Charging Plan](../energy/charging-plan.md)                                                                                                                                                                              |
+| TSDB           | InfluxDB 2 / QuestDB export                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| Prometheus     | Metrics endpoint and the exposed metrics                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| API tokens     | Create and revoke personal access tokens                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| Settings       | Documentation, authentication, server, network and the admin password                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| About          | Version, runtime, project and dependency information. The footer of every page shows the version and the build hash `(abc1234)` (`dev` outside an image)                                                                                                                                                                                                                                                                                                                                       |

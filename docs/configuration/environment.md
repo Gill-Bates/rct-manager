@@ -15,7 +15,7 @@ A set variable that is an internal setting but not one of these names is logged 
 | `DISPATCH_DB_PATH`                                                              | `<project>/data/rct-dispatch.db` | Location of the encrypted, crash-durable dispatch state database                                                                                                                                                                                                                                                                                                                                                |
 | `DISPATCH_MAX_CHARGE_POWER_W`                                                   | unset                            | Verified maximum grid-charge power; seeds a device without stored limits. Without it (and without a stored value) dispatch uses a conservative 3 kW fallback until limits are stored in Expert mode                                                                                                                                                                                                             |
 | `DISPATCH_MAX_DISCHARGE_POWER_W`                                                | unset                            | Verified maximum load-following discharge power; same seeding and 3 kW fallback as above                                                                                                                                                                                                                                                                                                                        |
-| `DISPATCH_USABLE_BATTERY_CAPACITY_WH`                                           | unset                            | Legacy seed only: initial per-device usable capacity (Wh) where no capacity is stored. It is treated as a persisted Expert override, not an automatically verified battery fact. Without an override the capacity is derived from the battery module count and the BMS Ah readings (see [Energy Manager](../energy-manager.md)); when neither is available the Dry-Run plan reports `battery_state_unavailable` |
+| `DISPATCH_USABLE_BATTERY_CAPACITY_WH`                                           | unset                            | Legacy seed only: initial per-device usable capacity (Wh) where no capacity is stored. It is treated as a persisted Expert override, not an automatically verified battery fact. Without an override the capacity is derived from the battery module count and the BMS Ah readings (see [Charging Plan](../energy/charging-plan.md#usable-battery-capacity)); when neither is available the Dry-Run plan reports `battery_state_unavailable` |
 | `BIND_ADDRESS`                                                                  | `127.0.0.1`                      | Listen address                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `BIND_PORT`                                                                     | `8000`                           | Listen port, 1024 to 65535                                                                                                                                                                                                                                                                                                                                                                                      |
 | `ALLOW_NON_LOOPBACK_BIND`                                                       | `false`                          | Explicit consent for a non-loopback listener; does not provide TLS or secure cookies. Compose sets it while publishing only on host loopback                                                                                                                                                                                                                                                                    |
@@ -34,7 +34,7 @@ A set variable that is an internal setting but not one of these names is logged 
 and `DISPATCH_GRID_IMPORT_POSITIVE` are no longer environment variables. They are fields of a
 persisted per-device capability record, set through the admin dispatch API after hardware
 verification. A set value is ignored with a `WARNING` naming the variable (never its value). See
-[Operation](../operation.md#battery-dispatch-capabilities). Back up the dispatch database together
+[Battery Control](../energy/battery-control.md#capability-gates-and-evidence). Back up the dispatch database together
 with `HMAC_SECRET`, like `data/rct.db`.
 
 ## GUI-only settings
@@ -48,3 +48,18 @@ python -m app validate
 ```
 
 Checks settings, object registry and write allowlist; exits non-zero on an invalid configuration.
+
+## Admin database and secret
+
+`HMAC_SECRET` is a stable random secret of at least 32 characters (`openssl rand -base64 32`; the
+deprecated name `ADMIN_SECRET` is still read). A local start generates it and appends it to
+`settings.env` when absent; Docker requires it up front (read-only root file system). Keep it in
+`settings.env`, never in version control.
+
+The database stores settings and credentials with Fernet authenticated encryption (AES with
+HMAC-SHA256). Passwords use a salted hash; PAT secrets are shown once and only their digests are
+kept. The GUI never displays the secret. `ADMIN_DB_PATH` overrides the location (default
+`<project>/data/rct.db`). Backup, restore and WAL details: [Operation](../operation.md#backup-and-restore).
+
+The first start prints the generated `admin` password, see
+[Authentication](authentication.md#administration-login).

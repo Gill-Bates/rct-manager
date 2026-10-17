@@ -11,32 +11,15 @@ is switched in the background and the page reconnects. Only the inverter list an
 fields need **Apply changes** (see [Devices](#devices)); the TSDB **Enable export** switch applies
 immediately. Leaving a page with unapplied changes discards them without a warning.
 
-## Administration storage
+## Secret and database
 
-`HMAC_SECRET` is a stable random secret of at least 32 characters (`openssl rand -base64 32`; the
-deprecated name `ADMIN_SECRET` is still read). A local start generates it and appends it to
-`settings.env` when absent; Docker requires it up front (read-only root file system). Keep it in
-`settings.env`, never in version control.
-
-The database stores settings and credentials with Fernet authenticated encryption (AES with
-HMAC-SHA256). Passwords use a salted hash; PAT secrets are shown once and only their digests are
-kept. Back up `data/rct.db` together with `HMAC_SECRET`; changing the secret prevents decryption.
-The GUI never displays the secret. `ADMIN_DB_PATH` overrides the location (default
-`<project>/data/rct.db`).
+`HMAC_SECRET` encrypts the admin database `data/rct.db` (default location; `ADMIN_DB_PATH` overrides
+it). A local start generates the secret; Docker requires it up front. Back up database and secret
+together. Details: [Environment Variables](../configuration/environment.md#admin-database-and-secret),
+backup and WAL rules: [Operation](../operation.md#backup-and-restore).
 
 The first start prints the generated `admin` password, see
 [Authentication](../configuration/authentication.md#administration-login).
-
-The database runs in SQLite WAL mode (`synchronous=NORMAL`, 5 s busy timeout), so concurrent
-autosaves, sessions and token bookkeeping do not block each other. While the service runs,
-`rct.db-wal` and `rct.db-shm` may exist next to `rct.db`; they get the same 0600 permissions and
-are folded back into `rct.db` on a clean shutdown. Rules:
-
-- Back up while the service is stopped (copy all existing `rct.db*` files together) or online with
-  `sqlite3 data/rct.db ".backup backup.db"`; never copy only `rct.db` of a running service.
-- Keep the directory on a local file system. WAL does not work on NFS or SMB shares.
-- The directory must be writable (in Docker the `rct-data` volume), because SQLite creates the
-  `-wal` and `-shm` files there.
 
 ## Device and Network
 
@@ -49,33 +32,12 @@ Add inverters on the **Overview** dashboard with **Add inverter** in the Inverte
 - Display name precedence: saved name, inverter-reported name, device id.
 - A `DEVICES` environment variable is ignored (INFO note at startup).
 
-### BIND_ADDRESS, ALLOW_NON_LOOPBACK_BIND, BIND_PORT
-Defaults: `127.0.0.1`, `false`, `8000`.
-
-`BIND_ADDRESS` is the REST API listen address (not the inverter address). A non-loopback address
-such as `0.0.0.0` requires `ALLOW_NON_LOOPBACK_BIND=true`; the flag allows the bind but enables
-neither TLS nor secure cookies, so put a TLS-terminating reverse proxy in front when the service is
-reachable beyond localhost. Docker Compose sets the flag because the container listens on
-`0.0.0.0` while the host publishes the port on `127.0.0.1`.
-
-The port can also be changed in the GUI; the service re-binds in the background, and the value
-saved in the GUI takes precedence over `BIND_PORT` after the first start. In a container this
-moves only the internal listener: the published port mapping and the health check's `BIND_PORT`
-stay unchanged, so the container reports unhealthy and the published port stops reaching the
-service until environment, compose value and mapping match the new port. The GUI warns before
-applying the change.
-
-### Behind reverse proxy
-GUI only. Confirms a TLS-terminating proxy in front of the service and sets the secure flag on session cookies. It does not trust any forwarded header; that is `TRUSTED_PROXIES` below. A `BEHIND_REVERSE_PROXY` variable is ignored with a warning. A consented non-loopback bind logs a warning until this option is enabled in the GUI.
-
-### TRUSTED_PROXIES and FORWARDED_HEADER
-Default: empty. See [Network and TLS](../configuration/network.md#caller-address).
-
-`TRUSTED_PROXIES`: comma-separated reverse-proxy networks (CIDR, at most 32), the only proxy trust
-list. Used to extract the client IP and to accept `X-Forwarded-Proto` for the admin interface.
-Without it all callers share the proxy's address; behind an unlisted TLS proxy admin logins and
-changes fail with 403. `FORWARDED_HEADER`: single header name set by the proxy (e.g.
-`X-Forwarded-For`), required together with `TRUSTED_PROXIES`; `Forwarded` (RFC 7239) is rejected.
+### Listener, reverse proxy and trusted proxies
+Defaults: `BIND_ADDRESS=127.0.0.1`, `ALLOW_NON_LOOPBACK_BIND=false`, `BIND_PORT=8000`. A non-loopback
+address requires `ALLOW_NON_LOOPBACK_BIND=true`, which enables neither TLS nor secure cookies: put a
+TLS-terminating reverse proxy in front and enable the GUI option "behind reverse proxy". Behind a
+proxy set `TRUSTED_PROXIES` and `FORWARDED_HEADER`. In a container the GUI port moves only the
+internal listener. Details: [Network and TLS](../configuration/network.md).
 
 ## Authentication and Tokens
 

@@ -35,7 +35,7 @@ Compose reads `../settings.env` relative to `docker/compose.yaml` (see
     host port on `127.0.0.1`. Enable the GUI option "behind reverse proxy" when serving through a
     TLS proxy. Keep `BIND_PORT` equal to the container side of the port mapping (default `8000`).
     A loopback bind makes the service unreachable through the published port; the start logs a
-    warning and the health check fails.
+    warning and the health check fails. See [Network and TLS](../configuration/network.md#listener-and-container-port).
 
 !!! warning "Changing the port in the GUI"
     The GUI port setting moves only the listener inside the container, not the published port
@@ -63,15 +63,15 @@ ignored (warning at startup, devices on INFO). See [Configuration](configuration
 
 ## Hardening in `compose.yaml`
 
-| Setting | Value |
-| --- | --- |
-| `ports` | `127.0.0.1:${RCT_API_PORT:-8000}:8000` (TLS terminates at a reverse proxy) |
-| `read_only` | `true`, with `/tmp` as tmpfs (`noexec,nosuid,nodev`) |
-| `cap_drop`, `cap_add` | `ALL`; `CHOWN`, `SETUID`, `SETGID` (entrypoint only) |
-| `security_opt` | `no-new-privileges:true` |
-| `pids_limit`, `mem_limit`, `cpus` | `128`, `256m`, `1.0` |
-| `stop_grace_period` | `1m` |
-| `logging` | json-file, 50 MB, 5 files |
+| Setting                           | Value                                                                      |
+| --------------------------------- | -------------------------------------------------------------------------- |
+| `ports`                           | `127.0.0.1:${RCT_API_PORT:-8000}:8000` (TLS terminates at a reverse proxy) |
+| `read_only`                       | `true`, with `/tmp` as tmpfs (`noexec,nosuid,nodev`)                       |
+| `cap_drop`, `cap_add`             | `ALL`; `CHOWN`, `SETUID`, `SETGID` (entrypoint only)                       |
+| `security_opt`                    | `no-new-privileges:true`                                                   |
+| `pids_limit`, `mem_limit`, `cpus` | `128`, `256m`, `1.0`                                                       |
+| `stop_grace_period`               | `1m`                                                                       |
+| `logging`                         | json-file, 50 MB, 5 files                                                  |
 
 ## Startup and volume ownership
 

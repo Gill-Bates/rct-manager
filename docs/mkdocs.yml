@@ -147,18 +147,25 @@ nav:
     - Authentication: configuration/authentication.md
     - Network and TLS: configuration/network.md
     - Push Export: configuration/export.md
+  - Energy Manager:
+    - Overview: energy-manager.md
+    - Charging Plan: energy/charging-plan.md
+    - Consumption: energy/consumption.md
+    - Battery Control: energy/battery-control.md
   - API Reference:
     - Overview: api/overview.md
     - Endpoints: api/endpoints.md
     - Errors: api/errors.md
     - Prometheus Metrics: api/prometheus.md
   - Operation: operation.md
-  - Energy Manager: energy-manager.md
+  - Troubleshooting: troubleshooting.md
   - Development:
     - Setup: development/setup.md
     - Architecture: development/architecture.md
+    - Consumption Forecast: development/consumption-forecast.md
   - Reference:
+    - Hardware Verification: reference/hardware-verification.md
+    - Transport Diagnostics: reference/transport-diagnostics.md
     - Protocol Specification: reference/protocol.md
-  - Troubleshooting: troubleshooting.md
 
 copyright: Copyright &copy; 2026 Gill-Bates | Licensed under MIT

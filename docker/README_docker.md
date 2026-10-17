@@ -49,9 +49,9 @@ verify each inverter's hardware.
 
 👉 [Learn more about the Energy Manager](https://gill-bates.github.io/rct-manager/energy-manager/)
 
-Preview: a dynamic charging planner proposes a charging plan from prices, forecast and
-consumption history in the Energy Manager's *Charging plan* tab, as a dry-run preview that never
-controls the battery.
+Read-only preview: the dynamic charging plan proposes a schedule from prices, forecast and
+consumption history in the Energy Manager's *Charging plan* tab. It is a dry run that sends no
+inverter command and never controls the battery.
 
 ---
 

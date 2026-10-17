@@ -51,9 +51,10 @@ inverter's hardware.
 👉 [Learn more about the Energy Manager](https://gill-bates.github.io/rct-manager/energy-manager/)
 
 > [!NOTE]
-> **Preview:** the dynamic charging planner turns prices, solar forecast and consumption
-> history into a proposed plan (*Charging plan* tab). It is a dry run and never controls the
-> battery.
+> **Read-only preview:** the dynamic charging plan turns prices, solar forecast and consumption
+> history into a proposed schedule (*Charging plan* tab). It is a dry run: it sends no inverter
+> command and never controls the battery.
+> [Charging plan](https://gill-bates.github.io/rct-manager/energy/charging-plan/)
 
 ---
 
@@ -97,6 +98,7 @@ Full documentation: **<https://gill-bates.github.io/rct-manager/>**
 [Docker](https://gill-bates.github.io/rct-manager/getting-started/docker/) ·
 [Configuration](https://gill-bates.github.io/rct-manager/getting-started/configuration/) ·
 [Energy Manager](https://gill-bates.github.io/rct-manager/energy-manager/) ·
+[Hardware verification](https://gill-bates.github.io/rct-manager/reference/hardware-verification/) ·
 [API](https://gill-bates.github.io/rct-manager/api/overview/) ·
 [Operation](https://gill-bates.github.io/rct-manager/operation/) ·
 [Troubleshooting](https://gill-bates.github.io/rct-manager/troubleshooting/) ·

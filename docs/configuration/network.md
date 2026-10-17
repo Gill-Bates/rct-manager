@@ -28,6 +28,30 @@ FORWARDED_HEADER=X-Forwarded-For
 admin interface takes the browser scheme from `X-Forwarded-Proto` only from these networks;
 behind an unlisted TLS proxy, saving in the GUI fails the same-origin check with 403.
 
+## Listener and container port
+
+`BIND_ADDRESS` is the REST API listen address (not the inverter address). Defaults: `127.0.0.1`,
+`ALLOW_NON_LOOPBACK_BIND=false`, `BIND_PORT=8000`. The port can also be changed in the GUI; the
+service re-binds in the background, and the value saved in the GUI takes precedence over `BIND_PORT`
+after the first start.
+
+In a container the GUI port moves only the internal listener. The published port mapping and the
+health check's `BIND_PORT` stay unchanged, so the container reports unhealthy and the published port
+stops reaching the service until environment, compose value and mapping match the new port. The GUI
+warns before applying the change.
+
+## Behind a reverse proxy
+
+The GUI option **Behind reverse proxy** confirms a TLS-terminating proxy in front of the service and
+sets the secure flag on session cookies. It does not trust any forwarded header; that is
+`TRUSTED_PROXIES` above. A `BEHIND_REVERSE_PROXY` variable is ignored with a warning. A consented
+non-loopback bind logs a warning until this option is enabled.
+
+`TRUSTED_PROXIES` takes comma-separated reverse-proxy networks (CIDR, at most 32) and is used to
+extract the client IP and to accept `X-Forwarded-Proto` for the admin interface.
+`FORWARDED_HEADER` is a single header name set by the proxy (for example `X-Forwarded-For`), required
+together with `TRUSTED_PROXIES`; `Forwarded` (RFC 7239) is rejected.
+
 ## Interactive documentation
 
 `/docs` and `/openapi.json` are served only with `DOCS_PUBLIC=true`; otherwise both answer 404

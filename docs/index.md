@@ -42,9 +42,9 @@ one inverter endpoint are serialized inside the process.
 
     ---
 
-    Battery actions (charge, hold, discharge), operating modes per inverter, and a read-only charging plan preview.
+    Battery actions (charge, hold, discharge), operating modes per inverter, and a read-only charging plan preview (Dry-Run, sends no inverter command).
 
-    [:octicons-arrow-right-24: Energy Manager](energy-manager.md)
+    [:octicons-arrow-right-24: Energy Manager](energy-manager.md) · [:octicons-arrow-right-24: Charging Plan](energy/charging-plan.md)
 
 -   :material-currency-eur:{ .lg .middle } **Spot Market & Solar Forecast**
 
@@ -123,5 +123,6 @@ python -m app  # or run the container, see Docker
 
 - [Environment Variables](configuration/environment.md): start parameters; everything else is set in the GUI.
 - [Operation](operation.md): production constraints.
+- [Hardware Verification](reference/hardware-verification.md): what is verified on real inverters.
 - [Protocol Specification](reference/protocol.md): vendor protocol PDF.
 - [Troubleshooting](troubleshooting.md): common problems.
