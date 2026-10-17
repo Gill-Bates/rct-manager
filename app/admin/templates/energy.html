@@ -59,15 +59,17 @@ Default tab is Inverter; Charging plan is the read-only Dry-Run preview. #}
             <div class="card-body">
                 <div class="energy-plan-head mb-3">
                     <div class="energy-plan-head-title">
-                        <h2 class="h5 card-title mb-0" id="energy-plan-title">Charging plan</h2>
-                        <p class="text-secondary small mb-0 mt-1">Read-only preview · No inverter commands are sent</p>
-                        {# Execution state of the selected inverter and forecast confidence; set by renderDryRunPlan. #}
-                        <div class="energy-plan-status mt-2" aria-live="polite">
-                            <span class="status-badge status-badge-neutral" id="energy-plan-manager-state"
-                                hidden></span>
-                            <span class="small text-secondary" id="energy-plan-confidence" hidden></span>
+                        {# Title, Energy Manager mode of the selected inverter and forecast confidence share one
+                        line; both status parts are set by renderDryRunPlan. #}
+                        <div class="energy-plan-title-row">
+                            <h2 class="h5 card-title mb-0" id="energy-plan-title">Charging plan</h2>
+                            <span class="energy-plan-status" aria-live="polite">
+                                <span class="status-badge status-badge-neutral" id="energy-plan-manager-state"
+                                    hidden></span>
+                                <span class="small text-secondary" id="energy-plan-confidence" hidden></span>
+                            </span>
                         </div>
-                        <p class="small text-secondary mb-0 mt-1" id="energy-plan-confidence-note" hidden></p>
+                        <p class="text-secondary small mb-0 mt-1">Read-only preview</p>
                     </div>
                     <div class="energy-plan-head-controls" role="group" aria-label="Charging plan controls">
                         <div class="energy-plan-device-field">

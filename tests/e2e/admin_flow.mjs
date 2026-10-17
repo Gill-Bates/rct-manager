@@ -310,7 +310,7 @@ try {
   await page.waitForFunction(() => [...document.querySelectorAll('.device-subcard-head .status-badge')].some((b) => b.textContent.trim().length > 0), null, { timeout: 20000 }).catch(() => { });
   const badgeTexts = await page.$$eval('.device-subcard-head .status-badge', (list) => list.map((b) => b.textContent.trim()));
   check('inverter status badge is fully readable (feed_in test value)', badgeTexts.some((t) => /feed in/i.test(t)), JSON.stringify(badgeTexts));
-  check('battery status badge is fully readable (balancing active test value)', badgeTexts.some((t) => /balancing active/i.test(t)), JSON.stringify(badgeTexts));
+  check('battery status badge is fully readable (balancing test value)', badgeTexts.some((t) => /^balancing$/i.test(t)), JSON.stringify(badgeTexts));
   // Every status badge shares one component: identical metrics, only the tone colours differ, and each
   // tone keeps WCAG AA text contrast (4.5:1) against the badge background composited on the page.
   const badgeMetrics = await page.evaluate(() => {
@@ -405,7 +405,9 @@ try {
   await page.waitForFunction(() => {
     const cards = [...document.querySelectorAll('.device-subcard-battery')];
     return cards.length >= 2 && cards.every((card) => /\d/.test(card.querySelector('.device-charge-value')?.textContent || '')
-      && (card.querySelector('.device-subcard-head .status-badge')?.textContent.trim() || '').length > 0);
+      && (card.querySelector('.device-subcard-head .status-badge')?.textContent.trim() || '').length > 0
+      // Every tower's own temperature arrives with its first full poll, not with the charge level.
+      && [...card.querySelectorAll('dt')].some((dt) => dt.textContent.trim() === 'Temperature'));
   }, null, { timeout: 45000 }).catch(() => { /* reported by the checks below */ });
   const readLayout = () => page.evaluate(() => {
     const text = (node) => (node ? node.textContent.trim() : null);
@@ -481,8 +483,8 @@ try {
   check('each tower shows its own charge level (55 % and 42 %), not a shared one',
     /^55\s*%$/.test(layout.towers[0].charge) && /^42\s*%$/.test(layout.towers[1].charge),
     JSON.stringify(layout.towers.map((tower) => tower.charge)));
-  check('each tower shows its own status (balancing active vs synchronizing), not a shared one',
-    /balancing active/i.test(layout.towers[0].chip || '') && /synchroniz/i.test(layout.towers[1].chip || '')
+  check('each tower shows its own status (balancing vs syncing), not a shared one',
+    /^balancing$/i.test(layout.towers[0].chip || '') && /^syncing$/i.test(layout.towers[1].chip || '')
     && layout.towers[0].chip !== layout.towers[1].chip,
     JSON.stringify(layout.towers.map((tower) => tower.chip)));
   check('each tower renders its own module count (5 and 4 modules: 4 and 3 middle slices)',

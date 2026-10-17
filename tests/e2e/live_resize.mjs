@@ -65,6 +65,11 @@ try {
   await page.fill('#confirm-password', NEW_PASSWORD);
   await page.click('#change-password-form button[type=submit]');
   await page.waitForURL('**/ui/dashboard');
+  // Until the one-time usage notice is accepted every gated admin API call is refused, so no card renders.
+  try {
+    await page.locator('#disclaimer-accept').waitFor({ state: 'visible', timeout: 5000 });
+    await Promise.all([page.waitForNavigation(), page.click('#disclaimer-accept')]);
+  } catch { /* already accepted */ }
 
   // --- Dashboard live resize -----------------------------------------------------------------
   await page.waitForSelector('.device-item');

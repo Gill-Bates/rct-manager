@@ -1341,26 +1341,15 @@ function planTechnicalDetails(plan) {
 const PLAN_CONFIDENCE_LABELS = { low: 'Low confidence', normal: 'Normal confidence' };
 const PLAN_MANAGER_LABELS = { off: 'Energy Manager off', manual: 'Manual control', external: 'External control' };
 
-// Forecast confidence next to the execution state, from forecast_basis / forecast_confidence only.
-// The note explains a weak forecast; a missing field hides the part instead of inventing a state.
+// Forecast confidence next to the execution state, from forecast_basis / forecast_confidence only;
+// a missing field hides the part instead of inventing a state.
 function renderPlanConfidence(plan) {
   const label = $('energy-plan-confidence');
-  const note = $('energy-plan-confidence-note');
+  if (!label) return;
   const ok = plan.status === 'ok';
-  const baseline = ok && plan.forecast_basis === 'bootstrap_baseline';
-  const text = !ok ? '' : baseline ? 'Baseline forecast' : (PLAN_CONFIDENCE_LABELS[plan.forecast_confidence] || '');
-  const explanation = baseline
-    ? 'Conservative household baseline while consumption history is collected.'
-    : ok && plan.forecast_confidence === 'low' ? 'Limited consumption history.' : '';
-  if (label) {
-    label.hidden = !text;
-    label.textContent = text;
-    label.title = explanation;
-  }
-  if (note) {
-    note.hidden = !explanation;
-    note.textContent = explanation ? `Preliminary plan: ${explanation[0].toLowerCase()}${explanation.slice(1)}` : '';
-  }
+  const text = !ok ? '' : plan.forecast_basis === 'bootstrap_baseline' ? 'Baseline forecast' : (PLAN_CONFIDENCE_LABELS[plan.forecast_confidence] || '');
+  label.hidden = !text;
+  label.textContent = text;
 }
 
 function renderDryRunPlan(plan, { waiting = true } = {}) {

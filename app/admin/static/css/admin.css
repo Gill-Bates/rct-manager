@@ -1943,7 +1943,9 @@ body {
     font-variant-numeric: tabular-nums;
 }
 
-/* Execution state and forecast confidence on one line below the title. */
+/* Title with the execution state and forecast confidence on one line; wraps only when the
+   viewport is too narrow for all three. */
+.energy-plan-title-row,
 .energy-plan-status {
     display: flex;
     flex-wrap: wrap;
