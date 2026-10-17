@@ -161,21 +161,12 @@ try {
   await page.screenshot({ path: path.join(OUT, `energy-weather-${tag}.png`) });
   await page.click('#energy-tab-plan');
   await page.waitForSelector('#energy-pane-plan.active');
-  await page.waitForFunction(() => !document.getElementById('energy-plan-manager-state').hidden, null, { timeout: 20000 }).catch(() => { /* reported by the check below */ });
-  const planHead = await page.evaluate(() => {
-    const title = document.getElementById('energy-plan-title').getBoundingClientRect();
-    const badge = document.getElementById('energy-plan-manager-state');
-    const box = badge.getBoundingClientRect();
-    return {
-      visible: !badge.hidden && box.width > 0, text: badge.textContent.trim(),
-      rightOfTitle: box.left >= title.right - 1, sameRow: box.top < title.bottom && box.bottom > title.top,
-      oneLine: box.height < 2.2 * parseFloat(getComputedStyle(badge).lineHeight || '20'),
-      pageOverflow: document.documentElement.scrollWidth > document.documentElement.clientWidth + 1,
-    };
-  });
-  // Below 390 px the badge may wrap under the title; it must then still fit without a page overflow.
-  check(`[${tag}] plan header: Energy Manager badge sits right of the title on one row`,
-    planHead.visible && (vw < 390 || (planHead.rightOfTitle && planHead.sameRow)) && !planHead.pageOverflow, JSON.stringify(planHead));
+  await page.waitForSelector('#energy-plan-title', { state: 'visible' });
+  const planHead = await page.evaluate(() => ({
+    badge: Boolean(document.getElementById('energy-plan-manager-state')),
+    pageOverflow: document.documentElement.scrollWidth > document.documentElement.clientWidth + 1,
+  }));
+  check(`[${tag}] plan header: no manager badge and no page overflow`, !planHead.badge && !planHead.pageOverflow, JSON.stringify(planHead));
   check(`[${tag}] plan header: no preliminary-plan note`,
     (await page.locator('#energy-plan-confidence-note').count()) === 0
     && !/Preliminary plan|limited consumption history/i.test(await page.locator('#energy-plan-card').innerText()));

@@ -1390,7 +1390,6 @@ function planTechnicalDetails(plan) {
 }
 
 const PLAN_CONFIDENCE_LABELS = { low: 'Low confidence', normal: 'Normal confidence' };
-const PLAN_MANAGER_LABELS = { manual: 'Manual control', external: 'External control' };
 
 // Forecast confidence next to the execution state, from forecast_basis / forecast_confidence only;
 // a missing field hides the part instead of inventing a state.
@@ -1412,15 +1411,6 @@ function renderDryRunPlan(plan, { waiting = true } = {}) {
   // Read before clearPlanSchedule() removes the element, so a refresh keeps an opened table open.
   const scheduleDetailsOpen = Boolean($('energy-plan-schedule-details')?.open);
   clearPlanSchedule();
-  // Energy Manager state of the selected inverter, shown as the header badge whatever the plan status.
-  const selectedDevice = (typeof planDevices === 'undefined' ? [] : planDevices).find((item) => item.device_id === $('energy-plan-device')?.value);
-  const managerBadge = $('energy-plan-manager-state');
-  if (managerBadge) {
-    managerBadge.hidden = !selectedDevice;
-    // The plan has no executor: the badge only reports the Energy Manager mode of the inverter.
-    managerBadge.textContent = PLAN_MANAGER_LABELS[selectedDevice?.mode] || PLAN_MANAGER_LABELS.manual;
-    managerBadge.className = `status-badge status-badge-success`;
-  }
   renderPlanConfidence(plan);
   if (plan.status === 'energy_manager_off') {
     // The inverter was switched off meanwhile: the tab disappears with the next device sync.
@@ -1453,7 +1443,7 @@ function renderDryRunPlan(plan, { waiting = true } = {}) {
   const next = nextGridCharge(plan.slots || []);
   const card = next
     ? planStatusCard('Next grid charge', `${planDateTime(next.start)} – ${planDateTime(next.end)}`)
-    : planStatusCard('No grid charge planned', 'The current plan does not schedule a grid charge.');
+    : planStatusCard('No grid charging planned', 'The current plan does not schedule grid charging.');
   // Three plan-KPI tiles (plan outputs) built from the plan's own snapshot (no second data source).
   // Battery remaining is a live device state, so it renders as a weaker tertiary line below the grid.
   const summary = element('div', 'spot-market-highlights energy-plan-highlights mt-3');

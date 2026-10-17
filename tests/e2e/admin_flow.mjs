@@ -2588,20 +2588,24 @@ try {
           (await ep.locator('#energy-plan-schedule details table tbody tr').count()) >= 1
           && (await ep.locator('#energy-plan-schedule details th.text-end').count()) === 2);
         await ep.locator('#energy-plan-schedule details summary').click();
-        check('plan header says Read-only preview and the Energy Manager mode, never Disabled',
+        await ep.locator('#energy-plan-schedule details summary').focus();
+        await ep.keyboard.press('Enter');
+        const openedByKey = await ep.locator('#energy-plan-schedule details').evaluate((d) => d.open);
+        await ep.keyboard.press('Enter');
+        check('Show all intervals opens and closes with the keyboard',
+          openedByKey && !(await ep.locator('#energy-plan-schedule details').evaluate((d) => d.open)));
+        const switchGap = await ep.evaluate(() => {
+          const input = document.querySelector('#energy-plan-expert-mode').getBoundingClientRect();
+          const label = document.querySelector('label[for="energy-plan-expert-mode"]').getBoundingClientRect();
+          return Math.round(label.left - input.right);
+        });
+        check('plan Expert mode label keeps a gap to its switch', switchGap >= 6, `${switchGap}px`);
+        check('plan header says Read-only preview, never Disabled',
           /Read-only preview/.test(await ep.locator('.energy-plan-head-title').innerText())
           && !/Disabled/.test(await ep.locator('.energy-plan-head-title').innerText()));
-        const headRow = await ep.evaluate(() => {
-          const title = document.getElementById('energy-plan-title').getBoundingClientRect();
-          const badge = document.getElementById('energy-plan-manager-state');
-          const box = badge.getBoundingClientRect();
-          return {
-            visible: !badge.hidden && box.width > 0, right: box.left >= title.right - 1,
-            sameRow: box.top < title.bottom && box.bottom > title.top, text: badge.textContent.trim()
-          };
-        });
-        check('Energy Manager badge sits right of the Charging plan title on the same row',
-          headRow.visible && headRow.right && headRow.sameRow, JSON.stringify(headRow));
+        check('plan header has no Energy Manager mode badge',
+          (await ep.locator('#energy-plan-manager-state').count()) === 0
+          && !/Manual control|External control/.test(await ep.locator('.energy-plan-head-title').innerText()));
         check('the removed "Preliminary plan" note does not exist',
           (await ep.locator('#energy-plan-confidence-note').count()) === 0
           && !/Preliminary plan|limited consumption history/i.test(await ep.locator('#energy-plan-card').innerText()));

@@ -60,13 +60,10 @@ until an inverter is Manual or External (energy-setup.js shows it). #}
             <div class="card-body">
                 <div class="energy-plan-head mb-3">
                     <div class="energy-plan-head-title">
-                        {# Title, Energy Manager mode of the selected inverter and forecast confidence share one
-                        line; both status parts are set by renderDryRunPlan. #}
+                        {# Title and forecast confidence share one line; the confidence is set by renderDryRunPlan. #}
                         <div class="energy-plan-title-row">
                             <h2 class="h5 card-title mb-0" id="energy-plan-title">Charging plan</h2>
                             <span class="energy-plan-status" aria-live="polite">
-                                <span class="status-badge status-badge-neutral" id="energy-plan-manager-state"
-                                    hidden></span>
                                 <span class="small text-secondary" id="energy-plan-confidence" hidden></span>
                             </span>
                         </div>

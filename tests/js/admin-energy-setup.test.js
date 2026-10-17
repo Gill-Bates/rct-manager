@@ -787,7 +787,7 @@ test('Battery remaining shows a dash, never NaN or undefined, without a snapshot
   }
 });
 
-test('Charging plan header shows the Energy Manager mode of an active inverter, never Disabled', () => {
+test('Charging plan renders for an active inverter without a mode badge', () => {
   const slots = [{ action: 'charge', start: '2026-01-01T10:00:00Z', end: '2026-01-01T10:15:00Z', max_power_w: 2000, target_soc_percent: 80 }];
   for (const mode of ['manual', 'external']) {
     const h = harness();
@@ -797,15 +797,11 @@ test('Charging plan header shows the Energy Manager mode of an active inverter, 
     const select = h.context.element('select');
     select.id = 'energy-plan-device';
     select.value = 'main';
-    const badge = h.context.element('span');
-    badge.id = 'energy-plan-manager-state';
     vm.runInContext(`planDevices = [{ device_id: 'main', mode: ${JSON.stringify(mode)} }]`, h.context);
     h.context.renderDryRunPlan({ status: 'ok', horizon_hours: 24, slots, energy: {}, window: {} });
     const text = flatten(host).map((n) => n.textContent || '').join(' ');
     assert.ok(/Next grid charge/.test(text), `mode ${mode}`);
-    assert.equal(badge.textContent, { manual: 'Manual control', external: 'External control' }[mode], `mode ${mode}`);
-    assert.ok(!/Disabled/.test(badge.textContent), 'the plan itself is never called disabled');
-    assert.equal(badge.hidden, false);
+    assert.ok(!/Manual control|External control|Disabled/.test(text), `mode ${mode}`);
   }
 });
 

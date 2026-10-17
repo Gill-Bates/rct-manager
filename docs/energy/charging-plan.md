@@ -259,7 +259,7 @@ capacity is never estimated and no extra inverter or provider query is made.
 Basic mode shows the capacity source and the read-only preview ("Dynamic charging plan (Dry-Run
 preview)"). The result area uses the full card width:
 
-- Header: title with the Energy Manager mode badge (and the forecast confidence, or "Baseline forecast" when the plan uses the configured baseline, when available) on one line, preview note, Inverter select, Expert switch.
+- Header: title with the forecast confidence (or "Baseline forecast" when the plan uses the configured baseline, when available) on one line, preview note, Inverter select, Expert switch.
 - Four equal KPI tiles (four columns on desktop, 2 x 2 on tablets, stacked on phones): Battery
   remaining (usable energy now, for example `33 % SoC - 10.37 kWh usable`, or a dash without a battery
   snapshot), Target SoC, Charge power, total plan grid energy.
@@ -274,8 +274,10 @@ preview)"). The result area uses the full card width:
   charge slots it reads "No grid charging planned." Narrow screens stack each row into labelled
   key-value pairs.
 - **Show all intervals** (a native disclosure): the complete technical slot history with Time,
-  Action, Power, Target SoC and Reason for every interval. Idle intervals are only hidden from the
-  default view, never removed from the plan.
+  Action, Power, Target SoC and Reason for every interval; directly adjacent intervals merge only
+  when action, power, target SoC and reason are identical. The action reads "Grid charging" or "No
+  grid charging", the reason is the plain-language label (for example "Battery can cover forecast
+  demand"). Idle intervals are only hidden from the default view, never removed from the plan.
 - Purpose is the short, user-facing form of the planner reason: "Protect battery reserve", "Reach
   target SoC", "Use negative price", "Solar covers demand", "Battery covers demand". An unknown
   reason is shown as the original text. The planner reasons themselves are unchanged.

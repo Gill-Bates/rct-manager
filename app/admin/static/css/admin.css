@@ -1943,8 +1943,7 @@ body {
     font-variant-numeric: tabular-nums;
 }
 
-/* Title with the execution state and forecast confidence on one line; wraps only when the
-   viewport is too narrow for all three. */
+/* Title and forecast confidence on one line; wraps only when the viewport is too narrow. */
 .energy-plan-title-row,
 .energy-plan-status {
     display: flex;
@@ -2127,9 +2126,12 @@ body {
     min-width: min(16rem, 100%);
 }
 
+/* As a flex item the switch input loses its float, so the label would touch it; the gap restores
+   the spacing the block-level #energy-expert-mode switch gets from Bootstrap. */
 .energy-plan-expert-field {
     display: flex;
     align-items: center;
+    gap: .5rem;
     min-height: 2.5rem;
 }
 
