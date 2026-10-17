@@ -1,155 +1,99 @@
 # Troubleshooting
 
+Find the symptom, check the likely cause, apply the fix. Low-level connection analysis (counters,
+unsolicited frames, packet capture) is on [Transport Diagnostics](reference/transport-diagnostics.md).
+
+| Symptom                                             | Section                                                            |
+| --------------------------------------------------- | ------------------------------------------------------------------ |
+| Container unhealthy or unreachable                  | [Unhealthy container](#the-container-is-unhealthy-or-unreachable)  |
+| Service refuses to start                            | [Start refused](#the-start-is-refused)                             |
+| Cannot log in as `admin`                            | [First admin login](#first-admin-login)                            |
+| `/docs` answers 404                                 | [`/docs` 404](#docs-answers-404)                                   |
+| Write, dispatch or Energy Manager routes answer 404 | [Writes 404](#write-endpoints-answer-404)                          |
+| 429 Too Many Requests                               | [429](#429-from-many-clients-behind-a-proxy)                       |
+| 503 `device_maintenance`                            | [Maintenance](#503-device_maintenance)                             |
+| Mixed, stale or missing values                      | [Stale values](#mixed-or-stale-values)                             |
+| Read timeouts, reconnects, unexpected frames        | [Connection drops](#read-timeouts-reconnects-or-unexpected-frames) |
+| Charging plan shows no plan                         | [Plan status](#charging-plan-shows-no-plan)                        |
+
 ## The container is unhealthy or unreachable
 
-The service listens on loopback. Inside a container set `BIND_ADDRESS=0.0.0.0` and the GUI option
-"behind reverse proxy", and keep `BIND_PORT` equal to the container port of the mapping. A loopback
-bind in a container logs a warning at start.
+- **Likely cause:** the service listens on loopback inside the container, or `BIND_PORT` differs from
+  the container side of the port mapping (also after changing the port in the GUI). A loopback bind in
+  a container logs a warning at start.
+- **First check:** `docker compose -f docker/compose.yaml logs rct-api` for the bind warning.
+- **Fix:** set `BIND_ADDRESS=0.0.0.0` and the GUI option "behind reverse proxy", and keep `BIND_PORT`
+  equal to the container port of the mapping. See [Docker](getting-started/docker.md) and
+  [Network and TLS](configuration/network.md#listener-and-container-port).
 
 ## The start is refused
 
-Run `python -m app validate` (or `docker compose -f docker/compose.yaml run --rm rct-api validate`).
-Typical causes:
-
-- a GUI device list with more than one device without network id on the same endpoint;
-- an invalid object registry or write allowlist;
-- missing `HMAC_SECRET` in a read-only container, or a secret that differs from the one that
-  encrypted the existing database.
+- **First check:** `python -m app validate` (or `docker compose -f docker/compose.yaml run --rm
+  rct-api validate`).
+- **Typical causes and fixes:**
+    - a GUI device list with more than one device without network id on the same endpoint: give each
+      device its own endpoint or network id;
+    - an invalid object registry or write allowlist: fix the entry the validation names;
+    - missing `HMAC_SECRET` in a read-only container, or a secret that differs from the one that
+      encrypted the existing database: set the original secret.
 
 ## First admin login
 
-The generated `admin` password is printed once in the boxed `FIRST START` block on stdout, when the
-admin account is created; restarts neither show nor replace it. If missed, there is no file to
-read it from: reset the admin account. The first login requires a password change. Keep database
-and `HMAC_SECRET` together when restoring a backup.
+- **Likely cause:** the generated `admin` password is printed once, in the boxed `FIRST START` block
+  on stdout, when the admin account is created; restarts neither show nor replace it.
+- **First check:** the logs of the first start.
+- **Fix:** if missed, there is no file to read it from: reset the admin account. The first login
+  requires a password change. Keep database and `HMAC_SECRET` together when restoring a backup.
 
 ## `/docs` answers 404
 
-Both `/docs` and `/openapi.json` need `DOCS_PUBLIC=true`.
+- **Cause:** `/docs` and `/openapi.json` are served only with `DOCS_PUBLIC=true`.
+- **Fix:** set `DOCS_PUBLIC=true`.
 
 ## Write endpoints answer 404
 
-While write access is off (GUI **Inverters** page), the write, dispatch and Energy Manager routes
-answer 404 `write_disabled`. Switching it on takes effect at once, without a restart.
+- **Cause:** write access is off (GUI **Inverters** page); the write, dispatch and Energy Manager
+  routes answer 404 `write_disabled`.
+- **Fix:** switch write access on. It takes effect at once, without a restart.
 
 ## 429 from many clients behind a proxy
 
-Set `TRUSTED_PROXIES` and `FORWARDED_HEADER`; otherwise all callers share the proxy address. See
-[Network and TLS](configuration/network.md).
-
-The admin GUI backs off by itself on a 429 and honours `Retry-After`; its requests use the
-separate `ADMIN_SESSION_RATE_LIMIT_*` budget (see [Environment](configuration/environment.md)).
+- **Likely cause:** all callers share the proxy address, so they share one rate-limit budget.
+- **Fix:** set `TRUSTED_PROXIES` and `FORWARDED_HEADER`; see
+  [Network and TLS](configuration/network.md).
+- **Admin GUI:** it backs off by itself on a 429 and honours `Retry-After`; its requests use the
+  separate `ADMIN_SESSION_RATE_LIMIT_*` budget (see [Environment](configuration/environment.md)).
 
 ## 503 `device_maintenance`
 
-The inverter signalled its bootloader. Requests resume after the cool-down once a single read
-succeeds.
-
-## Unsolicited response frames for objects that are not polled
-
-At DEBUG level the log shows `Unsolicited response burst started ...` for the first such frame, then
-one `burst summary` line per 60 s window (and when the connection drops) listing object ids with
-frame counts. Unmatched frames are never cached.
-
-Unexpected frames still count towards the flood limit: more than 50 within 60 s make the receiver
-reconnect (`unexpected_flood`, see `rct_transport_unexpected_frames_total`).
-
-Working hypothesis, not yet verified on hardware: the inverter keeps `READ PERIODICALLY`
-subscriptions from an earlier session (diagnostic script, other client, unclean shutdown). At
-startup the service only clears its own demultiplexer state; no device-side unsubscribe is
-known, so none is sent. Characterize it on the real device:
-
-1. Which object ids does this service register? Compare the periodic set in the startup log
-   (`Periodic reads active: N of M`) with the object ids in the summary.
-2. Which unsolicited object ids remain after a normal start with no other client connected?
-3. Stop the service cleanly (SIGTERM, which writes `pas.period = 0`), wait 10 s, start it again and
-   record 2-3 minutes of DEBUG log. Do the unsolicited ids disappear?
-4. Kill the service abruptly (`kill -9`) and restart it. Do they reappear?
-5. Repeat 2 with the vendor app, home automation and every diagnostic script stopped. Do they
-   still occur?
-
-Record the firmware version with the result.
+- **Cause:** the inverter signalled its bootloader.
+- **Fix:** none needed. Requests resume after the cool-down once a single read succeeds.
 
 ## Mixed or stale values
 
-Check `foreign_access_suspected` in `GET /api/v1/readiness`: another client
-(vendor app, home automation) may be using port 8899, or a second instance runs
-against the same inverter. See [Operation](operation.md).
+- **Likely cause:** another client (vendor app, home automation) uses port 8899, or a second instance
+  runs against the same inverter.
+- **First check:** `foreign_access_suspected` in `GET /api/v1/readiness`.
+- **Fix:** stop the other client or instance; see
+  [Operation](operation.md#exclusive-access-to-port-8899). Values carry `stale`, `source` and
+  `age_seconds`.
 
-## Truncated long value after a split read (known protocol ambiguity)
+## Read timeouts, reconnects or unexpected frames
 
-Some long inverter responses declare a wrong length, so the parser takes the frame end from the
-framing and accepts a CRC-verified end at the current read boundary. If a TCP read ends inside such
-a frame and the bytes so far happen to carry a valid CRC (chance 2^-16 per evaluated boundary), the
-frame is delivered truncated and the rest discarded. The wire format cannot tell this prefix from a
-complete frame, and the CRC is not weakened to hide it. Symptom: a long response with an
-unexpectedly short payload and a rising `discarded_bytes` in `/api/v1/vendor/rct/transports`.
+- **Likely cause:** line noise, a network problem, another client, or periodic subscriptions that the
+  inverter kept from an earlier session. The log shows "Connection to ... dropped: no response to
+  object ..." or `Unsolicited response burst started`.
+- **First check:** `GET /api/v1/readiness` (`periodic_available`, `periodic_setup_failures`,
+  `foreign_access_suspected`) and the `rct_transport_*` metrics.
+- **Fix:** remove foreign access first. For counters, packet capture and the timeout runbook see
+  [Transport Diagnostics](reference/transport-diagnostics.md).
 
-## Diagnostic values after a deployment
+## Charging plan shows no plan
 
-Always available (read token):
-
-- `GET /api/v1/readiness`, per device: `periodic_available` (`true`: periodic reads are registered on
-  the live connection; `false`: not registered, for example right after a reconnect; `null`: periodic
-  reads not configured), `periodic_setup_failures` (failed registration rounds in a row, `0` while
-  registered), `foreign_access_suspected`, `consecutive_failures`, `liveness_source`, `last_success_at`.
-  While a device is not ready the 503 problem carries the same `devices` list.
-- `GET /metrics` (Prometheus, if the metrics endpoint is on): `rct_transport_crc_errors_total`,
-  `rct_transport_framing_errors_total`, `rct_transport_bytes_discarded_total`,
-  `rct_transport_unexpected_frames_total`, `rct_transport_foreign_access_suspected`,
-  `rct_device_periodic_registrations`, `rct_device_errors_total`,
-  `rct_device_last_success_timestamp_seconds`.
-- `GET /health` is a process check only and says nothing about the inverter.
-
-Only with `ENABLE_VENDOR_DIAGNOSTICS` (internal switch, off by default, read/write token),
-`GET /api/v1/vendor/rct/transports`: `crc_errors`, `framing_errors`, `discarded_bytes`,
-`connection_epoch` (increments with every new TCP connection, so the reconnect count is the epoch
-minus 1), `periodic_registrations`, `periodic_available`, `periodic_setup_failures` and
-`periodic_last_failure` (reason of the latest failed registration round, per device). `connection_epoch`
-and `periodic_last_failure` have no Prometheus metric; without the vendor switch the reason is only in
-the log line "Setup of periodic reads failed".
-
-How to read them:
-
-- Rising `crc_errors`: frames arrive damaged and are dropped, never cached. Suspect line noise or a
-  serial bridge. A single increase does not explain a read timeout by itself.
-- Rising `framing_errors` or `discarded_bytes` without `crc_errors`: stray bytes or broken escaping on
-  the line.
-- `connection_epoch` rising while `crc_errors` stays flat: connections end by timeout or network, not
-  by damaged frames. A single unanswered read (5 s) keeps the connection for other objects, but the
-  same object is re-read only on a new connection, because the protocol has no transaction id and a
-  late answer would be taken for the retry's; the second unanswered read in a row drops the
-  connection too. Either reconnect drops all periodic registrations. The
-  log lines for both cases carry the parser state (`buffered`, age of the last frame, CRC and framing
-  error counts), which tells an answer held or discarded by the parser from one never sent.
-- `Duplicate response to object ... after its transaction was answered`: a second frame for an
-  already answered read (a duplicate or another client's request for the same object), harmless.
-- `periodic_available=false` with `periodic_setup_failures` growing: registration keeps being
-  interrupted; the retry delay doubles from 10 s to 300 s. Values then come from reads and cache and
-  are marked by `stale`, `source` and `age_seconds`.
-- `foreign_access_suspected=true`: another client uses port 8899; mixed answers are possible.
-
-## Runbook: next read timeout on the inverter connection
-
-Keep the polling load unchanged; do not add reads to reproduce it.
-
-1. Note the time of the log line "Connection to ... dropped: no response to object 0x... within 5.0 s"
-   and the object id.
-2. Capture `GET /api/v1/readiness`, `GET /metrics` (and the vendor transports, if enabled) as close
-   before and after that time as possible; compare `crc_errors`, `framing_errors`, `discarded_bytes`,
-   `connection_epoch`, `periodic_setup_failures`.
-3. In parallel keep a packet capture of port 8899 running on the host (for example
-   `tcpdump -i any -s 0 -w incident.pcap tcp port 8899`) and save it with the log excerpt.
-4. In the capture, tell apart:
-    - a) no answer: the request goes out, no data from the inverter follows;
-    - b) a TCP answer arrives but is damaged or incomplete (bad CRC, truncated): expect `crc_errors`
-      or `discarded_bytes` to rise;
-    - c) a complete, valid answer arrives but is not accepted: counters stay flat and the connection is
-      dropped after 5 s anyway, which points to the software;
-    - d) TCP reset, FIN or retransmissions: network or device-side connection problem; `connection_epoch`
-      rises without a timeout line.
-5. Save the raw bytes of the affected response. Check whether it is a long response (command 0x06 or
-   0x46) whose frame ends in an escaped CRC byte `2D 2D` or `2D 2B` (fixed escape-pair case: used to
-   wait for a following frame), or one whose first bytes already carry a valid CRC and which was
-   split across reads (known `PREFIX_COLLISION` case, see above). The first would now be delivered;
-   the second remains a known limitation.
+- **Likely cause:** a planner precondition is missing. The status names it:
+  `battery_state_unavailable`, `spot_disabled`, `spot_prices_unavailable`, `solar_not_configured` or
+  `solar_forecast_unavailable`.
+- **First check:** the readiness checklist on the **Charging plan** tab.
+- **Fix:** enable and configure the spot market and weather forecast, connect the inverter, or set an
+  Expert capacity override. Meaning of each status:
+  [Planner status codes](energy/charging-plan.md#planner-status-codes).

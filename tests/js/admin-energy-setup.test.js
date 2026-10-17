@@ -563,6 +563,26 @@ test('a failing background poll keeps the pending card and keeps polling', async
   h.cleanup();
 });
 
+// A 429 is short-lived load shedding: the Energy poll keeps what is shown (no failure state on the
+// panels) and waits at least as long as the shared rate-limit cooldown before the next poll.
+test('a 429 on the Energy poll keeps the panels and defers the next poll to the cooldown', async () => {
+  const limited = Object.assign(new Error('Too many requests'), { status: 429, retryAfter: 30, rateLimited: true });
+  const h = harness({ apiImpl: async () => { throw limited; } });
+  const pollStates = [];
+  Object.assign(h.context, {
+    energyPanels: new Map([['dev-1', { setPollState: (state) => pollStates.push(state) }]]),
+    energyHardwareStrategies: new Map(), energyPolling: false, energyPollTimer: null, energyClock: 0,
+    ENERGY_POLL_MS: 3000, ENERGY_POLL_BACKOFF_MS: 30000, ENERGY_POLL_TIMEOUT_MS: 8000,
+    energyPollDelay: 3000, pollDelay: (ms) => Math.max(ms, 31_000),
+  });
+  h.context.element('div').id = 'energy-list';
+  await h.context.pollEnergy();
+  assert.deepEqual(pollStates, [], 'a 429 must not flag the panels as failed');
+  assert.equal(h.context.energyPollDelay, 31_000, 'the next poll waits for the cooldown');
+  clearTimeout(h.context.energyPollTimer);
+  h.cleanup();
+});
+
 // P3.1: nextGridCharge must only merge adjacent charge slots of EQUAL power, so the "Next grid
 // charge" summary never reports one slot's power for a window charged at another. The planner keeps
 // adjacent charge slots with different power separate (test_dynamic_optimizer::
