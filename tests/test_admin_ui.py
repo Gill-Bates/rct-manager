@@ -1696,6 +1696,13 @@ def test_energy_page_wires_the_read_only_dry_run_plan_preview():
     # The Energy Manager state of the selected inverter is a badge beside the title, not a status card.
     assert 'id="energy-plan-manager-state"' in plan_pane
     assert "planStatusCard('Energy Manager is off'" not in js
+    # The plan is a read-only preview whose execution may be off; it is never labelled "Disabled".
+    assert "Read-only preview" in plan_pane and "Preview only" not in plan_pane
+    assert 'id="energy-plan-confidence"' in plan_pane and "'Execution off'" in js
+    assert "Show schedule details" in js and "element('details'" in js and "element('summary'" in js
+    assert "History coverage" in js and "Live recording" not in js
+    assert "Locally measured" in js and "Recovered from inverter history" in js
+    assert "will feed later" not in html
     assert 'role="group"' in plan_pane and 'aria-label="Charging plan controls"' in plan_pane
 
 

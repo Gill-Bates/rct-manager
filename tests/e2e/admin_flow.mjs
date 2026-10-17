@@ -2576,15 +2576,24 @@ try {
           check(`plan chart page has no horizontal scroll at ${width}px`, (await pageOverflow()) <= 0, String(await pageOverflow()));
         }
         await ep.setViewportSize({ width: 1280, height: 844 });
-        check('plan schedule is the chart only: no table or details, charge slots listed for screen readers',
-          (await ep.locator('#energy-plan-schedule table, #energy-plan-schedule details').count()) === 0
+        check('plan schedule is the chart plus collapsed details; charge slots stay listed for screen readers',
+          (await ep.locator('#energy-plan-schedule details:not([open]) summary').innerText()) === 'Show schedule details'
+          && !(await ep.locator('#energy-plan-schedule details table').first().isVisible())
           && (await ep.locator('#energy-plan-schedule ul.visually-hidden li').count()) === 2);
+        await ep.locator('#energy-plan-schedule details summary').click();
+        check('schedule details open to a table with right-aligned numbers',
+          (await ep.locator('#energy-plan-schedule details table tbody tr').count()) >= 1
+          && (await ep.locator('#energy-plan-schedule details th.text-end').count()) === 2);
+        await ep.locator('#energy-plan-schedule details summary').click();
+        check('plan header says Read-only preview and Execution state, never Disabled',
+          /Read-only preview/.test(await ep.locator('.energy-plan-head-title').innerText())
+          && !/Disabled/.test(await ep.locator('.energy-plan-head-title').innerText()));
         const hero = await ep.locator('#energy-plan-result .energy-plan-highlights .spot-market-highlight-caption').allInnerTexts();
         check('plan summary shows three plan KPI tiles in the pinned order',
           hero.map((t) => t.toLowerCase()).join('|') === 'target soc|charge power|total plan grid energy', hero.join('|'));
         const batteryLine = await ep.locator('#energy-plan-result .energy-plan-battery').first().innerText();
-        check('Battery remaining shows kWh, SoC and usable capacity as a separate tertiary line',
-          /3[.,]42 kWh/.test(batteryLine) && /33 % SoC · 10[.,]37 kWh usable/.test(batteryLine), batteryLine);
+        check('Current battery state shows SoC, remaining and usable kWh as a separate input line',
+          /Current battery state/.test(batteryLine) && /33 % SoC · 3[.,]42 kWh remaining \/ 10[.,]37 kWh usable/.test(batteryLine), batteryLine);
         const columnsAt = async (width) => {
           await ep.setViewportSize({ width, height: 844 });
           return ep.evaluate(() => new Set([...document.querySelectorAll('.energy-plan-highlights .spot-market-highlight')].map((t) => Math.round(t.getBoundingClientRect().left))).size);
@@ -2646,8 +2655,9 @@ try {
         await ep.waitForSelector('#energy-plan-schedule canvas');
 
         // Household consumption: chart with badge, no stale chart while loading, empty state.
-        check('consumption chart renders with the daily average badge',
-          (await chartsIn('#energy-consumption')) === 1 && /kWh\/day/.test(await ep.locator('#energy-consumption-status').innerText()));
+        check('consumption chart renders with the daily average and the history coverage',
+          (await chartsIn('#energy-consumption')) === 1 && /kWh\/day/.test(await ep.locator('#energy-consumption-status').innerText())
+          && /History coverage · \d+\/4 days/.test(await ep.locator('#energy-consumption-import-status').innerText()));
         let releaseConsumption;
         consumptionGate = new Promise((resolve) => { releaseConsumption = resolve; });
         await ep.locator('#energy-plan-device').dispatchEvent('change');

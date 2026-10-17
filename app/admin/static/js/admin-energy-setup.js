@@ -1238,7 +1238,7 @@ function planChargeList(slots) {
 
 // The chart is the schedule view; its tooltip carries the per-slot detail.
 function planSchedule(plan) {
-  const section = element('section', '');
+  const section = element('section', 'energy-plan-section');
   section.setAttribute('aria-labelledby', 'energy-plan-schedule-title');
   const title = element('h3', 'h6', 'Charging schedule');
   title.id = 'energy-plan-schedule-title';
@@ -1258,8 +1258,58 @@ function planSchedule(plan) {
   } else {
     section.append(element('p', 'text-danger small', 'Chart library could not be loaded.'));
   }
-  section.append(planChargeList(plan.slots));
+  section.append(planChargeList(plan.slots), planScheduleDetails(plan.slots));
   return { section, canvas };
+}
+
+// Consecutive slots with the same action, power, target and reason read as one row.
+function planSlotRuns(slots) {
+  const runs = [];
+  for (const slot of [...slots].sort((a, b) => new Date(a.start) - new Date(b.start))) {
+    const last = runs[runs.length - 1];
+    const same = last
+      && last.action === slot.action && last.max_power_w === slot.max_power_w
+      && last.target_soc_percent === slot.target_soc_percent && (last.reason || '') === (slot.reason || '')
+      && new Date(last.end).getTime() === new Date(slot.start).getTime();
+    if (same) last.end = slot.end;
+    else runs.push({ ...slot });
+  }
+  return runs;
+}
+
+// Collapsed lookup table next to the chart: keyboard and touch friendly, numbers right-aligned.
+function planScheduleDetails(slots) {
+  const details = element('details', 'energy-plan-slot-details mt-2');
+  details.id = 'energy-plan-schedule-details';
+  details.open = Boolean($('energy-plan-schedule-details')?.open);
+  details.append(element('summary', '', 'Show schedule details'));
+  const table = element('table', 'table table-sm energy-plan-slot-table mt-2 mb-0');
+  table.append(element('caption', 'visually-hidden', 'Charging schedule slots'));
+  const head = element('tr');
+  for (const [name, numeric] of [['Time'], ['Action'], ['Power', true], ['Target SoC', true], ['Reason']]) {
+    const cell = element('th', numeric ? 'text-end' : '', name);
+    cell.scope = 'col';
+    head.append(cell);
+  }
+  const body = element('tbody');
+  for (const slot of planSlotRuns(slots)) {
+    const watts = planNumber(slot.max_power_w);
+    const target = planNumber(slot.target_soc_percent);
+    const row = element('tr');
+    row.append(
+      element('td', '', planSlotTime(slot)),
+      element('td', '', PLAN_ACTION_LABELS[slot.action] || slot.action),
+      element('td', 'text-end', Number.isFinite(watts) && slot.action === 'charge' ? formatPower(watts) : NOT_AVAILABLE),
+      element('td', 'text-end', Number.isFinite(target) ? `${Math.round(target)} %` : NOT_AVAILABLE),
+      element('td', '', slot.reason ? (PLAN_REASON_LABELS[slot.reason] || slot.reason) : NOT_AVAILABLE),
+    );
+    body.append(row);
+  }
+  const thead = element('thead');
+  thead.append(head);
+  table.append(thead, body);
+  details.append(table);
+  return details;
 }
 
 function planTechnicalDetails(plan) {
@@ -1283,6 +1333,30 @@ function planTechnicalDetails(plan) {
   return parts;
 }
 
+const PLAN_CONFIDENCE_LABELS = { low: 'Low confidence', medium: 'Medium confidence', high: 'High confidence' };
+
+// Forecast confidence next to the execution state, from forecast_basis / forecast_confidence only.
+// The note explains a weak forecast; a missing field hides the part instead of inventing a state.
+function renderPlanConfidence(plan) {
+  const label = $('energy-plan-confidence');
+  const note = $('energy-plan-confidence-note');
+  const ok = plan.status === 'ok';
+  const baseline = ok && plan.forecast_basis === 'bootstrap_baseline';
+  const text = !ok ? '' : baseline ? 'Baseline forecast' : (PLAN_CONFIDENCE_LABELS[plan.forecast_confidence] || '');
+  const explanation = baseline
+    ? 'Conservative household baseline while consumption history is collected.'
+    : ok && plan.forecast_confidence === 'low' ? 'Limited consumption history.' : '';
+  if (label) {
+    label.hidden = !text;
+    label.textContent = text;
+    label.title = explanation;
+  }
+  if (note) {
+    note.hidden = !explanation;
+    note.textContent = explanation ? `Preliminary plan: ${explanation[0].toLowerCase()}${explanation.slice(1)}` : '';
+  }
+}
+
 function renderDryRunPlan(plan, { waiting = true } = {}) {
   const host = $('energy-plan-result');
   const technical = $('energy-plan-technical');
@@ -1296,9 +1370,11 @@ function renderDryRunPlan(plan, { waiting = true } = {}) {
   const managerBadge = $('energy-plan-manager-state');
   if (managerBadge) {
     managerBadge.hidden = !selectedDevice;
-    managerBadge.textContent = managerOff ? 'Disabled' : 'Enabled';
+    // The plan itself is never "disabled": this only says whether the Energy Manager executes it.
+    managerBadge.textContent = managerOff ? 'Execution off' : 'Execution on';
     managerBadge.className = `status-badge ${managerOff ? 'status-badge-neutral' : 'status-badge-success'}`;
   }
+  renderPlanConfidence(plan);
   if (plan.status !== 'ok') {
     const states = {
       battery_state_unavailable: ['Plan not available yet', 'Battery data could not be verified automatically. Check that the inverter is connected and reports its battery state and capacity; the plan is re-checked on its own.'],
@@ -1348,20 +1424,15 @@ function renderDryRunPlan(plan, { waiting = true } = {}) {
   add('Charge power', next && known(next.max_power_w) ? formatPower(next.max_power_w) : '—', 'bolt');
   add('Total plan grid energy', known(plan.energy?.grid_charge_energy_wh) ? planKwh(plan.energy.grid_charge_energy_wh) : '—', 'electric_meter');
   card.append(summary);
-  // Battery remaining is a live device state, not a plan output: render it as a weaker tertiary line.
-  const batteryLine = element('p', 'energy-plan-battery d-flex align-items-center gap-2 small text-secondary mt-3 mb-0');
+  // The battery is an input of the plan, not an output: a quiet labelled line, not another KPI.
+  const batteryLine = element('p', 'energy-plan-battery d-flex flex-wrap align-items-center gap-2 small text-secondary mt-3 mb-0');
   const batteryGlyph = element('span', 'material-icons text-secondary', 'battery_5_bar');
   batteryGlyph.setAttribute('aria-hidden', 'true');
   const batteryText = hasBattery
-    ? `Battery remaining ${planKwh(battery.remaining_energy_wh)} · ${Math.round(battery.soc_percent)} % SoC · ${planKwh(battery.usable_capacity_wh)} usable`
-    : 'Battery remaining — · Not available';
-  batteryLine.append(batteryGlyph, element('span', null, batteryText));
+    ? `${Math.round(battery.soc_percent)} % SoC · ${planKwh(battery.remaining_energy_wh)} remaining / ${planKwh(battery.usable_capacity_wh)} usable`
+    : 'Not available';
+  batteryLine.append(batteryGlyph, element('span', 'energy-plan-battery-label', 'Current battery state'), element('span', 'energy-plan-battery-value', batteryText));
   card.append(batteryLine);
-  if (plan.forecast_basis === 'bootstrap_baseline') {
-    card.append(element('p', 'small text-secondary mt-3 mb-0', 'Preliminary plan using a conservative household baseline while consumption history is collected.'));
-  } else if (plan.forecast_confidence === 'low') {
-    card.append(element('p', 'small text-secondary mt-3 mb-0', 'Preliminary plan based on limited consumption history.'));
-  }
   host.replaceChildren(card);
   const scheduleHost = $('energy-plan-schedule');
   const { section, canvas } = planSchedule(plan);
@@ -1644,8 +1715,8 @@ let consumptionGeneration = 0;
 
 // Bar colours per source; unavailable days stay empty instead of being drawn as zero.
 const CONSUMPTION_SOURCES = {
-  local_measured: { label: 'Measured locally', color: '--consumption-measured' },
-  inverter_history: { label: 'Inverter day total', color: '--consumption-history' },
+  local_measured: { label: 'Locally measured', color: '--consumption-measured' },
+  inverter_history: { label: 'Recovered from inverter history', color: '--consumption-history' },
 };
 
 function consumptionChartColors() {
@@ -1675,10 +1746,9 @@ function setConsumptionVisible(visible) {
   if (section) section.hidden = !visible;
 }
 
-// The recording-status badge is always meaningful, independent of whether the chart draws: live
-// recording and the inverter day-history import always run, so it reports how many of the window's
-// days have a value yet. It consumes only the already-fetched history (no extra request). A
-// null/undefined history clears the badge.
+// Data coverage of the window, neutral on purpose: a day counts once it has a value, whether it
+// was measured locally or recovered from the inverter's day history. Only the already-fetched
+// history is used. A null/undefined history clears the slot.
 function renderInverterHistoryStatus(history) {
   const slot = $('energy-consumption-import-status');
   if (!slot) return false;
@@ -1687,17 +1757,19 @@ function renderInverterHistoryStatus(history) {
     return false;
   }
   const days = Array.isArray(history.days) ? history.days : [];
-  const total = days.length;
-  const available = days.filter((day) => Number.isFinite(day.energy_wh)).length;
+  const known = days.filter((day) => Number.isFinite(day.energy_wh));
   const since = Date.parse(history.recording_since);
-  let detail;
-  if (available === 0 && Number.isFinite(since)) {
-    detail = `recording since ${new Date(since).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: '2-digit' })}`;
-  } else {
-    detail = `${available}/${total} days available`;
+  let coverage = `History coverage · ${known.length}/${days.length} days`;
+  if (!known.length && Number.isFinite(since)) {
+    coverage += ` · recording since ${new Date(since).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: '2-digit' })}`;
   }
-  slot.replaceChildren(element('span', 'badge rounded-pill text-bg-success',
-    `Live recording · ${detail}`));
+  const parts = [element('span', '', coverage)];
+  if (known.length) {
+    const local = known.filter((day) => day.source === 'local_measured').length;
+    const inverter = known.filter((day) => day.source === 'inverter_history').length;
+    parts.push(element('span', 'energy-consumption-sources', `${local} local · ${inverter} inverter`));
+  }
+  slot.replaceChildren(...parts);
   return true;
 }
 
@@ -1723,8 +1795,8 @@ function drawConsumptionChart(history) {
     return;
   }
   const average = known.reduce((sum, day) => sum + day.energy_wh, 0) / known.length / 1000;
-  status.replaceChildren(element('span', 'badge rounded-pill text-bg-secondary',
-    `Ø ${average.toLocaleString(undefined, { maximumFractionDigits: 1 })} kWh/day · ${known.length} of ${days.length} days`));
+  status.replaceChildren(element('span', '',
+    `Ø ${average.toLocaleString(undefined, { maximumFractionDigits: 1 })} kWh/day`));
   const box = element('div', 'spot-market-chart-box');
   const canvas = element('canvas');
   canvas.setAttribute('role', 'img');

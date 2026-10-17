@@ -1930,9 +1930,65 @@ body {
     min-width: 0;
 }
 
-/* Tertiary Battery-remaining line: the leading glyph matches the KPI tile glyph's visual weight. */
+/* Current battery state: an input of the plan, so a quiet labelled line instead of a KPI tile. */
 .energy-plan-battery .material-icons {
     font-size: 1.1rem;
+}
+
+.energy-plan-battery-label {
+    font-weight: 600;
+}
+
+.energy-plan-battery-value {
+    font-variant-numeric: tabular-nums;
+}
+
+/* Execution state and forecast confidence on one line below the title. */
+.energy-plan-status {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: .25rem .5rem;
+}
+
+/* Plan sections are separated by a hairline and spacing only, not by further card frames. */
+.energy-plan-section {
+    margin-top: 1.25rem;
+    padding-top: 1rem;
+    border-top: 1px solid var(--rct-line);
+}
+
+.energy-plan-slot-details summary {
+    cursor: pointer;
+    min-height: 2.75rem;
+    display: flex;
+    align-items: center;
+}
+
+.energy-plan-slot-table {
+    font-size: .85rem;
+    font-variant-numeric: tabular-nums;
+}
+
+.energy-plan-slot-table th,
+.energy-plan-slot-table td {
+    overflow-wrap: anywhere;
+}
+
+/* Average left, history coverage right; wraps below on narrow screens. */
+.energy-consumption-meta {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    gap: .25rem 1rem;
+    margin-bottom: .5rem;
+}
+
+.energy-consumption-coverage {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0 .75rem;
+    min-width: 0;
 }
 
 .energy-plan-head-controls {

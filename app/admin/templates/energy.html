@@ -4,9 +4,8 @@
 <div class="page-heading">
     <div>
         <h1>Energy Manager</h1>
-        <p class="text-secondary mb-0">Battery control per inverter, plus the spot-market and weather data sources that
-            will feed later energy optimisation. Spot-market and weather settings are inputs only; they never control
-            the inverter directly.</p>
+        <p class="text-secondary mb-0">Battery control per inverter, plus spot-market and weather inputs for the
+            read-only charging plan. Spot-market and weather settings never control the inverter directly.</p>
     </div>
 </div>
 
@@ -60,13 +59,15 @@ Default tab is Inverter; Charging plan is the read-only Dry-Run preview. #}
             <div class="card-body">
                 <div class="energy-plan-head mb-3">
                     <div class="energy-plan-head-title">
-                        <div class="d-flex align-items-center gap-2">
-                            <h2 class="h5 card-title mb-0" id="energy-plan-title">Charging plan</h2>
-                            {# Energy Manager state of the selected inverter; set by renderDryRunPlan. #}
+                        <h2 class="h5 card-title mb-0" id="energy-plan-title">Charging plan</h2>
+                        <p class="text-secondary small mb-0 mt-1">Read-only preview · No inverter commands are sent</p>
+                        {# Execution state of the selected inverter and forecast confidence; set by renderDryRunPlan. #}
+                        <div class="energy-plan-status mt-2" aria-live="polite">
                             <span class="status-badge status-badge-neutral" id="energy-plan-manager-state"
                                 hidden></span>
+                            <span class="small text-secondary" id="energy-plan-confidence" hidden></span>
                         </div>
-                        <p class="text-secondary small mb-0 mt-1">Preview only · No inverter commands are sent</p>
+                        <p class="small text-secondary mb-0 mt-1" id="energy-plan-confidence-note" hidden></p>
                     </div>
                     <div class="energy-plan-head-controls" role="group" aria-label="Charging plan controls">
                         <div class="energy-plan-device-field">
@@ -83,13 +84,15 @@ Default tab is Inverter; Charging plan is the read-only Dry-Run preview. #}
                 {# Result area at full width: summary, then the schedule, then the optional consumption history. #}
                 <div id="energy-plan-result" aria-live="polite"></div>
                 {# Full card width: the time-series chart and the slot table need the room. #}
-                <div id="energy-plan-schedule" class="mt-3"></div>
+                <div id="energy-plan-schedule"></div>
                 {# Context for the plan: the consumption history the forecast learns from. Hidden reserves no space. #}
-                <section class="mt-3" id="energy-consumption-section" aria-labelledby="energy-consumption-title" hidden>
+                <section class="energy-plan-section" id="energy-consumption-section" aria-labelledby="energy-consumption-title" hidden>
                     <div class="spot-market-preview-title-row">
                         <h3 class="h6 mb-0" id="energy-consumption-title">Household consumption · last 60 days</h3>
-                        <div id="energy-consumption-status" class="spot-market-preview-status" aria-live="polite"></div>
-                        <div id="energy-consumption-import-status" class="spot-market-preview-status"
+                    </div>
+                    <div class="energy-consumption-meta small text-secondary">
+                        <div id="energy-consumption-status" aria-live="polite"></div>
+                        <div id="energy-consumption-import-status" class="energy-consumption-coverage"
                             aria-live="polite"></div>
                     </div>
                     <div id="energy-consumption" class="spot-market-preview" aria-live="polite"></div>

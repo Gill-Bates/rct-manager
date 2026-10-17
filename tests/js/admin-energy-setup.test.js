@@ -758,7 +758,7 @@ function planBatteryLine(plan) {
   const inGrid = strip ? flatten(strip).includes(line) : false;
   // The harness's textContent getter does not concatenate children, so read the text span only
   // (the glyph span carries the Material Icon ligature, not label text).
-  const textSpan = line ? flatten(line).find((n) => n.tagName === 'span' && !(n.className || '').split(/\s+/).includes('material-icons')) : null;
+  const textSpan = line ? flatten(line).find((n) => n.tagName === 'span' && (n.className || '').split(/\s+/).includes('energy-plan-battery-value')) : null;
   const text = textSpan ? textSpan.textContent : null;
   return { text, inGrid, isTile: line ? (line.className || '').split(/\s+/).includes('spot-market-highlight') : false };
 }
@@ -774,7 +774,7 @@ test('Charging plan shows three plan KPI tiles with Battery remaining as a separ
   const battery = planBatteryLine(plan);
   assert.equal(battery.inGrid, false, 'Battery remaining must not live inside the plan-KPI grid');
   assert.equal(battery.isTile, false, 'Battery remaining must not be a .spot-market-highlight tile');
-  assert.match(battery.text, /Battery remaining 3[.,]42 kWh · 33 % SoC · 10[.,]37 kWh usable/);
+  assert.match(battery.text, /33 % SoC · 3[.,]42 kWh remaining \/ 10[.,]37 kWh usable/);
 });
 
 test('Battery remaining shows a dash, never NaN or undefined, without a snapshot', () => {
@@ -782,12 +782,12 @@ test('Battery remaining shows a dash, never NaN or undefined, without a snapshot
     const tiles = planTiles({ battery });
     assert.equal(tiles.length, 3, 'the plan-KPI grid keeps its three tiles');
     const line = planBatteryLine({ battery });
-    assert.equal(line.text, 'Battery remaining — · Not available');
+    assert.equal(line.text, 'Not available');
     assert.ok(!/NaN|undefined|null/.test(line.text));
   }
 });
 
-test('Charging plan announces no grid charge while the Energy Manager is off; the header badge shows the state', () => {
+test('Charging plan announces no grid charge while the Energy Manager is off; the header shows Execution off, never Disabled', () => {
   const slots = [{ action: 'charge', start: '2026-01-01T10:00:00Z', end: '2026-01-01T10:15:00Z', max_power_w: 2000, target_soc_percent: 80 }];
   for (const [mode, expectOff] of [['off', true], ['manual', false], [undefined, false]]) {
     const h = harness();
@@ -804,76 +804,118 @@ test('Charging plan announces no grid charge while the Energy Manager is off; th
     const text = flatten(host).map((n) => n.textContent || '').join(' ');
     assert.equal(/Next grid charge/.test(text), !expectOff, `mode ${mode}`);
     assert.ok(!/Energy Manager is off/.test(text), `mode ${mode}: no off card, the badge carries it`);
-    assert.equal(badge.textContent, expectOff ? 'Disabled' : 'Enabled', `mode ${mode}`);
+    assert.equal(badge.textContent, expectOff ? 'Execution off' : 'Execution on', `mode ${mode}`);
+    assert.ok(!/Disabled/.test(badge.textContent), 'the plan itself is never called disabled');
     assert.equal(badge.hidden, false);
   }
 });
 
-// The "Live recording" status badge is driven only by the already-fetched consumption
-// history: the day count derived from days[] and recording_since (the import is always on). It
-// renders real text (no colour-only state) into #energy-consumption-import-status and must degrade
-// gracefully when fields are missing (never NaN, never a crash). Build the host, call the pure
-// render function, and assert on the produced badge text and class.
+// The coverage line is driven only by the already-fetched consumption history: days[] with
+// their source. It is neutral text (no success state) in #energy-consumption-import-status and
+// must degrade gracefully when fields are missing (never NaN, never a crash).
 function importStatusHarness() {
   const h = harness();
   const slot = h.context.element('div');
   slot.id = 'energy-consumption-import-status';
-  const badge = () => slot.children[0] || null;
-  return { h, slot, badge };
+  const text = (index) => slot.children[index]?.textContent ?? null;
+  return { h, slot, text };
 }
 
-function consumptionDays(available, total) {
+function consumptionDays(available, total, source = 'inverter_history', local = 0) {
   return Array.from({ length: total }, (_, i) => ({
     date: `2026-01-${String(i + 1).padStart(2, '0')}`,
     energy_wh: i < available ? 1000 + i : null,
-    source: i < available ? 'inverter_history' : 'unavailable',
+    source: i >= available ? 'unavailable' : i < local ? 'local_measured' : source,
   }));
 }
 
-test('Recording status shows "Live recording · N/60 days available"', () => {
-  const { h, slot, badge } = importStatusHarness();
+test('Coverage status shows "History coverage · N/60 days" with the source split, neutral', () => {
+  const { h, slot, text } = importStatusHarness();
   try {
+    h.context.renderInverterHistoryStatus({ days: consumptionDays(60, 60), recording_since: null });
+    assert.equal(text(0), 'History coverage · 60/60 days');
+    assert.equal(text(1), '0 local · 60 inverter');
+    h.context.renderInverterHistoryStatus({ days: consumptionDays(60, 60, 'inverter_history', 42), recording_since: null });
+    assert.equal(text(1), '42 local · 18 inverter');
     h.context.renderInverterHistoryStatus({ days: consumptionDays(42, 60), recording_since: '2025-11-01T00:00:00Z' });
-    assert.equal(badge().textContent, 'Live recording · 42/60 days available');
-    assert.ok((badge().className || '').includes('text-bg-success'), 'the badge uses the success style');
-    h.context.renderInverterHistoryStatus({ days: [], recording_since: null });
-    assert.equal(slot.children.length, 1, 'the badge replaces rather than appends on re-render');
+    assert.equal(text(0), 'History coverage · 42/60 days');
+    assert.ok(!/Live recording|text-bg-success/.test(slot.children.map((c) => `${c.textContent} ${c.className}`).join(' ')));
+    assert.equal(slot.children.length, 2, 'a re-render replaces rather than appends');
   } finally { h.cleanup(); }
 });
 
-test('Recording status: total follows days.length, not a hard-coded 60', () => {
-  const { h, badge } = importStatusHarness();
+test('Coverage status: total follows days.length, not a hard-coded 60', () => {
+  const { h, text } = importStatusHarness();
   try {
     h.context.renderInverterHistoryStatus({ days: consumptionDays(5, 30), recording_since: null });
-    assert.equal(badge().textContent, 'Live recording · 5/30 days available');
+    assert.equal(text(0), 'History coverage · 5/30 days');
   } finally { h.cleanup(); }
 });
 
-test('Recording status: with no completed day but a valid recording_since shows "recording since"', () => {
-  const { h, badge } = importStatusHarness();
+test('Coverage status: with no completed day but a valid recording_since shows "recording since"', () => {
+  const { h, text, slot } = importStatusHarness();
   try {
     h.context.renderInverterHistoryStatus({ days: consumptionDays(0, 60), recording_since: '2026-01-05T00:00:00Z' });
-    assert.match(badge().textContent, /^Live recording · recording since /);
-    assert.ok(!/NaN|undefined|Invalid/.test(badge().textContent), 'the date is formatted, never NaN');
+    assert.match(text(0), /^History coverage · 0\/60 days · recording since /);
+    assert.ok(!/NaN|undefined|Invalid/.test(text(0)), 'the date is formatted, never NaN');
+    assert.equal(slot.children.length, 1, 'no source split without any available day');
   } finally { h.cleanup(); }
 });
 
-test('Recording status: with N=0 and no recording_since falls back to 0/N days', () => {
-  const { h, badge } = importStatusHarness();
+test('Coverage status degrades gracefully: missing days render 0/0, no crash', () => {
+  const { h, slot, text } = importStatusHarness();
   try {
-    h.context.renderInverterHistoryStatus({ days: consumptionDays(0, 60), recording_since: null });
-    assert.equal(badge().textContent, 'Live recording · 0/60 days available');
-  } finally { h.cleanup(); }
-});
-
-test('Recording status degrades gracefully: missing days render 0/0, no crash', () => {
-  const { h, slot, badge } = importStatusHarness();
-  try {
-    // days missing → 0/0, no NaN.
     h.context.renderInverterHistoryStatus({});
-    assert.equal(badge().textContent, 'Live recording · 0/0 days available');
-    // A null history clears the badge entirely and reports nothing to show.
+    assert.equal(text(0), 'History coverage · 0/0 days');
     assert.equal(h.context.renderInverterHistoryStatus(null), false);
-    assert.equal(slot.children.length, 0, 'a null history leaves no badge');
+    assert.equal(slot.children.length, 0, 'a null history leaves nothing');
   } finally { h.cleanup(); }
+});
+
+test('Charging plan shows forecast confidence from the plan fields and explains a weak forecast', () => {
+  const cases = [
+    [{ forecast_basis: 'adaptive_history', forecast_confidence: 'low' }, 'Low confidence', /limited consumption history/i],
+    [{ forecast_basis: 'adaptive_history', forecast_confidence: 'high' }, 'High confidence', null],
+    [{ forecast_basis: 'bootstrap_baseline', forecast_confidence: 'low' }, 'Baseline forecast', /baseline/i],
+    [{}, '', null],
+  ];
+  for (const [fields, label, note] of cases) {
+    const h = harness();
+    const host = h.context.element('div');
+    host.id = 'energy-plan-result';
+    const badge = h.context.element('span');
+    badge.id = 'energy-plan-confidence';
+    const explain = h.context.element('p');
+    explain.id = 'energy-plan-confidence-note';
+    h.context.renderDryRunPlan({ status: 'ok', horizon_hours: 24, slots: [], energy: {}, window: {}, ...fields });
+    assert.equal(badge.textContent, label, JSON.stringify(fields));
+    assert.equal(badge.hidden, !label);
+    if (note) assert.match(explain.textContent, note);
+    assert.equal(explain.hidden, !note);
+    h.context.renderDryRunPlan({ status: 'spot_prices_unavailable', slots: [], ...fields });
+    assert.equal(badge.hidden, true, 'no confidence without a plan');
+  }
+});
+
+test('Charging schedule offers collapsed details with merged consecutive slots', () => {
+  const h = harness();
+  h.context.formatPower = (w) => `${w} W`;
+  h.context.element('div').id = 'energy-plan-result';
+  const schedule = h.context.element('div');
+  schedule.id = 'energy-plan-schedule';
+  const slot = (start, end, action, power) => ({ start, end, action, max_power_w: power, target_soc_percent: 80, reason: 'forecast PV covers demand' });
+  h.context.renderDryRunPlan({
+    status: 'ok', horizon_hours: 24, energy: {}, window: {},
+    slots: [
+      slot('2026-01-01T10:00:00Z', '2026-01-01T10:15:00Z', 'charge', 2000),
+      slot('2026-01-01T10:15:00Z', '2026-01-01T10:30:00Z', 'charge', 2000),
+      slot('2026-01-01T10:30:00Z', '2026-01-01T11:00:00Z', 'idle', null),
+    ],
+  });
+  const nodes = flatten(schedule);
+  const details = nodes.find((n) => n.tagName === 'details');
+  assert.ok(details, 'a native details element exists');
+  assert.notEqual(details.open, true, 'collapsed by default');
+  assert.equal(nodes.find((n) => n.tagName === 'summary').textContent, 'Show schedule details');
+  assert.equal(nodes.filter((n) => n.tagName === 'tr' && flatten(n).some((c) => c.tagName === 'td')).length, 2);
 });
