@@ -105,6 +105,7 @@ function harness({ apiImpl } = {}) {
     api: apiImpl || (async (p, options) => { calls.push({ path: p, options }); return []; }),
     toast: (message, kind = 'success') => { toasts.push({ message, kind }); },
     messageFrom: (e) => e.message,
+    pollDelay: (ms) => ms,
     NOT_AVAILABLE: 'n/a',
     ENERGY_ACTION_LABELS: {},
     energyExpertMode: false, // lives in admin-energy-controls.js, which this harness does not load
@@ -766,7 +767,7 @@ test('Battery remaining shows a dash, never NaN or undefined, without a snapshot
   }
 });
 
-test('Charging plan announces no grid charge while the Energy Manager is off', () => {
+test('Charging plan announces no grid charge while the Energy Manager is off; the header badge shows the state', () => {
   const slots = [{ action: 'charge', start: '2026-01-01T10:00:00Z', end: '2026-01-01T10:15:00Z', max_power_w: 2000, target_soc_percent: 80 }];
   for (const [mode, expectOff] of [['off', true], ['manual', false], [undefined, false]]) {
     const h = harness();
@@ -776,11 +777,15 @@ test('Charging plan announces no grid charge while the Energy Manager is off', (
     const select = h.context.element('select');
     select.id = 'energy-plan-device';
     select.value = 'main';
+    const badge = h.context.element('span');
+    badge.id = 'energy-plan-manager-state';
     vm.runInContext(`planDevices = [{ device_id: 'main', mode: ${JSON.stringify(mode)} }]`, h.context);
     h.context.renderDryRunPlan({ status: 'ok', horizon_hours: 24, slots, energy: {}, window: {} });
     const text = flatten(host).map((n) => n.textContent || '').join(' ');
     assert.equal(/Next grid charge/.test(text), !expectOff, `mode ${mode}`);
-    assert.equal(/Energy Manager is off/.test(text), expectOff, `mode ${mode}`);
+    assert.ok(!/Energy Manager is off/.test(text), `mode ${mode}: no off card, the badge carries it`);
+    assert.equal(badge.textContent, expectOff ? 'Disabled' : 'Enabled', `mode ${mode}`);
+    assert.equal(badge.hidden, false);
   }
 });
 

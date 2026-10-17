@@ -1693,6 +1693,9 @@ def test_energy_page_wires_the_read_only_dry_run_plan_preview():
     # The static header reads as a card: a plain title (no "Preview" qualifier badge, the plan either
     # has data or says it has none) and the inverter select + Expert switch as one labelled controls block.
     assert 'id="energy-plan-qualifier"' not in plan_pane and ">Preview<" not in plan_pane
+    # The Energy Manager state of the selected inverter is a badge beside the title, not a status card.
+    assert 'id="energy-plan-manager-state"' in plan_pane
+    assert "planStatusCard('Energy Manager is off'" not in js
     assert 'role="group"' in plan_pane and 'aria-label="Charging plan controls"' in plan_pane
 
 

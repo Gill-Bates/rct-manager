@@ -50,6 +50,7 @@ from app.gateway.rct_dispatch import RctDispatchGateway
 from app.hostnames import strip_ipv6_brackets
 from app.security.client_ip import ClientIpResolver
 from app.security.dependencies import source_address
+from app.security.ratelimit import admin_session_key
 
 router = APIRouter(prefix="/admin/api", include_in_schema=False)
 _COOKIE = "rct_admin_session"
@@ -392,7 +393,9 @@ def require_admin(
     if session is None:
         raise HTTPException(401, "Login required")
     ctx = request.app.state.security
-    ctx.limiter.check_request("admin:" + source_address(request, ctx))
+    ctx.limiter.check_admin_session(
+        admin_session_key(request.cookies.get(_COOKIE), source_address(request, ctx))
+    )
     if mutation:
         _csrf(request, session)
     if session["must_change_password"] and not allow_password_change:

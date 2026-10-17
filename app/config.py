@@ -354,6 +354,9 @@ class Settings(BaseSettings):
     forwarded_header: str = ""
     rate_limit_requests: int = Field(60, ge=1, le=10_000)
     rate_limit_window_seconds: int = Field(60, ge=1, le=3600)
+    # Cookie-session admin GUI traffic (polling, several tabs); PAT callers keep rate_limit_*.
+    admin_session_rate_limit_requests: int = Field(600, ge=1, le=100_000)
+    admin_session_rate_limit_window_seconds: int = Field(60, ge=1, le=3600)
     auth_fail_limit: int = Field(5, ge=1, le=100)
     auth_fail_window_seconds: int = Field(300, ge=10, le=3600)
     auth_fail_block_seconds: int = Field(900, ge=10, le=86_400)

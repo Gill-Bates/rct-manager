@@ -515,26 +515,52 @@ async def test_daily_backfill_always_starts_without_a_switch(tmp_path) -> None:
     service.return_value.run.assert_awaited_once()
 
 
-def test_several_logger_points_for_one_local_date_log_once_and_the_last_one_wins(caplog) -> None:
+def _day_history(points):
     from app.gateway.rct_history import RctDailyConsumptionHistory
     from app.protocol.timeseries import TimeSeriesPoint
 
     class _Gateway:
         async def query_history_series(self, device_id, name, before):
-            # Two points on 2026-10-14 in Berlin (UTC+2) and one on the 13th.
-            return (
-                TimeSeriesPoint(datetime(2026, 10, 14, 6, 0, tzinfo=UTC), 100.0),
-                TimeSeriesPoint(datetime(2026, 10, 14, 18, 0, tzinfo=UTC), 200.0),
-                TimeSeriesPoint(datetime(2026, 10, 13, 12, 0, tzinfo=UTC), 300.0),
+            return tuple(
+                TimeSeriesPoint(datetime(2026, 10, day, 23, 59, 59, tzinfo=UTC), wh)
+                for day, wh in points
             )
 
-    history = RctDailyConsumptionHistory(_Gateway(), lambda: "Europe/Berlin")
+    return RctDailyConsumptionHistory(_Gateway(), lambda: "Europe/Berlin")
+
+
+def _read_days(history):
     before = datetime(2026, 10, 15, 0, 0, tzinfo=UTC)
+    readings = asyncio.run(history.daily_consumption("main", before=before, limit=10))
+    return {r.local_date.day: r.energy_wh for r in readings}
+
+
+def test_refinement_points_of_one_day_pick_the_largest_without_a_warning(caplog) -> None:
+    # Real device shape: the same 23:59:59 stamp repeated with sub-Wh jitter, last not the max.
+    history = _day_history(
+        [(14, 20103.80078125), (14, 20104.0), (14, 20103.66), (13, 300.0)]
+    )
+    with caplog.at_level("DEBUG", logger="app.gateway.rct_history"):
+        days = _read_days(history)
+    assert days == {14: 20104.0, 13: 300.0}
+    assert not [r for r in caplog.records if r.levelname == "WARNING"]
+
+
+def test_identical_repeated_points_are_a_silent_duplicate(caplog) -> None:
+    history = _day_history([(14, 500.0), (14, 500.0)])
+    with caplog.at_level("DEBUG", logger="app.gateway.rct_history"):
+        assert _read_days(history) == {14: 500.0}
+    assert not [r for r in caplog.records if r.levelname == "WARNING"]
+
+
+def test_conflicting_points_warn_once_with_both_values_and_keep_the_largest(caplog) -> None:
+    history = _day_history([(14, 100.0), (14, 200.0), (13, 300.0)])
     with caplog.at_level("WARNING", logger="app.gateway.rct_history"):
-        first = asyncio.run(history.daily_consumption("main", before=before, limit=10))
-        asyncio.run(history.daily_consumption("main", before=before, limit=10))
-    assert {r.local_date: r.energy_wh for r in first} == {date(2026, 10, 14): 200.0, date(2026, 10, 13): 300.0}
-    assert len([m for m in caplog.messages if "several logger points" in m]) == 1
+        assert _read_days(history) == {14: 200.0, 13: 300.0}
+        _read_days(history)
+    warnings = [m for m in caplog.messages if "conflicting logger points" in m]
+    assert len(warnings) == 1
+    assert "100.0" in warnings[0] and "200.0" in warnings[0]
 
 
 def test_day_logger_uses_wall_clock_date_at_local_midnight_boundary() -> None:
@@ -563,6 +589,22 @@ def test_day_logger_uses_wall_clock_date_at_local_midnight_boundary() -> None:
     assert [(reading.local_date, reading.energy_wh) for reading in readings] == [
         (date(2026, 10, 15), 18_018.7)
     ]
+
+
+def test_day_logger_discards_invalid_and_implausible_values() -> None:
+    from app.gateway.rct_history import RctDailyConsumptionHistory
+    from app.protocol.timeseries import TimeSeriesPoint
+
+    class _Gateway:
+        async def query_history_series(self, device_id, name, before):
+            return tuple(
+                TimeSeriesPoint(datetime(2026, 10, day, 23, 59, 59, tzinfo=UTC), value)
+                for day, value in ((14, float("nan")), (13, -5.0), (12, 5e9), (11, 9_000.0))
+            )
+
+    history = RctDailyConsumptionHistory(_Gateway(), lambda: "Europe/Berlin")
+    readings = asyncio.run(history.daily_consumption("main", before=datetime(2026, 10, 16, tzinfo=UTC), limit=10))
+    assert [(r.local_date.day, r.energy_wh) for r in readings] == [(11, 9_000.0)]
 
 
 # --- F2: retention prune indexes exist after init (review finding 2) ---------------------------

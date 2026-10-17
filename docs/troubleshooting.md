@@ -37,6 +37,9 @@ answer 404 `write_disabled`. Switching it on takes effect at once, without a res
 Set `TRUSTED_PROXIES` and `FORWARDED_HEADER`; otherwise all callers share the proxy address. See
 [Network and TLS](configuration/network.md).
 
+The admin GUI backs off by itself on a 429 and honours `Retry-After`; its requests use the
+separate `ADMIN_SESSION_RATE_LIMIT_*` budget (see [Environment](configuration/environment.md)).
+
 ## 503 `device_maintenance`
 
 The inverter signalled its bootloader. Requests resume after the cool-down once a single read

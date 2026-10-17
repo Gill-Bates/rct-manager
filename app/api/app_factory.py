@@ -2167,6 +2167,8 @@ def create_app(
             auth_fail_block_seconds=settings.auth_fail_block_seconds,
             scrape_requests=settings.metrics_rate_limit_requests,
             scrape_window_seconds=settings.metrics_rate_limit_window_seconds,
+            admin_session_requests=settings.admin_session_rate_limit_requests,
+            admin_session_window_seconds=settings.admin_session_rate_limit_window_seconds,
         ),
         ClientIpResolver(settings.trusted_proxies, settings.forwarded_header),
         write_enabled=settings.enable_write_support,

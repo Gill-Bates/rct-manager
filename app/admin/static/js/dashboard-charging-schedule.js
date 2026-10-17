@@ -211,11 +211,11 @@
   }
 
   async function load(signal) {
-    const devices = await window.RCTAdmin.api('energy/planning-devices', { signal });
+    const devices = await window.RCTAdmin.api('energy/planning-devices', { signal, background: true });
     if (!Array.isArray(devices) || !devices.length) return { empty: true };
     const device = devices[0];
     const plan = await window.RCTAdmin.api(
-      `energy/devices/${encodeURIComponent(device.device_id)}/dynamic-plan`, { signal });
+      `energy/devices/${encodeURIComponent(device.device_id)}/dynamic-plan`, { signal, background: true });
     return { device, plan };
   }
 
@@ -240,6 +240,10 @@
       draw(Chart, plan.slots);
     } catch (error) {
       if (generation !== mine) return;
+      if (error?.rateLimited) { // keep what is drawn and retry once the rate-limit cooldown ended
+        setTimeout(() => { if (!document.hidden && visible()) void refresh(); }, window.RCTAdmin.pollDelay(5000));
+        return;
+      }
       destroy();
       setState(window.RCTAdmin.messageFrom(error) || 'Charging schedule unavailable');
     } finally {
@@ -257,7 +261,7 @@
   }
 
   window.RCTDashboardChargingSchedule = Object.freeze({ sync, resize: () => chart?.resize() });
-  setInterval(() => { if (visible()) void refresh(); }, REFRESH_MS);
+  setInterval(() => { if (!document.hidden && visible()) void refresh(); }, REFRESH_MS);
   if (typeof MutationObserver !== 'undefined') {
     new MutationObserver(syncTheme).observe(document.documentElement, { attributes: true, attributeFilter: ['data-bs-theme'] });
   }

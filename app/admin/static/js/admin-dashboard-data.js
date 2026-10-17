@@ -170,7 +170,8 @@
       dashboardBanner.setAttribute('role', 'status');
       if (subtitle) subtitle.after(dashboardBanner); else grid.before(dashboardBanner);
     }
-    const reason = error?.status >= 500 ? `Server error (${error.status})` : 'Connection to server lost';
+    const reason = error?.status >= 500 ? `Server error (${error.status})`
+      : error?.status === 429 ? 'Too many requests, retrying' : 'Connection to server lost';
     const text = `${reason} – data from ${hhmm(new Date(dashboardSnapshot.at))}`;
     if (dashboardBanner.textContent !== text) dashboardBanner.textContent = text;
     dashboardBanner.hidden = false;
@@ -187,7 +188,7 @@
 
   function dashboardDelay() {
     const base = Math.min(DASHBOARD_INTERVAL_MS * 2 ** dashboardFailures, DASHBOARD_MAX_INTERVAL_MS);
-    return Math.round(base * (0.9 + Math.random() * 0.2)); // jitter keeps several tabs from polling in lockstep
+    return pollDelay(Math.round(base * (0.9 + Math.random() * 0.2))); // jitter keeps several tabs from polling in lockstep
   }
 
   function scheduleDashboard() {
@@ -269,7 +270,7 @@
     try {
       // One network leg: the flow graphic is fed from device.energy_flow on this same response, a
       // dispatch-independent projection, not from a second energy/devices fetch.
-      const data = await api('devices', { signal: controller.signal });
+      const data = await api('devices', { signal: controller.signal, background: automatic });
       if (generation !== dashboardGeneration) return 'skipped';
       dashboardPollFailing = false;
       dashboardFailures = 0;
@@ -288,7 +289,7 @@
       else syncChildren($('devices-list'), [dashboardNotices.error]);
       // Automatic background polls toast only on the first failure after a success streak, so a
       // sustained outage does not spam one alert per poll; a non-automatic load always toasts.
-      if (!automatic || !dashboardPollFailing) toast(messageFrom(error), 'danger');
+      if (!automatic || (!dashboardPollFailing && !error?.rateLimited)) toast(messageFrom(error), 'danger');
       dashboardPollFailing = true;
       return 'failed';
     } finally {

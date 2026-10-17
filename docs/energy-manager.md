@@ -81,12 +81,12 @@ geocoder directly; every request goes through the admin API to the providers' fi
 
 Describe your PV array so the forecast can turn irradiance into expected power:
 
-| Field | Meaning |
-| --- | --- |
-| **Location** | Latitude and longitude; a descriptive name is optional. |
-| **Peak power** | PV nameplate DC power, entered in kilowatt-peak (kWp), e.g. 10.0; stored internally in watt-peak (Wp). |
-| **Tilt** | Module angle from horizontal: 0° flat, 90° vertical. |
-| **Azimuth** | Orientation in the Open-Meteo convention: 0° = south, -90° = east, +90° = west, ±180° = north. |
+| Field                 | Meaning                                                                                                                            |
+| --------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| **Location**          | Latitude and longitude; a descriptive name is optional.                                                                            |
+| **Peak power**        | PV nameplate DC power, entered in kilowatt-peak (kWp), e.g. 10.0; stored internally in watt-peak (Wp).                             |
+| **Tilt**              | Module angle from horizontal: 0° flat, 90° vertical.                                                                               |
+| **Azimuth**           | Orientation in the Open-Meteo convention: 0° = south, -90° = east, +90° = west, ±180° = north.                                     |
 | **Performance ratio** | A single factor in (0, 1] (default 0.85) folding inverter, wiring, soiling and temperature losses into one transparent multiplier. |
 
 A disabled configuration may be saved incomplete; enabling it requires every forecast value. The
@@ -155,16 +155,16 @@ integration gap (5 minutes) leaves the period uncovered. History is kept for a r
 
 The inverter's daily load logger is a read-only reconciliation source for completed local calendar days. It bootstraps daily consumption history and repairs multi-day outages. Daily values are never expanded into quarter-hour observations and never train the forecast.
 
-| Source | Used for |
-| --- | --- |
-| Local 15-minute measurements | profile, forecast learning and the daily total |
-| Inverter daily history | daily total and reconciliation only (`profile_available` is false) |
+| Source                       | Used for                                                           |
+| ---------------------------- | ------------------------------------------------------------------ |
+| Local 15-minute measurements | profile, forecast learning and the daily total                     |
+| Inverter daily history       | daily total and reconciliation only (`profile_available` is false) |
 
 A background service asks the inverter, through the normal device queue and without write permission, for the last 60 completed local days (not the running day) shortly after start, after an outage and about once a day. Only days neither measured locally nor stored yet are fetched; the real values the inverter provides go to `consumption_daily_history`, the rest stays unavailable. A day counts as locally measured at 90 % or more local-second coverage; otherwise a stored inverter total is used, never the sum of both. Days are local calendar dates of the site time zone (a 23 h or 25 h DST day is one date).
 
 The query is not a write, but it is a request frame with a timestamp. A firmware that ignores it makes the request time out; the transport keeps the connection for other objects after the first miss, re-reads that object on a new connection and reconnects on a second miss in a row, before the service backs off for six hours. The backfill always runs; it is read-only.
 
-`logger.day_eload_log_ts` is Wh per local calendar day, stamped as local wall-clock time labelled UTC, so the `before=` query is normalized to the device wall clock; `tools/probe_consumption_history.py` re-checks this read-only on a real inverter. Read it with `GET /api/v1/devices/{device_id}/consumption/day?date=YYYY-MM-DD` and `GET /api/v1/devices/{device_id}/consumption/days?from=...&to=...` (at most 60 days, local store only, no device access). `source` is `local_measured`, `inverter_history` or `unavailable`.
+`logger.day_eload_log_ts` is Wh per local calendar day, stamped as local wall-clock time labelled UTC, so the `before=` query is normalized to the device wall clock; `tools/probe_consumption_history.py` re-checks this read-only on a real inverter. The logger may repeat one day's 23:59:59 point 8 to 16 times with values differing by under 1 Wh (late samples refine the closed day); the largest value wins, jitter within 5 Wh or 0.5 % is logged at debug level, and only a larger spread logs a warning with the minimum and maximum. Read it with `GET /api/v1/devices/{device_id}/consumption/day?date=YYYY-MM-DD` and `GET /api/v1/devices/{device_id}/consumption/days?from=...&to=...` (at most 60 days, local store only, no device access). `source` is `local_measured`, `inverter_history` or `unavailable`.
 
 ### Consumption forecast
 
@@ -303,10 +303,10 @@ static device limit, lowered by a verified, fresh live limit) and the **preferre
 optional, confirmed range inside it). Charging below the preferred range is not assumed to be
 gentler, and nothing about battery lifetime is derived from a few measurements.
 
-| Policy | Behaviour |
-|---|---|
-| `gentle` (default) | Keeps the hard limits and the preferred range for the target; secures the reserve; reports an unreachable target and the missing energy |
-| `meet_deadline` | Always keeps the hard limits; stays in the preferred range when possible; otherwise raises power up to the hard limit to reach the target |
+| Policy             | Behaviour                                                                                                                                 |
+| ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| `gentle` (default) | Keeps the hard limits and the preferred range for the target; secures the reserve; reports an unreachable target and the missing energy   |
+| `meet_deadline`    | Always keeps the hard limits; stays in the preferred range when possible; otherwise raises power up to the hard limit to reach the target |
 
 The **reserve** is a hard lower bound along the whole trajectory (`reserve_satisfied`,
 `reserve_shortfall_wh`); the optional **target** (`target_soc_percent` at `target_time`) is a
@@ -416,11 +416,11 @@ switched off by default (`battery_commissioning_derivation_enabled`, an internal
 environment variable). A date entered by an operator always works and wins.
 After a battery replacement a derived date is not used for the new series; enter the replacement date.
 
-| Method | Path | Effect |
-|---|---|---|
-| `GET` | `/admin/api/energy/devices/{device_id}/battery-calibration-history` | History, commissioning date and baseline for the inverter's current battery series (`limit` 1 to 5000, default 1200). Local store only, no device I/O. `baseline_unavailable_reason` is `inverter_serial_unknown`, `no_commissioning_date`, `no_measurement` or `battery_replaced` when there is no baseline. |
-| `PUT` | `/admin/api/energy/devices/{device_id}/battery-commissioning` | Sets the manual commissioning date (body `{"commissioned_on": "YYYY-MM-DD"}`, between 2010-01-01 and today; 409 while the inverter serial is unknown, 422 outside the range). |
-| `DELETE` | `/admin/api/energy/devices/{device_id}/battery-commissioning` | Removes the manual date; a derived one (only with the derivation enabled) applies again. |
+| Method   | Path                                                                | Effect                                                                                                                                                                                                                                                                                                        |
+| -------- | ------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GET`    | `/admin/api/energy/devices/{device_id}/battery-calibration-history` | History, commissioning date and baseline for the inverter's current battery series (`limit` 1 to 5000, default 1200). Local store only, no device I/O. `baseline_unavailable_reason` is `inverter_serial_unknown`, `no_commissioning_date`, `no_measurement` or `battery_replaced` when there is no baseline. |
+| `PUT`    | `/admin/api/energy/devices/{device_id}/battery-commissioning`       | Sets the manual commissioning date (body `{"commissioned_on": "YYYY-MM-DD"}`, between 2010-01-01 and today; 409 while the inverter serial is unknown, 422 outside the range).                                                                                                                                 |
+| `DELETE` | `/admin/api/energy/devices/{device_id}/battery-commissioning`       | Removes the manual date; a derived one (only with the derivation enabled) applies again.                                                                                                                                                                                                                      |
 
 All three need an admin session (read-only for `GET`; `PUT` and `DELETE` need the CSRF header).
 
@@ -438,19 +438,19 @@ available". A commissioning date derived from the logs is labelled "derived, unv
 
 Three independent things decide whether a battery command is possible:
 
-| Switch | Where | What it does |
-| --- | --- | --- |
-| **Write access** | Inverters page (global) | Allows the service to write to inverters at all. It also opens the generic `PUT /api/v1/devices/{id}/metrics` routes, so it stays a deliberate, separate switch: choosing a mode never turns it on. |
-| **Mode** per inverter | Energy Manager page | **Off**, **Manual** or **External**: who may command this inverter. Selecting Off hands back an active Manager command and verifies the inverter's Internal SoC strategy before disabling Manager control. |
-| **Expert mode** | Energy Manager page | A display switch only: it shows hardware verification, limits and diagnostics. It changes no behaviour. |
+| Switch                | Where                   | What it does                                                                                                                                                                                               |
+| --------------------- | ----------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Write access**      | Inverters page (global) | Allows the service to write to inverters at all. It also opens the generic `PUT /api/v1/devices/{id}/metrics` routes, so it stays a deliberate, separate switch: choosing a mode never turns it on.        |
+| **Mode** per inverter | Energy Manager page     | **Off**, **Manual** or **External**: who may command this inverter. Selecting Off hands back an active Manager command and verifies the inverter's Internal SoC strategy before disabling Manager control. |
+| **Expert mode**       | Energy Manager page     | A display switch only: it shows hardware verification, limits and diagnostics. It changes no behaviour.                                                                                                    |
 
 Who may call what, per mode:
 
-| Mode | Admin GUI (signed-in session, CSRF, no token) | REST API with a read/write token (`POST …/energy/command`) |
-| --- | --- | --- |
-| Off | refused, 409 `energy_manager_off` | refused, 409 `energy_manager_off` |
-| Manual | allowed: charge, keep idle, discharge | refused, 409 `energy_manager_not_external` (an operator must switch the inverter to External) |
-| External | refused, 409 `energy_manager_external` ("Controlled by an external app") | allowed |
+| Mode     | Admin GUI (signed-in session, CSRF, no token)                            | REST API with a read/write token (`POST …/energy/command`)                                    |
+| -------- | ------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------- |
+| Off      | refused, 409 `energy_manager_off`                                        | refused, 409 `energy_manager_off`                                                             |
+| Manual   | allowed: charge, keep idle, discharge                                    | refused, 409 `energy_manager_not_external` (an operator must switch the inverter to External) |
+| External | refused, 409 `energy_manager_external` ("Controlled by an external app") | allowed                                                                                       |
 
 Reading the status (`GET …/energy`) works in every mode, with a session or a token. The mode itself
 can only be changed in the admin GUI (`PUT /admin/api/energy/devices/{id}/mode`, session and CSRF; a
@@ -475,10 +475,10 @@ inverter is in mode **External** (see [How it works](#how-it-works)). The status
 API describes command authorization only; it does not prove the inverter's physical strategy.
 The admin page combines the saved mode with a current strategy reading for that indication.
 
-| Method | Path | Purpose |
-| --- | --- | --- |
-| GET | `/api/v1/devices/{device_id}/energy` | State, readings, target window, per-action availability |
-| POST | `/api/v1/devices/{device_id}/energy/command` | One action: `charge`, `discharge`, `hold`, `auto` |
+| Method | Path                                         | Purpose                                                 |
+| ------ | -------------------------------------------- | ------------------------------------------------------- |
+| GET    | `/api/v1/devices/{device_id}/energy`         | State, readings, target window, per-action availability |
+| POST   | `/api/v1/devices/{device_id}/energy/command` | One action: `charge`, `discharge`, `hold`, `auto`       |
 
 ```sh
 curl -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
@@ -486,12 +486,12 @@ curl -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/jso
   http://127.0.0.1:8000/api/v1/devices/main/energy/command
 ```
 
-| Action | `target_soc_percent` | `max_power_w` | Effect |
-| --- | --- | --- | --- |
-| `charge` | required | optional | Charges until the target SoC is reached |
-| `discharge` | required | optional | Discharges following the house load until the target SoC; cuts discharge immediately on grid export, bypassing deadband and write interval |
-| `hold` | omit | omit | Holds the battery at 0 W, grid charging off |
-| `auto` | omit | omit | Stops the current Manager command and restores the pre-command inverter settings; it does not switch the Manager Off or select the Internal strategy |
+| Action      | `target_soc_percent` | `max_power_w` | Effect                                                                                                                                               |
+| ----------- | -------------------- | ------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `charge`    | required             | optional      | Charges until the target SoC is reached                                                                                                              |
+| `discharge` | required             | optional      | Discharges following the house load until the target SoC; cuts discharge immediately on grid export, bypassing deadband and write interval           |
+| `hold`      | omit                 | omit          | Holds the battery at 0 W, grid charging off                                                                                                          |
+| `auto`      | omit                 | omit          | Stops the current Manager command and restores the pre-command inverter settings; it does not switch the Manager Off or select the Internal strategy |
 
 - A body that violates the table is rejected with 422 `invalid_request`.
 - `max_power_w` defaults to the limit configured for the inverter and is clamped to it
@@ -601,10 +601,10 @@ battery control requires write support to be enabled." instead of the control.
 The verification form uses two session-guarded admin endpoints (CSRF header required, not part of
 the public API):
 
-| Method | Path | Effect |
-|---|---|---|
-| `PUT` | `/admin/api/energy/devices/{device_id}/hardware-verification` | Verifies `write_path_convention`, `battery_power_sign_convention` and `grid_power_sign_convention` in one transaction, all or none. |
-| `DELETE` | `/admin/api/energy/devices/{device_id}/hardware-verification` | Revokes the same three; only the status changes, recorded evidence stays. |
+| Method   | Path                                                          | Effect                                                                                                                              |
+| -------- | ------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| `PUT`    | `/admin/api/energy/devices/{device_id}/hardware-verification` | Verifies `write_path_convention`, `battery_power_sign_convention` and `grid_power_sign_convention` in one transaction, all or none. |
+| `DELETE` | `/admin/api/energy/devices/{device_id}/hardware-verification` | Revokes the same three; only the status changes, recorded evidence stays.                                                           |
 
 The `PUT` body needs `verified_device_model`, `verified_firmware`, a non-empty `note`,
 `soc_strategy_external_code` (0-255), `enum_byte_width` and `bool_byte_width` (1-4), and the booleans

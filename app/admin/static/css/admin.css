@@ -2027,7 +2027,8 @@ body {
 
 .energy-actions {
     display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    /* auto-fit wraps to two rows on a phone instead of breaking "Discharge" mid-word */
+    grid-template-columns: repeat(auto-fit, minmax(7.5rem, 1fr));
     gap: .5rem;
 }
 

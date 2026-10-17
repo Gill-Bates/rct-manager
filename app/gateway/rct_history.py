@@ -22,6 +22,9 @@ from app.gateway.rct import RctGateway
 DAY_LOAD_LOG_METRIC = "logger_day_eload_log_ts"
 # Plausibility ceiling for one household day; anything above is a corrupt entry, not consumption.
 MAX_PLAUSIBLE_DAY_WH = 1_000_000.0
+# Repeated points of one day differing less than this are logger refinement jitter, not a conflict.
+DAY_CONFLICT_ABS_WH = 5.0
+DAY_CONFLICT_REL = 0.005
 
 log = logging.getLogger(__name__)
 
@@ -46,7 +49,8 @@ class RctDailyConsumptionHistory:
         points = await self._gateway.query_history_series(
             device_id, DAY_LOAD_LOG_METRIC, wire_before
         )
-        by_date: dict = {}
+        cutoff = before.astimezone(zone).date()
+        values: dict[date, list[float]] = {}
         for point in points:
             if (
                 not math.isfinite(point.value)
@@ -55,19 +59,43 @@ class RctDailyConsumptionHistory:
                 continue
             # The day logger encodes local wall-clock fields in a UTC-labelled timestamp.
             day = point.timestamp.date()
-            if day >= before.astimezone(zone).date():
-                continue
-            if day in by_date and (device_id, day) not in self._warned_dates:
-                self._warned_dates.add((device_id, day))
-                # The device can report multiple values for one day; keep the final entry.
-                log.warning(
-                    "Inverter day history of %s has several logger points for %s; the last one is used",
-                    device_id,
-                    day,
-                )
-            by_date[day] = float(point.value)
+            if day < cutoff:
+                values.setdefault(day, []).append(float(point.value))
+        by_date = {
+            day: self._resolve(device_id, day, found) for day, found in values.items()
+        }
         newest_first = sorted(by_date.items(), reverse=True)[: max(0, limit)]
         return [DailyConsumptionReading(day, wh) for day, wh in newest_first]
+
+    def _resolve(self, device_id: str, day: date, found: list[float]) -> float:
+        """Pick the day total from repeated logger points for one local date.
+
+        Hardware shows 8 to 16 points per affected day with the same 23:59:59 stamp that differ
+        by under 1 Wh (late-arriving samples refine the closed day), so the largest, most complete
+        total wins. Only a spread beyond the tolerance is a real conflict and is warned about.
+        """
+        best = max(found)
+        spread = best - min(found)
+        if spread <= max(DAY_CONFLICT_ABS_WH, DAY_CONFLICT_REL * best):
+            if len(found) > 1:
+                log.debug(
+                    "Inverter day history of %s: %d refinement points for %s (spread %.2f Wh)",
+                    device_id,
+                    len(found),
+                    day,
+                    spread,
+                )
+        elif (device_id, day) not in self._warned_dates:
+            self._warned_dates.add((device_id, day))
+            log.warning(
+                "Inverter day history of %s has conflicting logger points for %s "
+                "(min %.1f Wh, max %.1f Wh); the largest is used",
+                device_id,
+                day,
+                min(found),
+                best,
+            )
+        return best
 
 
 YEAR_ENERGY_LOG_METRIC = "logger_year_eac_log_ts"

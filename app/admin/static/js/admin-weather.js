@@ -598,7 +598,7 @@ async function initWeather() {
     });
   }
   scheduleWeatherPreview({ immediate: true });
-  window.setInterval(() => scheduleWeatherPreview({ immediate: true, resetRetry: false }), 60_000);
+  window.setInterval(() => { if (!document.hidden) scheduleWeatherPreview({ immediate: true, resetRetry: false }); }, 60_000);
 }
 
 // On a manual latitude/longitude edit, re-derive the timezone from the new coordinates (debounced).
@@ -628,7 +628,7 @@ function scheduleWeatherPreview({ immediate = false, resetRetry = true } = {}) {
   clearTimeout(weatherPreviewRetryTimer);
   weatherPreviewRetryTimer = null;
   if (resetRetry) weatherPreviewRetryMs = 5_000;
-  const run = () => previewWeather().catch((error) => toast(messageFrom(error), 'danger'));
+  const run = () => previewWeather({ background: !resetRetry }).catch((error) => toast(messageFrom(error), 'danger'));
   if (immediate) { run(); return; }
   weatherPreviewTimer = setTimeout(run, WEATHER_PREVIEW_DEBOUNCE_MS);
 }
@@ -965,7 +965,7 @@ function renderWeatherPreview(result) {
   return nodes;
 }
 
-async function previewWeather() {
+async function previewWeather({ background = false } = {}) {
   const target = $('weather-preview');
   if (!target) return;
   // A transient invalid number (e.g. a value being typed that is out of range) is not preview-fable:
@@ -981,7 +981,7 @@ async function previewWeather() {
   // The previous preview stays in place while the request runs (the template ships the initial
   // loading state), so a refresh swaps content once instead of flashing a spinner every time.
   try {
-    const result = await api('energy/weather/preview', { method: 'POST', body: JSON.stringify(weatherBody()), signal: controller.signal });
+    const result = await api('energy/weather/preview', { method: 'POST', body: JSON.stringify(weatherBody()), signal: controller.signal, background });
     if (generation !== weatherPreviewGeneration) return;
     setWeatherTimezone(result.timezone ?? weatherTimezone);
     const signature = JSON.stringify([result, weatherTimezone]);
@@ -1003,6 +1003,10 @@ async function previewWeather() {
     }
   } catch (error) {
     if (generation !== weatherPreviewGeneration || error.name === 'AbortError') return;
+    if (error.rateLimited) { // short-lived load shedding: keep the preview and retry after Retry-After
+      weatherPreviewRetryTimer = setTimeout(() => scheduleWeatherPreview({ immediate: true, resetRetry: false }), pollDelay(weatherPreviewRetryMs));
+      return;
+    }
     weatherPreviewRendered = null;
     weatherPreviewChart?.destroy();
     weatherPreviewChart = null;

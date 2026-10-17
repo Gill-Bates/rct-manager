@@ -53,7 +53,9 @@ secrets are not stored.
 
 Tokens are looked up by a keyed digest and appear in logs only as a short
 non-reversible id. The business rate limit counts per token id and source
-address.
+address. Admin GUI requests of a logged-in browser session are counted separately
+(`ADMIN_SESSION_RATE_LIMIT_*`, see [Environment](environment.md)), so GUI polling and API clients
+never share a budget.
 
 ## Opt-out
 

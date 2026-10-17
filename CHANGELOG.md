@@ -11,6 +11,7 @@
 - ``Fix`` Spot prices and bidding zones load more reliably, and a day's prices are only used once they cover a full local day.
 - ``Fix`` Steadier inverter connections and much less log noise while write support is off.
 - ``Fix`` Dashboard fixes: battery health tiles show one inverter per row, and the "Add widget" dialog keeps keyboard focus so Escape closes it again.
+- ``Fix`` The Energy page no longer runs into a permanent stream of HTTP 429 answers: admin GUI requests have their own budget per login session (`ADMIN_SESSION_RATE_LIMIT_REQUESTS`, default 600 per minute), and the GUI pauses polling in hidden tabs and backs off on a 429 according to `Retry-After`.
 - ``Security`` The usage disclaimer is enforced on the server, not just in the browser: until it is accepted every admin request is refused (including personal access tokens).
 
 <details markdown="1">

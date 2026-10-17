@@ -168,12 +168,12 @@
   }
 
   async function load(signal) {
-    const devices = await window.RCTAdmin.api('energy/planning-devices', { signal });
+    const devices = await window.RCTAdmin.api('energy/planning-devices', { signal, background: true });
     const list = Array.isArray(devices) ? devices.slice(0, MAX_DEVICES) : [];
     const entries = [];
     for (const device of list) {
       const view = await window.RCTAdmin.api(
-        `energy/devices/${encodeURIComponent(device.device_id)}/battery-calibration-history`, { signal });
+        `energy/devices/${encodeURIComponent(device.device_id)}/battery-calibration-history`, { signal, background: true });
       const name = view.inverter_serial || device.device_name || device.device_id;
       // device_name falls back to the device id when no display name is set; the serial reads better then.
       const named = device.device_name && device.device_name !== device.device_id ? device.device_name : '';
@@ -206,6 +206,10 @@
       draw(Chart, withData);
     } catch (error) {
       if (generation !== mine) return;
+      if (error?.rateLimited) { // keep what is drawn and retry once the rate-limit cooldown ended
+        setTimeout(() => { if (!document.hidden && anyVisible()) void refresh(); }, window.RCTAdmin.pollDelay(5000));
+        return;
+      }
       destroy();
       const message = window.RCTAdmin.messageFrom(error) || 'Battery data unavailable';
       node(`${CHART}-state`).textContent = message;
@@ -226,6 +230,6 @@
   }
 
   window.RCTDashboardBatteryHealth = Object.freeze({ sync, resize: () => chart?.resize() });
-  setInterval(() => { if (anyVisible()) void refresh(); }, REFRESH_MS);
+  setInterval(() => { if (!document.hidden && anyVisible()) void refresh(); }, REFRESH_MS);
   sync();
 })();

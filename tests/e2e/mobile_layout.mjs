@@ -103,6 +103,21 @@ try {
   await page.screenshot({ path: path.join(OUT, `dashboard-${tag}.png`), fullPage: true });
 
   // Energy page: tabs, compact flow graphic, footer.
+  // The compact flow view only renders once the required write registers are approved and the
+  // hardware is verified, so seed both through the admin API like an operator would.
+  const approved = await page.evaluate(async () => {
+    const json = { 'Content-Type': 'application/json' };
+    const { csrf_token: csrf } = await (await fetch('/admin/api/session', { credentials: 'same-origin' })).json();
+    const [{ exposed_names: exposed }, [{ required_write_names: required }]] = await Promise.all([
+      fetch('/admin/api/parameters', { credentials: 'same-origin' }).then((r) => r.json()),
+      fetch('/admin/api/energy/devices', { credentials: 'same-origin' }).then((r) => r.json()),
+    ]);
+    return (await fetch('/admin/api/parameters', {
+      method: 'PUT', credentials: 'same-origin', headers: { ...json, 'X-CSRF-Token': csrf },
+      body: JSON.stringify({ exposed_names: exposed, write_names: required }),
+    })).status;
+  });
+  check(`[${tag}] required write registers approved`, approved === 200, String(approved));
   // The compact flow view only renders for a hardware-verified device.
   const verified = await page.evaluate(async () => {
     const { csrf_token: csrf } = await (await fetch('/admin/api/session', { credentials: 'same-origin' })).json();
@@ -147,8 +162,33 @@ try {
   await sleep(400);
   await page.screenshot({ path: path.join(OUT, `energy-inverter-${tag}.png`), fullPage: true });
   // The compact view shares energyFlowGraphic() with the dashboard but needs approved write registers.
-  if (await page.locator('.energy-flow-lite:not([hidden]) .flow-node').count()) await checkFlow('energy page', '.energy-flow-lite:not([hidden])');
-  else console.log('SKIP energy page compact flow view: device has no approved write registers (dashboard graphic covers the shared code)');
+  const liteScope = '.energy-flow-lite:not([hidden])';
+  const liteShown = await page.waitForSelector(`${liteScope} .flow-node`, { state: 'attached', timeout: 20000 }).then(() => true, () => false);
+  const liteState = liteShown ? '' : await page.locator('.energy-panel').first().innerText().catch(() => 'no energy panel');
+  check(`[${tag}] energy page: compact flow view is shown for the verified device`, liteShown, liteState.slice(0, 300));
+  if (liteShown) {
+    await page.locator(liteScope).scrollIntoViewIfNeeded();
+    await checkFlow('energy page', liteScope);
+    const lite = await page.evaluate((sel) => {
+      const box = document.querySelector(sel).getBoundingClientRect();
+      return { left: box.left, right: box.right, width: box.width, docWidth: document.documentElement.clientWidth };
+    }, liteScope);
+    check(`[${tag}] energy page: compact flow view fits the viewport`, lite.width > 0 && lite.left >= -1 && lite.right <= lite.docWidth + 1, JSON.stringify(lite));
+    // A word that spans two line boxes was broken mid-word.
+    const actions = await page.evaluate(() => [...document.querySelectorAll('.energy-actions .btn')].map((b) => {
+      const text = b.firstChild;
+      const broken = [...text.data.matchAll(/\S+/g)].filter((m) => {
+        const r = document.createRange();
+        r.setStart(text, m.index);
+        r.setEnd(text, m.index + m[0].length);
+        return r.getClientRects().length > 1;
+      }).map((m) => m[0]);
+      return { label: b.textContent.trim(), broken, overflow: b.scrollWidth > b.clientWidth + 1 };
+    }));
+    check(`[${tag}] energy page: action buttons wrap between words, never inside one`,
+      actions.length === 3 && actions.every((a) => !a.broken.length && !a.overflow), JSON.stringify(actions));
+    await page.screenshot({ path: path.join(OUT, `energy-flow-${tag}.png`) });
+  }
   await checkFooter('energy page');
 } finally {
   await browser.close();

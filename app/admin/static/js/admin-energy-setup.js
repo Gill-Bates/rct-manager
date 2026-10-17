@@ -739,7 +739,7 @@ async function pollEnergy() {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(Object.assign(new Error('The energy request timed out.'), { name: 'TimeoutError' })), ENERGY_POLL_TIMEOUT_MS);
   try {
-    const devices = await api('energy/devices', { signal: controller.signal });
+    const devices = await api('energy/devices', { signal: controller.signal, background: true });
     energyPollDelay = ENERGY_POLL_MS;
     const ids = devices.map((item) => item.device_id);
     // Keep panels of devices that still exist (their unsaved input survives); add or drop the rest.
@@ -778,8 +778,10 @@ async function pollEnergy() {
     // every panel; it clears on the next 200. Any other failure (including a timeout) is a
     // transient note (§13).
     const poll503 = error && error.status === 503;
-    energyPollDelay = poll503 ? ENERGY_POLL_BACKOFF_MS : ENERGY_POLL_MS;
-    for (const panel of energyPanels.values()) panel.setPollState({ poll503, pollFailed: !poll503 });
+    // 429 is short-lived load shedding, not an outage: keep what is shown and wait out Retry-After.
+    const limited = error && error.status === 429;
+    energyPollDelay = poll503 ? ENERGY_POLL_BACKOFF_MS : limited ? pollDelay(ENERGY_POLL_MS) : ENERGY_POLL_MS;
+    if (!limited) for (const panel of energyPanels.values()) panel.setPollState({ poll503, pollFailed: !poll503 });
     if (!energyPanels.size) {
       if (poll503) {
         setEnergyNote(host, 'Manual battery control requires write support to be enabled.', { kind: 'warning', action: { label: 'Open Inverters page', href: '/ui/inverters' } });
@@ -824,7 +826,7 @@ async function pollHardwareStrategies() {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), ENERGY_POLL_TIMEOUT_MS);
   try {
-    const devices = await api('energy/hardware-strategies', { signal: controller.signal });
+    const devices = await api('energy/hardware-strategies', { signal: controller.signal, background: true });
     energyHardwareStrategies.clear();
     for (const device of devices) {
       energyHardwareStrategies.set(device.device_id, device);
@@ -835,6 +837,7 @@ async function pollHardwareStrategies() {
     }
     renderHardwareSummary();
   } catch (error) {
+    if (error && error.status === 429) return; // keep the last strategies; the next 30 s tick retries
     host.textContent = 'Inverter SOC strategy: n/a (unavailable).';
     energyHardwareStrategies.clear();
     for (const panel of energyPanels.values()) panel.setHardwareStrategy(null);
@@ -1287,6 +1290,15 @@ function renderDryRunPlan(plan, { waiting = true } = {}) {
   const forecast = $('energy-plan-forecast');
   if (forecast) forecast.hidden = plan.status !== 'ok';
   clearPlanSchedule();
+  // Energy Manager state of the selected inverter, shown as the header badge whatever the plan status.
+  const selectedDevice = (typeof planDevices === 'undefined' ? [] : planDevices).find((item) => item.device_id === $('energy-plan-device')?.value);
+  const managerOff = selectedDevice?.mode === 'off';
+  const managerBadge = $('energy-plan-manager-state');
+  if (managerBadge) {
+    managerBadge.hidden = !selectedDevice;
+    managerBadge.textContent = managerOff ? 'Disabled' : 'Enabled';
+    managerBadge.className = `status-badge ${managerOff ? 'status-badge-neutral' : 'status-badge-success'}`;
+  }
   if (plan.status !== 'ok') {
     const states = {
       battery_state_unavailable: ['Plan not available yet', 'Battery data could not be verified automatically. Check that the inverter is connected and reports its battery state and capacity; the plan is re-checked on its own.'],
@@ -1311,12 +1323,10 @@ function renderDryRunPlan(plan, { waiting = true } = {}) {
     return;
   }
   // While the Energy Manager is off for this inverter no grid charge will ever be started, so the
-  // plan must not announce one.
-  const selectedDevice = (typeof planDevices === 'undefined' ? [] : planDevices).find((item) => item.device_id === $('energy-plan-device')?.value);
-  const managerOff = selectedDevice?.mode === 'off';
+  // plan must not announce one; the header badge says Disabled and no status card is shown.
   const next = managerOff ? null : nextGridCharge(plan.slots || []);
   const card = managerOff
-    ? planStatusCard('Energy Manager is off', 'No grid charge will be started while the Energy Manager is off for this inverter.')
+    ? element('div')
     : next
       ? planStatusCard('Next grid charge', `${planDateTime(next.start)} – ${planDateTime(next.end)}`)
       : planStatusCard('No grid charge planned', 'The current plan does not schedule a grid charge.');
@@ -1795,7 +1805,7 @@ function armPlanPolling() {
     if (document.hidden) { armPlanPolling(); return; }
     planPollAttempts += 1;
     void loadDryRunPlan({ poll: true });
-  }, PLAN_POLL_MS);
+  }, pollDelay(PLAN_POLL_MS));
 }
 
 async function loadDryRunPlan({ poll = false } = {}) {
@@ -1819,13 +1829,13 @@ async function loadDryRunPlan({ poll = false } = {}) {
   }
   try {
     // Keep the Energy Manager mode current without rebuilding the select or the limits form.
-    await api('energy/planning-devices').then((list) => {
+    await api('energy/planning-devices', { background: poll }).then((list) => {
       for (const fresh of list) {
         const known = planDevices.find((item) => item.device_id === fresh.device_id);
         if (known) known.mode = fresh.mode;
       }
     }).catch(() => { });
-    const plan = await api(`energy/devices/${encodeURIComponent(select.value)}/dynamic-plan`);
+    const plan = await api(`energy/devices/${encodeURIComponent(select.value)}/dynamic-plan`, { background: poll });
     if (generation !== planGeneration) return;
     if (plan.status !== planLastStatus) { planLastStatus = plan.status; planPollAttempts = 0; }
     const exhausted = planPollAttempts >= PLAN_POLL_MAX;
@@ -1859,7 +1869,8 @@ function initDryRunPlan() {
   window.addEventListener('pagehide', stopPlanPolling);
   // The plan follows spot prices and forecasts, so it reloads by itself; no manual refresh needed.
   setInterval(() => { if (!document.hidden && select.value) void loadDryRunPlan({ poll: true }); }, PLAN_REFRESH_MS);
-  document.addEventListener('visibilitychange', () => { if (!document.hidden && select.value) void loadDryRunPlan({ poll: true }); });
+  // Staggered with the other visibility refreshes so returning to the tab is not a request burst.
+  document.addEventListener('visibilitychange', () => { if (!document.hidden && select.value) setTimeout(() => void loadDryRunPlan({ poll: true }), 600 + Math.random() * 600); });
   select.addEventListener('focus', () => { refreshPlanDevices().catch(() => { }); });
   refreshPlanDevices().then(() => loadDryRunPlan())
     .catch((error) => $('energy-plan-result').replaceChildren(element('p', 'text-danger', messageFrom(error))));
@@ -1908,6 +1919,6 @@ function initEnergy() {
   pollHardwareStrategies();
   setInterval(() => { if (!document.hidden) pollHardwareStrategies(); }, 30000);
   document.addEventListener('visibilitychange', () => { if (!document.hidden) pollEnergy(); });
-  document.addEventListener('visibilitychange', () => { if (!document.hidden) pollHardwareStrategies(); });
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) setTimeout(pollHardwareStrategies, 300 + Math.random() * 600); });
 }
 

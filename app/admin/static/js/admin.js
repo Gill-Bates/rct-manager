@@ -59,7 +59,7 @@ async function bootstrapAdminPage() {
 
 // dashboard.js loads after this file and needs the shared request/toast helpers; admin.js stays
 // the single owner of the CSRF token and the fetch wrapper (abort/401/toast handling included).
-window.RCTAdmin = Object.freeze({ api, toast, messageFrom, element, confirmAction });
+window.RCTAdmin = Object.freeze({ api, toast, messageFrom, element, confirmAction, pollDelay });
 
 function start() {
   initShell();

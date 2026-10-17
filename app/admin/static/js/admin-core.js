@@ -192,7 +192,53 @@ async function copyToClipboard(text) {
   return copied;
 }
 
+// Rate-limit (HTTP 429) cooldown shared by every background poller of this page: after a 429 they
+// stay quiet for at least Retry-After (doubling on repeats, reset by the next success), so a
+// saturated budget can drain instead of being refilled by retries.
+const RATE_LIMIT_DEFAULT_S = 8;
+const RATE_LIMIT_MAX_S = 120;
+let rateLimitUntil = 0;
+let rateLimitStreak = 0;
+
+// Retry-After as seconds (delta-seconds or HTTP-date); missing or invalid falls back to a default.
+function parseRetryAfter(value, now = Date.now()) {
+  const text = String(value ?? '').trim();
+  let seconds = NaN;
+  if (/^\d+$/.test(text)) seconds = Number(text);
+  else if (text) { const at = Date.parse(text); if (Number.isFinite(at)) seconds = Math.ceil((at - now) / 1000); }
+  if (!Number.isFinite(seconds)) return RATE_LIMIT_DEFAULT_S;
+  return Math.min(Math.max(seconds, 1), RATE_LIMIT_MAX_S);
+}
+
+function noteRateLimit(retryAfter, now = Date.now()) {
+  // Several in-flight requests fail together: only the first one after a cooldown counts as a repeat.
+  if (now >= rateLimitUntil) rateLimitStreak += 1;
+  const seconds = Math.min(retryAfter * 2 ** (rateLimitStreak - 1), RATE_LIMIT_MAX_S);
+  rateLimitUntil = Math.max(rateLimitUntil, now + seconds * 1000);
+}
+
+function rateLimitRemainingMs(now = Date.now()) { return Math.max(0, rateLimitUntil - now); }
+
+// Delay for a poller's next run: its normal period, but not before the cooldown ends (plus jitter,
+// so pollers that were waiting together do not fire together).
+function pollDelay(baseMs, now = Date.now()) {
+  const remaining = rateLimitRemainingMs(now);
+  return remaining > 0 ? Math.max(baseMs, remaining) + Math.round(Math.random() * 1000) : baseMs;
+}
+
+function rateLimitError(retryAfter, message) {
+  const error = new Error(message || 'Too many requests. Retrying shortly.');
+  error.status = 429;
+  error.retryAfter = retryAfter;
+  error.rateLimited = true;
+  return error;
+}
+
+// ``options.background`` marks a poller: during a cooldown it is refused locally, without a request.
 async function api(path, options = {}) {
+  const { background = false, ...fetchOptions } = options;
+  options = fetchOptions;
+  if (background && rateLimitRemainingMs() > 0) throw rateLimitError(Math.ceil(rateLimitRemainingMs() / 1000));
   const method = options.method || 'GET';
   let response;
   try {
@@ -220,6 +266,7 @@ async function api(path, options = {}) {
     }
     throw error;
   }
+  if (response.ok) { rateLimitStreak = 0; rateLimitUntil = 0; }
   if (response.ok && window.RCTReconnect?.isActive()) window.RCTReconnect.stop();
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
@@ -240,6 +287,11 @@ async function api(path, options = {}) {
     }
     const error = new Error(message);
     error.status = response.status; // callers (e.g. the Energy poll) branch on 503 vs transient
+    if (response.status === 429) {
+      error.retryAfter = parseRetryAfter(response.headers?.get?.('Retry-After'));
+      error.rateLimited = true;
+      noteRateLimit(error.retryAfter);
+    }
     // Callers that render per-field validation (e.g. the Weather form) read the raw 422 body: an
     // admin HTTPException carries a {loc, msg} list in `detail`, while the problem-document shape
     // carries per-field entries in `errors` ({parameter, detail}). Expose both; keep `message` as is.

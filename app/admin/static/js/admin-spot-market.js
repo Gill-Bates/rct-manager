@@ -216,7 +216,7 @@ async function initSpotMarket() {
   // One automatic read once the form and bidding-zone options are present; later reads are driven
   // after a parameter change, never by a re-render; the background worker owns provider polling.
   scheduleSpotMarketPreview({ immediate: true });
-  window.setInterval(() => scheduleSpotMarketPreview({ immediate: true, resetRetry: false }), 60_000);
+  window.setInterval(() => { if (!document.hidden) scheduleSpotMarketPreview({ immediate: true, resetRetry: false }); }, 60_000);
 }
 
 // Debounce a burst of parameter changes into one preview request, then run it. ``immediate``
@@ -226,7 +226,7 @@ function scheduleSpotMarketPreview({ immediate = false, resetRetry = true } = {}
   clearTimeout(spotMarketPreviewRetryTimer);
   spotMarketPreviewRetryTimer = null;
   if (resetRetry) spotMarketPreviewRetryMs = 5_000;
-  const run = () => previewSpotMarket().catch((error) => toast(messageFrom(error), 'danger'));
+  const run = () => previewSpotMarket({ background: !resetRetry }).catch((error) => toast(messageFrom(error), 'danger'));
   if (immediate) { run(); return; }
   spotMarketPreviewTimer = setTimeout(run, SPOT_MARKET_PREVIEW_DEBOUNCE_MS);
 }
@@ -504,7 +504,7 @@ function renderSpotMarketPreview(result) {
 // states live only in the preview target. A newer call supersedes an in-flight one — it aborts
 // the stale request and a generation guard discards a stale response that still arrives — so the
 // rendered preview always reflects the latest parameter values.
-async function previewSpotMarket() {
+async function previewSpotMarket({ background = false } = {}) {
   const target = $('spot-market-preview');
   if (!target) return;
   if (spotMarketPreviewController) {
@@ -517,7 +517,7 @@ async function previewSpotMarket() {
   spotMarketPreviewChart = null;
   target.replaceChildren(spotMarketLoadingState());
   try {
-    const result = await api('energy/spot-market/preview', { method: 'POST', body: JSON.stringify(spotMarketBody()), signal: controller.signal });
+    const result = await api('energy/spot-market/preview', { method: 'POST', body: JSON.stringify(spotMarketBody()), signal: controller.signal, background });
     if (generation !== spotMarketPreviewGeneration) return;
     target.replaceChildren(...renderSpotMarketPreview(result));
     if (result.status === 'connected') drawSpotMarketChart(result);
@@ -532,6 +532,10 @@ async function previewSpotMarket() {
     // A superseded request's abort is expected; the newer request owns the target, so leave its
     // loading state in place rather than overwriting it with this stale error.
     if (generation !== spotMarketPreviewGeneration || error.name === 'AbortError') return;
+    if (error.rateLimited) { // short-lived load shedding: retry after Retry-After instead of showing an error
+      spotMarketPreviewRetryTimer = setTimeout(() => scheduleSpotMarketPreview({ immediate: true, resetRetry: false }), pollDelay(spotMarketPreviewRetryMs));
+      return;
+    }
     setPreviewStatus('spot-market-preview-status', null);
     target.replaceChildren(element('p', 'text-danger small mb-0', messageFrom(error)));
     throw error;
