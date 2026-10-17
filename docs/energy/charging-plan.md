@@ -183,7 +183,9 @@ background plan recompute and no replanning. Stored configuration and forecast/h
 intact. An Off inverter gets no plan, an existing plan is dropped when the inverter is switched Off,
 and switching to Manual or External resumes the work immediately. Shared forecast refresh remains
 active while at least one inverter is Manual or External; planning stays per inverter. The Charging
-plan tab shows "Energy Manager off / Charging plan is inactive." for an Off inverter. This does not
+plan tab is hidden while every inverter is Off and appears without a reload as soon as one is Manual
+or External; its inverter select offers only those inverters. If the tab is open when the last
+inverter is switched Off, the page returns to the Inverter tab. This does not
 change the `enable_automatic_dispatch` setting, which stays independent and off by default.
 
 ## Replanning

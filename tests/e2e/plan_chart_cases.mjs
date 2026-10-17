@@ -140,11 +140,22 @@ try {
   for (const width of [320, 375, 390, 768]) {
     await page.setViewportSize({ width, height: 844 });
     await sleep(200);
-    const fit = await page.evaluate(() => ({
-      overflow: Math.max(0, document.documentElement.scrollWidth - document.documentElement.clientWidth),
-      rows: document.querySelectorAll('#energy-plan-charge-schedule tbody tr').length,
-    }));
-    check(`charging schedule tables fit at ${width}px (${THEME})`, fit.overflow === 0 && fit.rows >= 1, JSON.stringify(fit));
+    const fit = await page.evaluate(() => {
+      const vw = document.documentElement.clientWidth;
+      const cells = [...document.querySelectorAll('#energy-plan-schedule table td')];
+      // Purpose/Reason prose must wrap inside its cell: no cell wider than its box or the viewport.
+      const prose = [...document.querySelectorAll('#energy-plan-schedule td.data-table-stack-prose')];
+      return {
+        overflow: Math.max(0, document.documentElement.scrollWidth - vw),
+        rows: document.querySelectorAll('#energy-plan-charge-schedule tbody tr').length,
+        cellsOutside: cells.filter((c) => c.getBoundingClientRect().right > vw + 0.5).length,
+        proseOverflowing: prose.filter((c) => c.scrollWidth > c.clientWidth + 1).length,
+        proseCells: prose.length,
+      };
+    });
+    check(`charging schedule tables fit at ${width}px (${THEME})`,
+      fit.overflow === 0 && fit.rows >= 1 && fit.cellsOutside === 0 && fit.proseCells > 0 && fit.proseOverflowing === 0, JSON.stringify(fit));
+    await page.locator('#energy-plan-charge-schedule').screenshot({ path: path.join(OUT, `plan-schedule-${width}-${THEME}.png`) });
   }
   await page.setViewportSize({ width: 1280, height: 844 });
 

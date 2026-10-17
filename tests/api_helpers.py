@@ -108,6 +108,28 @@ async def wait_settled(app: FastAPI, timeout: float = 3.0) -> None:
             await asyncio.sleep(0.01)
 
 
+async def wait_startup_traffic_done(app: FastAPI, timeout: float = 5.0) -> None:
+    """Wait until the boot-time device traffic (name/serial reads, periodic registration) is over.
+
+    ``wait_settled`` returns after the first heartbeat, while these background tasks are still
+    sending frames; a test that asserts "no device I/O" must take its frame baseline after them.
+    """
+    gateway = app.state.runtime.gateway
+    async with asyncio.timeout(timeout):
+        while True:
+            startup_running = any(
+                getattr(task.get_coro(), "__qualname__", "") == "_log_startup_device"
+                for task in asyncio.all_tasks()
+            )
+            bindings = [gateway._device(d) for d in app.state.runtime.devices]
+            registering = any(
+                b.periodic is not None and not b.periodic.available for b in bindings
+            )
+            if not startup_running and not registering:
+                return
+            await asyncio.sleep(0.01)
+
+
 @contextlib.asynccontextmanager
 async def running_app(
     settings: Settings | None = None,

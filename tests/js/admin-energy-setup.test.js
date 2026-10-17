@@ -1011,6 +1011,31 @@ test('Charging schedule merges only identical adjacent charge slots', () => {
     planSlot('2026-01-01T01:15:00Z', '2026-01-01T01:30:00Z', 'charge', 2500),
   ]);
   assert.equal(bodyRows(power.nodes.find((n) => n.id === 'energy-plan-charge-schedule')).length, 2);
+  const target = renderPlan([
+    planSlot('2026-01-01T01:00:00Z', '2026-01-01T01:15:00Z', 'charge', 1510, REASON_CHARGE, 90),
+    planSlot('2026-01-01T01:15:00Z', '2026-01-01T01:30:00Z', 'charge', 1510, REASON_CHARGE, 95),
+  ]);
+  assert.equal(bodyRows(target.nodes.find((n) => n.id === 'energy-plan-charge-schedule')).length, 2, 'target SoC change splits');
+  const reason = renderPlan([
+    planSlot('2026-01-01T01:00:00Z', '2026-01-01T01:15:00Z', 'charge', 1510),
+    planSlot('2026-01-01T01:15:00Z', '2026-01-01T01:30:00Z', 'charge', 1510, 'charge as late as permitted for target SoC'),
+  ]);
+  assert.equal(bodyRows(reason.nodes.find((n) => n.id === 'energy-plan-charge-schedule')).length, 2, 'reason change splits');
+  // Identical charge slots around an idle slot, and a time gap between them, never merge.
+  const gaps = renderPlan([
+    planSlot('2026-01-01T01:00:00Z', '2026-01-01T01:15:00Z', 'charge', 1510),
+    planSlot('2026-01-01T01:15:00Z', '2026-01-01T01:30:00Z', 'idle', null, 'battery reserve covers demand', null),
+    planSlot('2026-01-01T01:30:00Z', '2026-01-01T01:45:00Z', 'charge', 1510),
+    planSlot('2026-01-01T02:00:00Z', '2026-01-01T02:15:00Z', 'charge', 1510),
+  ]);
+  assert.equal(bodyRows(gaps.nodes.find((n) => n.id === 'energy-plan-charge-schedule')).length, 3);
+});
+
+test('an ok plan without charge slots titles its status card "No grid charging planned"', () => {
+  const { h } = renderPlan([planSlot('2026-01-01T01:00:00Z', '2026-01-01T01:15:00Z', 'idle', null, 'battery reserve covers demand', null)]);
+  const texts = flatten(h.byId.get('energy-plan-result')).map((n) => n.textContent);
+  assert.ok(texts.includes('No grid charging planned'));
+  assert.ok(!texts.some((t) => /No grid charge\b/.test(t || '')));
 });
 
 test('Charging schedule without charge slots says so', () => {

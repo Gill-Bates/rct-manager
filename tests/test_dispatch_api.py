@@ -33,6 +33,7 @@ from tests.api_helpers import (
     float_payload,
     make_settings,
     running_app,
+    wait_startup_traffic_done,
 )
 
 WRITER = {"Authorization": f"Bearer {WRITE_TOKEN}"}
@@ -1184,6 +1185,7 @@ async def test_verified_capacity_source_reaches_device_list_and_plan_without_dev
         assert await source() == "unavailable"  # default source never reports a value
 
         harness.runtime.battery_capacity = _FixedCapacity(8_000.0)
+        await wait_startup_traffic_done(harness.app)
         sent_before = len(harness.net.frames)
         with patch.object(EnergyReadingsBatteryStateProvider, "current", recording):
             assert (

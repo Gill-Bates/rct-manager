@@ -24,6 +24,7 @@ from tests.api_helpers import (
     float_payload,
     make_settings,
     running_app,
+    wait_startup_traffic_done,
     write_fixtures,
 )
 
@@ -471,6 +472,7 @@ def test_daily_consumption_api_validates_the_range_and_starts_no_device_io(tmp_p
             store.initialize()
             h.app.state.admin_store = store
             base = "/api/v1/devices/main/consumption"
+            await wait_startup_traffic_done(h.app)  # boot traffic must not count as endpoint I/O
             frames_before = len(h.net.frames)
             too_long = await h.client.get(f"{base}/days", params={"from": "2026-01-01", "to": "2026-03-15"}, headers=BEARER)
             assert_problem(too_long, 422, "invalid_parameter")

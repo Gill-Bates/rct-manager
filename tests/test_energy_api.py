@@ -48,6 +48,7 @@ from tests.api_helpers import (
     float_payload,
     make_settings,
     running_app,
+    wait_startup_traffic_done,
 )
 
 WRITER = {"Authorization": f"Bearer {WRITE_TOKEN}"}
@@ -403,6 +404,7 @@ async def test_battery_characterization_is_authorized_cache_only_and_never_deriv
         denied = await harness.client.get(path)
         assert denied.status_code == 401
         headers = await admin_session(harness)
+        await wait_startup_traffic_done(harness.app)
         before = harness.runtime.gateway.device_status("main").transactions
         frames = len(harness.net.frames)
 
@@ -459,6 +461,7 @@ async def test_battery_calibration_history_is_authorized_local_only_and_bounded(
         headers = await admin_session(harness)
         store = harness.app.state.admin_store
         store.record_battery_calibration(_calibration_sample())
+        await wait_startup_traffic_done(harness.app)
         before = harness.runtime.gateway.device_status("main").transactions
         frames = len(harness.net.frames)
 
@@ -637,6 +640,7 @@ async def test_battery_characterization_refresh_is_bounded_to_requested_numeric_
         )
         assert csrf_denied.status_code == 403
         assert harness.runtime.gateway.device_status("main").transactions == before_denied
+        await wait_startup_traffic_done(harness.app)
         before = harness.runtime.gateway.device_status("main").transactions
         frames = len(harness.net.frames)
 
@@ -695,6 +699,7 @@ async def test_battery_characterization_refresh_never_probes_unconfirmed_second_
     async with running_app(characterization_settings(tmp_path, enable_write_support=False, enable_periodic_reads=False)) as harness:
         path = "/admin/api/energy/devices/main/battery-characterization/refresh"
         headers = await admin_session(harness)
+        await wait_startup_traffic_done(harness.app)
         before = harness.runtime.gateway.device_status("main").transactions
         frames = len(harness.net.frames)
 
