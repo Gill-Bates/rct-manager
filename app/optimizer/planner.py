@@ -1121,7 +1121,17 @@ class DynamicChargeOptimizer:
         now = planning_input.now
         capacity_wh = planning_input.battery.usable_capacity_wh
         params = self._params
-        trajectory = [(now, start_wh / capacity_wh * 100.0)]
+        initial_soc_percent = start_wh / capacity_wh * 100.0
+        # Seed the trajectory with the SoC at ``now`` and keep it flat until the first slot actually
+        # begins: planning starts at the next full quarter hour, so with an off-grid ``now`` there is
+        # a gap [now, first_slot.start) in which nothing is dispatched. Without a point at the first
+        # slot's start, replan.expected_soc_percent would interpolate a spurious partial SoC change
+        # inside that gap. The extra (first_slot.start, initial_soc) point holds it flat. When ``now``
+        # already sits on the first slot's start the two points coincide, so no duplicate/zero-length
+        # segment is created.
+        trajectory = [(now, initial_soc_percent)]
+        if slots and slots[0].start > now:
+            trajectory.append((slots[0].start, initial_soc_percent))
         planned: list[PlannedCharge] = []
         soc_wh = start_wh
         for slot in slots:
