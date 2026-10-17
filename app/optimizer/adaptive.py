@@ -43,6 +43,7 @@ from app.optimizer.consumption import (
     HistoricalConsumptionForecaster,
     HistoryBucket,
     floor_to_bucket,
+    usable_value,
 )
 from app.optimizer.models import ConsumptionForecast, ConsumptionForecastInterval
 
@@ -50,9 +51,9 @@ METHOD_ADAPTIVE = "adaptive-v1"
 METHOD_MEDIAN = "median-v1"
 
 # --- Observations -------------------------------------------------------------------------------
-# A PARTIAL bucket (measured 600..810 s) is extrapolated to the full width, so it is only trusted
-# from 750 s (83 %) on: the extrapolation factor then stays below 1.2.
-MIN_PARTIAL_COVERAGE_SECONDS = 750.0
+# ``usable_value`` (with ``MIN_PARTIAL_COVERAGE_SECONDS``) is the single shared forecast-usable
+# observation rule; it lives in app.optimizer.consumption and is imported here so the adaptive
+# replay and the median forecaster apply the exact same quality gate. It is re-exported via __all__.
 
 # --- Everyday profile ---------------------------------------------------------------------------
 # A bucket is learned this long after it ended, and only while the state is normal. The delay equals
@@ -140,23 +141,6 @@ class ConsumptionPhase(StrEnum):
     INSUFFICIENT_HISTORY = "insufficient_history"
     NORMAL = "normal"
     SUSPECTED_LOW_ACTIVITY = "suspected_low_activity"
-
-
-def usable_value(bucket: HistoryBucket) -> float | None:
-    """The bucket's full-width energy when it is a clean observation, else ``None``.
-
-    COMPLETE buckets count as measured; PARTIAL ones only from MIN_PARTIAL_COVERAGE_SECONDS on and
-    scaled to the full width. ESTIMATED, MISSING and thinly covered buckets are not observations.
-    """
-    quality = bucket.quality
-    if quality is BucketQuality.COMPLETE:
-        return bucket.energy_wh
-    if (
-        quality is BucketQuality.PARTIAL
-        and bucket.coverage_seconds >= MIN_PARTIAL_COVERAGE_SECONDS
-    ):
-        return bucket.normalized_wh
-    return None
 
 
 @dataclass(frozen=True, slots=True)

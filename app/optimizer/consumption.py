@@ -34,7 +34,12 @@ from enum import StrEnum
 from zoneinfo import ZoneInfo
 
 from app.optimizer.align import GRID_STEP_SECONDS, build_grid
-from app.optimizer.models import ConsumptionForecast, ConsumptionForecastInterval, _require_aware, _require_finite
+from app.optimizer.models import (
+    ConsumptionForecast,
+    ConsumptionForecastInterval,
+    _require_aware,
+    _require_finite,
+)
 
 # The fixed bucket width; the whole energy domain works on 15-minute intervals.
 BUCKET_SECONDS = 900
@@ -67,7 +72,9 @@ MIN_HORIZON_COVERAGE_RATIO = 0.5
 def floor_to_bucket(moment: datetime) -> datetime:
     """The UTC 15-minute bucket start that contains ``moment`` (converted to UTC first)."""
     moment = moment.astimezone(UTC)
-    return moment.replace(minute=moment.minute - moment.minute % 15, second=0, microsecond=0)
+    return moment.replace(
+        minute=moment.minute - moment.minute % 15, second=0, microsecond=0
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,7 +96,12 @@ class _BucketAccumulator:
 
 def _usable(watts: float) -> bool:
     """A house-load value that may enter the integration: finite and non-negative."""
-    return isinstance(watts, (int, float)) and not isinstance(watts, bool) and math.isfinite(watts) and watts >= 0.0
+    return (
+        isinstance(watts, (int, float))
+        and not isinstance(watts, bool)
+        and math.isfinite(watts)
+        and watts >= 0.0
+    )
 
 
 def aggregate_samples(
@@ -107,7 +119,11 @@ def aggregate_samples(
     straddling two batches is covered, but it is not counted again in ``sample_count``.
     """
     counted = sorted(samples, key=lambda sample: sample.measured_at)
-    ordered = counted if carry is None else sorted([carry, *counted], key=lambda sample: sample.measured_at)
+    ordered = (
+        counted
+        if carry is None
+        else sorted([carry, *counted], key=lambda sample: sample.measured_at)
+    )
     buckets: dict[datetime, _BucketAccumulator] = defaultdict(_BucketAccumulator)
     for sample in counted:
         if _usable(sample.watts):
@@ -129,7 +145,11 @@ def aggregate_samples(
 
 
 def _integrate_pair(
-    buckets: dict[datetime, _BucketAccumulator], start: datetime, end: datetime, w_start: float, w_end: float
+    buckets: dict[datetime, _BucketAccumulator],
+    start: datetime,
+    end: datetime,
+    w_start: float,
+    w_end: float,
 ) -> None:
     """Spread the trapezoidal energy of one sample pair across the buckets it spans."""
     total_seconds = (end - start).total_seconds()
@@ -162,7 +182,9 @@ def buckets_to_rows(buckets: dict[datetime, _BucketAccumulator]) -> list[dict]:
                 "interval_end": (bucket_start + BUCKET_WIDTH).isoformat(),
                 "energy_wh": max(0.0, accumulator.energy_wh),
                 "sample_count": accumulator.sample_count,
-                "coverage_seconds": min(float(BUCKET_SECONDS), accumulator.coverage_seconds),
+                "coverage_seconds": min(
+                    float(BUCKET_SECONDS), accumulator.coverage_seconds
+                ),
             }
         )
     return rows
@@ -204,7 +226,10 @@ class HistoryBucket:
     @property
     def quality(self) -> BucketQuality:
         if self.estimated_seconds > 0.0:
-            if self.coverage_seconds + self.estimated_seconds >= MIN_BUCKET_COVERAGE_SECONDS:
+            if (
+                self.coverage_seconds + self.estimated_seconds
+                >= MIN_BUCKET_COVERAGE_SECONDS
+            ):
                 return BucketQuality.ESTIMATED
             return BucketQuality.MISSING
         if self.coverage_seconds >= COMPLETE_COVERAGE_SECONDS:
@@ -222,11 +247,38 @@ class HistoryBucket:
         return self.energy_wh * BUCKET_SECONDS / min(float(BUCKET_SECONDS), seconds)
 
 
+# A PARTIAL bucket (measured 600..810 s) is extrapolated to the full width, so it is only trusted
+# from 750 s (83 %) on: the extrapolation factor then stays below 1.2. This is the single shared
+# threshold for what counts as a forecast-usable observation; the adaptive module re-exports it.
+MIN_PARTIAL_COVERAGE_SECONDS = 750.0
+
+
+def usable_value(bucket: HistoryBucket) -> float | None:
+    """The bucket's full-width energy when it is a clean observation, else ``None``.
+
+    This is the ONE shared "forecast-usable observation" rule for both forecasters. COMPLETE buckets
+    count as measured; PARTIAL ones only from :data:`MIN_PARTIAL_COVERAGE_SECONDS` on and scaled to
+    the full width. ESTIMATED, MISSING and thinly covered buckets are not observations and never
+    enter training, the median or coverage.
+    """
+    quality = bucket.quality
+    if quality is BucketQuality.COMPLETE:
+        return bucket.energy_wh
+    if (
+        quality is BucketQuality.PARTIAL
+        and bucket.coverage_seconds >= MIN_PARTIAL_COVERAGE_SECONDS
+    ):
+        return bucket.normalized_wh
+    return None
+
+
 def _parse_instant(value: str) -> datetime:
     return datetime.fromisoformat(value).astimezone(UTC)
 
 
-def rows_to_history(rows: Sequence[dict], meter: Sequence[dict] = ()) -> list[HistoryBucket]:
+def rows_to_history(
+    rows: Sequence[dict], meter: Sequence[dict] = ()
+) -> list[HistoryBucket]:
     """Parse store rows into timezone-aware :class:`HistoryBucket` values, dropping unreadable ones.
 
     ``rows`` are the power-integrated buckets; ``meter`` are the counter-based ones. Per bucket the
@@ -253,8 +305,10 @@ def rows_to_history(rows: Sequence[dict], meter: Sequence[dict] = ()) -> list[Hi
             start = _parse_instant(row["interval_start"])
             end = _parse_instant(row["interval_end"])
             values = (
-                float(row["measured_wh"]), float(row["measured_seconds"]),
-                float(row["estimated_wh"]), float(row["estimated_seconds"]),
+                float(row["measured_wh"]),
+                float(row["measured_seconds"]),
+                float(row["estimated_wh"]),
+                float(row["estimated_seconds"]),
             )
         except (KeyError, ValueError, TypeError):
             continue
@@ -264,7 +318,9 @@ def rows_to_history(rows: Sequence[dict], meter: Sequence[dict] = ()) -> list[Hi
     history: list[HistoryBucket] = []
     for start in power.keys() | counted.keys():
         end_p, energy_p, samples, seconds_p = power.get(start, (None, 0.0, 0, 0.0))
-        end_m, wh_m, seconds_m, est_wh, est_seconds = counted.get(start, (None, 0.0, 0.0, 0.0, 0.0))
+        end_m, wh_m, seconds_m, est_wh, est_seconds = counted.get(
+            start, (None, 0.0, 0.0, 0.0, 0.0)
+        )
         end = end_p or end_m
         if end is None:
             continue
@@ -275,9 +331,13 @@ def rows_to_history(rows: Sequence[dict], meter: Sequence[dict] = ()) -> list[Hi
         # The other source may already cover part of what the estimate spread; keep only the remainder.
         room = max(0.0, BUCKET_SECONDS - measured_seconds)
         if est_seconds > room:
-            est_wh, est_seconds = (est_wh * room / est_seconds if est_seconds else 0.0), room
+            est_wh, est_seconds = (
+                est_wh * room / est_seconds if est_seconds else 0.0
+            ), room
         history.append(
-            HistoryBucket(start, end, measured_wh + est_wh, samples, measured_seconds, est_seconds)
+            HistoryBucket(
+                start, end, measured_wh + est_wh, samples, measured_seconds, est_seconds
+            )
         )
     history.sort(key=lambda bucket: bucket.start)
     return history
@@ -302,9 +362,9 @@ class HistoricalConsumptionForecaster:
         self, history: Sequence[HistoryBucket], now: datetime, horizon: timedelta
     ) -> ConsumptionForecast:
         now = now.astimezone(UTC)
-        well_covered = [bucket for bucket in history if bucket.well_covered]
-        fallback_energy = self._whole_history_median(well_covered)
-        by_week_slot, by_slot = self._index(well_covered, now)
+        observations = self._observations(history)
+        fallback_energy = self._whole_history_median(observations)
+        by_week_slot, by_slot = self._index(observations, now)
         intervals: list[ConsumptionForecastInterval] = []
         start = floor_to_bucket(now)
         horizon_end = now + horizon
@@ -312,7 +372,9 @@ class HistoricalConsumptionForecaster:
             end = start + BUCKET_WIDTH
             energy = self._estimate(start, by_week_slot, by_slot, fallback_energy)
             if energy is not None:
-                intervals.append(ConsumptionForecastInterval(start, end, max(0.0, energy)))
+                intervals.append(
+                    ConsumptionForecastInterval(start, end, max(0.0, energy))
+                )
             start = end
         return ConsumptionForecast(created_at=now, intervals=tuple(intervals))
 
@@ -328,8 +390,8 @@ class HistoricalConsumptionForecaster:
         entire ~30 h horizon from one median.
         """
         now = now.astimezone(UTC)
-        well_covered = [bucket for bucket in history if bucket.well_covered]
-        by_week_slot, by_slot = self._index(well_covered, now)
+        observations = self._observations(history)
+        by_week_slot, by_slot = self._index(observations, now)
         total = 0
         covered = 0
         start = floor_to_bucket(now)
@@ -347,7 +409,9 @@ class HistoricalConsumptionForecaster:
             return 0.0
         return covered / total
 
-    def coverage_end(self, history: Sequence[HistoryBucket], now: datetime, horizon: timedelta) -> datetime:
+    def coverage_end(
+        self, history: Sequence[HistoryBucket], now: datetime, horizon: timedelta
+    ) -> datetime:
         """How far from ``now`` the horizon's slots are contiguously backed by per-slot history.
 
         Walks the horizon's quarter-hour slots from ``now`` and stops at the first slot that is not
@@ -357,8 +421,8 @@ class HistoricalConsumptionForecaster:
         reach for the common-horizon trim; the blunt whole-history median never extends it.
         """
         now = now.astimezone(UTC)
-        well_covered = [bucket for bucket in history if bucket.well_covered]
-        by_week_slot, by_slot = self._index(well_covered, now)
+        observations = self._observations(history)
+        by_week_slot, by_slot = self._index(observations, now)
         start = floor_to_bucket(now)
         horizon_end = now + horizon
         reached = now
@@ -374,14 +438,34 @@ class HistoricalConsumptionForecaster:
                 break
         return reached
 
-    def _local_keys(self, start: datetime) -> tuple[tuple[int, int, int], tuple[int, int]]:
+    def _local_keys(
+        self, start: datetime
+    ) -> tuple[tuple[int, int, int], tuple[int, int]]:
         """The ``(weekday, hour, minute)`` and ``(hour, minute)`` local keys of a bucket start."""
         local = start.astimezone(self._zone)
         return (local.weekday(), local.hour, local.minute), (local.hour, local.minute)
 
+    @staticmethod
+    def _observations(
+        history: Sequence[HistoryBucket],
+    ) -> list[tuple[HistoryBucket, float]]:
+        """The forecast-usable observations: each kept bucket paired with its full-width energy.
+
+        Uses the single shared :func:`usable_value` rule, so ESTIMATED and MISSING buckets (and the
+        estimated energy they carry) never enter training, the median or coverage.
+        """
+        observations: list[tuple[HistoryBucket, float]] = []
+        for bucket in history:
+            value = usable_value(bucket)
+            if value is not None:
+                observations.append((bucket, value))
+        return observations
+
     def _index(
-        self, buckets: Sequence[HistoryBucket], now: datetime
-    ) -> tuple[dict[tuple[int, int, int], list[float]], dict[tuple[int, int], list[float]]]:
+        self, observations: Sequence[tuple[HistoryBucket, float]], now: datetime
+    ) -> tuple[
+        dict[tuple[int, int, int], list[float]], dict[tuple[int, int], list[float]]
+    ]:
         """Build the two historical indices, each limited to its documented lookback window.
 
         The same-weekday (primary) index only sees buckets within the last
@@ -393,12 +477,12 @@ class HistoricalConsumptionForecaster:
         fallback_cutoff = now - timedelta(days=FALLBACK_LOOKBACK_DAYS)
         by_week_slot: dict[tuple[int, int, int], list[float]] = defaultdict(list)
         by_slot: dict[tuple[int, int], list[float]] = defaultdict(list)
-        for bucket in buckets:
+        for bucket, value in observations:
             week_key, slot_key = self._local_keys(bucket.start)
             if bucket.start >= primary_cutoff:
-                by_week_slot[week_key].append(bucket.energy_wh)
+                by_week_slot[week_key].append(value)
             if bucket.start >= fallback_cutoff:
-                by_slot[slot_key].append(bucket.energy_wh)
+                by_slot[slot_key].append(value)
         return by_week_slot, by_slot
 
     def _estimate(
@@ -418,8 +502,10 @@ class HistoricalConsumptionForecaster:
         return fallback_energy
 
     @staticmethod
-    def _whole_history_median(buckets: Sequence[HistoryBucket]) -> float | None:
-        energies = [bucket.energy_wh for bucket in buckets]
+    def _whole_history_median(
+        observations: Sequence[tuple[HistoryBucket, float]],
+    ) -> float | None:
+        energies = [value for _bucket, value in observations]
         if not energies:
             return None
         return statistics.median(energies)
