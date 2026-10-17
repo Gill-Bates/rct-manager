@@ -40,6 +40,7 @@ from app.dispatch.battery_facts import (
     resolve_device_battery_facts,
 )
 from app.dispatch.models import DeviceLimits
+from app.energy.activity import EnergyActivity
 from app.energy.readings import EnergyReadingsPort
 from app.optimizer.adapters import FORECAST_BASIS
 from app.optimizer.base import (
@@ -242,6 +243,7 @@ class PlanningService:
         battery_max_age_seconds: float,
         single_flight: SingleFlight | None = None,
         device_ready: Callable[[str], bool] | None = None,
+        activity: EnergyActivity | None = None,
     ) -> None:
         if horizon <= timedelta():
             raise ValueError("horizon must be a positive timedelta")
@@ -268,6 +270,8 @@ class PlanningService:
         # None means "always ready". False marks the startup race: the device is not connected yet,
         # so a missing input is pending, not a configuration or hardware-fact gap.
         self._device_ready = device_ready
+        # None means "always active"; with an activity, mode ``off`` suspends every computation.
+        self._activity = activity
         self._pending = False
         # The service's OWN private wake event: never a shared forecast-refresh event. An in-process
         # caller may set() it to shorten the one-interval worst-case latency.
@@ -306,7 +310,15 @@ class PlanningService:
             (self._device_id, "plan"), self._recompute_once
         )
 
+    def _active(self) -> bool:
+        return self._activity is None or self._activity.device_energy_active(
+            self._device_id
+        )
+
     async def _recompute_once(self) -> EnergyPlan | None:
+        if not self._active():
+            self._invalidate()
+            return None
         now = self._clock.now()
         was_pending = self._pending
         self._pending = False
@@ -374,6 +386,11 @@ class PlanningService:
             )
             self._invalidate()
             return None
+        if (
+            not self._active()
+        ):  # switched off while the inputs were read: compute and store nothing
+            self._invalidate()
+            return None
         resolution = getattr(self._consumption, "last_resolution", None)
         try:
             planning_input = PlanningInput(
@@ -399,6 +416,9 @@ class PlanningService:
             self._invalidate()
             return None
 
+        if not self._active():
+            self._invalidate()
+            return None
         try:
             self._scheduler.set_plan(plan)
         except (TypeError, ValueError):
@@ -527,22 +547,36 @@ class PlanningService:
 
     async def run(self) -> None:
         """The bounded recompute loop; never raises into its caller (design Part 3 error handling)."""
-        while True:
-            try:
-                await self.recompute()
-            except Exception:
-                log.exception(
-                    "Unexpected planning recompute failure for device %s",
-                    self._device_id,
+        if self._activity is not None:
+            self._activity.add_listener(
+                self._wake.set
+            )  # a mode change re-evaluates at once
+        try:
+            while True:
+                if not self._active():
+                    # Off: drop any plan, then rest until a mode change wakes the loop.
+                    self._invalidate()
+                    self._wake.clear()
+                    await self._wake.wait()
+                    continue
+                try:
+                    await self.recompute()
+                except Exception:
+                    log.exception(
+                        "Unexpected planning recompute failure for device %s",
+                        self._device_id,
+                    )
+                # A start race is re-checked quickly so the first plan does not wait a full interval.
+                timeout = (
+                    min(self._interval, _PENDING_RETRY_SECONDS)
+                    if self._pending
+                    else self._interval
                 )
-            # A start race is re-checked quickly so the first plan does not wait a full interval.
-            timeout = (
-                min(self._interval, _PENDING_RETRY_SECONDS)
-                if self._pending
-                else self._interval
-            )
-            try:
-                await asyncio.wait_for(self._wake.wait(), timeout=timeout)
-            except TimeoutError:
-                pass
-            self._wake.clear()
+                try:
+                    await asyncio.wait_for(self._wake.wait(), timeout=timeout)
+                except TimeoutError:
+                    pass
+                self._wake.clear()
+        finally:
+            if self._activity is not None:
+                self._activity.remove_listener(self._wake.set)

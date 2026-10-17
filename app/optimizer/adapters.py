@@ -72,6 +72,7 @@ class PlanStatus(StrEnum):
     """Why a Dry-Run plan could or could not be produced; mapped straight onto the admin API."""
 
     OK = "ok"
+    ENERGY_MANAGER_OFF = "energy_manager_off"
     INSUFFICIENT_HISTORY = "insufficient_history"
     SPOT_DISABLED = "spot_disabled"
     SPOT_PRICES_UNAVAILABLE = "spot_prices_unavailable"

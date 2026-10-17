@@ -69,6 +69,7 @@ from app.dispatch.soc_policy import SocTargetPolicy, SocTargetPolicyRegistry
 from app.dispatch.store import DispatchStore
 from app.energy.manager import EnergyManager
 from app.energy.models import EnergyMode, ModeRecord
+from app.energy.plan_handoff import PlanDispatchHandoff
 from app.errors import ConfigError, DeviceApiError, ReconfigurationBuildError
 from app.gateway.battery_inventory import (
     BMS_SERIAL_METRIC,
@@ -89,6 +90,7 @@ from app.observability.log_stream import TsdbLogHandler, register_tsdb_log_type
 from app.observability.names import build_metric_names, metric_help
 from app.observability.stats import ServiceCounters
 from app.optimizer.runtime_sources import build_runtime_planning_service
+from app.optimizer.service import PlanningService
 from app.protocol.types import StructKind
 from app.scheduling.budget import WorkBudget
 from app.scheduling.heartbeat import Heartbeat
@@ -121,6 +123,7 @@ from app.weather.timezone import TimezoneResolver
 
 log = logging.getLogger(__name__)
 _PERIODIC_CHECK_SECONDS = 10.0
+_PLAN_HANDOFF_POLL_SECONDS = 30.0
 _NAME_RETRY_SECONDS = 15.0  # between attempts to read the inverter's own name
 _SERIAL_MAX_ATTEMPTS = 3  # tries to read the serial number once the name is known
 _PASSWORD_POLL_SECONDS = 1.0
@@ -995,6 +998,7 @@ def _lifespan(
         refresh_tasks: list[asyncio.Task] = []
         dispatch_tasks: list[asyncio.Task] = []
         planning_tasks: list[asyncio.Task] = []
+        dispatch_recovered = asyncio.Event()
         connects: dict[int, asyncio.Task] = {}
         # Set first thing in the teardown: runtime.shutting_down() only turns true once the shutdown
         # coordinator runs, and a reconfiguration must stop starting work before that as well.
@@ -1120,10 +1124,44 @@ def _lifespan(
                 for device_id in runtime.devices
             }
             app.state.planning_services = services
-            for service in services.values():
+            for device_id, service in services.items():
                 task = asyncio.create_task(service.run())
                 planning_tasks.append(task)
                 tasks.append(task)
+                if runtime.energy is not None:
+                    enabled = runtime.settings.enable_automatic_dispatch
+                    handoff = PlanDispatchHandoff(
+                        manager=runtime.energy,
+                        enable_automatic_dispatch=enabled,
+                    )
+                    task = asyncio.create_task(run_plan_handoff(device_id, service, handoff, enabled))
+                    planning_tasks.append(task)
+                    tasks.append(task)
+
+        async def run_plan_handoff(
+            device_id: str,
+            service: PlanningService,
+            handoff: PlanDispatchHandoff,
+            enabled: bool,
+        ) -> None:
+            """Offer the current slot on its own bounded tick, including expiry handback."""
+            last_logged_slot = object()
+            while True:
+                if enabled:
+                    await dispatch_recovered.wait()
+                try:
+                    slot = service.scheduler.active_slot(runtime.clock.now())
+                    if enabled or slot != last_logged_slot:
+                        await handoff.offer(device_id, slot)
+                        last_logged_slot = slot
+                except Exception:
+                    log.exception("Plan handoff failed for device %s", device_id)
+                    if enabled:
+                        try:
+                            await handoff.offer(device_id, None)
+                        except Exception:
+                            log.exception("Plan handback failed for device %s", device_id)
+                await runtime.clock.sleep(_PLAN_HANDOFF_POLL_SECONDS)
 
         async def _recover_dispatch() -> None:
             """Await the startup recovery sweep before any dispatch loop starts, and fold its
@@ -1143,12 +1181,14 @@ def _lifespan(
                 log.exception("Battery dispatch recovery failed")
                 return
             runtime.dispatch_recovery_failed = False
+            dispatch_recovered.set()
             start_dispatch_tasks(runtime.devices)
 
         def start_device_jobs() -> None:
             if is_closing():
                 return  # a late password change must not re-register periodic reads after their teardown
-            if store is not None:
+            if store is not None and runtime.energy is not None:
+                # Both forecast loops rest while every inverter is off (the factory state).
                 tasks.append(
                     asyncio.create_task(
                         run_spot_market_refresh_loop(
@@ -1156,6 +1196,7 @@ def _lifespan(
                             app.state.spotmarket_provider,
                             app,
                             app.state.spotmarket_refresh_event,
+                            activity=runtime.energy.activity,
                         )
                     )
                 )
@@ -1166,6 +1207,7 @@ def _lifespan(
                             app.state.solar_forecast_provider,
                             app,
                             app.state.weather_refresh_event,
+                            activity=runtime.energy.activity,
                         )
                     )
                 )

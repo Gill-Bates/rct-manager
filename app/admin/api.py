@@ -74,14 +74,18 @@ _BATTERY_STATUS2_BITS: dict[int, str] = {
 def _battery_status2_label(value: int) -> str:
     """Best-effort, bitwise decoding into short badge texts; an unrecognized bit keeps its raw code."""
     if value == 0:
-        return "Normal"
+        # Zero means none of the known exceptional status bits is active. "Operational" conveys
+        # that state without claiming that the charge level itself is normal.
+        return "Operational"
     if value < 0:
         return f"Status {value}"
     labels = [label for bit, label in _BATTERY_STATUS2_BITS.items() if value & bit]
     known_mask = sum(bit for bit in _BATTERY_STATUS2_BITS if value & bit)
     if "Balancing" in labels and "Balance due" in labels:
         labels.remove("Balance due")  # active implies due; showing both is redundant
-    labels = list(dict.fromkeys(labels))  # charging and discharging calibration share one text
+    labels = list(
+        dict.fromkeys(labels)
+    )  # charging and discharging calibration share one text
     if not labels:
         return f"Status {value}"
     if (

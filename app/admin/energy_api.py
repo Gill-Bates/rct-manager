@@ -2055,7 +2055,8 @@ def _battery_view(state) -> DryRunBatteryView | None:
 class DryRunPlanView(BaseModel):
     """The Dry-Run plan preview for one device.
 
-    ``status`` is ``ok`` or one of the explicit unavailable reasons (``insufficient_history``,
+    ``status`` is ``ok``, ``energy_manager_off`` (nothing was computed) or one of the explicit
+    unavailable reasons (``insufficient_history``,
     ``spot_disabled``, ``spot_prices_unavailable``, ``solar_not_configured``,
     ``solar_forecast_unavailable``, ``battery_state_unavailable``).
     ``price_disclaimer`` makes clear the plan uses the raw day-ahead price only: it is part of the
@@ -2741,6 +2742,14 @@ async def get_dynamic_plan(
     if target_time is not None and target_time.tzinfo is None:
         raise HTTPException(422, "target_time must include a UTC offset")
     runtime = request.app.state.runtime
+    if runtime.energy is None or not runtime.energy.device_energy_active(device_id):
+        # Off (also: no stored mode) is operational rest: read no input and run no optimizer.
+        return DryRunPlanView(
+            device_id=device_id,
+            status=PlanStatus.ENERGY_MANAGER_OFF.value,
+            detail="Energy Manager is off for this inverter; the charging plan is inactive.",
+            horizon_hours=0.0,
+        )
     store = _spotmarket_store(request)
     now = runtime.clock.now()
 

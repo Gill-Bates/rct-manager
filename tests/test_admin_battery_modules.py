@@ -1369,11 +1369,13 @@ def test_replace_devices_drops_the_trusted_battery_topology() -> None:
 def test_battery_status2_badge_texts_are_short_and_logical() -> None:
     from app.admin.api import _battery_status2_label as label
 
-    assert label(0) == "Normal"
+    assert label(0) == "Operational"
     assert label(0x400) == label(0x008) == "Calibrating"
     assert label(0x002) == "Syncing"
     assert label(0x100 | 0x800) == "Balancing"  # active implies due
-    assert label(0x400 | 0x008) == "Calibrating"  # one text for both calibration directions
+    assert (
+        label(0x400 | 0x008) == "Calibrating"
+    )  # one text for both calibration directions
     assert label(0x200 | 0x100) == "Balancing · Low voltage"
     assert label(0x1000) == "Status 4096"
     assert label(0x100 | 0x1000) == "Balancing · code 4352"

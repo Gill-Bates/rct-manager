@@ -23,8 +23,13 @@ from zoneinfo import ZoneInfo
 
 from app.admin.store import AdminStore
 from app.clock import Clock, SystemClock
+from app.energy.activity import EnergyActivity
 from app.optimizer.models import SolarForecast
-from app.spotmarket.base import SpotMarketError, SpotMarketNotAvailableYet, SpotPriceProvider
+from app.spotmarket.base import (
+    SpotMarketError,
+    SpotMarketNotAvailableYet,
+    SpotPriceProvider,
+)
 from app.spotmarket.models import SpotMarketConfig, SpotPriceSnapshot
 from app.weather.base import WeatherError
 from app.weather.models import WeatherConfig
@@ -77,22 +82,37 @@ async def drain_store_threads(timeout: float = _DRAIN_TIMEOUT_SECONDS) -> None:
         return
     _, still_running = await asyncio.wait(pending, timeout=timeout)
     if still_running:
-        log.warning("%d forecast store operation(s) still running after %.0fs at shutdown", len(still_running), timeout)
+        log.warning(
+            "%d forecast store operation(s) still running after %.0fs at shutdown",
+            len(still_running),
+            timeout,
+        )
 
 
 def record_refresh_status(
-    store: AdminStore, status_key: str, config_key: str, ok: bool, message: str | None = None,
+    store: AdminStore,
+    status_key: str,
+    config_key: str,
+    ok: bool,
+    message: str | None = None,
 ) -> None:
     """Persist the outcome of the latest background refresh; a success resets a prior error."""
-    store.put(status_key, {
-        "config_key": config_key,
-        "ok": ok,
-        "at": datetime.now(UTC).isoformat(),
-        "message": None if ok else (message or "Refresh failed")[:_MAX_ERROR_LENGTH],
-    })
+    store.put(
+        status_key,
+        {
+            "config_key": config_key,
+            "ok": ok,
+            "at": datetime.now(UTC).isoformat(),
+            "message": (
+                None if ok else (message or "Refresh failed")[:_MAX_ERROR_LENGTH]
+            ),
+        },
+    )
 
 
-def load_refresh_status(store: AdminStore, status_key: str, config_key: str) -> dict | None:
+def load_refresh_status(
+    store: AdminStore, status_key: str, config_key: str
+) -> dict | None:
     """The last refresh outcome for this configuration, or ``None`` when none was recorded yet.
 
     The lookup goes through the store's dedicated ``get_refresh_status`` accessor rather than the
@@ -111,10 +131,16 @@ def load_refresh_status(store: AdminStore, status_key: str, config_key: str) -> 
 
 
 async def _record(
-    store: AdminStore, status_key: str, config_key: str, ok: bool, message: str | None = None,
+    store: AdminStore,
+    status_key: str,
+    config_key: str,
+    ok: bool,
+    message: str | None = None,
 ) -> None:
     try:
-        await _store_thread(record_refresh_status, store, status_key, config_key, ok, message)
+        await _store_thread(
+            record_refresh_status, store, status_key, config_key, ok, message
+        )
     except Exception:
         log.exception("Could not persist the forecast refresh status")
 
@@ -123,14 +149,18 @@ def _error_text(error: BaseException) -> str:
     return str(error).strip() or type(error).__name__
 
 
-async def _write_if_current(store: AdminStore, is_current: Callable[[], bool] | None, func, *args) -> bool:
+async def _write_if_current(
+    store: AdminStore, is_current: Callable[[], bool] | None, func, *args
+) -> bool:
     """Write under the save lock, and only while the refreshed configuration is still the active one."""
+
     def run() -> bool:
         with store.forecast_write_lock:
             if is_current is not None and not is_current():
                 return False
             func(*args)
             return True
+
     return await _store_thread(run)
 
 
@@ -140,7 +170,9 @@ def spot_config_key(config: SpotMarketConfig) -> str:
 
 
 def solar_config_key(config: WeatherConfig) -> str:
-    identity = config.model_dump(mode="json", exclude={"enabled", "location_name", "location_region"})
+    identity = config.model_dump(
+        mode="json", exclude={"enabled", "location_name", "location_region"}
+    )
     payload = json.dumps(identity, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(payload.encode()).hexdigest()
 
@@ -158,7 +190,10 @@ def _window(now: datetime, timezone: str) -> tuple[ZoneInfo, date, date, str, st
 
 
 def _spot_rows(
-    snapshots: tuple[SpotPriceSnapshot | None, ...], config_key: str, timezone: str, now: datetime,
+    snapshots: tuple[SpotPriceSnapshot | None, ...],
+    config_key: str,
+    timezone: str,
+    now: datetime,
 ) -> list[dict]:
     zone, first_day, last_day, _, _ = _window(now, timezone)
     rows: dict[str, dict] = {}
@@ -199,7 +234,9 @@ class RefreshPlan:
 
 def day_ahead_available_from(delivery_date: date) -> datetime:
     """When the day-ahead prices for ``delivery_date`` can be retrieved (D-1, market time)."""
-    return datetime.combine(delivery_date - timedelta(days=1), DAY_AHEAD_FETCH_FROM, tzinfo=MARKET_TIMEZONE)
+    return datetime.combine(
+        delivery_date - timedelta(days=1), DAY_AHEAD_FETCH_FROM, tzinfo=MARKET_TIMEZONE
+    )
 
 
 def spot_refresh_plan(rows: list[dict], now: datetime) -> RefreshPlan:
@@ -223,11 +260,17 @@ def spot_refresh_plan(rows: list[dict], now: datetime) -> RefreshPlan:
         fetch_yesterday=not has_yesterday,
         complete=complete,
         overdue=not has_tomorrow and now >= opens + PUBLICATION_GRACE,
-        wake_at=day_ahead_available_from(today + timedelta(days=2)) if has_tomorrow else max(opens, now),
+        wake_at=(
+            day_ahead_available_from(today + timedelta(days=2))
+            if has_tomorrow
+            else max(opens, now)
+        ),
     )
 
 
-def solar_refresh_plan(rows: list[dict], now: datetime, timezone: str | None) -> RefreshPlan:
+def solar_refresh_plan(
+    rows: list[dict], now: datetime, timezone: str | None
+) -> RefreshPlan:
     """Decide from the stored solar rows whether a retrieval is due: today and tomorrow must be stored.
 
     The forecast model has no publication time, so a new local day simply needs its window loaded
@@ -239,8 +282,12 @@ def solar_refresh_plan(rows: list[dict], now: datetime, timezone: str | None) ->
     complete = {today.isoformat(), (today + timedelta(days=1)).isoformat()} <= days
     midnight = datetime.combine(today + timedelta(days=1), time.min, tzinfo=zone)
     return RefreshPlan(
-        fetch_today=not complete, fetch_tomorrow=not complete, fetch_yesterday=False, complete=complete,
-        overdue=not complete, wake_at=midnight if complete else now,
+        fetch_today=not complete,
+        fetch_tomorrow=not complete,
+        fetch_yesterday=False,
+        complete=complete,
+        overdue=not complete,
+        wake_at=midnight if complete else now,
     )
 
 
@@ -267,8 +314,14 @@ def _clamp_wait(delta: timedelta) -> timedelta:
 
 
 async def _evaluate(
-    store: AdminStore, status_key: str, config_key: str, plan: RefreshPlan, backoff: RetryBackoff,
-    now: datetime, refresh,
+    store: AdminStore,
+    status_key: str,
+    config_key: str,
+    plan: RefreshPlan,
+    backoff: RetryBackoff,
+    now: datetime,
+    refresh,
+    active: Callable[[], bool] | None = None,
 ) -> timedelta:
     """Run ``refresh`` only when ``plan`` says it is due and the backoff allows; return the next wait."""
     if not plan.due:
@@ -279,9 +332,13 @@ async def _evaluate(
         status = await _store_thread(load_refresh_status, store, status_key, config_key)
         if status and not status.get("ok"):
             backoff.failures = 1
-            backoff.next_attempt = datetime.fromisoformat(status["at"]) + RETRY_BACKOFF_FIRST
+            backoff.next_attempt = (
+                datetime.fromisoformat(status["at"]) + RETRY_BACKOFF_FIRST
+            )
     if backoff.next_attempt is not None and now < backoff.next_attempt:
         return _clamp_wait(backoff.next_attempt - now)
+    if active is not None and not active():
+        return MAX_IDLE_WAIT  # the Energy Manager went to rest meanwhile: begin no provider call
     if await refresh():
         backoff.reset()
         return timedelta(seconds=1)
@@ -289,8 +346,13 @@ async def _evaluate(
 
 
 async def refresh_spot_market(
-    store: AdminStore, provider: SpotPriceProvider, config: SpotMarketConfig,
-    is_current: Callable[[], bool] | None = None, *, now: datetime | None = None, zone_cache=None,
+    store: AdminStore,
+    provider: SpotPriceProvider,
+    config: SpotMarketConfig,
+    is_current: Callable[[], bool] | None = None,
+    *,
+    now: datetime | None = None,
+    zone_cache=None,
 ) -> bool:
     """Retrieve only the spot days that are due (see :func:`spot_refresh_plan`) and store them.
 
@@ -330,7 +392,9 @@ async def refresh_spot_market(
             error = exc
     if error is None and plan.fetch_yesterday and zone_name:
         try:
-            snapshots.append(await asyncio.to_thread(provider.fetch_yesterday, config, zone_name))
+            snapshots.append(
+                await asyncio.to_thread(provider.fetch_yesterday, config, zone_name)
+            )
         except SpotMarketError as exc:
             error = exc
 
@@ -339,19 +403,31 @@ async def refresh_spot_market(
     merged = {row["interval_start"]: row for row in existing}
     for row in _spot_rows(tuple(snapshots), key, zone_name, now):
         merged[row["interval_start"]] = row
-    rows = [row for row in merged.values() if first_text <= row["local_date"] <= last_text]
-    if snapshots and not await _write_if_current(store, is_current, store.replace_spot_market_intervals, rows):
-        log.info("Spot-market configuration changed during the refresh; discarding its result")
+    rows = [
+        row for row in merged.values() if first_text <= row["local_date"] <= last_text
+    ]
+    if snapshots and not await _write_if_current(
+        store, is_current, store.replace_spot_market_intervals, rows
+    ):
+        log.info(
+            "Spot-market configuration changed during the refresh; discarding its result"
+        )
         return False
 
     after = spot_refresh_plan(rows, now)
     if error is None and not after.complete:
         if not after.overdue:
-            log.info("The spot-price window is incomplete; missing day(s) will be retried")
+            log.info(
+                "The spot-price window is incomplete; missing day(s) will be retried"
+            )
             return False
-        error = SpotMarketNotAvailableYet("Tomorrow's prices were not published after the usual retrieval time")
+        error = SpotMarketNotAvailableYet(
+            "Tomorrow's prices were not published after the usual retrieval time"
+        )
     if error is not None:
-        log.warning("Daily spot-price retrieval failed (%s): %s", config.bidding_zone, error)
+        log.warning(
+            "Daily spot-price retrieval failed (%s): %s", config.bidding_zone, error
+        )
         await _record(store, SPOT_STATUS_KEY, key, False, _error_text(error))
         return False
     await _record(store, SPOT_STATUS_KEY, key, True)
@@ -364,8 +440,12 @@ async def refresh_spot_market(
 
 
 async def refresh_solar_forecast(
-    store: AdminStore, provider, config: WeatherConfig, is_current: Callable[[], bool] | None = None,
-    *, now: datetime | None = None,
+    store: AdminStore,
+    provider,
+    config: WeatherConfig,
+    is_current: Callable[[], bool] | None = None,
+    *,
+    now: datetime | None = None,
 ) -> bool:
     """Retrieve yesterday, today and tomorrow's solar forecast in one request and store it.
 
@@ -376,9 +456,13 @@ async def refresh_solar_forecast(
     now = now or datetime.now(UTC)
     key = solar_config_key(config)
     _, _, _, first_text, last_text = _window(now, config.timezone or "UTC")
-    await _store_thread(store.prune_solar_forecast_intervals, key, first_text, last_text)
+    await _store_thread(
+        store.prune_solar_forecast_intervals, key, first_text, last_text
+    )
     try:
-        forecast: SolarForecast = await asyncio.to_thread(provider.fetch_preview, config, now)
+        forecast: SolarForecast = await asyncio.to_thread(
+            provider.fetch_preview, config, now
+        )
     except WeatherError as exc:
         log.warning("Daily solar forecast retrieval failed: %s", exc)
         await _record(store, SOLAR_STATUS_KEY, key, False, _error_text(exc))
@@ -389,30 +473,42 @@ async def refresh_solar_forecast(
     for interval in forecast.intervals:
         day = interval.start.astimezone(zone).date()
         if first_day <= day <= last_day:
-            rows.append({
-                "config_key": key,
-                "local_date": day.isoformat(),
-                "interval_start": interval.start.isoformat(),
-                "interval_end": interval.end.isoformat(),
-                "energy_wh": interval.energy_wh,
-                "timezone": config.timezone or "UTC",
-                "fetched_at": forecast.created_at.isoformat(),
-            })
+            rows.append(
+                {
+                    "config_key": key,
+                    "local_date": day.isoformat(),
+                    "interval_start": interval.start.isoformat(),
+                    "interval_end": interval.end.isoformat(),
+                    "energy_wh": interval.energy_wh,
+                    "timezone": config.timezone or "UTC",
+                    "fetched_at": forecast.created_at.isoformat(),
+                }
+            )
     if not solar_refresh_plan(rows, now, config.timezone).complete:
         message = "The solar forecast does not cover tomorrow"
         log.warning("Daily solar forecast retrieval failed: %s", message)
         await _record(store, SOLAR_STATUS_KEY, key, False, message)
         return False
-    if not await _write_if_current(store, is_current, store.replace_solar_forecast_intervals, rows):
-        log.info("Weather configuration changed during the refresh; discarding its result")
+    if not await _write_if_current(
+        store, is_current, store.replace_solar_forecast_intervals, rows
+    ):
+        log.info(
+            "Weather configuration changed during the refresh; discarding its result"
+        )
         return False
     await _record(store, SOLAR_STATUS_KEY, key, True)
     return True
 
 
 async def spot_refresh_tick(
-    store: AdminStore, provider: SpotPriceProvider, config: SpotMarketConfig, now: datetime,
-    backoff: RetryBackoff, is_current: Callable[[], bool] | None = None, zone_cache=None,
+    store: AdminStore,
+    provider: SpotPriceProvider,
+    config: SpotMarketConfig,
+    now: datetime,
+    backoff: RetryBackoff,
+    is_current: Callable[[], bool] | None = None,
+    zone_cache=None,
+    active: Callable[[], bool] | None = None,
 ) -> timedelta:
     """One evaluation of the stored spot rows: retrieve if due, return how long to wait."""
     if not config.enabled:
@@ -420,14 +516,27 @@ async def spot_refresh_tick(
     key = spot_config_key(config)
     rows = await _store_thread(store.get_spot_market_intervals, key)
     return await _evaluate(
-        store, SPOT_STATUS_KEY, key, spot_refresh_plan(rows, now), backoff, now,
-        lambda: refresh_spot_market(store, provider, config, is_current, now=now, zone_cache=zone_cache),
+        store,
+        SPOT_STATUS_KEY,
+        key,
+        spot_refresh_plan(rows, now),
+        backoff,
+        now,
+        lambda: refresh_spot_market(
+            store, provider, config, is_current, now=now, zone_cache=zone_cache
+        ),
+        active,
     )
 
 
 async def solar_refresh_tick(
-    store: AdminStore, provider, config: WeatherConfig, now: datetime, backoff: RetryBackoff,
+    store: AdminStore,
+    provider,
+    config: WeatherConfig,
+    now: datetime,
+    backoff: RetryBackoff,
     is_current: Callable[[], bool] | None = None,
+    active: Callable[[], bool] | None = None,
 ) -> timedelta:
     """One evaluation of the stored solar rows: retrieve if due, return how long to wait."""
     if not config.is_forecastable():
@@ -436,17 +545,40 @@ async def solar_refresh_tick(
     zone = ZoneInfo(config.timezone or "UTC")
     today = now.astimezone(zone).date()
     rows = await _store_thread(
-        store.get_solar_forecast_intervals, key, today.isoformat(), (today + timedelta(days=1)).isoformat()
+        store.get_solar_forecast_intervals,
+        key,
+        today.isoformat(),
+        (today + timedelta(days=1)).isoformat(),
     )
     return await _evaluate(
-        store, SOLAR_STATUS_KEY, key, solar_refresh_plan(rows, now, config.timezone), backoff, now,
+        store,
+        SOLAR_STATUS_KEY,
+        key,
+        solar_refresh_plan(rows, now, config.timezone),
+        backoff,
+        now,
         lambda: refresh_solar_forecast(store, provider, config, is_current, now=now),
+        active,
     )
 
 
-async def _run_loop(tick, status_key: str, store: AdminStore, config_of, key_of, event: asyncio.Event) -> None:
+async def _run_loop(
+    tick,
+    status_key: str,
+    store: AdminStore,
+    config_of,
+    key_of,
+    event: asyncio.Event,
+    activity: EnergyActivity | None = None,
+) -> None:
     backoff = RetryBackoff()
     while True:
+        if activity is not None and not activity.any_energy_active():
+            # Every inverter is off: rest without any evaluation, retry or provider call until a mode
+            # change. A configuration save only sets ``event``, which the next evaluation still sees.
+            await activity.wait_until_any_active()
+            backoff.reset()
+            continue
         config = config_of()
         key = key_of(config)
         try:
@@ -464,35 +596,67 @@ async def _run_loop(tick, status_key: str, store: AdminStore, config_of, key_of,
 
 
 async def run_spot_market_refresh_loop(
-    store: AdminStore, provider: SpotPriceProvider, app, event: asyncio.Event, clock: Clock | None = None,
+    store: AdminStore,
+    provider: SpotPriceProvider,
+    app,
+    event: asyncio.Event,
+    clock: Clock | None = None,
+    activity: EnergyActivity | None = None,
 ) -> None:
     clock = clock or SystemClock()
 
     def tick(config, backoff):
         key = spot_config_key(config)
         return spot_refresh_tick(
-            store, provider, config, clock.now(), backoff,
+            store,
+            provider,
+            config,
+            clock.now(),
+            backoff,
             lambda: spot_config_key(app.state.spotmarket_config) == key,
             getattr(app.state, "spotmarket_zone_cache", None),
+            activity.any_energy_active if activity is not None else None,
         )
 
     await _run_loop(
-        tick, SPOT_STATUS_KEY, store, lambda: app.state.spotmarket_config, spot_config_key, event
+        tick,
+        SPOT_STATUS_KEY,
+        store,
+        lambda: app.state.spotmarket_config,
+        spot_config_key,
+        event,
+        activity,
     )
 
 
 async def run_solar_refresh_loop(
-    store: AdminStore, provider, app, event: asyncio.Event, clock: Clock | None = None,
+    store: AdminStore,
+    provider,
+    app,
+    event: asyncio.Event,
+    clock: Clock | None = None,
+    activity: EnergyActivity | None = None,
 ) -> None:
     clock = clock or SystemClock()
 
     def tick(config, backoff):
         key = solar_config_key(config)
         return solar_refresh_tick(
-            store, provider, config, clock.now(), backoff,
+            store,
+            provider,
+            config,
+            clock.now(),
+            backoff,
             lambda: solar_config_key(app.state.weather_config) == key,
+            activity.any_energy_active if activity is not None else None,
         )
 
     await _run_loop(
-        tick, SOLAR_STATUS_KEY, store, lambda: app.state.weather_config, solar_config_key, event
+        tick,
+        SOLAR_STATUS_KEY,
+        store,
+        lambda: app.state.weather_config,
+        solar_config_key,
+        event,
+        activity,
     )

@@ -18,6 +18,8 @@ from app.admin.store import AdminStore
 from app.api.runtime import Runtime
 from app.dispatch.models import DeviceLimits
 from app.dispatch.store import DispatchStore
+from app.energy.activity import EnergyActivity
+from app.energy.models import EnergyMode
 from app.energy.soc_window import effective_target_window
 from app.errors import DeviceApiError
 from app.gateway.base import DeviceState
@@ -179,4 +181,10 @@ def build_runtime_planning_service(
         consumption_max_age_seconds=settings.consumption_max_age_seconds,
         battery_max_age_seconds=settings.battery_max_age_seconds,
         device_ready=lambda device_id: _device_started(runtime, device_id),
+        # Without an Energy Manager there is no mode, which is the same as off.
+        activity=(
+            runtime.energy.activity
+            if runtime.energy is not None
+            else EnergyActivity(lambda _device_id: EnergyMode.OFF, lambda: ())
+        ),
     )
