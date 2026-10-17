@@ -1111,6 +1111,11 @@ function planChartTickLabel(value) {
   return [date.toLocaleDateString(undefined, { day: '2-digit', month: 'short' }), time];
 }
 
+// Axis unit titles match the legend size and the tick colour; the padding keeps them off the ticks.
+function chartAxisTitle(text, color) {
+  return { display: true, text, color, font: { size: 13, weight: 600 }, padding: { top: 4, bottom: 8 } };
+}
+
 function planChartColors(host) {
   const styles = getComputedStyle(host);
   return {
@@ -1199,12 +1204,12 @@ function drawPlanChart(canvas, slots) {
           ticks: { color: label, maxRotation: 0, callback: planChartTickLabel },
         },
         power: {
-          position: 'left', beginAtZero: true, grid: { color: grid }, ticks: { color: label },
-          title: { display: true, text: 'kW', color: label },
+          position: 'left', beginAtZero: true, grid: { color: grid }, ticks: { color: label, padding: 6 },
+          title: chartAxisTitle('kW', label),
         },
         soc: {
-          position: 'right', min: 0, max: 100, display: hasSoc, grid: { drawOnChartArea: false }, ticks: { color: label },
-          title: { display: true, text: '%', color: label },
+          position: 'right', min: 0, max: 100, display: hasSoc, grid: { drawOnChartArea: false }, ticks: { color: label, padding: 6 },
+          title: chartAxisTitle('%', label),
         },
       },
     },
@@ -1517,7 +1522,7 @@ function drawBatteryCalibrationChart() {
       scales: {
         x: { type: 'linear', ticks: { color: label, callback: dateText, maxTicksLimit: 8 }, grid: { color: grid } },
         y: {
-          beginAtZero: true, title: { display: true, text: 'kWh', color: label },
+          beginAtZero: true, title: chartAxisTitle('kWh', label),
           ticks: { color: label }, grid: { color: grid }
         },
       },
@@ -1734,7 +1739,6 @@ function consumptionChartColors() {
 function syncConsumptionChartTheme() {
   if (!consumptionChart) return;
   const { label, grid } = consumptionChartColors();
-  consumptionChart.options.plugins.legend.labels.color = label;
   for (const axis of Object.values(consumptionChart.options.scales)) {
     axis.ticks.color = label;
     axis.grid.color = grid;
@@ -1774,6 +1778,31 @@ function renderInverterHistoryStatus(history) {
   }
   slot.replaceChildren(...parts);
   return true;
+}
+
+// One button per data series; each toggles exactly its own dataset (keyboard and touch operable)
+// and reports the state through aria-pressed, which also drives the strike-through.
+function consumptionLegend(chart, datasets) {
+  const group = element('div', 'energy-consumption-legend');
+  group.setAttribute('role', 'group');
+  group.setAttribute('aria-label', 'Data sources');
+  datasets.forEach((dataset, index) => {
+    const button = element('button', 'energy-consumption-legend-item');
+    button.type = 'button';
+    button.setAttribute('aria-pressed', 'true');
+    const swatch = element('span', 'energy-consumption-legend-swatch');
+    swatch.style.backgroundColor = dataset.backgroundColor;
+    swatch.setAttribute('aria-hidden', 'true');
+    button.append(swatch, element('span', '', dataset.label));
+    button.addEventListener('click', () => {
+      const visible = chart.isDatasetVisible(index);
+      chart.setDatasetVisibility(index, !visible);
+      button.setAttribute('aria-pressed', String(!visible));
+      chart.update('none');
+    });
+    group.append(button);
+  });
+  return group;
 }
 
 function drawConsumptionChart(history) {
@@ -1816,14 +1845,15 @@ function drawConsumptionChart(history) {
       backgroundColor: color, borderColor: color, stack: 'kwh', borderRadius: 2,
     };
   });
-  consumptionChart = new window.Chart(canvas, {
+  const chart = new window.Chart(canvas, {
     type: 'bar',
     data: { labels, datasets },
     options: {
       responsive: true, maintainAspectRatio: false, animation: false,
       interaction: { mode: 'index', intersect: false, axis: 'x' },
       plugins: {
-        legend: { display: true, labels: { color: label } },
+        // The legend is HTML (consumptionLegend): every entry is a real button for its own series.
+        legend: { display: false },
         tooltip: {
           filter: (item) => Number.isFinite(item.parsed?.y),
           callbacks: { label: (item) => `${item.dataset.label}: ${item.parsed.y.toLocaleString(undefined, { maximumFractionDigits: 2 })} kWh` },
@@ -1831,10 +1861,12 @@ function drawConsumptionChart(history) {
       },
       scales: {
         x: { stacked: true, grid: { color: grid }, ticks: { color: label, autoSkip: true, maxTicksLimit: 8, maxRotation: 0 } },
-        y: { stacked: true, beginAtZero: true, grid: { color: grid }, ticks: { color: label }, title: { display: true, text: 'kWh', color: label } },
+        y: { stacked: true, beginAtZero: true, grid: { color: grid }, ticks: { color: label, padding: 6 }, title: chartAxisTitle('kWh', label) },
       },
     },
   });
+  consumptionChart = chart;
+  host.prepend(consumptionLegend(chart, datasets));
 }
 
 async function loadConsumptionHistory(deviceId) {

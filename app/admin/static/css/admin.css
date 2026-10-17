@@ -1984,6 +1984,35 @@ body {
     margin-bottom: .5rem;
 }
 
+.energy-consumption-legend {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 0 1rem;
+}
+
+.energy-consumption-legend-item {
+    display: inline-flex;
+    align-items: center;
+    gap: .5rem;
+    min-height: 2.75rem;
+    padding: 0 .25rem;
+    border: 0;
+    background: none;
+    color: var(--bs-body-color);
+    font-size: .85rem;
+}
+
+.energy-consumption-legend-item[aria-pressed="false"] {
+    text-decoration: line-through;
+}
+
+.energy-consumption-legend-swatch {
+    width: 2.25rem;
+    height: .75rem;
+    border-radius: 2px;
+}
+
 .energy-consumption-coverage {
     display: flex;
     flex-wrap: wrap;

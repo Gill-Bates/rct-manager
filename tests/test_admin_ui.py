@@ -1703,6 +1703,9 @@ def test_energy_page_wires_the_read_only_dry_run_plan_preview():
     assert "History coverage" in js and "Live recording" not in js
     assert "Locally measured" in js and "Recovered from inverter history" in js
     assert "will feed later" not in html
+    # Axis unit titles are sized like the legend and the legend entries are real buttons per series.
+    assert "chartAxisTitle('kW'" in js and "chartAxisTitle('%'" in js and "chartAxisTitle('kWh'" in js
+    assert "energy-consumption-legend-item" in js and "setDatasetVisibility(index" in js
     assert 'role="group"' in plan_pane and 'aria-label="Charging plan controls"' in plan_pane
 
 

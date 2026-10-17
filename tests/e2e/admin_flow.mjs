@@ -2658,6 +2658,21 @@ try {
         check('consumption chart renders with the daily average and the history coverage',
           (await chartsIn('#energy-consumption')) === 1 && /kWh\/day/.test(await ep.locator('#energy-consumption-status').innerText())
           && /History coverage · \d+\/4 days/.test(await ep.locator('#energy-consumption-import-status').innerText()));
+        const legendState = () => ep.evaluate(() => {
+          const chart = window.Chart.getChart(document.querySelector('#energy-consumption canvas'));
+          return [...document.querySelectorAll('.energy-consumption-legend-item')].map((button, index) => [chart.isDatasetVisible(index), button.getAttribute('aria-pressed')].join('/'));
+        });
+        const legendItem = (index) => ep.locator('.energy-consumption-legend-item').nth(index);
+        await legendItem(1).click();
+        const afterBlue = await legendState();
+        await legendItem(0).click();
+        const afterGreen = await legendState();
+        await legendItem(1).click();
+        await legendItem(0).click();
+        const restored = await legendState();
+        check('each consumption legend entry toggles exactly its own series, repeatedly',
+          JSON.stringify([afterBlue, afterGreen, restored]) === JSON.stringify([['true/true', 'false/false'], ['false/false', 'false/false'], ['true/true', 'true/true']]),
+          JSON.stringify([afterBlue, afterGreen, restored]));
         let releaseConsumption;
         consumptionGate = new Promise((resolve) => { releaseConsumption = resolve; });
         await ep.locator('#energy-plan-device').dispatchEvent('change');

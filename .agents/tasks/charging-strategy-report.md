@@ -1,16 +1,21 @@
 # Charging-Strategy Integration Report
 
-Current status on `feature/v1.2.2`: the plan preview and automatic battery-capacity source are
-implemented, but automatic hardware dispatch is still disabled. The checklist in section 4
-requires real-device verification and operator sign-off; see `open-tasks-session.md` for the
-remaining logger and provider probes. Earlier branch/worktree details below are historical.
+Status on `feature/v1.2.2`, verified against the code on 2026-10-17: the read-only plan route, the
+automatic battery-capacity source and the planning service are wired in `app/`; automatic hardware
+dispatch is still disabled and **`PlanDispatchHandoff` is still not instantiated in `app/`**
+(definition in `app/energy/plan_handoff.py`, constructed only in `tests/test_energy_plan_handoff.py`).
+`enable_automatic_dispatch` is `False` and is not in `OPERATOR_FIELDS`. The checklist in section 4
+requires real-device verification and operator sign-off; `open-tasks-session.md` lists the remaining
+logger and provider probes.
 
-- **Worktree:** `/opt/rct-manager/.worktrees/charging-integrate` (branch `charging-integrate`, HEAD `c485bad`)
-- **Base branch:** `feature/v1.2.1` (tip `20ea9ec` at integration time)
-- **Toolchain:** Python 3.13.5 · ruff 0.16.5 · node v22.22.2
+Historical (integration of 2026-10, no longer current): worktree `.worktrees/charging-integrate`,
+branch `charging-integrate` (HEAD `c485bad`), base `feature/v1.2.1` (`20ea9ec`). The test numbers in
+section 2 belong to that state, not to the current branch.
+
+- **Toolchain at integration time:** Python 3.13.5 · ruff 0.16.5 · node v22.22.2
 - **Sources:** this report consolidates `implementation-evidence.md`, `integration-verification.md`,
-  and the independent review `charging-integrate-review.md` (verdict APPROVED, no blocking findings),
-  all in this same `.agents/tasks/` directory.
+  and `charging-integrate-review.md` (verdict APPROVED at that time). Those three files no longer
+  exist in `.agents/tasks/`; their results survive only as summarized here.
 
 ## 1. Strategy summary
 
@@ -18,7 +23,14 @@ The charging strategy is a **plan-only, default-OFF** dynamic battery optimizer.
 hardware in its shipped state; it computes a reasoned proposal that a read-only API serves and that
 a separately gated handoff may later offer to the existing Energy Manager.
 
-### What the optimizer decides (`app/optimizer/greedy.py`)
+### What the optimizer decides (`app/optimizer/greedy.py`, not the production optimizer)
+
+> Current-state note: `build_runtime_planning_service` (`app/optimizer/runtime_sources.py`) builds the
+> service with `DynamicChargeOptimizer` (`app/optimizer/planner.py`), a dry-run planner that plans grid
+> charging into cheap windows only and no discharge, export or arbitrage. `GreedyEnergyOptimizer`
+> below is exported from `app.optimizer` but has no production caller, and `cheap_percentile` /
+> `expensive_percentile` are consumed only by it. Re-evaluate this section before the handoff is
+> wired: the handoff currently maps only explicit grid-charge slots to commands.
 
 `GreedyEnergyOptimizer.plan()` is a pure function of its `PlanningInput` snapshot: it reads no clock
 other than `planning_input.now`, does no I/O, and never touches a device. It resamples the three
@@ -49,7 +61,10 @@ computed with `Decimal` arithmetic so a tie against the threshold is exact.
   `TARGET_SOC_MAX_PERCENT = 97` from `app/limits.py` intersected with the operator `DispatchConfig`
   window (default 5/95).
 - Power = `min(battery limit, MAX_POWER_W)`; `MAX_POWER_W = 50 000 W` from `app/limits.py`.
-- Capacity = `battery_usable_capacity_wh` from operator config.
+- Capacity: in production the service resolves it through `resolve_device_battery_facts`
+  (`app/dispatch/battery_facts.py`): a persisted expert override first, else the cache-only verified
+  automatic source, else unavailable (then no plan). `battery_usable_capacity_wh` is the setting the
+  optimizer's own tests and the `resolve_battery_facts` fallback use.
 
 Every `CHARGE`/`DISCHARGE` slot carries a concrete in-window `target_soc_percent` and a
 positive-finite `max_power_w`; `HOLD`/`IDLE` carry both as `None`. Every slot carries a bounded
@@ -60,8 +75,10 @@ printable-ASCII `reason` (≤ 128 chars). SoC is a hard constraint, re-asserted 
 `PlanningService` runs a single bounded recompute loop
 (`await asyncio.wait_for(self._wake.wait(), timeout=interval)` on its **own private** event, never a
 shared refresh event). On each tick it re-reads the four inputs — spot prices, solar forecast,
-household-consumption forecast, measured battery state — and checks each against its configured
-maximum age. Only when **all four are present and fresh** does it build a `PlanningInput`, run the
+household-consumption forecast, measured battery state. Spot and solar are judged by interval
+**coverage** of the plan horizon (not by fetch age), consumption by `consumption_max_age_seconds`,
+and the battery provider enforces `battery_max_age_seconds` itself. Only when **all four are present
+and fresh/covering** does it build a `PlanningInput`, run the
 optimizer, and store the plan. Any stale or missing required input takes the **no-plan path**: the
 previous plan expires naturally and nothing is charged on stale data. `valid_until` is tightened to
 `min(created_at + plan_ttl, now + horizon, earliest input expiry)`, so a plan is never valid past
@@ -69,7 +86,7 @@ the point any input would be stale. The battery state is built from the readings
 static per-device `DeviceLimits` (power bounds), and operator config (capacity); any missing source
 yields `None` -> no plan.
 
-### How a decision could reach hardware — and why it does not yet (`app/optimizer/handoff.py`)
+### How a decision could reach hardware — and why it does not yet (`app/energy/plan_handoff.py`)
 
 `PlanDispatchHandoff` is the only component that may offer a slot to the Energy Manager, and it is
 **OFF by default**. The master switch is the `enable_automatic_dispatch` config flag
@@ -83,7 +100,12 @@ unchanged offers, and on restart (no in-memory state) it reads live device statu
 re-apply when the device already runs the slot's intent, so a restart cannot double-command. Expected
 refusal codes are logged and swallowed; unexpected ones propagate.
 
-## 2. Test results — new-vs-pre-existing failure split
+## 2. Test results — new-vs-pre-existing failure split (historical, integration state `c485bad`)
+
+Current-branch check on 2026-10-17 (no code changed): `pytest tests/test_energy_plan_handoff.py
+tests/test_plan_api.py tests/test_dynamic_adapters.py tests/test_optimizer_service.py
+tests/test_config_validation.py` -> 133 passed; `pytest tests/test_admin_ui.py` -> 134 passed. The full
+suite and the JS suite were not re-run for this report.
 
 Pulled from `implementation-evidence.md` and `integration-verification.md` (both tied to HEAD
 `c485bad`; working tree clean, so results are reused rather than re-run):
@@ -112,15 +134,20 @@ Pulled from `implementation-evidence.md` and `integration-verification.md` (both
 
 ## 3. Remaining assumptions
 
-1. **`PlanDispatchHandoff` is still not instantiated in `app/`.** `PlanningService` is now built per device
-   by `build_runtime_planning_service` in `app/api/app_factory.py` (`start_planning_tasks`), so the read-only
-   plan route is live. The handoff (`app/energy/plan_handoff.py`, moved from `app/optimizer/handoff.py`) is
-   exercised only by `tests/test_energy_plan_handoff.py`; the runtime path plan -> handoff -> Energy Manager is
-   proven by tests, not by app assembly. This is intended while `enable_automatic_dispatch` stays `False`.
+1. **`PlanDispatchHandoff` is still not instantiated in `app/`** (re-verified 2026-10-17 by grep over
+   `app/`). `PlanningService` is built per device by `build_runtime_planning_service`
+   (`app/optimizer/runtime_sources.py`) from `start_planning_tasks` in `app/api/app_factory.py`, so the
+   read-only plan route is live. The handoff (`app/energy/plan_handoff.py`) is exercised only by
+   `tests/test_energy_plan_handoff.py`, which proves that a handoff built with
+   `enable_automatic_dispatch=False` issues no `command()`. It was deliberately **not** wired as a
+   log-only instance: wiring needs a design decision (the scheduler offers `active_slot(now)`, but nothing
+   decides who calls `offer` on which tick), and any wiring is a release-gate change.
+   Open question for the owner: wire it log-only (OFF) ahead of the hardware checks, or only together
+   with the enable decision.
 2. ~~Handoff docstring overstates the enable flag.~~ Fixed: the docstring states a plain `bool` captured once.
-3. **Battery-state inputs assume operator configuration is correct.** Usable capacity and the static
-   per-device power limits are taken from operator config as declared; the optimizer never
-   cross-checks them against hardware. A misconfigured capacity would skew the planned SoC trajectory
+3. **Battery-state inputs assume the configured or verified values are correct.** Usable capacity (expert
+   override or cache-only verified source) and the static per-device power limits are taken as
+   declared; the optimizer never cross-checks them against the RCT app or the physical system. A misconfigured capacity would skew the planned SoC trajectory
    (a planning estimate only; the real SoC is re-read every recompute).
 4. **Forecast quality is out of scope.** The optimizer trusts the solar/consumption/price snapshots
    it is handed; forecast accuracy is a separate concern not addressed by this integration.
@@ -133,17 +160,21 @@ cannot be flipped from the operator surface.
 
 - [ ] **Wire `PlanDispatchHandoff` into the production assembly** (`PlanningService` is already wired in
       `app_factory`), so the plan -> handoff -> Energy Manager path is exercised at runtime and not only by
-      `tests/test_energy_plan_handoff.py` (assumption 1).
+      `tests/test_energy_plan_handoff.py` (assumption 1). Code-verifiable, but NOT done: still not
+      instantiated, pending the owner's decision in assumption 1.
 - [ ] **Validate operator config against the physical system:** `battery_usable_capacity_wh` and the
       per-device static `DeviceLimits` (max charge/discharge power) match the installed hardware's
       real ratings and safe operating limits (assumption 3).
 - [ ] **Confirm the SoC reserve floor and ceiling are safe for the specific battery** — the effective
       window `[max(7, min_soc), min(97, max_soc)]` must respect the manufacturer's limits; adjust the
-      operator `DispatchConfig` window if the hardware needs a tighter range.
+      operator `DispatchConfig` window if the hardware needs a tighter range. (Hardware/operator.)
 - [ ] **Verify input freshness thresholds are conservative for live control:** `spot_max_age`,
       `solar_max_age`, `consumption_max_age`, `battery_max_age_seconds`, `plan_ttl_seconds`, and
       `plan_recompute_interval_seconds` are tuned so a stale input reliably forces the no-plan path
-      before any command could act on outdated data.
+      before any command could act on outdated data. (Code side verified: stale or uncovered inputs take
+      the no-plan path, `tests/test_optimizer_service.py`; spot/solar are coverage-based, so
+      `spot_max_age_seconds`/`solar_max_age_seconds` only clamp `valid_until`. The "conservative
+      enough" judgement is the operator's.)
 - [ ] **Exercise the Energy Manager gate chain end-to-end with the `charging-strategy` actor on a
       non-production or isolated device:** confirm mode authorization, write enable, allowlist,
       capability gate, static limits, and SoC re-validation all apply to handoff commands and that
@@ -158,9 +189,16 @@ cannot be flipped from the operator surface.
       its safe default (`NullLiveChargeLimitProvider` remains the dispatch default).
 - [ ] **Re-run the full Python and JS suites plus the targeted charging tests** on the exact build to
       be deployed, and confirm the hard invariants still hold (dispatch OFF until this checklist is
-      complete; flag absent from `OPERATOR_FIELDS`; no architecture rule weakened).
+      complete; flag absent from `OPERATOR_FIELDS`; no architecture rule weakened). The invariants hold
+      on the current tree (`enable_automatic_dispatch: bool = False` in `app/config.py`, absent from
+      `OPERATOR_FIELDS`); the full-suite run on the deployed build is still due.
 - [ ] **Obtain explicit operator/owner sign-off** that automatic hardware dispatch may be enabled,
       recorded against the specific hardware and configuration validated above.
+
+Triage 2026-10-17: no box is checked. Wiring (item 1) and the full-suite re-run (item 9) are
+code-side work that remains open by decision or by timing; all other items need the real
+installation, an isolated device, or the operator. Nothing here may be ticked by an agent, and the
+sign-off item cannot be given by one.
 
 Only after every box is checked may `enable_automatic_dispatch` be set to `True` in code for the
 validated deployment.
