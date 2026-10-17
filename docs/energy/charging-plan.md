@@ -263,10 +263,22 @@ preview)"). The result area uses the full card width:
 - Four equal KPI tiles (four columns on desktop, 2 x 2 on tablets, stacked on phones): Battery
   remaining (usable energy now, for example `33 % SoC - 10.37 kWh usable`, or a dash without a battery
   snapshot), Target SoC, Charge power, total plan grid energy.
-- The schedule as a time-series chart: grid charge power (kW, idle slots at 0) and target SoC (%,
-  second axis) on a real time axis, so slots of uneven length keep their length. The tooltip names
-  time range, action, power, target SoC and plain-language reason; the canvas has a text summary and
-  a visually hidden list of the charge slots for assistive technology.
+- The schedule as a time-series chart (the temporal overview): grid charge power (kW, idle slots at
+  0) and target SoC (%, second axis) on a real time axis, so slots of uneven length keep their
+  length. The tooltip shows only what applies: an idle slot reads "No grid charging" plus the
+  plain-language reason; a charge slot reads "Grid charging" with power, target SoC and the reason.
+  The canvas has a text summary and is described by the "Charging schedule" table below it.
+- **Charging schedule**, directly under the chart: only the planned active grid-charging windows,
+  with Time, Power, Target SoC and Purpose. Directly adjacent charge slots merge only when power,
+  target SoC and reason are identical; a change or an idle slot in between starts a new row. Without
+  charge slots it reads "No grid charging planned." Narrow screens stack each row into labelled
+  key-value pairs.
+- **Show all intervals** (a native disclosure): the complete technical slot history with Time,
+  Action, Power, Target SoC and Reason for every interval. Idle intervals are only hidden from the
+  default view, never removed from the plan.
+- Purpose is the short, user-facing form of the planner reason: "Protect battery reserve", "Reach
+  target SoC", "Use negative price", "Solar covers demand", "Battery covers demand". An unknown
+  reason is shown as the original text. The planner reasons themselves are unchanged.
 - Below it, the consumption bar chart ([Consumption](consumption.md#daily-consumption-api)).
 - The forecast windows (consumption, solar, price) and the note that prices are raw day-ahead prices
   only. The "Next grid charge" hero metrics sit in one row (stacked on narrow screens).
