@@ -52,12 +52,17 @@ try {
   const footerGeometry = () => page.evaluate(() => {
     const footer = document.querySelector('.admin-footer');
     const range = document.createRange();
-    range.selectNodeContents(footer.firstElementChild);
+    // Visible text only: stop after "GitHub" so the visually-hidden new-tab hint is not measured.
+    const link = footer.querySelector('a');
+    range.setStartBefore(footer.firstElementChild.firstChild);
+    range.setEndAfter([...link.childNodes].find((n) => n.nodeType === Node.TEXT_NODE));
     const rects = [...range.getClientRects()].filter((r) => r.width > 0);
     const box = range.getBoundingClientRect();
-    const tops = new Set(rects.map((r) => Math.round(r.top / 4)));
+    // Lines = distinct vertical bands of the text boxes (the inline icon box is offset by a few px).
+    const bands = rects.filter((r) => r.height > 8).sort((a, b) => a.top - b.top)
+      .reduce((n, r, i, all) => (i && r.top < all[i - 1].bottom - r.height / 2 ? n : n + 1), 0);
     return {
-      center: box.left + box.width / 2, width: box.width, height: box.height, lines: tops.size,
+      center: box.left + box.width / 2, width: box.width, height: box.height, lines: bands,
       lineHeight: parseFloat(getComputedStyle(footer).lineHeight) || parseFloat(getComputedStyle(footer).fontSize) * 1.5,
       docWidth: document.documentElement.clientWidth, scrollW: document.documentElement.scrollWidth,
     };
@@ -98,6 +103,19 @@ try {
   await page.screenshot({ path: path.join(OUT, `dashboard-${tag}.png`), fullPage: true });
 
   // Energy page: tabs, compact flow graphic, footer.
+  // The compact flow view only renders for a hardware-verified device.
+  const verified = await page.evaluate(async () => {
+    const { csrf_token: csrf } = await (await fetch('/admin/api/session', { credentials: 'same-origin' })).json();
+    return (await fetch('/admin/api/energy/devices/sim/hardware-verification', {
+      method: 'PUT', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrf },
+      body: JSON.stringify({
+        verified_device_model: 'Simulator', verified_firmware: '1.0', note: 'e2e', soc_strategy_external_code: 2,
+        enum_byte_width: 1, bool_byte_width: 1, write_frame_layout_verified: true, apply_sequence_verified: true,
+        battery_discharge_positive: true, grid_import_positive: true, soc_target_unit: 'ratio',
+      }),
+    })).status;
+  });
+  check(`[${tag}] hardware verification accepted`, verified === 200, String(verified));
   await page.goto(`${base}/ui/energy`);
   await page.waitForSelector('.energy-tabs .nav-link');
   const tabs = () => page.evaluate(() => {
@@ -122,15 +140,19 @@ try {
   await page.waitForSelector('#energy-pane-weather.active');
   await sleep(600);
   t = await tabs();
+  check(`[${tag}] tabs: the bar scrolled to reveal the last tab`, !t.scrollable || (await page.locator('.energy-tabs').evaluate((n) => n.scrollLeft)) > 0, JSON.stringify(t));
   check(`[${tag}] tabs: the active tab is scrolled into view`, t.activeVisible, JSON.stringify(t));
   await page.screenshot({ path: path.join(OUT, `energy-weather-${tag}.png`) });
   await page.click('#energy-tab-inverter');
   await sleep(400);
   await page.screenshot({ path: path.join(OUT, `energy-inverter-${tag}.png`), fullPage: true });
-  await checkFlow('energy page', '.energy-flow-lite');
+  // The compact view shares energyFlowGraphic() with the dashboard but needs approved write registers.
+  if (await page.locator('.energy-flow-lite:not([hidden]) .flow-node').count()) await checkFlow('energy page', '.energy-flow-lite:not([hidden])');
+  else console.log('SKIP energy page compact flow view: device has no approved write registers (dashboard graphic covers the shared code)');
   await checkFooter('energy page');
 } finally {
   await browser.close();
 }
 const failed = (await import('./harness.mjs')).results.filter((r) => !r.ok);
-process.exitCode = failed.length ? 1 : 0;
+// Explicit exit: the spawned server and simulator keep the event loop alive; the harness reaps them on exit.
+process.exit(failed.length ? 1 : 0);

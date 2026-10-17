@@ -17,7 +17,8 @@ function initEnergyTabs(onShown = null) {
   const initial = ENERGY_TABS.includes(fromHash) ? fromHash : 'inverter';
   // Scrolls only the tab bar (not the page) so the active tab is never hidden in the swipe row.
   const revealTab = (button) => {
-    const left = button.offsetLeft - (container.clientWidth - button.offsetWidth) / 2;
+    const offset = button.getBoundingClientRect().left - container.getBoundingClientRect().left + container.scrollLeft;
+    const left = offset - (container.clientWidth - button.offsetWidth) / 2;
     container.scrollTo({ left: Math.max(0, left), behavior: 'auto' });
   };
   for (const button of container.querySelectorAll('[data-bs-toggle="tab"]')) {

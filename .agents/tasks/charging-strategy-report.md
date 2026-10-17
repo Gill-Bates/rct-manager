@@ -1,5 +1,10 @@
 # Charging-Strategy Integration Report
 
+Current status on `feature/v1.2.2`: the plan preview and automatic battery-capacity source are
+implemented, but automatic hardware dispatch is still disabled. The checklist in section 4
+requires real-device verification and operator sign-off; see `open-tasks-session.md` for the
+remaining logger and provider probes. Earlier branch/worktree details below are historical.
+
 - **Worktree:** `/opt/rct-manager/.worktrees/charging-integrate` (branch `charging-integrate`, HEAD `c485bad`)
 - **Base branch:** `feature/v1.2.1` (tip `20ea9ec` at integration time)
 - **Toolchain:** Python 3.13.5 · ruff 0.16.5 · node v22.22.2

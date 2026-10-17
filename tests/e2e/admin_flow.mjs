@@ -677,9 +677,9 @@ try {
     if (width === 320) check('subcards are stacked (illustration above readings) at 320px', images.every((image) => image.stacked), JSON.stringify(images));
   }
   // The footer is fixed to the viewport bottom while .app-shell reserves --rct-footer-height there,
-  // so the last card must keep a visible gap above it. At 320px the footer text wraps to two lines;
-  // below 420px the CSS raises --rct-footer-height to 3.5rem, which feeds both the reserve and the
-  // footer's min-height. `reserveShortfall` must therefore be <= 0: a gap that only survives on the
+  // so the last card must keep a visible gap above it. The footer text is one line at every width
+  // (it shrinks, then ellipsizes), so the reserve and the footer's min-height stay in step.
+  // `reserveShortfall` must therefore be <= 0: a gap that only survives on the
   // last card's incidental height would let a taller final element slide under the footer.
   const MIN_FOOTER_GAP = 8;
   for (const width of [390, 320]) {

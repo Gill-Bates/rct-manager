@@ -554,16 +554,21 @@ def test_day_logger_uses_wall_clock_date_at_local_midnight_boundary() -> None:
     from app.protocol.timeseries import TimeSeriesPoint
 
     class _Gateway:
+        query_before = None
+
         async def query_history_series(self, device_id, name, before):
+            self.query_before = before
             return (
                 TimeSeriesPoint(datetime(2026, 10, 16, 23, 59, 59, tzinfo=UTC), 19_000.0),
                 TimeSeriesPoint(datetime(2026, 10, 15, 23, 59, 59, tzinfo=UTC), 18_018.7),
             )
 
-    history = RctDailyConsumptionHistory(_Gateway(), lambda: "Europe/Berlin")
+    gateway = _Gateway()
+    history = RctDailyConsumptionHistory(gateway, lambda: "Europe/Berlin")
     before = datetime(2026, 10, 16, tzinfo=ZoneInfo("Europe/Berlin"))
     readings = asyncio.run(history.daily_consumption("main", before=before, limit=10))
 
+    assert gateway.query_before == datetime(2026, 10, 16, tzinfo=UTC)
     assert [(reading.local_date, reading.energy_wh) for reading in readings] == [
         (date(2026, 10, 15), 18_018.7)
     ]

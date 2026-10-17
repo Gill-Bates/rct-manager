@@ -6,8 +6,8 @@
 
 """RCT implementation of the daily-consumption history port (logger.day_eload_log_ts).
 
-Hardware samples confirm Wh and show that day-entry timestamps encode local wall-clock dates.
-The query boundary's wire-time interpretation is still unverified, so backfill stays disabled.
+Hardware samples confirm Wh and show that day-entry timestamps and query boundaries encode
+local wall-clock dates as UTC-labelled values.
 """
 
 import logging
@@ -37,13 +37,15 @@ class RctDailyConsumptionHistory:
     async def daily_consumption(
         self, device_id: str, *, before: datetime, limit: int
     ) -> Sequence[DailyConsumptionReading]:
-        points = await self._gateway.query_history_series(
-            device_id, DAY_LOAD_LOG_METRIC, before
-        )
         try:
             zone = ZoneInfo(self._timezone() or "UTC")
         except (ZoneInfoNotFoundError, ValueError):
             zone = ZoneInfo("UTC")
+        # The device interprets the query epoch as local clock fields, as confirmed by A/B reads.
+        wire_before = before.astimezone(zone).replace(tzinfo=UTC)
+        points = await self._gateway.query_history_series(
+            device_id, DAY_LOAD_LOG_METRIC, wire_before
+        )
         by_date: dict = {}
         for point in points:
             if (
