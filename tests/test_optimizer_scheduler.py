@@ -25,7 +25,11 @@ def _plan(now: datetime, **overrides) -> EnergyPlan:
         max_power_w=1500.0,
         reason="low spot price",
     )
-    values = {"created_at": now, "valid_until": now + timedelta(hours=1), "slots": (slot,)}
+    values = {
+        "created_at": now,
+        "valid_until": now + timedelta(hours=1),
+        "slots": (slot,),
+    }
     values.update(overrides)
     return EnergyPlan(**values)
 
@@ -78,18 +82,43 @@ def test_scheduler_rejects_an_expired_plan_without_replacing_the_current_one() -
     assert scheduler.current_plan() is current
 
 
+def test_clear_invalidates_the_stored_plan() -> None:
+    now = datetime.now(UTC)
+    scheduler = InMemoryPlanScheduler()
+    scheduler.set_plan(_plan(now))
+
+    scheduler.clear()
+
+    assert scheduler.current_plan() is None
+    assert scheduler.active_slot(now + timedelta(minutes=20)) is None
+
+
 def test_scheduler_rejects_a_naive_lookup_time() -> None:
     with pytest.raises(ValueError):
-        InMemoryPlanScheduler().active_slot(datetime(2026, 10, 12, 12, 0, tzinfo=UTC).replace(tzinfo=None))
+        InMemoryPlanScheduler().active_slot(
+            datetime(2026, 10, 12, 12, 0, tzinfo=UTC).replace(tzinfo=None)
+        )
 
 
 def test_optimizer_modules_are_isolated_from_hardware_execution() -> None:
     root = Path(__file__).resolve().parents[1] / "app" / "optimizer"
-    forbidden = ("app.energy.", "app.dispatch.controller", "app.dispatch.store", "app.gateway", "EnergyCommand")
+    forbidden = (
+        "app.energy.",
+        "app.dispatch.controller",
+        "app.dispatch.store",
+        "app.gateway",
+        "EnergyCommand",
+    )
 
     # The pure algorithm and the pure history/forecast live here and must stay hardware-free. The
     # impure data adapters (adapters.py) deliberately read stores/cache and are NOT on this list.
-    for filename in ("models.py", "base.py", "scheduler.py", "planner.py", "consumption.py"):
+    for filename in (
+        "models.py",
+        "base.py",
+        "scheduler.py",
+        "planner.py",
+        "consumption.py",
+    ):
         source = (root / filename).read_text()
         for name in forbidden:
             assert name not in source, f"{filename} must not name {name}"

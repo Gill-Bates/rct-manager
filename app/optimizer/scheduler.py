@@ -27,6 +27,14 @@ class InMemoryPlanScheduler:
             raise ValueError("plan is already expired")
         self._plan = plan
 
+    def clear(self) -> None:
+        """Drop the stored plan so no slot is served until a fresh plan is set.
+
+        The planning service calls this on every hard no-plan recompute, so a previous plan is
+        never served on top of inputs a newer cycle has just found stale or missing.
+        """
+        self._plan = None
+
     def active_slot(self, now: datetime) -> EnergyPlanSlot | None:
         _require_aware(now, "now")
         plan = self._plan

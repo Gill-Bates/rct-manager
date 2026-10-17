@@ -34,11 +34,19 @@ from datetime import datetime, timedelta
 from typing import Protocol
 
 from app.clock import Clock
-from app.dispatch.battery_facts import VerifiedCapacityPort, resolve_battery_facts, resolve_device_battery_facts
+from app.dispatch.battery_facts import (
+    VerifiedCapacityPort,
+    resolve_battery_facts,
+    resolve_device_battery_facts,
+)
 from app.dispatch.models import DeviceLimits
 from app.energy.readings import EnergyReadingsPort
 from app.optimizer.adapters import FORECAST_BASIS
-from app.optimizer.base import ConsumptionForecastProvider, EnergyOptimizer, SolarForecastProvider
+from app.optimizer.base import (
+    ConsumptionForecastProvider,
+    EnergyOptimizer,
+    SolarForecastProvider,
+)
 from app.optimizer.models import (
     BatteryState,
     ConsumptionForecast,
@@ -66,7 +74,9 @@ class _TimedInterval(Protocol):
     def end(self) -> datetime: ...
 
 
-def _covers_plan_horizon(intervals: Sequence[_TimedInterval], start: datetime, end: datetime) -> bool:
+def _covers_plan_horizon(
+    intervals: Sequence[_TimedInterval], start: datetime, end: datetime
+) -> bool:
     """Require contiguous source coverage through the final full planner slot."""
     cursor = start
     tolerance = timedelta(seconds=1)
@@ -146,27 +156,49 @@ class ReadingsBatteryStateProvider:
     def current(self, device_id: str) -> BatteryState | None:
         limits = self._dispatch.device_limits(device_id)
         if limits is None:
-            log.info("No battery state: no static power limits configured for device %s", device_id)
+            log.info(
+                "No battery state: no static power limits configured for device %s",
+                device_id,
+            )
             return None
         if self._capacity_source is not None:
             # Same resolver as planning-devices and dynamic-plan, so all three agree on the source.
-            facts = resolve_device_battery_facts(limits, self._capacity_source, device_id)
+            facts = resolve_device_battery_facts(
+                limits, self._capacity_source, device_id
+            )
         else:
-            facts = resolve_battery_facts(limits, verified_usable_capacity_wh=self._usable_capacity_wh)
+            facts = resolve_battery_facts(
+                limits, verified_usable_capacity_wh=self._usable_capacity_wh
+            )
         capacity_wh = facts.usable_capacity_wh
         if not (capacity_wh and capacity_wh > 0):
-            log.info("No battery state: usable battery capacity unavailable: no expert override and no verified automatic source")
+            log.info(
+                "No battery state: usable battery capacity unavailable: no expert override and no verified automatic source"
+            )
             return None
         try:
             soc_reading = self._readings.readings(device_id).battery_soc_percent
         except Exception:
-            log.warning("No battery state: readings for device %s could not be read", device_id, exc_info=True)
+            log.warning(
+                "No battery state: readings for device %s could not be read",
+                device_id,
+                exc_info=True,
+            )
             return None
-        if soc_reading.value is None or soc_reading.stale or soc_reading.age_seconds is None:
-            log.info("No battery state: SoC for device %s is absent or stale", device_id)
+        if (
+            soc_reading.value is None
+            or soc_reading.stale
+            or soc_reading.age_seconds is None
+        ):
+            log.info(
+                "No battery state: SoC for device %s is absent or stale", device_id
+            )
             return None
         if soc_reading.age_seconds > self._max_age_seconds:
-            log.info("No battery state: SoC for device %s is older than the maximum age", device_id)
+            log.info(
+                "No battery state: SoC for device %s is older than the maximum age",
+                device_id,
+            )
             return None
         measured_at = self._clock.now() - timedelta(seconds=soc_reading.age_seconds)
         try:
@@ -179,7 +211,11 @@ class ReadingsBatteryStateProvider:
             )
         except ValueError:
             # A malformed datum is treated as missing data, never silently defaulted.
-            log.info("No battery state: the measured values for device %s are invalid", device_id, exc_info=True)
+            log.info(
+                "No battery state: the measured values for device %s are invalid",
+                device_id,
+                exc_info=True,
+            )
             return None
 
 
@@ -257,40 +293,72 @@ class PlanningService:
         if plan is None:
             return None
         basis, confidence = self._forecast_quality or (None, None)
-        return PlanView(plan=plan, data_age=self._last_age, forecast_basis=basis, forecast_confidence=confidence)
+        return PlanView(
+            plan=plan,
+            data_age=self._last_age,
+            forecast_basis=basis,
+            forecast_confidence=confidence,
+        )
 
     async def recompute(self) -> EnergyPlan | None:
         """Collapse concurrent recomputes for this device onto one computation."""
-        return await self._single_flight.run((self._device_id, "plan"), self._recompute_once)
+        return await self._single_flight.run(
+            (self._device_id, "plan"), self._recompute_once
+        )
 
     async def _recompute_once(self) -> EnergyPlan | None:
         now = self._clock.now()
         was_pending = self._pending
         self._pending = False
-        self._pending = self._device_ready is not None and not self._device_ready(self._device_id)
+        self._pending = self._device_ready is not None and not self._device_ready(
+            self._device_id
+        )
         if self._pending:
-            (log.debug if was_pending else log.info)("Planning for device %s is pending: the device is not connected yet", self._device_id)
+            (log.debug if was_pending else log.info)(
+                "Planning for device %s is pending: the device is not connected yet",
+                self._device_id,
+            )
             return None
         start = planning_start(now)
         end = start
         while end < now + self._horizon:
             end += SLOT
         if end == start:
-            log.info("No plan for device %s: the planning horizon contains no full slot", self._device_id)
+            log.info(
+                "No plan for device %s: the planning horizon contains no full slot",
+                self._device_id,
+            )
+            self._invalidate()
             return None
         forecast_horizon = end - now
         prices = await asyncio.to_thread(self._prices.snapshot)
         solar = await asyncio.to_thread(self._solar.forecast, now, forecast_horizon)
-        consumption = await asyncio.to_thread(self._consumption.forecast, now, forecast_horizon)
+        consumption = await asyncio.to_thread(
+            self._consumption.forecast, now, forecast_horizon
+        )
         battery = await asyncio.to_thread(self._battery.current, self._device_id)
-        self._last_age = self._ages(now, prices, solar, consumption, battery)
+        # Ages are computed locally and only ever published together with a successful plan, so a
+        # surviving old plan can never be paired with a newer failed recompute's data ages.
+        ages = self._ages(now, prices, solar, consumption, battery)
 
-        missing = self._stale_or_missing(now, start, end, prices, solar, consumption, battery)
+        missing = self._stale_or_missing(
+            now, start, end, prices, solar, consumption, battery
+        )
         if missing:
-            log.info("No plan for device %s: required inputs are stale or missing: %s", self._device_id, missing)
+            log.info(
+                "No plan for device %s: required inputs are stale or missing: %s",
+                self._device_id,
+                missing,
+            )
+            self._invalidate()
             return None
 
-        assert prices is not None and solar is not None and consumption is not None and battery is not None
+        assert (
+            prices is not None
+            and solar is not None
+            and consumption is not None
+            and battery is not None
+        )
         uncovered = [
             name
             for name, intervals in (
@@ -301,7 +369,10 @@ class PlanningService:
             if not _covers_plan_horizon(intervals, start, end)
         ]
         if uncovered:
-            log.info("No plan for device %s: forecast gaps in %s", self._device_id, uncovered)
+            log.info(
+                "No plan for device %s: forecast gaps in %s", self._device_id, uncovered
+            )
+            self._invalidate()
             return None
         resolution = getattr(self._consumption, "last_resolution", None)
         try:
@@ -312,25 +383,48 @@ class PlanningService:
                 solar_forecast=solar,
                 consumption_forecast=consumption,
                 horizon=self._horizon,
-                forecast_basis=resolution.description if resolution is not None else FORECAST_BASIS,
+                forecast_basis=(
+                    resolution.description if resolution is not None else FORECAST_BASIS
+                ),
             )
             plan = self._optimizer.plan(planning_input)
             plan = self._with_expiry(plan, now, prices, solar, consumption, battery)
         except ValueError:
             # A malformed snapshot that violates a dataclass invariant is treated as missing data.
-            log.info("No plan for device %s: the input snapshot was invalid", self._device_id, exc_info=True)
+            log.info(
+                "No plan for device %s: the input snapshot was invalid",
+                self._device_id,
+                exc_info=True,
+            )
+            self._invalidate()
             return None
 
         try:
             self._scheduler.set_plan(plan)
         except (TypeError, ValueError):
             # An already-expired plan (e.g. a zero-length horizon grid) is simply not stored.
-            log.info("No plan stored for device %s: the computed plan was not valid", self._device_id, exc_info=True)
+            log.info(
+                "No plan stored for device %s: the computed plan was not valid",
+                self._device_id,
+                exc_info=True,
+            )
+            self._invalidate()
             return None
+        # One atomic snapshot generation: plan, data ages and forecast quality are published
+        # together only on a successful recompute, so current_view() never mixes generations.
+        self._last_age = ages
         self._forecast_quality = (
-            (resolution.basis, resolution.confidence) if resolution is not None else None
+            (resolution.basis, resolution.confidence)
+            if resolution is not None
+            else None
         )
         return plan
+
+    def _invalidate(self) -> None:
+        """Drop the stored plan and its paired snapshot together on every hard no-plan recompute."""
+        self._scheduler.clear()
+        self._last_age = DataAge(None, None, None, None)
+        self._forecast_quality = None
 
     def _with_expiry(
         self,
@@ -357,14 +451,22 @@ class PlanningService:
         # valid, but (unlike a fetched_at/created_at-relative cap) never clamps a still-covering
         # persisted snapshot into the past just because it was fetched hours ago.
         spot_coverage_expiry = prices.intervals[-1].end
-        spot_expiry = min(spot_coverage_expiry, now + timedelta(seconds=self._spot_max_age))
+        spot_expiry = min(
+            spot_coverage_expiry, now + timedelta(seconds=self._spot_max_age)
+        )
         if prices.valid_until:
             spot_expiry = min(spot_expiry, prices.valid_until)
         candidates.append(spot_expiry)
         solar_coverage_expiry = solar.intervals[-1].end
-        candidates.append(min(solar_coverage_expiry, now + timedelta(seconds=self._solar_max_age)))
-        candidates.append(consumption.created_at + timedelta(seconds=self._consumption_max_age))
-        candidates.append(battery.measured_at + timedelta(seconds=self._battery_max_age_seconds))
+        candidates.append(
+            min(solar_coverage_expiry, now + timedelta(seconds=self._solar_max_age))
+        )
+        candidates.append(
+            consumption.created_at + timedelta(seconds=self._consumption_max_age)
+        )
+        candidates.append(
+            battery.measured_at + timedelta(seconds=self._battery_max_age_seconds)
+        )
         valid_until = min(candidates)
         if valid_until <= plan.created_at:
             # Guarded by _stale_or_missing (every input covers the horizon at build time), so this is defensive.
@@ -417,7 +519,9 @@ class PlanningService:
         return DataAge(
             spot_seconds=age(prices.fetched_at if prices is not None else None),
             solar_seconds=age(solar.created_at if solar is not None else None),
-            consumption_seconds=age(consumption.created_at if consumption is not None else None),
+            consumption_seconds=age(
+                consumption.created_at if consumption is not None else None
+            ),
             battery_seconds=age(battery.measured_at if battery is not None else None),
         )
 
@@ -427,9 +531,16 @@ class PlanningService:
             try:
                 await self.recompute()
             except Exception:
-                log.exception("Unexpected planning recompute failure for device %s", self._device_id)
+                log.exception(
+                    "Unexpected planning recompute failure for device %s",
+                    self._device_id,
+                )
             # A start race is re-checked quickly so the first plan does not wait a full interval.
-            timeout = min(self._interval, _PENDING_RETRY_SECONDS) if self._pending else self._interval
+            timeout = (
+                min(self._interval, _PENDING_RETRY_SECONDS)
+                if self._pending
+                else self._interval
+            )
             try:
                 await asyncio.wait_for(self._wake.wait(), timeout=timeout)
             except TimeoutError:
