@@ -46,7 +46,7 @@ repeating it.
 
 | Feature or assumption                                                                                   | Status      | Evidence and consequence                                                                                         |
 | ------------------------------------------------------------------------------------------------------- | ----------- | ---------------------------------------------------------------------------------------------------------------- |
-| Capacity ratio `power_mng_amp_hours_measured` / `battery_ah_capacity`                                   | Assumed     | Used only as a ratio against the rated module baseline. A comparison with the RCT app's usable kWh is still due. |
+| Capacity ratio `power_mng_amp_hours_measured` / `battery_ah_capacity`                                   | Unsupported | Hardware reads varied from 25.0/23.8531 Ah at 79–87 % SoC to 16.9251/8.65005 Ah near 2.5 % SoC. No automatic current capacity or calibration point is released. |
 | Per-tower versus device-wide meaning of `battery_placeholder_0_ah_capacity` and other battery registers | Unverified  | Unsupported tower combinations stay unavailable.                                                                 |
 | `battery_soh` scale and `power_mng_battery_type` codes                                                  | Unsupported | Not used.                                                                                                        |
 

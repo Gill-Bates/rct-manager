@@ -27,6 +27,12 @@ flowchart LR
 
 ## Operating modes
 
+Off is the factory and default Energy Manager state; an inverter without a stored mode is Off. While
+every inverter is Off, Energy Manager forecast refresh (spot market and weather) and charging-plan
+computation are suspended. Stored configuration and forecast/history data remain intact. Shared
+forecast refresh remains active while at least one inverter is Manual or External. General inverter
+telemetry, the transport and the consumption history keep running in every mode.
+
 Who may call what, per mode:
 
 | Mode     | Admin GUI (signed-in session, CSRF, no token)                            | REST API with a read/write token (`POST .../energy/command`)                                  |
@@ -35,6 +41,8 @@ Who may call what, per mode:
 | Manual   | allowed: charge, keep idle, discharge                                    | refused, 409 `energy_manager_not_external` (an operator must switch the inverter to External) |
 | External | refused, 409 `energy_manager_external` ("Controlled by an external app") | allowed                                                                                       |
 
+- In the admin GUI the Charge, Keep idle and Discharge buttons are disabled while the inverter is Off;
+  the backend refuses the same calls with 409 `energy_manager_off`. The mode selection stays usable.
 - Reading the status (`GET .../energy`) works in every mode, with a session or a token.
 - The mode can only be changed in the admin GUI (`PUT /admin/api/energy/devices/{id}/mode`, session and
   CSRF; a token gets 403). Changing the mode to Off, or between Manual and External, first hands the

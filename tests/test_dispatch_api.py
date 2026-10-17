@@ -41,6 +41,13 @@ ADMIN_WRITE_TOKEN = _fixed_pat("AdminWriteToken")
 ADMIN_WRITER = {"Authorization": f"Bearer {ADMIN_WRITE_TOKEN}"}
 
 
+
+def _activate_energy_manager(harness, *device_ids: str) -> None:
+    """Planning is at rest in the factory Off state; these tests need the dry-run to compute."""
+    for device_id in device_ids:
+        harness.runtime.energy._mode_states[device_id] = ModeRecord(device_id, mode=EnergyMode.MANUAL)
+    harness.runtime.energy.activity.notify()
+
 def settings(tmp_path: Path, **overrides):
     paths = dispatch_fixtures(tmp_path)
     admin_path = tmp_path / "admin.db"
@@ -868,6 +875,7 @@ async def test_p2_8_dynamic_plan_resolves_capacity_per_device_from_stored_limits
 
     config = settings(tmp_path)
     async with running_app(config) as harness:
+        _activate_energy_manager(harness, "main", "slave1")
         seed_payloads(harness)
         # seed_payloads only stages device payloads; an explicit read warms the cache the readings
         # port serves the (fresh, non-stale) 50 % SoC from. The endpoint itself performs no read.
@@ -1134,6 +1142,7 @@ async def test_verified_capacity_source_reaches_device_list_and_plan_without_dev
         dispatch_max_discharge_power_w=None,
     )
     async with running_app(config) as harness:
+        _activate_energy_manager(harness, "main")
         seed_payloads(harness)
         await harness.runtime.gateway.read_metric("main", "battery_soc", fresh=False)
         headers = await admin_session_headers(
@@ -1210,6 +1219,7 @@ async def test_dry_run_planning_data_works_with_write_support_off(
         dispatch_max_discharge_power_w=None,
     )
     async with running_app(config) as harness:
+        _activate_energy_manager(harness, "main")
         assert harness.runtime.dispatch is None
         seed_payloads(harness)
         await harness.runtime.gateway.read_metric("main", "battery_soc", fresh=False)
@@ -1346,3 +1356,43 @@ async def test_consumption_history_lists_the_last_60_completed_days_from_the_sto
                 "/admin/api/energy/devices/nope/consumption-history", headers=headers
             )
         ).status_code == 404
+
+
+async def test_dynamic_plan_computes_nothing_while_off_and_keeps_the_plan_when_active(
+    tmp_path: Path,
+) -> None:
+    from app.admin import energy_api
+    from app.optimizer.adapters import EnergyReadingsBatteryStateProvider
+
+    real_build = energy_api.build_dry_run_plan
+    calls: list[int] = []
+
+    def spy(**kwargs):
+        calls.append(1)
+        return real_build(**kwargs)
+
+    config = settings(tmp_path, enable_write_support=False)
+    async with running_app(config) as harness:
+        headers = await admin_session_headers(harness.client, "replacement-test-password")
+        url = "/admin/api/energy/devices/main/dynamic-plan"
+        with (
+            patch.object(energy_api, "build_dry_run_plan", spy),
+            patch.object(
+                EnergyReadingsBatteryStateProvider,
+                "current",
+                side_effect=AssertionError("Off must not read the planning inputs"),
+            ),
+        ):
+            off = await harness.client.get(url, headers=headers)  # no stored mode == Off
+        assert off.status_code == 200, off.text
+        assert off.json()["status"] == "energy_manager_off"
+        assert off.json()["slots"] == [] and calls == []
+
+        for mode in (EnergyMode.MANUAL, EnergyMode.EXTERNAL):
+            _activate_energy_manager(harness, "main")
+            harness.runtime.energy._mode_states["main"] = ModeRecord("main", mode=mode)
+            with patch.object(energy_api, "build_dry_run_plan", spy):
+                active = await harness.client.get(url, headers=headers)
+            assert active.status_code == 200, active.text
+            assert active.json()["status"] != "energy_manager_off"
+        assert len(calls) == 2

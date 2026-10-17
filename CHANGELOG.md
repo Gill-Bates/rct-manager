@@ -1,11 +1,12 @@
 ## [1.2.2] - 2026-xx-xx
 
 - ``New`` A one-time usage and liability disclaimer must be accepted after the first login before the admin interface can be used.
-- ``New`` New dashboard battery health widgets (usable capacity, remaining capacity, cycles, last calibration, commissioning date, and a degradation chart), off by default and shown per inverter.
+- ``New`` New dashboard battery health widgets (usable capacity, remaining capacity, cycles, last calibration, commissioning date, and a degradation chart), off by default and shown per inverter. Capacity and degradation remain empty until qualified calibration data exists.
 - ``New`` The Charging plan shows a battery calibration history in Expert diagnostics and a "Battery remaining" tile with the energy currently usable in the battery.
+- ``Change`` Energy Manager Off is now a real rest state: while every inverter is Off, spot-market and weather refresh and charging-plan computation are suspended (stored data stays), the Charge/Keep idle/Discharge buttons are disabled, and the Charging plan shows "Charging plan is inactive". Manual or External resumes the work at once.
 - ``Change`` The Charging plan uses the full width, reloads on its own (the Refresh button is gone), and shows its KPIs in a compact header with the inverter select and Expert switch.
 - ``Change`` An inverter without configured power limits falls back to 3 kW charge and discharge for the plan; Expert mode can set its own values.
-- ``Fix`` More reliable battery capacity and module detection, so the Charging plan no longer gets stuck on "could not be verified".
+- ``Fix`` Module detection now reports the installed topology reliably. Hardware testing showed that fresh Ah readings vary with battery state; the Charging plan therefore requires an Expert capacity override until a completed calibration can be identified, and legacy Ah-ratio rows are excluded from the degradation chart without deleting them.
 - ``Fix`` Several Charging plan display fixes: the "Please wait …" spinner no longer sticks, and no "Next grid charge" is announced while the Energy Manager is off.
 - ``Fix`` More accurate location handling: the site timezone and a place's postal code are no longer taken from a nearby or partial match.
 - ``Fix`` Spot prices and bidding zones load more reliably, and a day's prices are only used once they cover a full local day.

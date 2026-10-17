@@ -16,7 +16,7 @@
     holding: 'Holding', stopping: 'Stopping', fault: 'Fault',
   };
   const ENERGY_REASON_LABELS = {
-    mode_off: 'the inverter is switched off', external: 'controlled by an external app',
+    mode_off: 'Energy Manager is off. Select Manual to use battery actions.', external: 'controlled by an external app',
     write_not_permitted: 'write access was revoked',
     limits_missing: 'power limits are not configured', hardware_not_verified: 'hardware is not verified',
     restore_required: 'the inverter must be handed back first',
@@ -582,17 +582,19 @@
       });
     }
 
-    buttons.hold.addEventListener('click', () => { if (device.connected) send({ action: 'hold' }); });
+    // Off is operational rest: a disabled button already blocks the click, this guards synthetic events.
+    const actionsLocked = () => !device.connected || device.mode === 'off';
+    buttons.hold.addEventListener('click', () => { if (!actionsLocked()) send({ action: 'hold' }); });
     for (const action of ['charge', 'discharge']) {
       buttons[action].addEventListener('click', () => {
-        if (!device.connected) return;
+        if (actionsLocked()) return;
         selected = selected === action ? null : action;
         render();
       });
     }
     range.addEventListener('input', () => { if (selected) touched[selected] = true; renderTarget(); });
     confirm.addEventListener('click', () => {
-      if (!selected || !device.connected) return;
+      if (!selected || actionsLocked()) return;
       send({ action: selected, target_soc_percent: Number(range.value) });
     });
 
@@ -741,9 +743,10 @@
       if (!liteBox.hidden) liteFlow.update(device.readings);
       for (const action of ['charge', 'hold', 'discharge']) {
         const item = energyAvailability(device, action);
-        const enabled = operable && item.available && !busy && device.connected;
+        const enabled = operable && item.available && !busy && device.connected && device.mode !== 'off';
         buttons[action].disabled = !enabled;
-        const reason = external ? 'external' : item.reason;
+        setClass(buttons[action], 'is-inactive', !enabled);
+        const reason = device.mode === 'off' ? 'mode_off' : external ? 'external' : item.reason;
         buttons[action].title = enabled ? '' : (ENERGY_REASON_LABELS[reason] || '');
         setClass(buttons[action], 'is-selected', selected === action);
         buttons[action].setAttribute('aria-pressed', action === 'charge' || action === 'discharge' ? String(selected === action) : 'false');

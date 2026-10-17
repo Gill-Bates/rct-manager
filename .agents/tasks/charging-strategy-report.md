@@ -29,8 +29,8 @@ a separately gated handoff may later offer to the existing Energy Manager.
 > service with `DynamicChargeOptimizer` (`app/optimizer/planner.py`), a dry-run planner that plans grid
 > charging into cheap windows only and no discharge, export or arbitrage. `GreedyEnergyOptimizer`
 > below is exported from `app.optimizer` but has no production caller, and `cheap_percentile` /
-> `expensive_percentile` are consumed only by it. Re-evaluate this section before the handoff is
-> wired: the handoff currently maps only explicit grid-charge slots to commands.
+> `expensive_percentile` are consumed only by it. Re-evaluate this section before automatic
+> hardware dispatch is enabled: the wired handoff maps only explicit grid-charge slots to commands.
 
 `GreedyEnergyOptimizer.plan()` is a pure function of its `PlanningInput` snapshot: it reads no clock
 other than `planning_input.now`, does no I/O, and never touches a device. It resamples the three
@@ -106,9 +106,11 @@ Current-branch check on 2026-10-17 (no code changed): `pytest tests/test_energy_
 tests/test_plan_api.py tests/test_dynamic_adapters.py tests/test_optimizer_service.py
 tests/test_config_validation.py` -> 133 passed; `pytest tests/test_admin_ui.py` -> 134 passed.
 
-Full-suite rerun on 2026-10-18 (branch `feature/v1.2.2`, HEAD `81f4c45`): `python -m pytest -q -rfE`
--> 2331 passed, 2 xfailed, 0 failed (~9m51s); `node --test tests/js/*.test.js` -> 147 passed,
-1 failed. The single JS failure (`Charging plan shows forecast confidence from the plan fields and
+Full-suite rerun on 2026-10-17 (branch `feature/v1.2.2`, HEAD `d8919da` plus uncommitted working-tree
+changes from concurrent sessions, which kept changing during the run): `python -m pytest -q -rfE`
+-> 2346 passed, 2 xfailed, 0 failed (~10m); `node --test tests/js/*.test.js` -> 148 passed, 0 failed.
+Superseded earlier run at `81f4c45` (2331 passed / 2 xfailed; JS 147 passed, 1 failed; it does not
+cover the later optimizer commits dfa3f41, 6f09d4d, 9623590, 8994890). The earlier single JS failure (`Charging plan shows forecast confidence from the plan fields and
 explains a weak forecast`, `tests/js/admin-energy-setup.test.js:875`) is a PRE-EXISTING admin-UI
 forecast-confidence / `energy-plan-confidence-note` failure outside the charging-strategy/optimizer/
 energy/dispatch domain; it belongs to the admin-UI follow-up, was not caused by and is not fixed by
@@ -123,8 +125,8 @@ store's `interval_start` PRIMARY KEY (a correct integrity guarantee) and `replac
 were left unchanged.
 
 Current wiring check: `pytest tests/test_plan_api.py tests/test_energy_plan_handoff.py
-tests/test_structure_smoke.py` -> 24 passed; `pytest tests/test_config_validation.py
-tests/test_plan_api.py` -> 59 passed. `ruff check app/api/app_factory.py tests/test_plan_api.py` passed.
+tests/test_structure_smoke.py tests/test_config_validation.py` -> 80 passed.
+`ruff check app/api/app_factory.py tests/test_plan_api.py` passed.
 The earlier full-suite results above predate the handoff wiring and do not certify this new state.
 
 Pulled from `implementation-evidence.md` and `integration-verification.md` (both tied to HEAD
@@ -158,10 +160,12 @@ Pulled from `implementation-evidence.md` and `integration-verification.md` (both
    creates a handoff beside each `PlanningService` when the Energy Manager is available and tracks
    both tasks for startup, shutdown, and device reconfiguration. A separate 30-second tick reads
    `service.scheduler.active_slot(runtime.clock.now())`; it offers `None` when no slot is active or
-   the plan has expired. The flag is captured at construction and remains OFF by default.
-   `tests/test_plan_api.py` exercises the
-   factory path for an active slot and a cleared plan, verifying log-only behavior with no
-   `EnergyManager.command` call. This code-level wiring does not validate live hardware control.
+   the plan has expired. The enabled path waits for a successful dispatch-recovery sweep before
+   offering any slot; a slot lookup error is logged and attempts an `AUTO` handback. The flag is
+   captured at construction and remains OFF by default. `tests/test_plan_api.py` exercises the
+   factory path for an active slot, a cleared plan, a slot lookup failure, and both recovery outcomes.
+   The default-OFF path is log-only and issues no `EnergyManager.command` call. This code-level
+   wiring does not validate live hardware control.
 2. ~~Handoff docstring overstates the enable flag.~~ Fixed: the docstring states a plain `bool` captured once.
 3. **Battery-state inputs assume the configured or verified values are correct.** Usable capacity (expert
    override or cache-only verified source) and the static per-device power limits are taken as
@@ -205,17 +209,17 @@ cannot be flipped from the operator surface.
       be deployed, and confirm the hard invariants still hold (dispatch OFF until this checklist is
       complete; flag absent from `OPERATOR_FIELDS`; no architecture rule weakened). The invariants hold
       on the current tree (`enable_automatic_dispatch: bool = False` in `app/config.py`, absent from
-      `OPERATOR_FIELDS`). Code-side rerun done on this tree (HEAD `81f4c45`, 2026-10-18): full Python
-      suite 2331 passed / 2 xfailed / 0 failed; JS 147/148 (the one failure is the pre-existing
-      admin-UI forecast-note test, out of scope — see section 2). Box stays unchecked: it must be run
+      `OPERATOR_FIELDS`). Code-side rerun on HEAD `d8919da` plus an uncommitted working tree (2026-10-17):
+      full Python suite 2346 passed / 2 xfailed / 0 failed; JS 148/148 (see section 2). It is not a
+      run of a pinned, clean build. Box stays unchecked: it must be run
       again on the exact build to be deployed and the rest of this checklist is still open.
 - [ ] **Obtain explicit operator/owner sign-off** that automatic hardware dispatch may be enabled,
       recorded against the specific hardware and configuration validated above.
 
 Triage 2026-10-18: the code-verifiable wiring item was completed and removed; the remaining boxes
 are unchecked. The earlier code-side full-suite rerun was done on the working tree of
-`feature/v1.2.2` (see section 2: Python 2331 passed / 2 xfailed / 0 failed, JS 147/148 with one
-pre-existing admin-UI failure) and the hard invariants were reconfirmed, but the release-build
+`feature/v1.2.2` (see section 2: HEAD `d8919da` plus uncommitted changes, Python 2346 passed /
+2 xfailed / 0 failed, JS 148/148) and the hard invariants were reconfirmed, but the release-build
 suite item stays OPEN
 because it requires the run on the exact deployed build in the operator's release context, not an
 agent's working-tree run. The remaining items need the real installation, an isolated device,

@@ -2578,10 +2578,10 @@ try {
           check(`plan chart page has no horizontal scroll at ${width}px`, (await pageOverflow()) <= 0, String(await pageOverflow()));
         }
         await ep.setViewportSize({ width: 1280, height: 844 });
-        check('plan schedule is the chart plus collapsed details; charge slots stay listed for screen readers',
-          (await ep.locator('#energy-plan-schedule details:not([open]) summary').innerText()) === 'Show schedule details'
+        check('plan schedule is the chart, the charge-window table and collapsed all-intervals details',
+          (await ep.locator('#energy-plan-schedule details:not([open]) summary').innerText()) === 'Show all intervals'
           && !(await ep.locator('#energy-plan-schedule details table').first().isVisible())
-          && (await ep.locator('#energy-plan-schedule ul.visually-hidden li').count()) === 2);
+          && (await ep.locator('#energy-plan-charge-schedule tbody tr').count()) === 2);
         await ep.locator('#energy-plan-schedule details summary').click();
         check('schedule details open to a table with right-aligned numbers',
           (await ep.locator('#energy-plan-schedule details table tbody tr').count()) >= 1
@@ -2594,8 +2594,10 @@ try {
           const title = document.getElementById('energy-plan-title').getBoundingClientRect();
           const badge = document.getElementById('energy-plan-manager-state');
           const box = badge.getBoundingClientRect();
-          return { visible: !badge.hidden && box.width > 0, right: box.left >= title.right - 1,
-            sameRow: box.top < title.bottom && box.bottom > title.top, text: badge.textContent.trim() };
+          return {
+            visible: !badge.hidden && box.width > 0, right: box.left >= title.right - 1,
+            sameRow: box.top < title.bottom && box.bottom > title.top, text: badge.textContent.trim()
+          };
         });
         check('Energy Manager badge sits right of the Charging plan title on the same row',
           headRow.visible && headRow.right && headRow.sameRow, JSON.stringify(headRow));
@@ -2628,7 +2630,7 @@ try {
         await ep.mouse.move(box.x + box.width * 0.3, box.y + box.height * 0.5);
         await ep.waitForFunction(() => window.Chart.getChart(document.querySelector('#energy-plan-schedule canvas')).tooltip.opacity > 0);
         const tooltip = await ep.evaluate(() => window.Chart.getChart(document.querySelector('#energy-plan-schedule canvas')).tooltip.body.flatMap((b) => b.lines).join(' | '));
-        check('plan chart tooltip names the slot reason in plain language', /Reason: (Solar forecast|Battery charge|Expected shortfall|Negative spot)/.test(tooltip), tooltip);
+        check('plan chart tooltip names the slot reason in plain language', /(Solar covers|Battery can cover|protect the battery reserve|reach the target SoC|Negative price)/.test(tooltip), tooltip);
         const tickBefore = (await planChartState()).tick;
         await ep.locator('#theme-toggle').click();
         await ep.waitForFunction((before) => window.Chart.getChart(document.querySelector('#energy-plan-schedule canvas')).options.scales.x.ticks.color !== before, tickBefore);

@@ -1068,32 +1068,37 @@ def test_module_count_alone_never_releases_current_usable_capacity() -> None:
     assert _measured_capacity(runtime) is None
 
 
-def test_measured_ah_caps_single_tower_capacity_below_rated_value() -> None:
+@pytest.mark.parametrize(
+    ("reference", "measured"),
+    [(25.0, 23.8531), (16.9251, 8.65005)],
+)
+def test_state_dependent_ah_pairs_do_not_release_capacity(
+    reference: float, measured: float
+) -> None:
     runtime = _runtime(
-        _single_tower(6), unanswered=_PLACEHOLDER_SILENT, ah_samples=_ah_samples()
+        _single_tower(6), unanswered=_PLACEHOLDER_SILENT,
+        ah_samples=_ah_samples(reference=reference, measured=measured),
     )
-    assert _measured_capacity(runtime) == pytest.approx(
-        10_368 * 14.450748443603516 / 17.82485008239746
-    )
+    assert _measured_capacity(runtime) is None
+    assert MeasuredBatteryCapacity(runtime).calibration_sample(
+        "dev", datetime(2026, 10, 17, tzinfo=UTC)
+    ) is None
 
 
-def test_verified_capacity_follows_the_debounced_topology_not_a_single_read() -> None:
+def test_capacity_stays_unavailable_as_debounced_topology_changes() -> None:
     serials = _single_tower(5)
     runtime = _runtime(
         serials, unanswered=_PLACEHOLDER_SILENT, ah_samples=_ah_samples()
     )
-    ratio = 14.450748443603516 / 17.82485008239746
-    assert _measured_capacity(runtime) == pytest.approx(5 * 1920 * 0.9 * ratio)
+    assert _battery_module_report(runtime, "dev", "battery")["module_count"] == 5
+    assert _measured_capacity(runtime) is None
     serials.update(_single_tower(6))  # one complete 6-module read: not yet trusted
-    assert _measured_capacity(runtime) == pytest.approx(5 * 1920 * 0.9 * ratio)
-    assert _measured_capacity(runtime) == pytest.approx(
-        6 * 1920 * 0.9 * ratio
-    )  # repeated read
+    assert _battery_module_report(runtime, "dev", "battery")["module_count"] == 5
+    assert _battery_module_report(runtime, "dev", "battery")["module_count"] == 6
+    assert _measured_capacity(runtime) is None
 
 
-def test_calibration_sample_carries_rated_and_current_capacity_with_raw_cycles() -> (
-    None
-):
+def test_fresh_cycles_and_ah_do_not_prove_a_completed_calibration() -> None:
     readings = {**_ah_samples(), "battery_cycles": (42, CacheFreshness.FRESH)}
     runtime = _runtime(
         _single_tower(6), unanswered=_PLACEHOLDER_SILENT, ah_samples=readings
@@ -1101,22 +1106,10 @@ def test_calibration_sample_carries_rated_and_current_capacity_with_raw_cycles()
     sample = MeasuredBatteryCapacity(runtime).calibration_sample(
         "dev", datetime(2026, 10, 16, tzinfo=UTC)
     )
-    assert sample is not None
-    assert sample.module_counts == (6,)
-    assert sample.battery_cycles == 42
-    assert sample.rated_usable_capacity_wh == pytest.approx(10_368)
-    assert sample.current_usable_capacity_wh == pytest.approx(
-        _measured_capacity(runtime)
-    )
-    assert sample.remaining_capacity_percent == pytest.approx(
-        100 * 14.450748443603516 / 17.82485008239746
-    )
-    assert sample.source_contract == "bms_ah_ratio_v1"
-    assert sample.inverter_serial == "SN-INV-1"
-    assert sample.battery_bms_sn is None  # no fresh BMS serial in the cache
+    assert sample is None
 
 
-def test_calibration_sample_carries_fresh_bms_serial_only() -> None:
+def test_fresh_bms_serial_does_not_qualify_ah_pair() -> None:
     at = datetime(2026, 10, 16, tzinfo=UTC)
     readings = {
         **_ah_samples(),
@@ -1125,12 +1118,12 @@ def test_calibration_sample_carries_fresh_bms_serial_only() -> None:
     sample = MeasuredBatteryCapacity(
         _runtime(_single_tower(6), unanswered=_PLACEHOLDER_SILENT, ah_samples=readings)
     ).calibration_sample("dev", at)
-    assert sample is not None and sample.battery_bms_sn == "BMS12345"
+    assert sample is None
     stale = {**_ah_samples(), "battery_bms_sn": ("BMS12345", CacheFreshness.GRACE)}
     sample = MeasuredBatteryCapacity(
         _runtime(_single_tower(6), unanswered=_PLACEHOLDER_SILENT, ah_samples=stale)
     ).calibration_sample("dev", at)
-    assert sample is not None and sample.battery_bms_sn is None
+    assert sample is None
 
 
 @pytest.mark.parametrize("serial", [None, ""])
@@ -1182,13 +1175,13 @@ def test_bms_ah_cache_remains_fresh_between_daily_background_reads() -> None:
     )
 
 
-def test_measured_ah_above_reference_never_exceeds_rated_ceiling() -> None:
+def test_measured_ah_above_reference_does_not_release_rated_capacity() -> None:
     runtime = _runtime(
         _single_tower(6),
         unanswered=_PLACEHOLDER_SILENT,
         ah_samples=_ah_samples(reference=15.0, measured=18.0),
     )
-    assert _measured_capacity(runtime) == pytest.approx(10_368)
+    assert _measured_capacity(runtime) is None
 
 
 @pytest.mark.parametrize(
@@ -1233,15 +1226,11 @@ async def test_background_capacity_refresh_reads_both_metrics_and_isolates_failu
                 raise StopCycle
 
     reads = []
-    persisted = []
 
     async def read_system(device_id, name):
         reads.append(name)
         if name == failure:
             raise DeviceApiError("unavailable")
-
-    async def persist(sample):
-        persisted.append(sample)
 
     gateway = SimpleNamespace(
         read_module_inventory=lambda *_args: _done(),
@@ -1260,16 +1249,13 @@ async def test_background_capacity_refresh_reads_both_metrics_and_isolates_failu
             "dev",
             Clock(),
             capacity_ah_names=("battery_ah_capacity", "power_mng_amp_hours_measured"),
-            capacity_source=SimpleNamespace(calibration_sample=lambda *_args: "sample"),
-            on_capacity_calibration=persist,
             bms_serial_name="battery_bms_sn",
         )
-    # The BMS serial is best effort: its failure still persists the sample, an Ah failure does not.
+    # Reads remain diagnostic; no background reading writes a calibration point.
     ah_reads = ["battery_ah_capacity", "power_mng_amp_hours_measured"]
     assert reads == (
         ah_reads if failure == "battery_ah_capacity" else [*ah_reads, "battery_bms_sn"]
     )
-    assert persisted == ([] if failure == "battery_ah_capacity" else ["sample"])
 
 
 def test_power_battery_11_5_six_modules_are_reported_as_topology_only() -> None:
@@ -1290,7 +1276,7 @@ def test_symmetric_two_towers_keep_their_separate_diagnostic_counts(
         == modules
     )
     measured = _runtime(serials, ah_samples=_ah_samples(reference=18.0, measured=18.0))
-    assert _measured_capacity(measured) == pytest.approx(2 * modules * 1920 * 0.9)
+    assert _measured_capacity(measured) is None
 
 
 @pytest.mark.parametrize(("primary", "second"), [(6, 5), (3, 3), (4, 5), (2, 2)])

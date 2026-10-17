@@ -2225,6 +2225,8 @@ body {
     --bs-btn-disabled-bg: var(--bs-secondary-bg);
     --bs-btn-disabled-border-color: var(--bs-border-color);
     --bs-btn-disabled-opacity: 1;
+    border-style: dashed;
+    box-shadow: none;
 }
 
 .energy-target {

@@ -134,6 +134,19 @@ try {
   check(`DST day (25 h fall-back) renders with a > 24 h time axis (${THEME})`, state !== null && state.spanHours > 24 && state.spanHours <= 26, JSON.stringify(state));
   check(`DST chart does not cause horizontal page overflow (${THEME})`, overflow === 0, `overflow=${overflow}px`);
 
+  // The charge-window table and the opened all-intervals table stay inside the page at phone widths.
+  await page.locator('#energy-plan-schedule details summary').click();
+  for (const width of [320, 375, 390, 768]) {
+    await page.setViewportSize({ width, height: 844 });
+    await sleep(200);
+    const fit = await page.evaluate(() => ({
+      overflow: Math.max(0, document.documentElement.scrollWidth - document.documentElement.clientWidth),
+      rows: document.querySelectorAll('#energy-plan-charge-schedule tbody tr').length,
+    }));
+    check(`charging schedule tables fit at ${width}px (${THEME})`, fit.overflow === 0 && fit.rows >= 1, JSON.stringify(fit));
+  }
+  await page.setViewportSize({ width: 1280, height: 844 });
+
   // (8) null/NaN tooltip filter. Sweep the whole chart width (which crosses the NaN-power slot and
   // the all-null gap between the two idle slots) and collect every tooltip body shown. A broken
   // tooltip would print the raw "NaN", "undefined" or "null" from a non-finite datapoint; the
@@ -156,11 +169,10 @@ try {
   check(`no tooltip across the chart shows NaN/undefined/null for a non-finite point (${THEME})`, brokenTokens.length === 0, brokenTokens.join(' | '));
 
   // A finite slot still produces a readable tooltip (the filter did not suppress everything): at
-  // least one hover across the sweep showed an "Action:" line with a non-finite value rendered as
-  // the "n/a" placeholder, not a broken token.
-  const readable = allLines.filter((l) => /Action:/.test(l));
-  check(`a finite slot still shows a readable tooltip, nulls as n/a (${THEME})`,
-    readable.length > 0 && allLines.some((l) => /Power: (n\/a|[\d.,]+)/.test(l)), readable.slice(0, 2).join(' | '));
+  // least one hover across the sweep showed a charge line, and no line is an "n/a" placeholder.
+  const readable = allLines.filter((l) => /^(Grid charging|No grid charging)/.test(l));
+  check(`a finite slot still shows a readable tooltip without n/a rows (${THEME})`,
+    readable.length > 0 && !allLines.some((l) => /n\/a/.test(l)), readable.slice(0, 2).join(' | '));
 
   check(`no unexpected console or page errors (${THEME})`,
     problems.every((p) => /style-src|Content Security Policy|status of 503|Failed to load resource/.test(p)), problems.join(' | '));

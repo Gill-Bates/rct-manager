@@ -14,6 +14,8 @@ from unittest.mock import patch
 
 import pytest
 
+from app.energy.activity import EnergyActivity
+from app.energy.models import EnergyMode
 from app.optimizer.adapters import FORECAST_BASIS
 from app.optimizer.consumption import BaselineConsumptionForecastProvider
 from app.optimizer.models import (
@@ -757,3 +759,97 @@ async def test_raising_readiness_check_does_not_leave_pending_set() -> None:
     with pytest.raises(RuntimeError):
         await service.recompute()
     assert service._pending is False
+
+
+class _Modes:
+    """A mutable mode map behind a real EnergyActivity; a missing device is Off, as in production."""
+
+    def __init__(self, **modes: EnergyMode) -> None:
+        self.modes = dict(modes)
+        self.activity = EnergyActivity(
+            lambda device_id: self.modes.get(device_id, EnergyMode.OFF),
+            lambda: ("main", "second"),
+        )
+
+    def set(self, device_id: str, mode: EnergyMode) -> None:
+        self.modes[device_id] = mode
+        self.activity.notify()
+
+
+class _SpyOptimizer(DynamicChargeOptimizer):
+    def __init__(self) -> None:
+        super().__init__(PlanParameters())
+        self.calls = 0
+
+    def plan(self, planning_input):
+        self.calls += 1
+        return super().plan(planning_input)
+
+
+def _gated_service(clock, modes: _Modes, device_id: str = DEVICE):
+    now = clock.now()
+    spy = _SpyOptimizer()
+    service = _service(
+        clock,
+        _PricesSource(_prices(now)),
+        _SolarSource(_solar(now)),
+        _BatterySource(_battery(now)),
+        device_id=device_id,
+        optimizer=spy,
+        activity=modes.activity,
+        recompute_interval_seconds=3600.0,
+    )
+    return service, spy
+
+
+async def _settle(cycles: int = 20) -> None:
+    for _ in range(cycles):
+        await asyncio.sleep(0)
+
+
+async def test_planning_rests_without_a_stored_mode_and_follows_mode_changes() -> None:
+    clock = _live_clock()
+    modes = _Modes()  # fresh install: no stored mode, which is Off
+    service, spy = _gated_service(clock, modes)
+    task = asyncio.create_task(service.run())
+    try:
+        await _settle()
+        service.request_recompute()
+        assert await service.recompute() is None
+        await _settle()
+        assert spy.calls == 0 and service.current_view() is None
+
+        modes.set(DEVICE, EnergyMode.MANUAL)  # Off -> Manual wakes the loop without a timeout
+        await _wait_for(lambda: service.current_view() is not None)
+        assert spy.calls >= 1
+        assert service.scheduler.current_plan() is not None
+
+        calls = spy.calls
+        modes.set(DEVICE, EnergyMode.OFF)  # Manual -> Off invalidates the plan at once
+        await _wait_for(lambda: service.current_view() is None)
+        assert service.scheduler.current_plan() is None and service.scheduler.active_slot(clock.now()) is None
+        service.request_recompute()
+        await _settle()
+        assert spy.calls == calls, "no optimizer call after the switch to Off"
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+
+async def test_planning_is_per_device_while_one_other_inverter_is_active() -> None:
+    clock = _live_clock()
+    modes = _Modes(second=EnergyMode.EXTERNAL)  # main is Off, second is External
+    off_service, off_spy = _gated_service(clock, modes, "main")
+    on_service, on_spy = _gated_service(clock, modes, "second")
+    tasks = [asyncio.create_task(off_service.run()), asyncio.create_task(on_service.run())]
+    try:
+        await _wait_for(lambda: on_service.current_view() is not None)
+        await _settle()
+        assert off_spy.calls == 0 and off_service.current_view() is None
+        assert on_spy.calls >= 1
+        assert modes.activity.any_energy_active()
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)

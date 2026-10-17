@@ -4,21 +4,18 @@
 # Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
 #
 
-"""Battery tower topology and BMS-Ah-capped usable capacity from cached readings.
+"""Battery tower topology and conservative capacity availability from cached readings.
 
 Cache-only: nothing here reads a device. The admin dashboard and planning source use the
 module-serial classification. The gateway drops last-known-good topology when inventory changes.
 """
 
 import logging
-import math
 import re
 import threading
 import time
 from dataclasses import dataclass
-from datetime import UTC, datetime
-
-from app.gateway.cache import CacheFreshness
+from datetime import datetime
 
 log = logging.getLogger(__name__)
 
@@ -304,11 +301,6 @@ def _battery_module_report(runtime, device_id: str, prefix: str) -> dict:
     return {k: v for k, v in report.items() if k != "_complete"}
 
 
-# RCT Power Battery 2024: a module has 1.92 kWh rated energy and 90 % rated usable depth.
-# This is an upper baseline, never the present-day capacity by itself.
-_RATED_USABLE_WH_PER_MODULE = 1920 * 0.9
-
-
 @dataclass(frozen=True, slots=True)
 class CapacityCalibrationSample:
     device_id: str
@@ -326,102 +318,20 @@ class CapacityCalibrationSample:
 
 
 class MeasuredBatteryCapacity:
-    """Cache-only usable Wh from trusted topology capped by the BMS measured/reference Ah ratio."""
+    """Fail closed until a completed BMS calibration can be identified reliably.
+
+    The Ah registers vary with operating state, so freshness and topology cannot qualify them
+    as a current usable capacity or a permanent degradation measurement.
+    """
 
     def __init__(self, runtime) -> None:
         self._runtime = runtime
 
-    def _components(
-        self, device_id: str
-    ) -> tuple[float, float, tuple[int, ...], float, float] | None:
-        samples = [
-            self._runtime.gateway.cached_sample(device_id, name)
-            for name in CAPACITY_AH_METRICS
-        ]
-        for sample in samples:
-            if sample is None or sample[2] is not CacheFreshness.FRESH:
-                return None
-            value = sample[0]
-            if (
-                isinstance(value, bool)
-                or not isinstance(value, (int, float))
-                or not math.isfinite(value)
-                or value <= 0
-            ):
-                return None
-        reference_ah, measured_ah = (sample[0] for sample in samples)
-
-        counts = []
-        for prefix in _BATTERY_TOWER_PREFIXES:
-            # Stabilized topology, same source as the module display: one flipped read must not
-            # change the verified capacity.
-            report = _battery_module_report(self._runtime, device_id, prefix)
-            if not _battery_tower_present(
-                self._runtime, device_id, prefix, report["populated_module_slots"]
-            ):
-                if prefix == "battery":
-                    return None
-                continue
-            if report["module_count_status"] != "ok":
-                return None
-            counts.append(report["module_count"])
-        if len(counts) == 1 and counts[0] not in range(2, 7):
-            return None
-        if len(counts) == 2 and (counts[0] != counts[1] or counts[0] not in (4, 5, 6)):
-            return None
-        if not counts:
-            return None
-        rated_wh = sum(counts) * _RATED_USABLE_WH_PER_MODULE
-        current_wh = rated_wh * min(1.0, measured_ah / reference_ah)
-        return (
-            float(reference_ah),
-            float(measured_ah),
-            tuple(counts),
-            rated_wh,
-            current_wh,
-        )
-
     def verified_usable_capacity_wh(self, device_id: str) -> float | None:
-        components = self._components(device_id)
-        return None if components is None else components[4]
-
-    def _bms_serial(self, device_id: str) -> str | None:
-        sample = self._runtime.gateway.cached_sample(device_id, BMS_SERIAL_METRIC)
-        if (
-            sample is None
-            or sample[2] is not CacheFreshness.FRESH
-            or not isinstance(sample[0], str)
-        ):
-            return None
-        return _clean_module_serial(sample[0])[:64] or None
+        return None
 
     def calibration_sample(
         self, device_id: str, measured_at: datetime
     ) -> CapacityCalibrationSample | None:
-        """Sample keyed by the inverter serial; None while that serial is unknown (no device_id fallback)."""
-        inverter_serial = self._runtime.gateway.reported_serial(device_id)
-        if not inverter_serial:
-            return None
-        components = self._components(device_id)
-        if components is None:
-            return None
-        reference_ah, measured_ah, counts, rated_wh, current_wh = components
-        cycles_sample = self._runtime.gateway.cached_sample(device_id, "battery_cycles")
-        cycles = None
-        if cycles_sample is not None and cycles_sample[2] is CacheFreshness.FRESH:
-            raw = cycles_sample[0]
-            if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 0:
-                cycles = raw
-        return CapacityCalibrationSample(
-            device_id=device_id,
-            inverter_serial=inverter_serial,
-            battery_bms_sn=self._bms_serial(device_id),
-            measured_at=measured_at.astimezone(UTC),
-            battery_cycles=cycles,
-            reference_ah=reference_ah,
-            measured_ah=measured_ah,
-            rated_usable_capacity_wh=rated_wh,
-            current_usable_capacity_wh=current_wh,
-            remaining_capacity_percent=100.0 * current_wh / rated_wh,
-            module_counts=counts,
-        )
+        """No sample until a proven calibration-completion signal is available."""
+        return None

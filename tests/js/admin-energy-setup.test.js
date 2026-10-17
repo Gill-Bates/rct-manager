@@ -893,7 +893,7 @@ test('Charging plan shows forecast confidence from the plan fields and no prelim
   }
 });
 
-test('Charging schedule offers collapsed details with merged consecutive slots', () => {
+test('Show all intervals offers collapsed details with merged consecutive slots', () => {
   const h = harness();
   h.context.formatPower = (w) => `${w} W`;
   h.context.element('div').id = 'energy-plan-result';
@@ -912,15 +912,16 @@ test('Charging schedule offers collapsed details with merged consecutive slots',
   const details = nodes.find((n) => n.tagName === 'details');
   assert.ok(details, 'a native details element exists');
   assert.notEqual(details.open, true, 'collapsed by default');
-  assert.equal(nodes.find((n) => n.tagName === 'summary').textContent, 'Show schedule details');
-  assert.equal(nodes.filter((n) => n.tagName === 'tr' && flatten(n).some((c) => c.tagName === 'td')).length, 2);
+  assert.equal(nodes.find((n) => n.tagName === 'summary').textContent, 'Show all intervals');
+  const detailTable = flatten(details).find((n) => n.tagName === 'table');
+  assert.equal(flatten(detailTable).filter((n) => n.tagName === 'tr' && flatten(n).some((c) => c.tagName === 'td')).length, 2);
   // Responsive stacked layout: the table opts into .data-table-stack and every data cell carries
   // its column name in data-label, so the phone card keeps each value tied to its field. Without
   // this the mobile layout (admin.css) shows values with no labels, the bug this guards against.
-  const table = nodes.find((n) => n.tagName === 'table');
+  const table = detailTable;
   assert.ok((table.className || '').split(/\s+/).includes('data-table-stack'), 'table opts into the stacked layout');
   const labels = ['Time', 'Action', 'Power', 'Target SoC', 'Reason'];
-  const dataRows = nodes.filter((n) => n.tagName === 'tr' && flatten(n).some((c) => c.tagName === 'td'));
+  const dataRows = flatten(detailTable).filter((n) => n.tagName === 'tr' && flatten(n).some((c) => c.tagName === 'td'));
   for (const dataRow of dataRows) {
     const cells = dataRow.children.filter((c) => c.tagName === 'td');
     assert.deepEqual(cells.map((c) => c.dataset.label), labels, 'each cell labelled with its column');
@@ -938,4 +939,114 @@ test('Charging schedule details stay open across a plan refresh', () => {
   h.byId.get('energy-plan-schedule-details').open = true;
   h.context.renderDryRunPlan(plan);
   assert.equal(h.byId.get('energy-plan-schedule-details').open, true, 'opened details survive the re-render');
+});
+
+function renderPlan(slots) {
+  const h = harness();
+  h.context.formatPower = (w) => `${(w / 1000).toFixed(2)} kW`;
+  h.context.element('div').id = 'energy-plan-result';
+  const schedule = h.context.element('div');
+  schedule.id = 'energy-plan-schedule';
+  h.context.renderDryRunPlan({ status: 'ok', horizon_hours: 24, energy: {}, window: {}, slots });
+  return { h, nodes: flatten(schedule) };
+}
+
+const REASON_CHARGE = 'forecast deficit, charged as late as permitted';
+const planSlot = (start, end, action, power, reason = REASON_CHARGE, target = 95) => (
+  { start, end, action, max_power_w: power, target_soc_percent: target, reason });
+const bodyRows = (root) => flatten(root).filter((n) => n.tagName === 'tr' && flatten(n).some((c) => c.tagName === 'td'));
+const rowText = (row) => row.children.filter((c) => c.tagName === 'td').map((c) => c.textContent);
+
+test('Plan reasons map to user-facing labels and unknown reasons stay verbatim', () => {
+  const { h } = renderPlan([]);
+  const ctx = h.context;
+  const expected = {
+    'forecast PV covers demand': ['Solar covers forecast demand', 'Solar covers demand'],
+    'battery reserve covers demand': ['Battery can cover forecast demand', 'Battery covers demand'],
+    'forecast deficit, charged as late as permitted': ['Grid charging needed to protect the battery reserve', 'Protect battery reserve'],
+    'charge as late as permitted for target SoC': ['Grid charging scheduled to reach the target SoC', 'Reach target SoC'],
+    'negative spot price, forecast deficit': ['Negative price: charge now for forecast demand', 'Use negative price'],
+    'no spot price for this slot': ['No market price available for this period', undefined],
+  };
+  for (const [reason, [long, short]] of Object.entries(expected)) {
+    assert.equal(ctx.planReasonLabel(reason), long);
+    if (short) assert.equal(ctx.planPurposeLabel(reason), short);
+  }
+  assert.equal(ctx.planReasonLabel('something new'), 'something new');
+  assert.equal(ctx.planPurposeLabel('something new'), 'something new');
+});
+
+test('Plan tooltip shows only relevant fields per action', () => {
+  const { h } = renderPlan([]);
+  const idle = h.context.planTooltipLines(planSlot('2026-01-01T10:00:00Z', '2026-01-01T10:15:00Z', 'idle', null, 'battery reserve covers demand', null)).join('|');
+  assert.match(idle, /No grid charging/);
+  assert.match(idle, /Battery can cover forecast demand/);
+  assert.doesNotMatch(idle, /n\/a|Power:|Target SoC/);
+  const charge = h.context.planTooltipLines(planSlot('2026-01-01T10:00:00Z', '2026-01-01T10:15:00Z', 'charge', 1510)).join('|');
+  assert.match(charge, /Grid charging · 1\.51 kW/);
+  assert.match(charge, /Target SoC 95 %/);
+  assert.match(charge, /protect the battery reserve/);
+});
+
+test('Charging schedule lists only charge windows; Show all intervals lists every interval', () => {
+  const { nodes } = renderPlan([
+    planSlot('2026-01-01T01:00:00Z', '2026-01-01T01:15:00Z', 'charge', 1510),
+    planSlot('2026-01-01T01:15:00Z', '2026-01-01T01:30:00Z', 'idle', null, 'battery reserve covers demand'),
+    planSlot('2026-01-01T01:30:00Z', '2026-01-01T01:45:00Z', 'charge', 1510),
+    planSlot('2026-01-01T01:45:00Z', '2026-01-01T02:00:00Z', 'idle', null, 'battery reserve covers demand'),
+  ]);
+  const details = nodes.find((n) => n.tagName === 'details');
+  const main = nodes.find((n) => n.id === 'energy-plan-charge-schedule');
+  const mainRows = bodyRows(main);
+  assert.equal(mainRows.length, 2, 'idle gap keeps two charging events');
+  assert.deepEqual(rowText(mainRows[0]).slice(1), ['1.51 kW', '95 %', 'Protect battery reserve']);
+  assert.equal(flatten(main).filter((n) => n.tagName === 'th').map((n) => n.textContent).join(','), 'Time,Power,Target SoC,Purpose');
+  assert.equal(bodyRows(details).length, 4);
+  assert.equal(flatten(details).filter((n) => n.tagName === 'th').map((n) => n.textContent).join(','), 'Time,Action,Power,Target SoC,Reason');
+});
+
+test('Charging schedule merges only identical adjacent charge slots', () => {
+  const merged = renderPlan([
+    planSlot('2026-01-01T01:00:00Z', '2026-01-01T01:15:00Z', 'charge', 1510),
+    planSlot('2026-01-01T01:15:00Z', '2026-01-01T01:30:00Z', 'charge', 1510),
+  ]);
+  assert.equal(bodyRows(merged.nodes.find((n) => n.id === 'energy-plan-charge-schedule')).length, 1);
+  const power = renderPlan([
+    planSlot('2026-01-01T01:00:00Z', '2026-01-01T01:15:00Z', 'charge', 1510),
+    planSlot('2026-01-01T01:15:00Z', '2026-01-01T01:30:00Z', 'charge', 2500),
+  ]);
+  assert.equal(bodyRows(power.nodes.find((n) => n.id === 'energy-plan-charge-schedule')).length, 2);
+});
+
+test('Charging schedule without charge slots says so', () => {
+  const { nodes } = renderPlan([planSlot('2026-01-01T01:00:00Z', '2026-01-01T01:15:00Z', 'idle', null, 'battery reserve covers demand')]);
+  assert.ok(flatten(nodes.find((n) => n.id === 'energy-plan-charge-schedule')).some((n) => n.textContent === 'No grid charging planned.'));
+});
+
+test('Charging plan of an Off inverter shows a compact inactive notice and requests no plan', async () => {
+  const paths = [];
+  const h = harness({
+    apiImpl: async (p) => {
+      paths.push(p);
+      if (p === 'energy/planning-devices') return [{ device_id: 'dev-1', device_name: 'RCT', mode: 'off' }];
+      return { status: 'ok', slots: [], window: {} };
+    },
+  });
+  const select = h.context.element('select');
+  select.id = 'energy-plan-device';
+  select.value = 'dev-1';
+  const result = h.context.element('div');
+  result.id = 'energy-plan-result';
+  vm.runInContext("planDevices = [{ device_id: 'dev-1', mode: 'off' }]", h.context);
+
+  await h.context.loadDryRunPlan();
+  const text = flatten(result).map((n) => n.textContent).join(' ');
+  assert.match(text, /Energy Manager off/);
+  assert.match(text, /Charging plan is inactive/);
+  assert.equal(flatten(result).some((n) => (n.className || '').includes('plan-loading')), false, 'no spinner');
+  assert.equal(paths.some((p) => p.includes('dynamic-plan')), false, 'no plan is requested while off');
+  h.context.renderDryRunPlan({ status: 'energy_manager_off', slots: [], window: {}, energy: null }, { waiting: true });
+  assert.equal(vm.runInContext('planPollTimer', h.context), null, 'no retry polling is armed');
+  h.context.stopPlanPolling();
+  h.cleanup();
 });

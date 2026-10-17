@@ -1009,3 +1009,24 @@ async def test_both_active_modes_share_the_prerequisites(mode: EnergyMode) -> No
         await no_limits.set_mode("main", mode, actor=ADMIN_ACTOR)
     assert info.value.code == "dispatch_limits_missing"
     assert off.mode("main") is EnergyMode.OFF and no_limits.mode("main") is EnergyMode.OFF
+
+
+async def test_activity_follows_only_committed_mode_changes() -> None:
+    """Workers learn of a mode change after the commit; a refused change signals nothing."""
+
+    class FailingStore:
+        def put_energy_state(self, record: ModeRecord) -> None:
+            raise DeviceApiError("dispatch_store_unavailable")
+
+    failing = manager(SpyPort(), mode=EnergyMode.OFF, store=FailingStore())
+    seen: list[bool] = []
+    failing.activity.add_listener(lambda: seen.append(failing.any_energy_active()))
+    with pytest.raises(DeviceApiError):
+        await failing.set_mode("main", EnergyMode.MANUAL, actor="tester")
+    assert seen == [] and not failing.any_energy_active()
+
+    service = manager(SpyPort(), mode=EnergyMode.OFF, approvals=ApprovalSpy(EXISTING_WRITES))
+    assert not service.device_energy_active("main") and not service.device_energy_active("unknown")
+    service.activity.add_listener(lambda: seen.append(service.device_energy_active("main")))
+    await service.set_mode("main", EnergyMode.MANUAL, actor="tester")
+    assert seen == [True] and service.any_energy_active()

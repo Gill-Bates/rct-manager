@@ -51,6 +51,10 @@ _UPSERT_SETTING = (
 _BOOTSTRAP_SPECIALS = "!#%+-=?@_"
 _BOOTSTRAP_ALPHABET = string.ascii_letters + string.digits
 
+# No hardware-proven completion signal exists yet. Legacy bms_ah_ratio_v1 rows stay on disk,
+# but cannot become an effective calibration history or seed a 100 % baseline.
+_QUALIFIED_BATTERY_CALIBRATION_CONTRACTS: frozenset[str] = frozenset()
+
 # The current baseline admin schema, created directly (the application is unreleased: no deployed
 # database to migrate). Keyed by table name so initialize() can create a table only when absent and
 # otherwise verify its on-disk definition against the current shape.
@@ -859,6 +863,8 @@ class AdminStore:
         Rows belong to the inverter serial. A measurement is skipped when the Ah value is unchanged
         for the same battery; a new BMS serial always starts a new series.
         """
+        if sample.source_contract not in _QUALIFIED_BATTERY_CALIBRATION_CONTRACTS:
+            raise ValueError("unsupported battery calibration source contract")
         if sample.measured_at.tzinfo is None or sample.measured_at.utcoffset() is None:
             raise ValueError("battery calibration timestamp must be timezone-aware")
         serial = sample.inverter_serial
@@ -895,13 +901,15 @@ class AdminStore:
                 (serial, sample.device_id),
             )
             latest = db.execute(
-                "SELECT measured_ah FROM battery_calibration_history WHERE inverter_serial=? ORDER BY id DESC LIMIT 1",
-                (serial,),
+                "SELECT measured_ah FROM battery_calibration_history "
+                "WHERE inverter_serial=? AND source_contract=? ORDER BY id DESC LIMIT 1",
+                (serial, sample.source_contract),
             ).fetchone()
             known_bms = db.execute(
                 "SELECT battery_bms_sn FROM battery_calibration_history "
-                "WHERE inverter_serial=? AND battery_bms_sn IS NOT NULL ORDER BY id DESC LIMIT 1",
-                (serial,),
+                "WHERE inverter_serial=? AND source_contract=? "
+                "AND battery_bms_sn IS NOT NULL ORDER BY id DESC LIMIT 1",
+                (serial, sample.source_contract),
             ).fetchone()
             new_series = bms_sn is not None and (
                 known_bms is None or known_bms["battery_bms_sn"] != bms_sn
@@ -945,25 +953,33 @@ class AdminStore:
             raise ValueError(
                 "battery calibration history limit must be between 1 and 5000"
             )
+        if not _QUALIFIED_BATTERY_CALIBRATION_CONTRACTS:
+            return {"battery_bms_sn": None, "battery_replaced": False, "points": []}
+        if len(_QUALIFIED_BATTERY_CALIBRATION_CONTRACTS) != 1:
+            raise ValueError("one qualified calibration contract must be selected")
+        contract = next(iter(_QUALIFIED_BATTERY_CALIBRATION_CONTRACTS))
         with self.connect() as db:
             current = db.execute(
                 "SELECT battery_bms_sn FROM battery_calibration_history "
-                "WHERE inverter_serial=? AND battery_bms_sn IS NOT NULL ORDER BY id DESC LIMIT 1",
-                (inverter_serial,),
+                "WHERE inverter_serial=? AND source_contract=? "
+                "AND battery_bms_sn IS NOT NULL ORDER BY id DESC LIMIT 1",
+                (inverter_serial, contract),
             ).fetchone()
             bms_sn = current["battery_bms_sn"] if current is not None else None
             cut = 0
             if bms_sn is not None:
                 cut = db.execute(
                     "SELECT COALESCE(MAX(id), 0) FROM battery_calibration_history "
-                    "WHERE inverter_serial=? AND battery_bms_sn IS NOT NULL AND battery_bms_sn != ?",
-                    (inverter_serial, bms_sn),
+                    "WHERE inverter_serial=? AND source_contract=? "
+                    "AND battery_bms_sn IS NOT NULL AND battery_bms_sn != ?",
+                    (inverter_serial, contract, bms_sn),
                 ).fetchone()[0]
             rows = db.execute(
                 "SELECT measured_at, battery_bms_sn, battery_cycles, reference_ah, measured_ah, "
                 "rated_usable_capacity_wh, current_usable_capacity_wh, module_counts, source_contract "
-                "FROM battery_calibration_history WHERE inverter_serial=? AND id>? ORDER BY id DESC LIMIT ?",
-                (inverter_serial, cut, limit),
+                "FROM battery_calibration_history WHERE inverter_serial=? AND id>? "
+                "AND source_contract=? ORDER BY id DESC LIMIT ?",
+                (inverter_serial, cut, contract, limit),
             ).fetchall()
         return {
             "battery_bms_sn": bms_sn,

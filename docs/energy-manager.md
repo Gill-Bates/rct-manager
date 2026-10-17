@@ -86,8 +86,9 @@ automatic executor, no `Dynamic` operating mode, no register write.
 Details, status codes and the preview API: [Charging Plan](energy/charging-plan.md).
 
 !!! note "Usable battery capacity"
-    The plan needs a verified usable capacity: module count x rated usable baseline, capped by the BMS
-    Ah ratio, or an Expert override. Without one it reports `battery_state_unavailable`. See
+    The plan needs a verified current usable capacity or an Expert override. Module count gives a
+    rated 100 % reference, while live Ah readings have not proven current capacity. Without an
+    override it reports `battery_state_unavailable`. See
     [Usable battery capacity](energy/charging-plan.md#usable-battery-capacity).
 
 ## Consumption in short

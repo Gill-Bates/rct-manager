@@ -1701,7 +1701,7 @@ def test_energy_page_wires_the_read_only_dry_run_plan_preview():
     assert "Preliminary plan" not in js
     assert "energy-plan-confidence-note" not in plan_pane + js
     assert 'id="energy-plan-confidence"' in plan_pane and "'Energy Manager off'" in js
-    assert "Show schedule details" in js and "element('details'" in js and "element('summary'" in js
+    assert "Show all intervals" in js and "element('details'" in js and "element('summary'" in js
     assert "History coverage" in js and "Live recording" not in js
     assert "Locally measured" in js and "Recovered from inverter history" in js
     assert "will feed later" not in html
@@ -1741,7 +1741,7 @@ vm.runInContext(`${block}; this.renderDryRunPlan = renderDryRunPlan; this.labels
 const plan = JSON.parse(fs.readFileSync(planPath, 'utf8'));
 context.renderDryRunPlan(plan);
 const rows = technical.find('tbody').flatMap((body) => body.children.map((row) => row.children.map((cell) => cell.textContent)));
-console.log(JSON.stringify({ labels: context.labels, rows, spinners: host.count('spinner-border'), series: context.planChartSeries(plan.slots), items: schedule.find('li').map((li) => li.textContent), text: `${host.textContent} ${schedule.textContent} ${technical.textContent}` }));
+console.log(JSON.stringify({ labels: context.labels, rows, spinners: host.count('spinner-border'), series: context.planChartSeries(plan.slots), items: schedule.find('td').slice(0, 4).map((td) => td.textContent), text: `${host.textContent} ${schedule.textContent} ${technical.textContent}` }));
 """
 
 
@@ -1773,7 +1773,7 @@ def test_dry_run_plan_renderer_shows_idle_and_null_slots_with_horizon_and_window
     }
     out = _render_plan(tmp_path, plan)
     assert len(out["rows"]) == 3  # forecast window rows; the schedule is a chart, not a table
-    assert len(out["items"]) == 1 and "3000 W" in out["items"][0] and "target SoC 80 %" in out["items"][0]
+    assert out["items"][1:3] == ["3000 W", "80 %"]  # first row of the charge-window table
     assert [point["y"] for point in out["series"]["power"]] == [3.0, 3.0, None, 0, 0]  # idle reads 0; the overlapping duplicate slot breaks the line
     assert "Horizon: 24 h" in out["text"] and "Forecast inputs" in out["text"]
     assert out["rows"][2][1] == "n/a"  # spot prices window is unknown

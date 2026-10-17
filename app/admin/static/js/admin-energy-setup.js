@@ -858,8 +858,9 @@ const PLAN_STATUS_LABELS = {
   solar_not_configured: 'Solar forecast is not configured',
   solar_forecast_unavailable: 'Solar forecast is not available yet',
   battery_state_unavailable: 'Usable battery capacity is needed',
+  energy_manager_off: 'Energy Manager off',
 };
-const PLAN_ACTION_LABELS = { idle: 'No grid charge', charge: 'Charge from grid', hold: 'Hold', discharge: 'Discharge', auto: 'Automatic' };
+const PLAN_ACTION_LABELS = { idle: 'No grid charging', charge: 'Grid charging', hold: 'Hold', discharge: 'Discharge', auto: 'Automatic' };
 const PLAN_POLICY_LABELS = { gentle: 'Gentle (stay in the preferred power range)', meet_deadline: 'Meet deadline (raise power up to the hard limit if needed)' };
 const LIMITING_REASON_LABELS = {
   reserve_not_securable: 'Reserve not securable',
@@ -982,6 +983,14 @@ function planWaitState() {
 const PLAN_PENDING_STATUSES = new Set(['insufficient_history', 'spot_prices_unavailable', 'solar_forecast_unavailable']);
 const PLAN_RETRY_STATUSES = new Set([...PLAN_PENDING_STATUSES, 'battery_state_unavailable']);
 
+// Off is operational rest: no spinner, no retry polling and no chart, only this compact notice.
+function planOffState() {
+  const card = element('section', 'mb-3 energy-plan-off');
+  card.setAttribute('role', 'status');
+  card.append(element('h3', 'h5 mb-1', 'Energy Manager off'), element('p', 'mb-0 text-secondary', 'Charging plan is inactive.'));
+  return card;
+}
+
 function planStatusCard(title, message) {
   const card = element('section', 'mb-3');
   card.append(element('h3', 'h5 mb-2', title), element('p', 'mb-0', message));
@@ -1040,15 +1049,45 @@ function nextGridCharge(slots) {
 }
 
 // Plain-language explanations of the planner's machine-oriented slot reasons (app/optimizer/planner.py);
-// an unknown reason is shown verbatim.
+// an unknown reason is shown verbatim. PURPOSE is the short form for the schedule table.
 const PLAN_REASON_LABELS = {
-  'forecast PV covers demand': 'Solar forecast covers the household consumption',
-  'battery reserve covers demand': 'Battery charge covers the consumption, no grid charge needed',
-  'forecast deficit, charged as late as permitted': 'Expected shortfall: charge from the grid, as late as possible',
-  'charge as late as permitted for target SoC': 'Reach the target SoC: charge as late as possible',
-  'negative spot price, forecast deficit': 'Negative spot price: charge now to cover the expected shortfall',
-  'no spot price for this slot': 'No spot price known for this period',
+  'forecast PV covers demand': 'Solar covers forecast demand',
+  'battery reserve covers demand': 'Battery can cover forecast demand',
+  'forecast deficit, charged as late as permitted': 'Grid charging needed to protect the battery reserve',
+  'charge as late as permitted for target SoC': 'Grid charging scheduled to reach the target SoC',
+  'negative spot price, forecast deficit': 'Negative price: charge now for forecast demand',
+  'no spot price for this slot': 'No market price available for this period',
 };
+const PLAN_PURPOSE_LABELS = {
+  'forecast deficit, charged as late as permitted': 'Protect battery reserve',
+  'charge as late as permitted for target SoC': 'Reach target SoC',
+  'negative spot price, forecast deficit': 'Use negative price',
+  'forecast PV covers demand': 'Solar covers demand',
+  'battery reserve covers demand': 'Battery covers demand',
+};
+
+function planReasonLabel(reason) {
+  return reason ? (PLAN_REASON_LABELS[reason] || reason) : '';
+}
+
+function planPurposeLabel(reason) {
+  return reason ? (PLAN_PURPOSE_LABELS[reason] || reason) : NOT_AVAILABLE;
+}
+
+// Tooltip lines show only what applies: an idle slot has no power or target to report.
+function planTooltipLines(slot) {
+  const watts = planNumber(slot.max_power_w);
+  const target = planNumber(slot.target_soc_percent);
+  const lines = [];
+  if (slot.action === 'charge') {
+    lines.push(Number.isFinite(watts) ? `Grid charging · ${formatPower(watts)}` : 'Grid charging');
+    if (Number.isFinite(target)) lines.push(`Target SoC ${Math.round(target)} %`);
+  } else {
+    lines.push(PLAN_ACTION_LABELS[slot.action] || slot.action);
+  }
+  if (slot.reason) lines.push(planReasonLabel(slot.reason));
+  return lines;
+}
 
 function planSlotTime(slot) {
   const start = new Date(slot.start);
@@ -1183,17 +1222,7 @@ function drawPlanChart(canvas, slots) {
           filter: (item, index, items) => items.findIndex((other) => Number.isFinite(other.parsed?.y)) === index,
           callbacks: {
             title: (items) => (items[0]?.raw?.slot ? planSlotTime(items[0].raw.slot) : ''),
-            label: (item) => {
-              const slot = item.raw.slot;
-              const watts = planNumber(slot.max_power_w);
-              const target = planNumber(slot.target_soc_percent);
-              return [
-                `Action: ${PLAN_ACTION_LABELS[slot.action] || slot.action}`,
-                `Power: ${Number.isFinite(watts) ? formatPower(watts) : NOT_AVAILABLE}`,
-                `Target SoC: ${Number.isFinite(target) ? `${Math.round(target)} %` : NOT_AVAILABLE}`,
-                ...(slot.reason ? [`Reason: ${PLAN_REASON_LABELS[slot.reason] || slot.reason}`] : []),
-              ];
-            },
+            label: (item) => planTooltipLines(item.raw.slot),
           },
         },
       },
@@ -1223,25 +1252,7 @@ function planChartSummary(slots) {
   return `Charging schedule ${span}: ${charge.length} grid charge slot${charge.length === 1 ? '' : 's'} of ${slots.length}`;
 }
 
-// Text alternative for the chart: the grid-charge slots, readable without a pointer.
-function planChargeList(slots) {
-  const list = element('ul', 'visually-hidden');
-  const charge = slots.filter((slot) => slot.action === 'charge')
-    .sort((a, b) => new Date(a.start) - new Date(b.start));
-  if (!charge.length) {
-    list.append(element('li', '', 'No grid charge planned.'));
-    return list;
-  }
-  for (const slot of charge) {
-    const watts = planNumber(slot.max_power_w);
-    const target = planNumber(slot.target_soc_percent);
-    list.append(element('li', '', `${planSlotTime(slot)}: ${Number.isFinite(watts) ? formatPower(watts) : NOT_AVAILABLE}`
-      + `, target SoC ${Number.isFinite(target) ? `${Math.round(target)} %` : NOT_AVAILABLE}`));
-  }
-  return list;
-}
-
-// The chart is the schedule view; its tooltip carries the per-slot detail.
+// The chart is the time overview; the charging schedule table below it is also its text alternative.
 function planSchedule(plan, detailsOpen = false) {
   const section = element('section', 'energy-plan-section');
   section.setAttribute('aria-labelledby', 'energy-plan-schedule-title');
@@ -1258,16 +1269,64 @@ function planSchedule(plan, detailsOpen = false) {
     canvas = element('canvas');
     canvas.setAttribute('role', 'img');
     canvas.setAttribute('aria-label', planChartSummary(plan.slots));
+    canvas.setAttribute('aria-describedby', 'energy-plan-charge-schedule');
     box.append(canvas);
     section.append(box);
   } else {
     section.append(element('p', 'text-danger small', 'Chart library could not be loaded.'));
   }
-  section.append(planChargeList(plan.slots), planScheduleDetails(plan.slots, detailsOpen));
+  section.append(planChargeSchedule(plan.slots), planScheduleDetails(plan.slots, detailsOpen));
   return { section, canvas };
 }
 
-// Consecutive slots with the same action, power, target and reason read as one row.
+// Stacked-card tables (data-table-stack, admin.css): every cell carries its column name in data-label.
+function planTable(className, captionText, columns, rows) {
+  const table = element('table', `table table-sm energy-plan-slot-table data-table-stack ${className}`);
+  table.append(element('caption', 'visually-hidden', captionText));
+  const head = element('tr');
+  for (const [name, numeric] of columns) {
+    const cell = element('th', numeric ? 'text-end' : '', name);
+    cell.scope = 'col';
+    head.append(cell);
+  }
+  const thead = element('thead');
+  thead.append(head);
+  const body = element('tbody');
+  for (const cells of rows) {
+    const row = element('tr');
+    cells.forEach((cell, index) => { cell.dataset.label = columns[index][0]; });
+    row.append(...cells);
+    body.append(row);
+  }
+  table.append(thead, body);
+  return table;
+}
+
+// Default view: only the planned grid-charging windows. Idle slots are hidden here, not removed from the plan.
+function planChargeSchedule(slots) {
+  const wrap = element('div', 'mt-2');
+  wrap.id = 'energy-plan-charge-schedule';
+  const charge = planSlotRuns(slots.filter((slot) => slot.action === 'charge'));
+  if (!charge.length) {
+    wrap.append(element('p', 'text-secondary small mb-0', 'No grid charging planned.'));
+    return wrap;
+  }
+  const columns = [['Time'], ['Power', true], ['Target SoC', true], ['Purpose']];
+  const rows = charge.map((slot) => {
+    const watts = planNumber(slot.max_power_w);
+    const target = planNumber(slot.target_soc_percent);
+    return [
+      element('td', '', planSlotTime(slot)),
+      element('td', 'text-end', Number.isFinite(watts) ? formatPower(watts) : NOT_AVAILABLE),
+      element('td', 'text-end', Number.isFinite(target) ? `${Math.round(target)} %` : NOT_AVAILABLE),
+      element('td', 'data-table-stack-prose', planPurposeLabel(slot.reason)),
+    ];
+  });
+  wrap.append(planTable('mb-0', 'Planned grid charging windows', columns, rows));
+  return wrap;
+}
+
+// Only directly adjacent slots with the same action, power, target and reason merge; a gap or any change starts a new row.
 function planSlotRuns(slots) {
   const runs = [];
   for (const slot of [...slots].sort((a, b) => new Date(a.start) - new Date(b.start))) {
@@ -1282,45 +1341,28 @@ function planSlotRuns(slots) {
   return runs;
 }
 
-// Collapsed lookup table next to the chart: keyboard and touch friendly, numbers right-aligned.
+// Collapsed full technical slot history: keyboard and touch friendly, numbers right-aligned.
 function planScheduleDetails(slots, open = false) {
   const details = element('details', 'energy-plan-slot-details mt-2');
   details.id = 'energy-plan-schedule-details';
   details.open = open;
-  details.append(element('summary', '', 'Show schedule details'));
-  // data-table-stack: below the phone breakpoint the six-column table would squeeze "Power"/"162 W"
-  // character-by-character, so each row stacks into a labelled card (admin.css). The column name is
-  // carried on every cell in data-label and reused there; the desktop table is unchanged.
-  const table = element('table', 'table table-sm energy-plan-slot-table data-table-stack mt-2 mb-0');
-  table.append(element('caption', 'visually-hidden', 'Charging schedule slots'));
-  const head = element('tr');
+  details.append(element('summary', '', 'Show all intervals'));
+  // data-table-stack: below the phone breakpoint the five-column table would squeeze "Power"/"162 W"
+  // character-by-character, so each row stacks into a labelled card (admin.css).
   const columns = [['Time'], ['Action'], ['Power', true], ['Target SoC', true], ['Reason']];
-  for (const [name, numeric] of columns) {
-    const cell = element('th', numeric ? 'text-end' : '', name);
-    cell.scope = 'col';
-    head.append(cell);
-  }
-  const body = element('tbody');
-  for (const slot of planSlotRuns(slots)) {
+  const rows = planSlotRuns(slots).map((slot) => {
     const watts = planNumber(slot.max_power_w);
     const target = planNumber(slot.target_soc_percent);
-    const row = element('tr');
     // The reason is free prose: it spans full width and wraps at word boundaries in the stacked card.
-    const cells = [
+    return [
       element('td', '', planSlotTime(slot)),
       element('td', '', PLAN_ACTION_LABELS[slot.action] || slot.action),
       element('td', 'text-end', Number.isFinite(watts) && slot.action === 'charge' ? formatPower(watts) : NOT_AVAILABLE),
       element('td', 'text-end', Number.isFinite(target) ? `${Math.round(target)} %` : NOT_AVAILABLE),
-      element('td', 'data-table-stack-prose', slot.reason ? (PLAN_REASON_LABELS[slot.reason] || slot.reason) : NOT_AVAILABLE),
+      element('td', 'data-table-stack-prose', slot.reason ? planReasonLabel(slot.reason) : NOT_AVAILABLE),
     ];
-    cells.forEach((cell, index) => { cell.dataset.label = columns[index][0]; });
-    row.append(...cells);
-    body.append(row);
-  }
-  const thead = element('thead');
-  thead.append(head);
-  table.append(thead, body);
-  details.append(table);
+  });
+  details.append(planTable('mt-2 mb-0', 'All charging plan intervals', columns, rows));
   return details;
 }
 
@@ -1379,6 +1421,10 @@ function renderDryRunPlan(plan, { waiting = true } = {}) {
     managerBadge.className = `status-badge ${managerOff ? 'status-badge-neutral' : 'status-badge-success'}`;
   }
   renderPlanConfidence(plan);
+  if (plan.status === 'energy_manager_off') {
+    host.replaceChildren(planOffState());
+    return;
+  }
   if (plan.status !== 'ok') {
     const states = {
       battery_state_unavailable: ['Plan not available yet', 'Battery data could not be verified automatically. Check that the inverter is connected and reports its battery state and capacity; the plan is re-checked on its own.'],
@@ -1926,9 +1972,11 @@ async function loadDryRunPlan({ poll = false } = {}) {
   }
   const generation = ++planGeneration; // a slower earlier response must not overwrite a newer one
   if (typeof energyExpertMode !== 'undefined' && energyExpertMode) void loadBatteryCalibrationHistory(select.value);
+  const knownDevice = () => planDevices.find((item) => item.device_id === select.value);
   if (!poll) {
     void loadConsumptionHistory(select.value);
-    host.replaceChildren(planWaitState());
+    if (knownDevice()?.mode === 'off') host.replaceChildren(planOffState());
+    else host.replaceChildren(planWaitState());
   }
   try {
     // Keep the Energy Manager mode current without rebuilding the select or the limits form.
@@ -1938,6 +1986,13 @@ async function loadDryRunPlan({ poll = false } = {}) {
         if (known) known.mode = fresh.mode;
       }
     }).catch(() => { });
+    if (generation !== planGeneration) return;
+    if (knownDevice()?.mode === 'off') {
+      // Nothing to compute or retry while the Energy Manager is off; the periodic refresh notices a switch-on.
+      planLastStatus = 'energy_manager_off';
+      renderDryRunPlan({ status: 'energy_manager_off', slots: [], window: {}, energy: null }, { waiting: false });
+      return;
+    }
     const plan = await api(`energy/devices/${encodeURIComponent(select.value)}/dynamic-plan`, { background: poll });
     if (generation !== planGeneration) return;
     if (plan.status !== planLastStatus) { planLastStatus = plan.status; planPollAttempts = 0; }

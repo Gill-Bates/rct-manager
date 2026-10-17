@@ -7,10 +7,19 @@ from pathlib import Path
 
 import pytest
 
+import app.admin.store as store_module
 from app.admin.store import _LEGACY_BATTERY_CALIBRATION_SQL, AdminStore
 from app.gateway.battery_inventory import CapacityCalibrationSample
 
 AT = datetime(2026, 10, 16, 12, tzinfo=UTC)
+
+
+@pytest.fixture(autouse=True)
+def _allow_synthetic_qualified_contract(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        store_module, "_QUALIFIED_BATTERY_CALIBRATION_CONTRACTS",
+        frozenset({"test_qualified_calibration"}),
+    )
 
 
 def _sample(
@@ -21,7 +30,7 @@ def _sample(
         reference_ah=17.0, measured_ah=measured_ah, rated_usable_capacity_wh=10368.0,
         current_usable_capacity_wh=10368.0 * measured_ah / 17.0,
         remaining_capacity_percent=100.0 * measured_ah / 17.0,
-        module_counts=(6,), source_contract="bms_ah_ratio_v1",
+        module_counts=(6,), source_contract="test_qualified_calibration",
     )
 
 
@@ -132,9 +141,9 @@ def test_first_build_schema_is_migrated_keeping_rows_and_attaching_the_serial_la
     assert migrated.get_battery_calibration_history("SN-A")["points"] == []
     assert migrated.attach_inverter_serial("second", "SN-X") == 0  # another device_id's rows stay untouched
     assert migrated.attach_inverter_serial("main", "SN-A") == 2
-    assert [p["measured_ah"] for p in migrated.get_battery_calibration_history("SN-A")["points"]] == [14.0, 13.5]
-    # New measurements continue the migrated series and still deduplicate against it.
-    assert not migrated.record_battery_calibration(_sample(AT + timedelta(days=2), 13.5))
+    assert migrated.get_battery_calibration_history("SN-A")["points"] == []
+    # Legacy rows stay on disk but cannot qualify a calibration point.
+    assert migrated.record_battery_calibration(_sample(AT + timedelta(days=2), 13.5))
     assert migrated.record_battery_calibration(_sample(AT + timedelta(days=3), 12.0))
     migrated.close()
 
@@ -150,8 +159,8 @@ def test_recording_attaches_the_serial_to_rows_of_the_first_build(tmp_path: Path
 
     migrated = AdminStore(path, "x" * 32)
     migrated.initialize()
-    assert not migrated.record_battery_calibration(_sample(AT + timedelta(days=5), 13.5))
-    assert [p["measured_ah"] for p in migrated.get_battery_calibration_history("SN-A")["points"]] == [14.0, 13.5]
+    assert migrated.record_battery_calibration(_sample(AT + timedelta(days=5), 13.5))
+    assert [p["measured_ah"] for p in migrated.get_battery_calibration_history("SN-A")["points"]] == [13.5]
     migrated.close()
 
 

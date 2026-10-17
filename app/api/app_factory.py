@@ -12,7 +12,6 @@ import functools
 import logging
 from collections.abc import (
     AsyncIterator,
-    Awaitable,
     Callable,
     Iterable,
     Iterator,
@@ -75,7 +74,6 @@ from app.gateway.battery_inventory import (
     BMS_SERIAL_METRIC,
     CAPACITY_AH_METRICS,
     RCT_MODULE_SN_SLOTS,
-    CapacityCalibrationSample,
     MeasuredBatteryCapacity,
 )
 from app.gateway.cache import MemoryCache
@@ -867,10 +865,6 @@ async def _inventory_loop(
     clock: Clock,
     activate_second_tower: Callable[[], bool] | None = None,
     capacity_ah_names: tuple[str, ...] = (),
-    capacity_source: MeasuredBatteryCapacity | None = None,
-    on_capacity_calibration: (
-        Callable[[CapacityCalibrationSample], Awaitable[object]] | None
-    ) = None,
     bms_serial_name: str | None = None,
 ) -> None:
     """Drive the bounded initial discovery of the static module-serial inventory, then idle.
@@ -936,20 +930,6 @@ async def _inventory_loop(
                         "Battery BMS serial background read failed: device=%s",
                         device_id,
                     )
-            if (
-                not failed
-                and capacity_source is not None
-                and on_capacity_calibration is not None
-            ):
-                sample = capacity_source.calibration_sample(device_id, clock.now())
-                if sample is not None:
-                    try:
-                        await on_capacity_calibration(sample)
-                    except Exception:
-                        log.exception(
-                            "Battery calibration persistence failed for device %s",
-                            device_id,
-                        )
             next_capacity_read = clock.monotonic() + (
                 _CAPACITY_AH_RETRY_SECONDS if failed else _CAPACITY_AH_REFRESH_SECONDS
             )
@@ -1057,10 +1037,6 @@ def _lifespan(
                 runtime.export_task = export_task
 
         def start_polling_tasks() -> None:
-            async def record_capacity(sample: CapacityCalibrationSample) -> None:
-                if store is not None:
-                    await asyncio.to_thread(store.record_battery_calibration, sample)
-
             for endpoint, heartbeat in parts.heartbeats:
                 task = asyncio.create_task(
                     _heartbeat_loop(connects[id(endpoint)], heartbeat)
@@ -1095,8 +1071,6 @@ def _lifespan(
                             )
                             else ()
                         ),
-                        runtime.battery_capacity,
-                        record_capacity if store is not None else None,
                         (
                             BMS_SERIAL_METRIC
                             if runtime.catalog.exists(BMS_SERIAL_METRIC)

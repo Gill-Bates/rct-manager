@@ -19,6 +19,7 @@ import pytest
 from app.admin.store import AdminStore
 from app.dispatch.models import DeviceLimits
 from app.dispatch.store import DispatchStore
+from app.energy.models import EnergyMode, ModeRecord
 from app.energy.plan_handoff import PlanDispatchHandoff
 from app.energy.readings import DeviceReading
 from app.optimizer.consumption import BaselineConsumptionForecastProvider
@@ -166,9 +167,8 @@ async def test_plan_endpoint_reports_absent_when_no_service_or_no_plan() -> None
 
 
 async def test_factory_starts_registered_planning_service_and_serves_its_plan(
-    tmp_path: Path, monkeypatch, caplog
+    tmp_path: Path
 ) -> None:
-    monkeypatch.setattr("app.api.app_factory._PLAN_HANDOFF_POLL_SECONDS", 0.01)
     settings = make_settings(
         hmac_secret="s" * 48,
         admin_db_path=tmp_path / "admin.db",
@@ -187,6 +187,9 @@ async def test_factory_starts_registered_planning_service_and_serves_its_plan(
 
     async with running_app(settings) as harness:
         service = harness.app.state.planning_services["main"]
+        # Off is the factory state and suspends planning; this test needs the active computation.
+        harness.runtime.energy._mode_states["main"] = ModeRecord("main", mode=EnergyMode.MANUAL)
+        harness.runtime.energy.activity.notify()
         assert any(
             task.get_coro().__qualname__ == "PlanningService.run"
             for task in harness.runtime.tasks
@@ -205,19 +208,35 @@ async def test_factory_starts_registered_planning_service_and_serves_its_plan(
         # The factory's background PlanningService.run loop shares a per-device SingleFlight with this
         # on-demand recompute: a call issued while the loop's own recompute is still in flight is
         # collapsed onto that earlier computation, which ran against the real (empty) sources before
-        # the overrides above and yields None. Re-issue after the background computation settles.
+        # the overrides above and yields None. Re-issue until a call starts fresh against the
+        # overridden sources, which always produce a plan. Bounded so a genuine failure still fails.
         plan = None
-        with caplog.at_level(logging.INFO, logger="app.optimizer.service"):
-            async with asyncio.timeout(2.0):
-                while plan is None:
-                    plan = await service.recompute()
-                    if plan is None:
-                        await asyncio.sleep(0.01)
-        assert plan is not None, [record.message for record in caplog.records if record.name == "app.optimizer.service"]
+        for _ in range(10):
+            plan = await service.recompute()
+            if plan is not None:
+                break
+        assert plan is not None
         response = await harness.client.get("/api/v1/devices/main/plan")
         assert response.status_code == 200
         assert response.json()["available"] is True
 
+
+async def test_factory_default_off_handoff_logs_slots_without_commanding(
+    tmp_path: Path, monkeypatch, caplog
+) -> None:
+    monkeypatch.setattr("app.api.app_factory._PLAN_HANDOFF_POLL_SECONDS", 0.01)
+    settings = make_settings(
+        hmac_secret="s" * 48,
+        admin_db_path=tmp_path / "admin.db",
+        dispatch_db_path=tmp_path / "dispatch.db",
+    )
+    store = AdminStore(settings.admin_db_path, "s" * 48)
+    password = store.initialize()
+    assert store.change_password(password, "replacement-test-password")
+    store.close()
+
+    async with running_app(settings) as harness:
+        service = harness.app.state.planning_services["main"]
         assert settings.enable_automatic_dispatch is False
         assert harness.runtime.energy is not None
         command = AsyncMock(

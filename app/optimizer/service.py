@@ -558,6 +558,7 @@ class PlanningService:
                     self._invalidate()
                     self._wake.clear()
                     await self._wake.wait()
+                    self._wake.clear()
                     continue
                 try:
                     await self.recompute()

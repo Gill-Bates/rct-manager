@@ -437,7 +437,17 @@ def _calibration_sample(serial: str = "SN-A", bms: str | None = "BMS-1", at: dat
         measured_at=at or datetime(2026, 10, 16, 12, tzinfo=UTC), battery_cycles=128,
         reference_ah=17.0, measured_ah=ah, rated_usable_capacity_wh=10368.0,
         current_usable_capacity_wh=8538.35, remaining_capacity_percent=82.35,
-        module_counts=(6,), source_contract="bms_ah_ratio_v1",
+        module_counts=(6,), source_contract="test_qualified_calibration",
+    )
+
+
+@pytest.fixture(autouse=True)
+def _allow_synthetic_qualified_contract(monkeypatch: pytest.MonkeyPatch) -> None:
+    import app.admin.store as store_module
+
+    monkeypatch.setattr(
+        store_module, "_QUALIFIED_BATTERY_CALIBRATION_CONTRACTS",
+        frozenset({"test_qualified_calibration"}),
     )
 
 
@@ -475,6 +485,35 @@ async def test_battery_calibration_history_is_authorized_local_only_and_bounded(
         assert (await harness.client.get("/admin/api/energy/devices/missing/battery-calibration-history", headers=headers)).status_code == 404
         assert harness.runtime.gateway.device_status("main").transactions == before
         assert len(harness.net.frames) == frames
+
+
+async def test_legacy_ah_ratio_remains_stored_but_is_not_api_calibration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import app.admin.store as store_module
+
+    monkeypatch.setattr(store_module, "_QUALIFIED_BATTERY_CALIBRATION_CONTRACTS", frozenset())
+    async with running_app(characterization_settings(tmp_path, enable_periodic_reads=False)) as harness:
+        headers = await admin_session(harness)
+        store = harness.app.state.admin_store
+        harness.runtime.gateway.set_reported_serial("main", "SN-A")
+        with store.connect() as db:
+            db.execute(
+                "INSERT INTO battery_calibration_history (device_id, inverter_serial, measured_at, "
+                "battery_cycles, reference_ah, measured_ah, rated_usable_capacity_wh, "
+                "current_usable_capacity_wh, module_counts, source_contract) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                ("main", "SN-A", "2026-10-17T12:00:00+00:00", 128, 25.0, 23.8531,
+                 10368.0, 9892.4, "[6]", "bms_ah_ratio_v1"),
+            )
+        response = await harness.client.get(
+            "/admin/api/energy/devices/main/battery-calibration-history", headers=headers
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["points"] == [] and body["baseline"] is None
+        with store.connect() as db:
+            assert db.execute("SELECT count(*) FROM battery_calibration_history").fetchone()[0] == 1
 
 
 async def test_battery_calibration_baseline_shape_and_manual_override(tmp_path: Path) -> None:
@@ -526,8 +565,8 @@ async def test_commissioning_override_needs_a_known_serial(tmp_path: Path) -> No
         assert response.status_code == 409
 
 
-async def test_calibration_is_recorded_while_the_energy_manager_is_disabled(tmp_path: Path) -> None:
-    """The producer path has no dispatch dependency: write support off still records every calibration."""
+async def test_background_ah_reads_do_not_record_calibration(tmp_path: Path) -> None:
+    """A fresh Ah pair is diagnostic, even with the Energy Manager disabled."""
     from types import SimpleNamespace
 
     from app.api.app_factory import _inventory_loop
@@ -539,9 +578,6 @@ async def test_calibration_is_recorded_while_the_energy_manager_is_disabled(tmp_
         assert runtime.dispatch is None  # the Energy Manager is off
         assert isinstance(runtime.battery_capacity, MeasuredBatteryCapacity)
         store = harness.app.state.admin_store
-        stub = SimpleNamespace(
-            calibration_sample=lambda device_id, at: _calibration_sample(at=at)
-        )
 
         class StopLoop(Exception):
             pass
@@ -572,15 +608,11 @@ async def test_calibration_is_recorded_while_the_energy_manager_is_disabled(tmp_
             read_system=read_system,
         )
 
-        async def persist(sample):
-            await asyncio.to_thread(store.record_battery_calibration, sample)
-
         with pytest.raises(StopLoop):
             await _inventory_loop(
                 gateway, "main", LoopClock(), capacity_ah_names=("battery_ah_capacity",),
-                capacity_source=stub, on_capacity_calibration=persist,
             )
-        assert [p["measured_ah"] for p in store.get_battery_calibration_history("SN-A")["points"]] == [14.0]
+        assert store.get_battery_calibration_history("SN-A")["points"] == []
 
 
 async def test_battery_characterization_refresh_is_bounded_to_requested_numeric_reads(tmp_path: Path) -> None:

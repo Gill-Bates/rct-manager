@@ -35,43 +35,47 @@ Open-Meteo request and never queries the inverter. Control stays with the
 
 ## Usable battery capacity
 
-The battery-facts resolver uses a verified capacity when available; a persisted per-device Expert
-override takes precedence. A cache-only port (`Runtime.battery_capacity`) feeds it; the device list
-and the plan both read it, and the plan endpoint never queries the inverter.
+The battery-facts resolver requires a verified current capacity or a persisted per-device Expert
+override. The cache-only capacity port currently returns unavailable because the inverter has no
+proven signal for a completed, stable BMS capacity calibration. The device list and plan both read
+this port; the plan endpoint never queries the inverter.
 
 ```mermaid
 flowchart LR
     MOD["Module count<br/>serial slots, stabilized"] --> RATED["Rated usable baseline<br/>modules x 1.92 kWh x 90 %"]
-    AH["BMS Ah registers<br/>measured / reference"] --> RATIO["min(1.0, measured Ah / reference Ah)"]
-    RATED --> CAP["Verified usable capacity"]
-    RATIO --> CAP
+    RATED --> DIAG["Diagnostic 100% reference only"]
+    AH["BMS Ah registers"] --> DIAG2["Raw diagnostic observations"]
+    OVERRIDE["Expert override"] --> CAP["Planner capacity"]
 ```
 
 | Used                                                                                                     | Not used                                                                                |
 | -------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
 | Module count from populated serial slots                                                                 | Live battery voltage                                                                    |
 | Rated baseline: 1.92 kWh per module at 90 % usable depth of discharge (six modules: 10.368 kWh when new) | A guessed nominal voltage                                                               |
-| Ratio `power_mng_amp_hours_measured` / `battery_ah_capacity`, never above 100 %                          | The raw `battery_soh` scale (unverified)                                                |
+| Ah register readings as raw diagnostics                                                                  | The raw `battery_soh` scale (unverified)                                                |
 |                                                                                                          | `battery_stored_energy` and `battery_used_energy` (total energy flow, not a fill level) |
 
-Capacity is `modules x 1.92 kWh x 0.9 x min(1.0, measured Ah / reference Ah)`.
+The rated baseline is `modules x 1.92 kWh x 0.9`. It represents 100 % when new, not the
+present-day usable capacity. Ah readings do not qualify as a degradation percentage.
 
-Rules for a verified capacity:
+Rules for capacity diagnostics:
 
-- Both Ah readings must be fresh, finite and positive, and every tower scan complete and trustworthy.
-  The two Ah registers refresh in the background at a bounded daily cadence, with isolated retries
-  after failures.
+- The two Ah registers refresh in the background at a bounded daily cadence, with isolated retries
+  after failures. Even fresh values are diagnostic only.
 - A single tower may have 2 to 6 modules; two towers are accepted only as documented symmetric 4+4,
   5+5 or 6+6. Missing or unsupported data leaves capacity unavailable.
 - Module serials are read once per device and then kept. After adding or removing modules, restart
   the service; re-addressing a device in a live reload re-reads it and discards the trusted tower
   topology.
 
-??? info "Why registers are used only as a ratio"
+??? info "Why the Ah registers cannot yet determine current capacity"
     The protocol names `battery_ah_capacity` and `power_mng_amp_hours_measured` as capacity in Ah and
     `battery_soh` as State of Health, but gives no usable Wh value, Ah-to-Wh conversion, nominal
     voltage, SoH scale or labels for the `power_mng_battery_type` codes. The Ah values are therefore
-    used only as a ratio, never as standalone Wh. `battery_ah_capacity` x `battery_voltage` is gross,
+    not used as a capacity ratio or standalone Wh. Hardware reads showed 25.0/23.8531 Ah at
+    79–87 % SoC and 16.9251/8.65005 Ah near 2.5 % SoC. A changed next calibration date and
+    `battery_status2=0` did not establish a stable completed calibration.
+    `battery_ah_capacity` x `battery_voltage` is gross,
     voltage-dependent and ignores module count and health. `battery_stored_energy` and
     `battery_used_energy` are total energy flow per the [RCT serial protocol](../reference/protocol.md).
     Per-tower versus device-wide semantics of `battery_placeholder_0_ah_capacity` and other battery
@@ -171,6 +175,17 @@ The plan reports `static_charge_limit_w`, `live_charge_limit_w` (null if absent)
 RCT producer is inert on this build. "Reachable" always means reachable under the currently known
 limits; a lower verified live limit wins at the executor and requires a replan.
 
+## Energy Manager Off
+
+Off is the factory/default Energy Manager state. While every inverter is Off, Energy Manager forecast
+refresh and charging-plan computation are suspended: no spot-market or weather provider call, no
+background plan recompute and no replanning. Stored configuration and forecast/history data remain
+intact. An Off inverter gets no plan, an existing plan is dropped when the inverter is switched Off,
+and switching to Manual or External resumes the work immediately. Shared forecast refresh remains
+active while at least one inverter is Manual or External; planning stays per inverter. The Charging
+plan tab shows "Energy Manager off / Charging plan is inactive." for an Off inverter. This does not
+change the `enable_automatic_dispatch` setting, which stays independent and off by default.
+
 ## Replanning
 
 `app/optimizer/replan.py` (pure `evaluate_replan`, no executor) marks a plan stale when one of these
@@ -202,6 +217,7 @@ Missing hard preconditions return a status with HTTP 200, never a 500 or raw har
 
 | Status                       | Meaning                                                          |
 | ---------------------------- | ---------------------------------------------------------------- |
+| `energy_manager_off`         | Inverter is Off; nothing was read or computed                    |
 | `battery_state_unavailable`  | No verified battery state or capacity                            |
 | `spot_disabled`              | Spot market switched off or incomplete; waiting does not help    |
 | `spot_prices_unavailable`    | Spot market configured, no usable prices yet                     |
@@ -290,15 +306,15 @@ tower. It never reads the inverter on its own. To request a bounded device read,
 one to four listed numeric or enum registers. A read-only admin token may use both routes; a cookie
 session needs its CSRF header for `POST`. A second tower is not probed until its module inventory
 confirms that it exists. The result reports raw observations only and never derives usable Wh from
-them. Only the ratio of the two Ah registers is used for the usable capacity; the comparison with the
-RCT app must still establish how they relate to its displayed usable kWh.
+them. The Ah readings remain unsuitable for a current-capacity claim until a completion signal and
+stable post-calibration values are verified against the RCT app.
 
 ### Battery calibration history
 
-Each time the background Ah read yields a changed BMS capacity measurement, the service stores it
-permanently, keyed by the inverter serial (and the BMS serial, so a replaced battery starts a new
-series). Expert mode shows it under **Advanced diagnostics** as a chart and table of usable capacity
-against the datasheet capacity (100 %).
+The service currently writes no new calibration points: a changed Ah reading does not prove that a
+calibration completed. Existing `bms_ah_ratio_v1` rows remain in SQLite but are excluded from the
+effective history, API chart and capacity percentage. The chart becomes meaningful after a proven
+calibration contract is implemented and new qualified points exist.
 
 The curve starts at a commissioning date. A date entered by an operator always works and wins. After
 a battery replacement a derived date is not used for the new series; enter the replacement date. A
@@ -316,10 +332,8 @@ is **unverified on hardware** and switched off by default
 
 All three need an admin session (read-only for `GET`; `PUT` and `DELETE` need the CSRF header).
 
-Recording does not depend on the Energy Manager: the background Ah read, the calibration history and
-the commissioning-date derivation (when enabled) run whenever the gateway polls the device, also with
-write support off. A calibration is only recorded once the inverter serial is known (never under the
-device id).
+Background Ah reads and commissioning-date derivation (when enabled) run while write support is off.
+No Ah read currently records a calibration point.
 
 The dashboard offers the data as selectable widgets (off by default, added through **Edit Widgets**):
 the tiles *Usable capacity*, *Capacity vs datasheet*, *Battery cycles*, *Last calibration* and
