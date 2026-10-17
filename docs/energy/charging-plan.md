@@ -243,7 +243,7 @@ capacity is never estimated and no extra inverter or provider query is made.
 Basic mode shows the capacity source and the read-only preview ("Dynamic charging plan (Dry-Run
 preview)"). The result area uses the full card width:
 
-- Header: title, preview note, Inverter select, Expert switch.
+- Header: title with the Energy Manager mode badge (and the forecast confidence when weak) on one line, preview note, Inverter select, Expert switch.
 - Four equal KPI tiles (four columns on desktop, 2 x 2 on tablets, stacked on phones): Battery
   remaining (usable energy now, for example `33 % SoC - 10.37 kWh usable`, or a dash without a battery
   snapshot), Target SoC, Charge power, total plan grid energy.

@@ -2154,6 +2154,7 @@ async def test_spot_market_preview_reuses_the_overwritten_database_snapshot(tmp_
 
 async def test_spot_market_preview_summarises_available_series_when_tomorrow_unpublished(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # Regression: in the normal daily pre-auction state the next-day curve is not published yet
     # (fetch_day_ahead raises SpotMarketNotAvailableYet), but yesterday and today exist. The
@@ -2167,8 +2168,9 @@ async def test_spot_market_preview_summarises_available_series_when_tomorrow_unp
     from app.spotmarket.base import SpotMarketNotAvailableYet
 
     berlin = ZoneInfo("Europe/Berlin")  # CET (+01:00) on these January dates
-    # Anchor these rows to the current local date so the API's database projection can classify them.
-    now_local = datetime.now(berlin)
+    # Fixed instant: the wall clock made the live quarter collide with a static interval (same
+    # primary key); 10:20 on a January day also keeps CET/+01:00 stable.
+    now_local = datetime(2026, 1, 15, 10, 20, tzinfo=berlin)
     local_today = now_local.date()
     fetched = now_local.astimezone(UTC)
 
@@ -2212,6 +2214,15 @@ async def test_spot_market_preview_summarises_available_series_when_tomorrow_unp
         def fetch_day_ahead(self, config):
             raise SpotMarketNotAvailableYet("Energy-Charts next-day prices are not published yet")
 
+    # The preview route reads the wall clock directly (``datetime.now(UTC)``), not the injected
+    # clock, so pin that module reference to the fixed instant. The preview then classifies today
+    # and selects the current-slot price deterministically, whatever time the suite runs at.
+    class _FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fetched if tz is None else fetched.astimezone(tz)
+
+    monkeypatch.setattr("app.admin.energy_api.datetime", _FixedDatetime)
     async with running_app(spot_market_settings(tmp_path)) as harness:
         _activate_spot_market(harness)
         _seed_spot_prices(harness.app.state.admin_store, (*today_intervals, *yesterday_intervals), "Europe/Berlin")

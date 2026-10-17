@@ -1698,6 +1698,8 @@ def test_energy_page_wires_the_read_only_dry_run_plan_preview():
     assert "planStatusCard('Energy Manager is off'" not in js
     # The plan is a read-only preview whose execution may be off; it is never labelled "Disabled".
     assert "Read-only preview" in plan_pane and "Preview only" not in plan_pane
+    assert "No inverter commands" not in plan_pane and "Preliminary plan" not in js
+    assert "energy-plan-confidence-note" not in plan_pane + js
     assert 'id="energy-plan-confidence"' in plan_pane and "'Energy Manager off'" in js
     assert "Show schedule details" in js and "element('details'" in js and "element('summary'" in js
     assert "History coverage" in js and "Live recording" not in js

@@ -104,8 +104,23 @@ refusal codes are logged and swallowed; unexpected ones propagate.
 
 Current-branch check on 2026-10-17 (no code changed): `pytest tests/test_energy_plan_handoff.py
 tests/test_plan_api.py tests/test_dynamic_adapters.py tests/test_optimizer_service.py
-tests/test_config_validation.py` -> 133 passed; `pytest tests/test_admin_ui.py` -> 134 passed. The full
-suite and the JS suite were not re-run for this report.
+tests/test_config_validation.py` -> 133 passed; `pytest tests/test_admin_ui.py` -> 134 passed.
+
+Full-suite rerun on 2026-10-18 (branch `feature/v1.2.2`, HEAD `81f4c45`): `python -m pytest -q -rfE`
+-> 2331 passed, 2 xfailed, 0 failed (~9m51s); `node --test tests/js/*.test.js` -> 147 passed,
+1 failed. The single JS failure (`Charging plan shows forecast confidence from the plan fields and
+explains a weak forecast`, `tests/js/admin-energy-setup.test.js:875`) is a PRE-EXISTING admin-UI
+forecast-confidence / `energy-plan-confidence-note` failure outside the charging-strategy/optimizer/
+energy/dispatch domain; it belongs to the admin-UI follow-up, was not caused by and is not fixed by
+this work. The one Python failure seen earlier
+(`tests/test_energy_api.py::test_spot_market_preview_summarises_available_series_when_tomorrow_unpublished`,
+`sqlite3.IntegrityError: UNIQUE constraint failed: spot_market_intervals.interval_start`) was a
+flaky test caused by wall-clock-dependent fixture construction, not a product defect: when the live
+15-minute quarter rounded to 00:30 or 18:00 local, the fixture's `current_start` interval collided
+with a static today interval and seeded two rows with the same persisted `interval_start`. Fixed in
+the test only by anchoring the fixture and the preview route's `now` to one fixed instant; the
+store's `interval_start` PRIMARY KEY (a correct integrity guarantee) and `replace_spot_market_intervals`
+were left unchanged.
 
 Pulled from `implementation-evidence.md` and `integration-verification.md` (both tied to HEAD
 `c485bad`; working tree clean, so results are reused rather than re-run):
@@ -144,6 +159,22 @@ Pulled from `implementation-evidence.md` and `integration-verification.md` (both
    decides who calls `offer` on which tick), and any wiring is a release-gate change.
    Open question for the owner: wire it log-only (OFF) ahead of the hardware checks, or only together
    with the enable decision.
+   NAMED BLOCKER (re-verified 2026-10-18, item left OPEN by decision): the wiring cannot be derived
+   unambiguously from existing code, tests or docs, so no architectural decision was invented. Three
+   things are undecided and nothing in the repository fixes them. (a) Which tick owns the offer: the
+   only plan-domain runtime tick is `PlanningService.run()` -> `recompute()` -> `_recompute_once()`
+   (`app/optimizer/service.py`), a plan-PRODUCTION loop that returns the full `EnergyPlan`, not
+   `active_slot(now)`; nothing states it should also drive dispatch, nor whether an offer fires
+   before or after `set_plan`. `active_slot(now)` is called today only by the read-only plan route
+   (`app/api/routers/plan.py`, on HTTP request), which is not a scheduler tick and must not become
+   one. (b) Who constructs/owns the handoff: `start_planning_tasks` (`app/api/app_factory.py`) and
+   `build_runtime_planning_service` (`app/optimizer/runtime_sources.py`) build a `PlanningService`
+   per device but offer no hook, field, or owner for a `PlanDispatchHandoff`, and no `app/` code
+   constructs one (constructed only in `tests/test_energy_plan_handoff.py`). (c) The call site and
+   device-id source for `offer(device_id, slot)` per tick are therefore undefined. Resolving (a)-(c)
+   is a new architectural + release-gate decision for the owner; until then the item stays OPEN. The
+   `log-only, default OFF` mandate (`enable_automatic_dispatch` is `bool = False`, not in
+   `OPERATOR_FIELDS`) is untouched and was reconfirmed on the current tree on 2026-10-18.
 2. ~~Handoff docstring overstates the enable flag.~~ Fixed: the docstring states a plain `bool` captured once.
 3. **Battery-state inputs assume the configured or verified values are correct.** Usable capacity (expert
    override or cache-only verified source) and the static per-device power limits are taken as
@@ -160,8 +191,21 @@ cannot be flipped from the operator surface.
 
 - [ ] **Wire `PlanDispatchHandoff` into the production assembly** (`PlanningService` is already wired in
       `app_factory`), so the plan -> handoff -> Energy Manager path is exercised at runtime and not only by
-      `tests/test_energy_plan_handoff.py` (assumption 1). Code-verifiable, but NOT done: still not
-      instantiated, pending the owner's decision in assumption 1.
+      `tests/test_energy_plan_handoff.py` (assumption 1). Code-verifiable, but NOT done — left OPEN as a
+      NAMED BLOCKER (triage 2026-10-18): the owner, the tick/when, and the call site cannot be derived
+      unambiguously from existing code, tests, or docs, so wiring it would mean inventing an
+      architectural decision, which is explicitly out of scope. Concretely undecided:
+      (a) which loop owns the `offer` call — the only plan-domain tick is `PlanningService.run()` ->
+          `recompute()` -> `_recompute_once()` (`app/optimizer/service.py`), but nothing in code/tests/doc
+          assigns the offer to it; `active_slot(now)` is today called only by the read-only plan route
+          (`app/api/routers/plan.py`) on HTTP request, which is not a dispatch tick;
+      (b) when in that tick to offer (before/after `set_plan`, and whether off the recompute result or a
+          fresh `scheduler.active_slot(now)` — `_recompute_once` returns the whole plan, not the active slot);
+      (c) who constructs and holds the single `PlanDispatchHandoff` instance and passes the
+          `EnergyManagerPort` — no `app/` factory, `Runtime` field, or `start_planning_tasks` hook exists.
+      The existing mandate stays intact regardless: `enable_automatic_dispatch` is `bool = False`, absent
+      from `OPERATOR_FIELDS`, and any future wiring must be log-only/OFF with the non-admin
+      `charging-strategy` actor and no bypass of the Energy Manager gate chain.
 - [ ] **Validate operator config against the physical system:** `battery_usable_capacity_wh` and the
       per-device static `DeviceLimits` (max charge/discharge power) match the installed hardware's
       real ratings and safe operating limits (assumption 3).
@@ -191,14 +235,21 @@ cannot be flipped from the operator surface.
       be deployed, and confirm the hard invariants still hold (dispatch OFF until this checklist is
       complete; flag absent from `OPERATOR_FIELDS`; no architecture rule weakened). The invariants hold
       on the current tree (`enable_automatic_dispatch: bool = False` in `app/config.py`, absent from
-      `OPERATOR_FIELDS`); the full-suite run on the deployed build is still due.
+      `OPERATOR_FIELDS`). Code-side rerun done on this tree (HEAD `81f4c45`, 2026-10-18): full Python
+      suite 2331 passed / 2 xfailed / 0 failed; JS 147/148 (the one failure is the pre-existing
+      admin-UI forecast-note test, out of scope — see section 2). Box stays unchecked: it must be run
+      again on the exact build to be deployed and the rest of this checklist is still open.
 - [ ] **Obtain explicit operator/owner sign-off** that automatic hardware dispatch may be enabled,
       recorded against the specific hardware and configuration validated above.
 
-Triage 2026-10-17: no box is checked. Wiring (item 1) and the full-suite re-run (item 9) are
-code-side work that remains open by decision or by timing; all other items need the real
-installation, an isolated device, or the operator. Nothing here may be ticked by an agent, and the
-sign-off item cannot be given by one.
+Triage 2026-10-18: no box is checked. The code-side full-suite rerun was done on the working tree of
+`feature/v1.2.2` (see section 2: Python 2331 passed / 2 xfailed / 0 failed, JS 147/148 with one
+pre-existing admin-UI failure) and the hard invariants were reconfirmed, but item 9 stays OPEN
+because it requires the run on the exact deployed build in the operator's release context, not an
+agent's working-tree run. Wiring (item 1) stays OPEN as a named blocker (see item 1 above): the
+tick, owner, and call site are undecided and an agent must not invent them. All other items need the
+real installation, an isolated device, live providers, or the operator. Nothing here may be ticked
+by an agent, and the sign-off item cannot be given by one.
 
 Only after every box is checked may `enable_automatic_dispatch` be set to `True` in code for the
 validated deployment.

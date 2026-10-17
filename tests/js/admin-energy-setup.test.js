@@ -872,26 +872,22 @@ test('Coverage status degrades gracefully: missing days render 0/0, no crash', (
   } finally { h.cleanup(); }
 });
 
-test('Charging plan shows forecast confidence from the plan fields and explains a weak forecast', () => {
+test('Charging plan shows forecast confidence from the plan fields and no preliminary-plan note', () => {
   const cases = [
-    [{ forecast_basis: 'adaptive_history', forecast_confidence: 'low' }, 'Low confidence', /limited consumption history/i],
-    [{ forecast_basis: 'adaptive_history', forecast_confidence: 'normal' }, 'Normal confidence', null],
-    [{ forecast_basis: 'bootstrap_baseline', forecast_confidence: 'low' }, 'Baseline forecast', /baseline/i],
-    [{}, '', null],
+    [{ forecast_basis: 'adaptive_history', forecast_confidence: 'low' }, 'Low confidence'],
+    [{ forecast_basis: 'adaptive_history', forecast_confidence: 'normal' }, 'Normal confidence'],
+    [{ forecast_basis: 'bootstrap_baseline', forecast_confidence: 'low' }, 'Baseline forecast'],
+    [{}, ''],
   ];
-  for (const [fields, label, note] of cases) {
+  for (const [fields, label] of cases) {
     const h = harness();
     const host = h.context.element('div');
     host.id = 'energy-plan-result';
     const badge = h.context.element('span');
     badge.id = 'energy-plan-confidence';
-    const explain = h.context.element('p');
-    explain.id = 'energy-plan-confidence-note';
     h.context.renderDryRunPlan({ status: 'ok', horizon_hours: 24, slots: [], energy: {}, window: {}, ...fields });
     assert.equal(badge.textContent, label, JSON.stringify(fields));
     assert.equal(badge.hidden, !label);
-    if (note) assert.match(explain.textContent, note);
-    assert.equal(explain.hidden, !note);
     h.context.renderDryRunPlan({ status: 'spot_prices_unavailable', slots: [], ...fields });
     assert.equal(badge.hidden, true, 'no confidence without a plan');
   }

@@ -2590,6 +2590,18 @@ try {
         check('plan header says Read-only preview and the Energy Manager mode, never Disabled',
           /Read-only preview/.test(await ep.locator('.energy-plan-head-title').innerText())
           && !/Disabled/.test(await ep.locator('.energy-plan-head-title').innerText()));
+        const headRow = await ep.evaluate(() => {
+          const title = document.getElementById('energy-plan-title').getBoundingClientRect();
+          const badge = document.getElementById('energy-plan-manager-state');
+          const box = badge.getBoundingClientRect();
+          return { visible: !badge.hidden && box.width > 0, right: box.left >= title.right - 1,
+            sameRow: box.top < title.bottom && box.bottom > title.top, text: badge.textContent.trim() };
+        });
+        check('Energy Manager badge sits right of the Charging plan title on the same row',
+          headRow.visible && headRow.right && headRow.sameRow, JSON.stringify(headRow));
+        check('the removed "Preliminary plan" note does not exist',
+          (await ep.locator('#energy-plan-confidence-note').count()) === 0
+          && !/Preliminary plan|limited consumption history/i.test(await ep.locator('#energy-plan-card').innerText()));
         const hero = await ep.locator('#energy-plan-result .energy-plan-highlights .spot-market-highlight-caption').allInnerTexts();
         check('plan summary shows three plan KPI tiles in the pinned order',
           hero.map((t) => t.toLowerCase()).join('|') === 'target soc|charge power|total plan grid energy', hero.join('|'));
