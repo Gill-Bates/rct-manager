@@ -9,10 +9,10 @@ The service can push its metrics to a time-series database. Supported targets:
 | QuestDB OSS 10.x | Writes to `/write` (ILP over HTTP); HTTP Basic Auth only |
 
 Configure the target on the GUI **TSDB** page (secrets are write-only). Without a database type
-nothing is exported. A saved change restarts the export at once; no server restart is needed. The
-fields of one backend are saved together, and only once its required fields are filled. The variables `DB_TYPE=influxdb_v2` or
-`DB_TYPE=questdb` and the `INFLUXDB_*` / `QUESTDB_*` names listed in
-[Environment Variables](environment.md) only seed the very first start.
+nothing is exported. A saved change restarts the export at once. The fields of one backend are
+saved together, once its required fields are filled. `DB_TYPE=influxdb_v2` or `DB_TYPE=questdb` and
+the `INFLUXDB_*` / `QUESTDB_*` variables ([Environment Variables](environment.md)) only seed the
+first start.
 
 ## What is exported
 

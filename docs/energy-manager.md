@@ -1,22 +1,18 @@
 # Energy Manager
 
 The Energy Manager turns one business decision ("charge to 80 % now") into a battery dispatch
-command. The admin GUI page **Energy Manager** and the REST API share one control path, so both
-behave identically.
+command. The admin GUI page **Energy Manager** and the REST API share one control path.
 
 ![Energy Manager spot-market configuration and day-ahead price preview](assets/screenshot_02.png)
 
-The **Spot Market** tab configures the Energy-Charts price source and shows a
-read-only day-ahead preview. The **Weather** tab configures an Open-Meteo solar
-production forecast and shows a read-only preview. Neither tab schedules or
-executes a battery command: both are read-only inputs for the dashboard and for
-the dynamic charging planner.
+The **Spot Market** tab configures the Energy-Charts price source, the **Weather** tab an Open-Meteo
+solar forecast; each shows a read-only preview. Neither schedules or executes a battery command:
+both are read-only inputs for the dashboard and the dynamic charging planner.
 
-The dynamic charging planner now exists as a **Dry-Run**: it reads local
-measurements, spot prices, the solar forecast and the battery state and produces
-a traceable charging plan for preview only. It never commands the battery — there
-is no automatic execution, no `Dynamic` operating mode, and no register write
-anywhere in the planner. See [Dynamic charging plan (Dry-Run)](#dynamic-charging-plan-dry-run).
+The planner exists as a **Dry-Run**: it reads local measurements, spot prices, the solar forecast
+and the battery state and produces a traceable plan for preview only. There is no automatic
+execution, no `Dynamic` operating mode and no register write in the planner. See
+[Dynamic charging plan (Dry-Run)](#dynamic-charging-plan-dry-run).
 
 ```mermaid
 flowchart LR
@@ -41,30 +37,24 @@ flowchart LR
 
 ## Spot Market
 
-In **Energy Manager → Spot Market**, choose a bidding zone. The source currency
-and unit are read-only. Network fees are not calculated or added. Save the
-configuration to retain it in the admin database. The source is disabled by
-default.
+In **Energy Manager → Spot Market**, choose a bidding zone and save it to the admin database. The
+source is disabled by default; currency and unit are read-only; network fees are not added.
 
-The preview shows the saved bidding zone's prices for yesterday, today and
-tomorrow. The source reports EUR/MWh;
-prices are normalized to EUR/kWh internally and shown as cents per kWh.
-Tomorrow's curve is published
-around 12:45 CET (SDAC day-ahead auction), so it is normally absent in the morning.
-Price intervals are stored in the SQLite `spot_market_intervals` table and the
-bidding-zone list in the admin database. Everything the UI shows is read from SQLite;
-page views, previews and restarts never call the provider. One daily retrieval fetches
-tomorrow's prices (and the zone list) from 13:00 Europe/Berlin (market time), only
-while tomorrow is missing from the database; afterwards nothing is requested until the
-next day. Only an empty database (first start) also fetches today and yesterday. A failed
-retrieval is retried with a growing delay (5 minutes up to 1 hour), logged as a warning
-and, while data that is due is still missing, shown as a stale warning in the preview and
-dashboard; an unpublished tomorrow only counts as a failure one hour after 13:00. The
-table keeps only the current three local days; no price history is kept. It never changes
-inverter control.
-Each complete day contains 96 quarter-hour intervals; local daylight-saving
-transitions naturally contain 92 or 100 intervals. If tomorrow is not published,
-its table rows remain absent and the preview shows the availability hint.
+The preview shows the zone's prices for yesterday, today and tomorrow. The source reports EUR/MWh;
+prices are normalized to EUR/kWh internally and shown as cents per kWh. Tomorrow's curve is
+published around 12:45 CET (SDAC auction), so it is normally absent in the morning. A complete day
+has 96 quarter-hour intervals (92 or 100 on daylight-saving days).
+
+- Intervals live in the SQLite `spot_market_intervals` table, the zone list in the admin database.
+  The UI reads only from SQLite; page views, previews and restarts never call the provider.
+- One daily retrieval fetches tomorrow's prices (and the zone list) from 13:00 Europe/Berlin, only
+  while tomorrow is missing; nothing is requested until the next day. Only an empty database (first
+  start) also fetches today and yesterday.
+- A failed retrieval is retried with a growing delay (5 minutes up to 1 hour) and logged as a
+  warning. While due data is missing, the preview and dashboard show a stale warning; an
+  unpublished tomorrow counts as a failure only one hour after 13:00.
+- The table keeps only the current three local days, no history. If tomorrow is not published, its
+  rows stay absent and the preview shows the availability hint. Inverter control is never affected.
 
 The displayed price is the day-ahead market (exchange) price only. It is **not**
 a complete household electricity price: it excludes your network fees, taxes,
@@ -72,29 +62,22 @@ levies and supplier margin. Treat it as the raw market price, not what you pay
 per kWh.
 
 The admin routes `/admin/api/energy/spot-market/config` (`GET`, `PUT`),
-`/admin/api/energy/spot-market/bidding-zones` (`GET`) and
-`/admin/api/energy/spot-market/preview` (`POST`) require an admin session; writes
-also require CSRF. They are not public token API routes.
+`/admin/api/energy/spot-market/bidding-zones` (`GET`) and `/admin/api/energy/spot-market/preview`
+(`POST`) require an admin session (writes also CSRF); they are not public token routes.
 
 ## Weather
 
 In **Energy Manager → Weather**, configure a solar production forecast from
-[Open-Meteo](https://open-meteo.com/). The forecast is a read-only input: like
-the spot-market source, it never charges or discharges the battery. The source
-is disabled by default, and a disabled or incomplete configuration makes no
-network request at all.
+[Open-Meteo](https://open-meteo.com/). Like the spot market it is a read-only input and never
+charges or discharges the battery. It is disabled by default; a disabled or incomplete
+configuration makes no network request.
 
-Type a city or postal code into the location search; the server resolves it
-through its location geocoder and offers a short pick list. The default geocoder
-is Photon over OpenStreetMap data, selectable with the `GEOCODING_PROVIDER`
-operator setting (`photon` default, `open_meteo` as a legacy alternative). The
-solar forecast itself always runs on Open-Meteo regardless of this setting.
-Choosing an entry fills in the coordinates (and the time zone when the geocoder
-reports one). Photon carries no IANA time zone, so when it is the active geocoder
-the time zone is not auto-filled and local-time display falls back to UTC; the
-forecast is always computed in UTC. The browser never calls the geocoder
-directly — every request goes through the admin API against the provider's fixed
-endpoints.
+Type a city or postal code into the location search; the server resolves it through its geocoder
+(`GEOCODING_PROVIDER` operator setting: `photon` default, `open_meteo` legacy) and offers a short
+pick list. The forecast itself always runs on Open-Meteo. Choosing an entry fills in the
+coordinates, and the time zone when the geocoder reports one. Photon reports none, so local-time
+display then falls back to UTC; the forecast is always computed in UTC. The browser never calls the
+geocoder directly; every request goes through the admin API to the providers' fixed endpoints.
 
 Describe your PV array so the forecast can turn irradiance into expected power:
 
@@ -106,10 +89,9 @@ Describe your PV array so the forecast can turn irradiance into expected power:
 | **Azimuth** | Orientation in the Open-Meteo convention: 0° = south, -90° = east, +90° = west, ±180° = north. |
 | **Performance ratio** | A single factor in (0, 1] (default 0.85) folding inverter, wiring, soiling and temperature losses into one transparent multiplier. |
 
-A disabled configuration may be saved while still incomplete; enabling it
-requires every forecast value. The forecast uses a deliberately simple, fully
-documented model and never patches a provider value — a missing, negative or
-mistyped reading is reported as an error rather than silently repaired:
+A disabled configuration may be saved incomplete; enabling it requires every forecast value. The
+model is deliberately simple and never patches a provider value: a missing, negative or mistyped
+reading is reported as an error.
 
 ```mermaid
 flowchart LR
@@ -120,208 +102,199 @@ flowchart LR
     EN --> WIDGET[Dashboard solar widget]
 ```
 
-The preview shows the saved configuration's production curve and energy for the
-next 24 hours. Solar forecast intervals are stored in a separate SQLite
-`solar_forecast_intervals` table. A background refresh replaces its contents
-with the latest three local days once per local day (when today or tomorrow is missing from
-the table, so the next-24-hours figure is always backed by stored data); a failed retrieval is
-retried with a growing delay and warned about in the log and, while data is missing, in the
-preview and dashboard. The Weather preview and
-dashboard read only from this table; they do not make provider calls. Changing
-the saved forecast configuration clears the previous rows before refresh starts.
-No forecast history is retained.
-The source supplies quarter-hour intervals, normally 96 per local day (92 or 100
-on daylight-saving transition days).
+The preview shows the production curve and energy for the next 24 hours. Quarter-hour intervals
+(96 per local day, 92 or 100 on daylight-saving days) are stored in the SQLite
+`solar_forecast_intervals` table; no history is kept.
+
+- A background refresh replaces the contents with the latest three local days once per local day
+  (when today or tomorrow is missing, so the next-24-hours figure is always backed by stored data).
+- A failed retrieval is retried with a growing delay and warned about in the log and, while data is
+  missing, in the preview and dashboard.
+- Preview and dashboard read only from the table, never from the provider. Changing the saved
+  configuration clears the previous rows before the refresh starts.
 
 The admin routes `/admin/api/energy/weather/config` (`GET`, `PUT`),
 `/admin/api/energy/weather/locations` (`GET`, geocoding search) and
-`/admin/api/energy/weather/preview` (`POST`) require an admin session; writes
-also require CSRF. They are not public token API routes.
+`/admin/api/energy/weather/preview` (`POST`) require an admin session (writes also CSRF); they are
+not public token routes.
 
 !!! note "Attribution"
-    The free Open-Meteo Open-Access endpoint needs no API key and is intended
-    for non-commercial use under CC BY 4.0: "Weather data by Open-Meteo.com".
-    Free non-commercial use with no availability guarantee. The location search's
-    attribution follows the active geocoder: with the default Photon geocoder it
-    is "Location data from Photon © OpenStreetMap contributors" (OpenStreetMap
-    data under the ODbL, credit the OpenStreetMap contributors); with the
-    Open-Meteo geocoder it is "Location data based on GeoNames via Open-Meteo".
-    All credits are recorded here in the documentation; the Weather tab itself no
-    longer displays them. The endpoints must not be polled aggressively (roughly 10,000 requests per day),
-    which is why the forecast retrieval (once per local day) is fixed in code and the location
-    search is served through a short-lived server-side cache.
+    The free Open-Meteo Open-Access endpoint needs no API key and is for non-commercial use under
+    CC BY 4.0 ("Weather data by Open-Meteo.com"), with no availability guarantee. Location search
+    attribution follows the active geocoder: Photon, "Location data from Photon © OpenStreetMap
+    contributors" (ODbL); Open-Meteo geocoder, "Location data based on GeoNames via Open-Meteo".
+    The Weather tab itself no longer displays these credits. The endpoints must not be polled
+    aggressively (roughly 10,000 requests per day), so the forecast retrieval (once per local day)
+    is fixed in code and the location search uses a short-lived server-side cache.
 
 ## Dynamic charging plan (Dry-Run)
 
-The dynamic charging planner turns the local data sources into a proposed charging
-plan. This first version is a **Dry-Run**: it only produces a plan for preview and
-evaluation and never controls the battery. There is no automatic executor, no
-`Dynamic` operating mode, and the planner issues no `EnergyManager.command()`,
-dispatch command or register write. The Energy Manager (Off / Manual / External)
-stays the only path that can command the inverter.
+The planner turns the local data sources into a proposed charging plan for preview and evaluation.
+It never controls the battery: no automatic executor, no `Dynamic` operating mode, and no
+`EnergyManager.command()`, dispatch command or register write. The Energy Manager (Off / Manual /
+External) stays the only path that can command the inverter.
 
 ### Local consumption history
 
-The planner needs the house's own consumption, so the service builds a local
-history of the `household_load_power` metric. It reuses the value that is already
-received over the periodic read path — it causes **no additional inverter reads**
-and does not depend on QuestDB, InfluxDB or metrics export being enabled. A small
-passive observer buffers each received value; a background task integrates the
-buffered power samples into fixed 15-minute energy buckets off the receiver path
-and writes them to the `consumption_history_intervals` SQLite table (one row per
-device and quarter hour). A SQLite error there can never disturb the inverter
-connection or the read cache.
+The service builds a local history of the `household_load_power` metric. It reuses the value
+already received over the periodic read path (**no additional inverter reads**) and does not depend
+on QuestDB, InfluxDB or metrics export. A passive observer buffers each value; a background task
+integrates the samples into fixed 15-minute energy buckets off the receiver path and writes them to
+the `consumption_history_intervals` SQLite table (one row per device and quarter hour). A SQLite
+error there never disturbs the inverter connection or the read cache.
 
-Energy is integrated **time-weighted** (`Wh = W × hours`) between consecutive
-samples and split correctly across any 15-minute boundary a sample interval
-crosses. A negative, non-finite or missing reading is kept as a measurement-gap marker: it adds no energy
-and no sample count, and the integration never bridges across it. Each
-bucket stores how well it is backed — `sample_count` and `coverage_seconds` (at
-most 900 s) — so a poorly-covered bucket can later be treated as uncertain.
-Missing samples are never read as `0 W`, and a dropout longer than the documented
-maximum integration gap (5 minutes) leaves the period uncovered instead of
-fabricating energy across it. History is kept for a rolling **60 days** (a code
-default); pruning touches only the consumption table, never the price or
-solar-forecast rows.
+Energy is integrated **time-weighted** (`Wh = W × hours`) between consecutive samples and split
+across any 15-minute boundary. A negative, non-finite or missing reading is a measurement-gap
+marker: it adds no energy and no sample count, and integration never bridges it. Each bucket stores
+`sample_count` and `coverage_seconds` (at most 900 s), so a poorly covered bucket can be treated as
+uncertain. Missing samples are never read as `0 W`, and a dropout longer than the maximum
+integration gap (5 minutes) leaves the period uncovered. History is kept for a rolling **60 days**
+(code default); pruning touches only the consumption table.
 
 ### Inverter day history (daily reconciliation)
 
-The inverter's daily load logger is used as a read-only reconciliation source for completed local calendar days. It can bootstrap daily consumption history and repair multi-day application outages. Daily inverter values are never expanded into artificial quarter-hour observations and never train the consumption forecast.
+The inverter's daily load logger is a read-only reconciliation source for completed local calendar days. It bootstraps daily consumption history and repairs multi-day outages. Daily values are never expanded into quarter-hour observations and never train the forecast.
 
 | Source | Used for |
 | --- | --- |
 | Local 15-minute measurements | profile, forecast learning and the daily total |
 | Inverter daily history | daily total and reconciliation only (`profile_available` is false) |
 
-A background service asks the inverter, through the normal device queue and without any write permission, for the last 60 completed local days (the running day is excluded) once shortly after start, after a device came back from an outage, and about once a day. Only days that are neither measured locally nor stored yet are fetched; as many real values as the inverter provides are stored in their own table (`consumption_daily_history`), the rest stays unavailable. A day counts as locally measured when at least 90 % of its local seconds are covered; otherwise a stored inverter total is used, never the sum of both. The days are local calendar dates of the site time zone, so a 23 h or 25 h DST day is one date.
+A background service asks the inverter, through the normal device queue and without write permission, for the last 60 completed local days (not the running day) shortly after start, after an outage and about once a day. Only days neither measured locally nor stored yet are fetched; the real values the inverter provides go to `consumption_daily_history`, the rest stays unavailable. A day counts as locally measured at 90 % or more local-second coverage; otherwise a stored inverter total is used, never the sum of both. Days are local calendar dates of the site time zone (a 23 h or 25 h DST day is one date).
 
-The query is not a write, but it is sent as a request frame with a timestamp. A firmware that ignores it makes the request time out; the transport keeps the connection for other objects after the first unanswered attempt, re-reads that object on a new connection, and reconnects on a second miss in a row, before the service backs off for six hours. The backfill always runs; it is read-only and never applies anything to the inverter.
+The query is not a write, but it is a request frame with a timestamp. A firmware that ignores it makes the request time out; the transport keeps the connection for other objects after the first miss, re-reads that object on a new connection and reconnects on a second miss in a row, before the service backs off for six hours. The backfill always runs; it is read-only.
 
-The unit and the day semantics of `logger.day_eload_log_ts` are assumed to be Wh per local calendar day; `tools/probe_consumption_history.py` checks them read-only on a real inverter. Read it with `GET /api/v1/devices/{device_id}/consumption/day?date=YYYY-MM-DD` and `GET /api/v1/devices/{device_id}/consumption/days?from=...&to=...` (at most 60 days, local store only, no device access). `source` is `local_measured`, `inverter_history` or `unavailable`.
+`logger.day_eload_log_ts` is Wh per local calendar day, stamped as local wall-clock time labelled UTC, so the `before=` query is normalized to the device wall clock; `tools/probe_consumption_history.py` re-checks this read-only on a real inverter. Read it with `GET /api/v1/devices/{device_id}/consumption/day?date=YYYY-MM-DD` and `GET /api/v1/devices/{device_id}/consumption/days?from=...&to=...` (at most 60 days, local store only, no device access). `source` is `local_measured`, `inverter_history` or `unavailable`.
 
 ### Consumption forecast
 
-The forecast is deterministic and uses no machine learning. It separates the **everyday
-profile** (a capped mean per local weekday and quarter hour, learned only from clean, closed,
-sufficiently measured buckets) from the current **consumption phase**. A contiguous stretch of clearly
-reduced consumption is labelled *suspected low activity* (not "absence"): the profile is then frozen, so
-quiet days never pull the everyday profile down, and the forecast follows the low level. When several
-consecutive well-measured observations resemble the profile again, the forecast returns to the everyday
-profile; a single spike or a heavy appliance does not trigger the switch. Estimated buckets and
-measurement outages are neither vacation nor zero consumption. Lasting changes are learned through a
-level factor (about three days) or, after four weeks, by promoting the phase to the new normal. With
-fewer than 14 usable days the median forecast (same weekday, then time of day, then whole history) is
-used with low confidence. With no usable history, the Dry-Run preview uses the configured
-`baseline_household_load_w` as an explicit low-confidence bootstrap assumption; it is never
-presented as measured consumption. The next local day (92 to 100 slots on
-daylight-saving days) is stored once per day after 22:00 local time together with its basis, and later
-compared with measured actuals. Rules, thresholds and measured detection delays:
-[Architecture](development/architecture.md).
+The forecast is deterministic, without machine learning. It separates the **everyday profile** (a
+capped mean per local weekday and quarter hour, learned only from clean, closed, sufficiently
+measured buckets) from the current **consumption phase**.
+
+- A contiguous stretch of clearly reduced consumption is labelled *suspected low activity* (not
+  "absence"). The profile is then frozen and the forecast follows the low level.
+- Several consecutive well-measured observations resembling the profile return the forecast to it;
+  a single spike or heavy appliance does not.
+- Estimated buckets and outages are neither vacation nor zero consumption.
+- Lasting changes are learned via a level factor (about three days) or, after four weeks, by
+  promoting the phase to the new normal.
+- Fewer than 14 usable days: median forecast (same weekday, then time of day, then whole history)
+  at low confidence. No usable history: the configured `baseline_household_load_w` as an explicit
+  low-confidence bootstrap assumption, never presented as measured.
+- The next local day (92 to 100 slots) is stored once per day after 22:00 local time with its
+  basis and later compared with measured actuals.
+
+Rules, thresholds and measured detection delays: [Architecture](development/architecture.md).
 
 ### Inputs and plan
 
-The planner combines the consumption forecast with the already-persisted spot
-prices and solar forecast (read from SQLite — a plan preview triggers **no**
-Energy-Charts or Open-Meteo request) and the current battery state (SoC from the
-read cache, power limits from the dispatch configuration). The battery-facts resolver
-uses a verified usable capacity when one is available, with a persisted per-device
-Expert override taking precedence. The resolver is fed by a cache-only capacity port
-(`Runtime.battery_capacity`) that both the device list and the plan read; the plan
-endpoint never queries the inverter. Module serials establish a rated upper baseline:
-the RCT Power Battery datasheet specifies 1.92 kWh per module and 90 % usable depth of
-discharge, so six modules have 10.368 kWh rated usable capacity when new. Current usable
-capacity is capped by the BMS ratio `power_mng_amp_hours_measured / battery_ah_capacity`,
-never above 100 % of that rated baseline. Both Ah readings must be fresh, finite and positive,
-and every tower scan must be complete and trustworthy. A single tower may have 2–6 modules;
-two towers are accepted only as documented symmetric 4+4, 5+5 or 6+6 installations.
-Missing or unsupported data leaves capacity unavailable. Neither live voltage nor the
-unverified `battery_soh` scale is used. The two Ah registers are refreshed automatically
-in the background at a bounded daily cadence, with isolated retries after failures.
-No RCT register is proven to yield usable Wh directly:
-`battery_ah_capacity` x live `battery_voltage` is gross, voltage-dependent and ignores
-module count and state of health. `battery_stored_energy` and `battery_used_energy` are
-documented by the [RCT serial protocol](reference/protocol.md) as total energy flow into and
-out of the battery; they are not a fill level and are never used as capacity. The same
-protocol names `battery_ah_capacity` as battery capacity in Ah,
-`power_mng_amp_hours_measured` as measured battery capacity in Ah, and `battery_soh` as
-State of Health. It gives no usable-capacity value in Wh, no Ah-to-Wh conversion or
-nominal-voltage mapping, no SoH scale, and no labels for the `power_mng_battery_type`
-enum codes. The planner uses the two Ah values only as a ratio to reduce the datasheet
-baseline, never as standalone Wh. Per-tower versus device-wide semantics for
-`battery_placeholder_0_ah_capacity` and other battery registers still need characterization;
-unsupported tower combinations therefore remain unavailable. Live voltage stays unsuitable
-for an Ah-to-Wh conversion. Existing
-persisted `usable_capacity_wh` values remain effective as Expert overrides, including
-values seeded from the legacy `DISPATCH_USABLE_BATTERY_CAPACITY_WH` setting. Saving
-other limits without the capacity field keeps the stored override; an explicit `null`
-clears it. Without a reliable capacity, the plan reports `battery_state_unavailable`
-instead of inventing a value.
+The planner combines the consumption forecast with the persisted spot prices and solar forecast
+(from SQLite; a plan preview triggers **no** Energy-Charts or Open-Meteo request) and the current
+battery state (SoC from the read cache, power limits from the dispatch configuration).
+
+**Usable battery capacity.** The battery-facts resolver uses a verified capacity when available;
+a persisted per-device Expert override takes precedence. It is fed by a cache-only port
+(`Runtime.battery_capacity`) that the device list and the plan both read; the plan endpoint never
+queries the inverter.
+
+- Module serials give a rated upper baseline: the RCT Power Battery datasheet specifies 1.92 kWh
+  per module at 90 % usable depth of discharge (six modules: 10.368 kWh when new).
+- Current capacity is capped by the BMS ratio `power_mng_amp_hours_measured / battery_ah_capacity`,
+  never above 100 % of that baseline. Both Ah readings must be fresh, finite and positive, and every
+  tower scan complete and trustworthy. The two Ah registers refresh in the background at a bounded
+  daily cadence, with isolated retries after failures.
+- A single tower may have 2-6 modules; two towers are accepted only as documented symmetric 4+4,
+  5+5 or 6+6. Missing or unsupported data leaves capacity unavailable.
+- Not used: live voltage and the unverified `battery_soh` scale. `battery_ah_capacity` x
+  `battery_voltage` is gross, voltage-dependent and ignores module count and health.
+  `battery_stored_energy` and `battery_used_energy` are total energy flow per the
+  [RCT serial protocol](reference/protocol.md), not a fill level, and never a capacity.
+- The protocol names `battery_ah_capacity` and `power_mng_amp_hours_measured` as capacity in Ah and
+  `battery_soh` as State of Health, but gives no usable Wh value, Ah-to-Wh conversion, nominal
+  voltage, SoH scale or labels for the `power_mng_battery_type` codes. The Ah values are therefore
+  used only as a ratio, never as standalone Wh. Per-tower versus device-wide semantics of
+  `battery_placeholder_0_ah_capacity` and other battery registers still need characterization, so
+  unsupported tower combinations stay unavailable.
+- Persisted `usable_capacity_wh` values (including seeds from the legacy
+  `DISPATCH_USABLE_BATTERY_CAPACITY_WH`) remain effective as Expert overrides. Saving other limits
+  without the capacity field keeps the override; an explicit `null` clears it. Without a reliable
+  capacity the plan reports `battery_state_unavailable`.
 
 Module serials are read once per device and then kept, so the module count does not change at
-runtime. After adding or removing battery modules, restart the service so the inventory is read
-again. Re-addressing a device in a live reload re-reads it too and discards the previously
-trusted tower topology.
+runtime. After adding or removing modules, restart the service; re-addressing a device in a live
+reload re-reads it and discards the trusted tower topology.
 
-The **Charging plan** tab shows the battery-capacity source and the read-only preview
-in Basic mode. Below the schedule, a bar chart shows the household consumption of the last 60 completed
-local days (`GET /admin/api/energy/devices/{device_id}/consumption-history`, local store only, no
-device I/O): green for a locally measured day, blue for an inverter day total, a gap for an
-unknown day, and the daily average over the known days. While no day has data, the whole consumption section (heading included) stays hidden. The result area uses the full card width: the header carries title, preview note, Inverter select and Expert switch; a row of four equal KPI tiles shows Battery remaining (usable energy now: `33 % SoC · 10.37 kWh usable`, or `—` without a battery snapshot), Target SoC, Charge power and the total plan grid energy (four columns on desktop, 2 x 2 on tablets, stacked on phones); the schedule follows at full width, and the household consumption history sits below it without reserving space while hidden. The schedule is drawn as a
-time-series chart (it replaces the former slot table): grid charge power (kW, idle slots at 0) and the target SoC
-(%, second axis) on a real time axis, so slots of uneven length keep their length. The tooltip names the
-slot's time range, action, power, target SoC and plain-language reason; the canvas carries a text summary
-and a visually hidden list of the charge slots for assistive technology. `GET /admin/api/energy/planning-devices` reports
-`battery_capacity_source` as `verified`, `expert_override`, or `unavailable`;
-`verified` means the topology- and BMS-Ah-capped capacity above. While an
-input is only pending (spot prices, solar forecast, consumption model), Basic mode shows
-nothing but a rotating "Please wait …" spinner and re-requests the plan every 10 s (at most 30 times per
-status, then the status text with the readiness checklist stays); a new load, a device change or a hidden tab
-stops the polling, and a changed status restarts the count. A missing or unverifiable battery state is not
-pending: its explanation ("Check that the inverter is connected and reports its battery state and
-capacity") shows at once and the plan is re-requested quietly in the same way. Configuration states that waiting cannot fix (spot market disabled,
-solar forecast not configured) and errors keep an explanatory text with the readiness checklist (battery
-capacity, spot prices, solar forecast, consumption model, each with a text state such as "disabled in
-settings"). Expert mode additionally shows that checklist, including "Battery data could not be verified
-automatically.", below the spinner. The plan loads
-automatically when an inverter is selected and then reloads by itself every 5 minutes and whenever the
-browser tab becomes visible again; there is no Refresh button. The "Next grid charge" hero metrics sit in one
-row (stacked on narrow screens). In Expert mode, **Advanced diagnostics** groups Battery capacity (status, source, override), Power
-limits (charge, discharge), Battery calibration history and Forecast inputs (consumption, solar, prices). The
-**Battery data override** form appears only after enabling Expert mode. It accepts
-verified charge and discharge power (kW) and usable capacity (kWh), then saves them
-through `PUT /admin/api/energy/devices/{device_id}/planning-limits` into the same
-per-device store. An empty capacity clears the override. The preview and override
-save work with write access off and do not activate battery control. The Inverter
-Setup limits form keeps a stored capacity when its capacity field is empty, and its
-capacity input is visible only in Expert mode. Capacity is a planner prerequisite,
-never a prerequisite for manual control.
+**Charging plan tab.** Basic mode shows the capacity source and the read-only preview. The result
+area uses the full card width:
 
-Consumption history is a preview-quality input, not a Dry-Run availability gate. The preview
-reports `forecast_basis` as `bootstrap_baseline`, `history_fallback`, or `adaptive_history`, plus
-`consumption_history_available` and `forecast_confidence`. A fresh device can therefore show a
-plan as soon as the physical battery, price, and solar preconditions are available. The runtime
-planner (`GET /api/v1/devices/{device_id}/plan`) uses the same shared consumption policy: no
-history yields the configured `baseline_household_load_w` baseline, thin history the median
-fallback, both at low confidence; the plan response reports `forecast_basis` and
-`forecast_confidence`. Both are stable enum values shared with the Dry-Run (documented in the
-API reference); the free-form description stays in the plan assumptions and is not a contract
-field. Consumption therefore no longer blocks a runtime plan; the usable battery
-capacity still does, until an Expert override or a verified automatic source exists. The runtime plan
-is not yet connected to `PlanDispatchHandoff`, and that handoff stays off by default, so a
-baseline-based plan sends no battery command.
+- Header: title, preview note, Inverter select, Expert switch.
+- Four equal KPI tiles (four columns on desktop, 2 x 2 on tablets, stacked on phones): Battery
+  remaining (usable energy now, e.g. `33 % SoC · 10.37 kWh usable`, or `—` without a battery
+  snapshot), Target SoC, Charge power, total plan grid energy.
+- The schedule follows at full width as a time-series chart (it replaces the former slot table):
+  grid charge power (kW, idle slots at 0) and target SoC (%, second axis) on a real time axis, so
+  slots of uneven length keep their length. The tooltip names time range, action, power, target SoC
+  and plain-language reason; the canvas has a text summary and a visually hidden list of the charge
+  slots for assistive technology.
+- Below it, a bar chart shows the household consumption of the last 60 completed local days
+  (`GET /admin/api/energy/devices/{device_id}/consumption-history`, local store only, no device
+  I/O): green for a locally measured day, blue for an inverter day total, a gap for an unknown day,
+  plus the daily average over known days. While no day has data, the whole section (heading
+  included) stays hidden and reserves no space.
 
-Over a dynamic horizon of 6 to 36 hours at 15-minute resolution the optimizer first simulates
-the battery trajectory without grid charging, then places only the grid energy the
-battery needs to avoid undercutting its reserve into the **latest permitted slots**
-regardless of earlier cheaper slots, never exceeding the maximum SoC or the charge-power limit. The reserve and the maximum SoC
-are the Energy Manager's effective target window (the configured minimum and maximum SoC
-narrowed to the hard product window), so the plan never proposes a target the Energy Manager
-would reject. A charge slot raises the SoC by the commanded battery charge power, independent
-of the house load, exactly as the dispatch executor does. Round-trip losses are not modelled; see the charge policy below. Scope v1
-plans grid charging into cheap windows only; it does not plan grid export,
-speculative discharge-to-grid, or arbitrage cycling. Each plan slot carries a
-deterministic reason (for example `forecast deficit, charged as late as permitted` or
-`forecast PV covers demand`).
+`GET /admin/api/energy/planning-devices` reports `battery_capacity_source` as `verified` (the
+topology- and BMS-Ah-capped capacity above), `expert_override` or `unavailable`.
+
+Loading behavior:
+
+- The plan loads when an inverter is selected, then reloads every 5 minutes and when the browser
+  tab becomes visible again; there is no Refresh button.
+- While an input is only pending (spot prices, solar forecast, consumption model), Basic mode shows
+  just a rotating "Please wait …" spinner and re-requests the plan every 10 s (at most 30 times per
+  status, then the status text with the readiness checklist stays). A new load, a device change or
+  a hidden tab stops the polling; a changed status restarts the count.
+- A missing or unverifiable battery state is not pending: its explanation ("Check that the inverter
+  is connected and reports its battery state and capacity") shows at once, and the plan is
+  re-requested quietly in the same way.
+- States waiting cannot fix (spot market disabled, solar forecast not configured) and errors keep an
+  explanatory text with the readiness checklist (battery capacity, spot prices, solar forecast,
+  consumption model, each with a text state such as "disabled in settings"). Expert mode also shows
+  the checklist, including "Battery data could not be verified automatically.", below the spinner.
+- The "Next grid charge" hero metrics sit in one row (stacked on narrow screens).
+
+Expert mode adds **Advanced diagnostics** (Battery capacity: status, source, override; Power limits:
+charge, discharge; Battery calibration history; Forecast inputs: consumption, solar, prices) and the
+**Battery data override** form for verified charge and discharge power (kW) and usable capacity
+(kWh). It saves through `PUT /admin/api/energy/devices/{device_id}/planning-limits` into the same
+per-device store; an empty capacity clears the override. Preview and override work with write access
+off and do not activate battery control. The Inverter Setup limits form keeps a stored capacity when
+its capacity field is empty; that field is visible only in Expert mode. Capacity is a planner
+prerequisite, never a prerequisite for manual control.
+
+Consumption history is a preview-quality input, not an availability gate. The preview reports
+`forecast_basis` (`bootstrap_baseline`, `history_fallback` or `adaptive_history`),
+`consumption_history_available` and `forecast_confidence`, so a fresh device shows a plan as soon as
+battery, price and solar preconditions are met. The runtime planner
+(`GET /api/v1/devices/{device_id}/plan`) uses the same policy (no history: configured
+`baseline_household_load_w`; thin history: median fallback; both low confidence) and reports the
+stable enums `forecast_basis` and `forecast_confidence` (see the API reference); the free-form
+description stays in the plan assumptions and is not a contract field. Consumption no longer blocks
+a runtime plan; the usable battery capacity still does, until an Expert override or a verified
+automatic source exists. The runtime plan is not connected to `PlanDispatchHandoff`, which stays off
+by default, so a baseline-based plan sends no battery command.
+
+Over a dynamic horizon of 6 to 36 hours at 15-minute resolution the optimizer first simulates the
+battery trajectory without grid charging, then places only the grid energy needed to avoid
+undercutting the reserve into the **latest permitted slots**, regardless of earlier cheaper slots,
+never exceeding the maximum SoC or the charge-power limit. Reserve and maximum SoC are the Energy
+Manager's effective target window (configured minimum and maximum SoC narrowed to the hard product
+window), so the plan never proposes a target the Energy Manager would reject. A charge slot raises
+the SoC by the commanded battery charge power, independent of house load, as the dispatch executor
+does. Round-trip losses are not modelled (see below). Scope v1 plans grid charging into cheap
+windows only: no grid export, speculative discharge-to-grid or arbitrage cycling. Each slot carries
+a deterministic reason (e.g. `forecast deficit, charged as late as permitted`, `forecast PV covers
+demand`).
 
 #### Charge policy, reserve and target
 
@@ -386,37 +359,35 @@ thresholds are returned in the `replan` field of the preview.
 The preview route accepts `policy`, and the pair `target_soc_percent` / `target_time` (with UTC
 offset), as query parameters.
 
-The Energy page shows this plan read-only in its own **Charging plan** tab
-("Dynamic charging plan (Dry-Run preview)"): status and detail, horizon, slots (time,
-action, power, target SoC, reason), the consumption, solar and price forecast
-windows, and the note that prices are raw day-ahead prices only. The
-preview never commands the battery.
+The **Charging plan** tab shows the plan read-only ("Dynamic charging plan (Dry-Run preview)"):
+status and detail, horizon, slots (time, action, power, target SoC, reason), the consumption, solar
+and price forecast windows, and the note that prices are raw day-ahead prices only.
 
-The stored spot price is the raw day-ahead market price. It is included in the plan basis and
-change detection but never moves charging into an earlier slot; the planner does not compute an
-absolute household cost, and grid fees, taxes, levies and supplier margin are not included.
+The stored spot price is the raw day-ahead price. It enters the plan basis and change detection but
+never moves charging into an earlier slot; no absolute household cost is computed, and grid fees,
+taxes, levies and supplier margin are not included.
 
 ### Preview
 
-The admin route `GET /admin/api/energy/devices/{device_id}/dynamic-plan` returns
-the current Dry-Run plan for one device (admin session required; it is not a public
-token route). It recomputes the plan on request from local data only. Missing hard
-preconditions return an understandable status — `battery_state_unavailable`,
-`spot_disabled` or `spot_prices_unavailable`, `solar_not_configured` or
-`solar_forecast_unavailable` — with HTTP 200, never
-a 500 and never raw hardware detail. `spot_disabled` and `solar_not_configured` mean the
-input is switched off or incomplete in the settings, so waiting does not help; the `_unavailable`
-statuses mean a configured input has no usable data yet. Missing or sparse consumption history instead
-selects a clearly marked low-confidence fallback. The response carries the plan
-status, `created_at`, `valid_until`, forecast basis and confidence, the horizon, the
-slots (action, target SoC, power, reason), the underlying forecast time ranges and a
-note that the plan is preview-only. The `battery` block is the very `BatteryState` snapshot the
-plan was computed from (`soc_percent`, `usable_capacity_wh`, `remaining_energy_wh`,
-`max_charge_power_w`, `max_discharge_power_w`, `measured_at`); `remaining_energy_wh` is the
-verified usable capacity times the measured SoC divided by 100, never the nominal total
-capacity. It is `null` when no verified battery state exists (`battery_state_unavailable`); a
-remaining capacity is then never estimated, and the response triggers no extra inverter or
-provider query.
+`GET /admin/api/energy/devices/{device_id}/dynamic-plan` returns the current Dry-Run plan for one
+device (admin session required, not a public token route). It recomputes the plan on request from
+local data only.
+
+- Missing hard preconditions return a status with HTTP 200, never a 500 or raw hardware detail:
+  `battery_state_unavailable`, `spot_disabled` / `spot_prices_unavailable`, `solar_not_configured`
+  / `solar_forecast_unavailable`. `spot_disabled` and `solar_not_configured` mean the input is
+  switched off or incomplete (waiting does not help); the `_unavailable` statuses mean a configured
+  input has no usable data yet.
+- Missing or sparse consumption history selects a clearly marked low-confidence fallback instead.
+- The response carries plan status, `created_at`, `valid_until`, forecast basis and confidence,
+  horizon, slots (action, target SoC, power, reason), the underlying forecast time ranges and a
+  preview-only note.
+- The `battery` block is the `BatteryState` snapshot the plan was computed from (`soc_percent`,
+  `usable_capacity_wh`, `remaining_energy_wh`, `max_charge_power_w`, `max_discharge_power_w`,
+  `measured_at`). `remaining_energy_wh` is the verified usable capacity times SoC / 100, never the
+  nominal total. The block is `null` when no verified battery state exists
+  (`battery_state_unavailable`); remaining capacity is never estimated and no extra inverter or
+  provider query is made.
 
 ### Battery register comparison
 
@@ -429,11 +400,8 @@ routes; a cookie session needs its CSRF header for `POST`. A second tower is not
 its module inventory confirms that it exists. The result reports raw observations only and
 never derives usable Wh from them.
 
-The [RCT serial protocol](reference/protocol.md) labels `battery_ah_capacity` as battery
-capacity in Ah, `power_mng_amp_hours_measured` as measured battery capacity in Ah, and
-`battery_soh` as State of Health. Only the ratio of the two Ah registers is used for the
-usable capacity (see above); the comparison with the RCT app must still establish how they
-relate to its displayed usable kWh.
+Only the ratio of the two Ah registers is used for the usable capacity (see above); the comparison
+with the RCT app must still establish how they relate to its displayed usable kWh.
 
 ### Battery calibration history
 
@@ -492,11 +460,10 @@ Selecting Off also sets and verifies the inverter's Internal SoC strategy. If th
 confirmed, the mode stays Manual or External and the UI reports the error.
 Internal lets the inverter choose its own charge power; Off does not request maximum charging power.
 
-The expert endpoint `POST /api/v1/devices/{id}/battery/dispatch` is independent of the mode: it needs
-no mode and is not limited by it. External is therefore **not** the only way to control the battery
-through the API; it is the way for an app that should use the business actions (`charge`, `hold`, …)
-while the operator keeps the on/off decision. Manual and External share the same prerequisites,
-described under [Switching on](#switching-on).
+The expert endpoint `POST /api/v1/devices/{id}/battery/dispatch` is independent of the mode.
+External is therefore **not** the only API path to the battery; it is the one for an app that uses
+the business actions (`charge`, `hold`, …) while the operator keeps the on/off decision. Manual and
+External share the prerequisites under [Switching on](#switching-on).
 
 ## REST API
 

@@ -1,29 +1,25 @@
 # API Overview
 
-The REST API is versioned under `/api/v1`. Responses are JSON; errors follow
-RFC 9457 problem details (`application/problem+json`, see [Errors](errors.md)).
-Every response, including `/health`, `/metrics`, `/docs` and error responses,
-carries `Cache-Control: no-store`.
+The REST API is versioned under `/api/v1`. Responses are JSON; errors follow RFC 9457 problem
+details (`application/problem+json`, see [Errors](errors.md)). Every response, including `/health`,
+`/metrics`, `/docs` and errors, carries `Cache-Control: no-store`.
 
 ## Authentication
 
-Send `Authorization: Bearer <token>` on every request except `GET /health`.
-See [Authentication](../configuration/authentication.md) for roles and the
-personal access tokens created in the GUI.
+Send `Authorization: Bearer <token>` on every request except `GET /health`; see
+[Authentication](../configuration/authentication.md).
 
 ## Interactive documentation
 
-With `DOCS_PUBLIC=true` the service serves Swagger UI at `/docs` and the
-OpenAPI document at `/openapi.json` without a token. Both count against the
-request rate limit.
+With `DOCS_PUBLIC=true` Swagger UI (`/docs`) and the OpenAPI document (`/openapi.json`) are served
+without a token; both count against the rate limit.
 
 ## Vendor-neutral contract
 
-Paths, error keys and status codes do not depend on the inverter vendor. A
-different device adapter must fill the same fields; the adapter port is
-`app/gateway/base.py` (see [Architecture](../development/architecture.md)).
-Vendor-specific data (object ids, protocol types, frame counters, slave
-discovery) lives only under `/api/v1/vendor/rct/`.
+Paths, error keys and status codes do not depend on the vendor; another adapter fills the same
+fields (port: `app/gateway/base.py`, see [Architecture](../development/architecture.md)).
+Vendor-specific data (object ids, protocol types, frame counters, slave discovery) lives only under
+`/api/v1/vendor/rct/`.
 
 | Resource | Fields |
 | --- | --- |

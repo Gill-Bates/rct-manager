@@ -2,79 +2,74 @@
 
 ## One instance per inverter endpoint
 
-The serialization of device access is guaranteed only inside one process with
-one HTTP worker. Several instances against the same inverter endpoint violate
-it and produce mixed or stale answers. Run exactly one replica per device
-group; the service has no cross-instance lock.
+Device access is serialized only inside one process with one HTTP worker. Several instances
+against the same endpoint produce mixed or stale answers and there is no cross-instance lock: run
+exactly one replica per device group.
 
 ## Exclusive access to port 8899
 
-Make sure this service is the only client of the inverter's port 8899. The
-vendor app, a home automation integration or any other RCT client counts as
-foreign access. The service does not enforce exclusivity; it flags a suspicion
-(`foreign_access_suspected` in the readiness response and the Prometheus gauge
-`rct_transport_foreign_access_suspected`) and keeps serving.
+This service must be the only client of the inverter's port 8899; the vendor app, home automation
+or any other RCT client counts as foreign access. Exclusivity is not enforced: a suspicion is
+flagged (`foreign_access_suspected` in the readiness response, Prometheus gauge
+`rct_transport_foreign_access_suspected`) and the service keeps serving.
 
 ## Maintenance state
 
-When the inverter signals its bootloader, sending stops and requests for its
-devices get 503 `device_maintenance` until a cool-down has passed and a single
-read succeeds.
+When the inverter signals its bootloader, sending stops and requests for its devices get 503
+`device_maintenance` until a cool-down has passed and a single read succeeds.
 
 ## Logs and health
 
 - Logs are text on stdout; Compose rotates them (50 MB, 5 files).
-- The access log level depends on the request: GUI pages, assets, session polls and successful
-  `/metrics` requests are `DEBUG`; mutating admin actions (login, password, settings, tokens),
-  `/api/` and `/health` requests are `INFO`; any 4xx is `WARNING` and any 5xx is `ERROR`. The one exception is the Energy page's device poll, whose 503 while write support is off is expected and logged at `DEBUG`.
-- The boxed block printed to stdout after the server has started shows the generated admin
-  password in clear text (a deliberate operator choice, so it can be copied straight from the
-  console on first start). It appears only on the initial bootstrap. Console output is persisted
-  and centrally collected in systemd/Docker/Kubernetes, so the password may remain in log history
-  — a deliberately accepted tradeoff. Change the password at first login.
-- `GET /health` is token-free and turns 503 once the shutdown has begun. The
-  container health check queries it on the container's own address.
+- Access log level: GUI pages, assets, session polls and successful `/metrics` requests are
+  `DEBUG`; mutating admin actions (login, password, settings, tokens), `/api/` and `/health` are
+  `INFO`; any 4xx is `WARNING`, any 5xx `ERROR`. Exception: the Energy page's device poll, whose
+  expected 503 while write support is off is `DEBUG`.
+- The generated admin password appears in clear text in a boxed block on first start only (see
+  [Authentication](configuration/authentication.md#administration-login)). Change it at first login.
+- `GET /health` is token-free and turns 503 once shutdown has begun; the container health check
+  queries it on the container's own address.
 
 ## Admin dashboard
 
-- **Edit dashboard** opens the edit mode of the **Overview** page (move and resize widgets, **Add
-  widget**, **Reset layout**, **Done**). Changes autosave. On a phone the widgets are stacked and the
-  layout cannot be edited; the saved layout stays untouched.
-- Each inverter card shows the energy-flow graphic (from the cached readings, also with write
-  support off), a power card and one card per battery tower. The module count of a tower is derived
-  from its populated module serial slots; until all slots were read the card shows "Detecting
-  modules…", and a slot pattern that cannot describe a documented tower shows "Module layout
-  unclear" instead of a drawing (for example seven populated slots, where a Power Battery 11.5
-  has six modules). A tower with N modules is drawn as top cap, N-1 middle parts and bottom part.
+- **Edit dashboard** opens edit mode on the **Overview** page (move and resize widgets, **Add
+  widget**, **Reset layout**, **Done**); changes autosave. On a phone widgets are stacked and the
+  layout cannot be edited (the saved layout stays untouched).
+- Each inverter card shows the energy-flow graphic (from cached readings, also with write support
+  off), a power card and one card per battery tower. A tower's module count comes from its
+  populated module serial slots: "Detecting modules…" until all slots were read, "Module layout
+  unclear" instead of a drawing for a pattern no documented tower has (e.g. seven slots, where a
+  Power Battery 11.5 has six modules). A tower with N modules is drawn as top cap, N-1 middle parts
+  and bottom part.
 - The Energy Manager page shows a compact grid, house and battery energy-flow view beside the
-  controls when space allows. Both views use measured, sign-normalized readings.
-- If the server cannot be reached, the dashboard keeps showing the last data (up to one hour old,
-  dimmed, with a banner) and a "Connection lost" dialog without buttons probes the server in the background and reloads the page automatically once it answers again.
-- The layout is stored in `data/rct.db`, separate from the device settings, through
-  `GET`/`PUT`/`DELETE /admin/api/dashboard-layout` (admin API, not part of the public contract). The
-  server accepts only known widget ids, at most 32 widgets and a 12-column grid.
+  controls when space allows, from measured, sign-normalized readings.
+- If the server is unreachable, the dashboard keeps the last data (up to one hour old, dimmed, with
+  a banner); a button-less "Connection lost" dialog probes the server and reloads the page once it
+  answers.
+- The layout is stored in `data/rct.db`, separate from device settings, via
+  `GET`/`PUT`/`DELETE /admin/api/dashboard-layout` (admin API, not public contract). The server
+  accepts only known widget ids, at most 32 widgets and a 12-column grid.
 - The About page checks GitHub for a newer release: results are cached for 1 h, errors for 60 s, and
   a forced refresh runs at most once per 30 s.
 - `/admin/static/` answers 404 for any path with a dot-prefixed segment.
 
 ## Writes
 
-- Write support is enabled on the GUI **Inverters** page; the `read/write` role and the
-  write selection stored in `data/rct.db` still apply. A fresh database starts with an
-  empty selection: the shipped catalog only lists what may be enabled, so tick each
-  metric you want to allow, including action objects such as `com_service`.
-- The shipped allowlist separates "documented in the catalog" from "writable out of the box": a
-  labeled action is not automatically a safe default. The destructive `com_service` codes
-  `6 erase_parameters_flash` and `11 erase_datalog` are therefore not shipped as writable; the
-  codes `0, 5, 9, 10, 12, 13, 14, 15, 16, 18` are. To allow an erase action anyway, copy the
-  shipped file, add the code to its `allowed_values` and use that file as the write allowlist (`write_allowlist_path` is not an environment setting).
+- Write support is enabled on the GUI **Inverters** page; the `read/write` role and the write
+  selection in `data/rct.db` still apply. A fresh database starts with an empty selection (the
+  shipped catalog only lists what may be enabled): tick each metric to allow, including action
+  objects such as `com_service`.
+- "Documented in the catalog" is not "writable out of the box". The destructive `com_service` codes
+  `6 erase_parameters_flash` and `11 erase_datalog` are not shipped as writable; codes
+  `0, 5, 9, 10, 12, 13, 14, 15, 16, 18` are. To allow an erase action, copy the shipped file, add
+  the code to its `allowed_values` and use it as the write allowlist (`write_allowlist_path` is not
+  an environment setting).
 - Numeric limits are wire type limits, not safe operating limits or a promise
   that the firmware accepts a write.
 - The **Inverters** page shows a short explanation under a writable parameter where the catalog
-  carries one in the entry's `help_text`. Most entries document only their vendor object path, so
-  they intentionally stay without an explanation rather than getting a guessed one; an own registry
-  file can add `help_text` to any entry. The field is optional, so a registry written without it
-  keeps loading.
+  entry has a `help_text`. Most entries document only their vendor object path and intentionally
+  have none rather than a guessed one; an own registry file can add `help_text` to any entry (the
+  field is optional).
 - `wifi_password` is deliberately excluded: secrets are neither readable nor
   writable, and a registry or allowlist that lists it aborts the start.
 - Writing `pas_period` can change periodic polling.
@@ -100,8 +95,8 @@ all numeric fields little-endian.
 
 The hardware-specific parts of battery dispatch (the external-control strategy code and the
 sign conventions for battery power and grid power) are not configured through the environment.
-They are **per-device capabilities**, persisted in the dispatch database and shown and set through
-the admin dispatch API (`/admin/api/dispatch/...`, not part of the public, documented contract).
+They are **per-device capabilities**, persisted in the dispatch database and set through the admin
+dispatch API (`/admin/api/dispatch/...`, not part of the public contract).
 
 - **Each capability row carries only the evidence that governs it.** The dispatch adapter reads every
   evidence field from exactly one capability, so `GET .../capabilities` reports it on that row only
@@ -140,10 +135,9 @@ the admin dispatch API (`/admin/api/dispatch/...`, not part of the public, docum
   switch (`PUT /admin/api/dispatch/devices/{device_id}`), carries a shorter TTL cap than normal
   operation, and still refuses the write-path capability without a strategy code — there is no
   way to form the write at all without one.
-- Work through the capability points on the real device using the project's internal hardware
-  verification plan before enabling dispatch in production; it is not part of this documentation
-  site, because a filled-in sheet holds operator measurements that belong with the operator, not
-  on a published page.
+- Verify the capability points on the real device with the project's internal hardware
+  verification plan before enabling dispatch in production (not part of this site: a filled-in
+  sheet holds operator measurements).
 - **A removed device loses its dispatch state.** Removing a device (or re-addressing it under the
   same id) resets all its capabilities to `unverified`, switches engineering mode off and sets the
   Energy Manager mode to Off, so a device later added under that id starts unverified. The reset runs only

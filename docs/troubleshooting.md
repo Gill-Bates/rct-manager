@@ -2,30 +2,26 @@
 
 ## The container is unhealthy or unreachable
 
-The service listens on loopback. Inside a container set `BIND_ADDRESS=0.0.0.0`
-and the GUI option "behind reverse proxy", and keep `BIND_PORT` equal to the container
-port of the mapping. The start logs a warning for a loopback bind in a
-container.
+The service listens on loopback. Inside a container set `BIND_ADDRESS=0.0.0.0` and the GUI option
+"behind reverse proxy", and keep `BIND_PORT` equal to the container port of the mapping. A loopback
+bind in a container logs a warning at start.
 
 ## The start is refused
 
 Run `python -m app validate` (or `docker compose -f docker/compose.yaml run --rm rct-api validate`).
 Typical causes:
 
-- a device list saved in the GUI with more than one device without network id on
-  the same endpoint;
-- an invalid object registry or write allowlist.
-- missing `HMAC_SECRET` in a read-only container, or a secret that differs
-  from the one used to encrypt the existing database.
+- a GUI device list with more than one device without network id on the same endpoint;
+- an invalid object registry or write allowlist;
+- missing `HMAC_SECRET` in a read-only container, or a secret that differs from the one that
+  encrypted the existing database.
 
 ## First admin login
 
-The generated `admin` password is printed in clear text in the boxed `FIRST START` block on stdout
-on the first start only. It is shown once, when the admin account is created: on later restarts
-the administrator exists already and no new password is generated, so the block does not reappear.
-If you missed it, there is no file to read it from; recover by resetting the admin account. A
-restart does not replace the password. The first login requires a password change. Keep the
-database and `HMAC_SECRET` together when restoring a backup.
+The generated `admin` password is printed once in the boxed `FIRST START` block on stdout, when the
+admin account is created; restarts neither show nor replace it. If missed, there is no file to
+read it from: reset the admin account. The first login requires a password change. Keep database
+and `HMAC_SECRET` together when restoring a backup.
 
 ## `/docs` answers 404
 
@@ -38,13 +34,13 @@ answer 404 `write_disabled`. Switching it on takes effect at once, without a res
 
 ## 429 from many clients behind a proxy
 
-Set `TRUSTED_PROXIES` and `FORWARDED_HEADER`; otherwise all callers share the
-proxy address. See [Network and TLS](configuration/network.md).
+Set `TRUSTED_PROXIES` and `FORWARDED_HEADER`; otherwise all callers share the proxy address. See
+[Network and TLS](configuration/network.md).
 
 ## 503 `device_maintenance`
 
-The inverter signalled its bootloader. Requests resume after the cool-down once
-a single read succeeds.
+The inverter signalled its bootloader. Requests resume after the cool-down once a single read
+succeeds.
 
 ## Unsolicited response frames for objects that are not polled
 
@@ -52,9 +48,8 @@ At DEBUG level the log shows `Unsolicited response burst started ...` for the fi
 one `burst summary` line per 60 s window (and when the connection drops) listing object ids with
 frame counts. Unmatched frames are never cached.
 
-This is a logging-only change: unexpected frames still count towards the flood limit. More than 50
-within 60 s make the receiver reconnect (`unexpected_flood`, see
-`rct_transport_unexpected_frames_total`); reconnect and flood semantics are unchanged.
+Unexpected frames still count towards the flood limit: more than 50 within 60 s make the receiver
+reconnect (`unexpected_flood`, see `rct_transport_unexpected_frames_total`).
 
 Working hypothesis, not yet verified on hardware: the inverter keeps `READ PERIODICALLY`
 subscriptions from an earlier session (diagnostic script, other client, unclean shutdown). At
@@ -80,13 +75,12 @@ against the same inverter. See [Operation](operation.md).
 
 ## Truncated long value after a split read (known protocol ambiguity)
 
-Some long responses of the inverter declare a wrong length, so the parser takes the frame end from
-the framing and accepts a CRC-verified end at the current read boundary. If a TCP read ends exactly
-inside such a frame and the bytes received so far happen to carry a valid CRC (chance 2^-16 per
-evaluated boundary), the frame is delivered truncated and the rest is discarded. The wire format has
-no further framing information to tell this prefix from a complete frame, and the CRC is not
-weakened to hide it. A suspect value shows up as a long response with an unexpectedly short payload
-together with a rising `discarded_bytes` counter in `/api/v1/vendor/rct/transports`.
+Some long inverter responses declare a wrong length, so the parser takes the frame end from the
+framing and accepts a CRC-verified end at the current read boundary. If a TCP read ends inside such
+a frame and the bytes so far happen to carry a valid CRC (chance 2^-16 per evaluated boundary), the
+frame is delivered truncated and the rest discarded. The wire format cannot tell this prefix from a
+complete frame, and the CRC is not weakened to hide it. Symptom: a long response with an
+unexpectedly short payload and a rising `discarded_bytes` in `/api/v1/vendor/rct/transports`.
 
 ## Diagnostic values after a deployment
 

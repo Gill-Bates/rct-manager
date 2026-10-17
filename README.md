@@ -27,11 +27,9 @@
 
 ## What is RCT Manager?
 
-Do you have an RCT inverter and want to do more than the manufacturer’s app
-allows? RCT Manager connects to one or more inverters via TCP and puts their
-readings and controls behind a REST API, an admin GUI and a live dashboard. You
-build your own integrations without touching the proprietary RCT protocol, and
-no vendor app is required.
+RCT Manager connects to one or more RCT inverters via TCP and exposes their readings and
+controls through a REST API, an admin GUI and a live dashboard. No proprietary protocol
+handling and no vendor app required.
 
 <p align="center">
   <img src=".github/img/screenshot_01.png" width="800" alt="RCT Manager dashboard">
@@ -43,41 +41,35 @@ no vendor app is required.
 
 ## ⚡ Energy Manager
 
-**Your battery, your rules.** Charge from the grid when power is cheap, keep the
-battery idle, or let it supply the house down to a target state of charge, with
-one click in the admin GUI or from your own app through the API. The day-ahead
-spot prices (Energy-Charts) and the solar production forecast (Open-Meteo) live
-on the same Energy Manager page and on the dashboard, so you see at a glance when
-charging is worth it.
+Charge from the grid when power is cheap, keep the battery idle, or discharge it down to a
+target state of charge, from the admin GUI or the API. Day-ahead spot prices (Energy-Charts)
+and the solar forecast (Open-Meteo) appear on the Energy Manager page and the dashboard.
 
-Safe by default: battery control stays off until you switch on write access and
-verify each inverter's hardware, and nothing happens without your decision.
+Safe by default: battery control stays off until you enable write access and verify each
+inverter's hardware.
 
 👉 [Learn more about the Energy Manager](https://gill-bates.github.io/rct-manager/energy-manager/)
 
 > [!NOTE]
-> **Preview:** a dynamic charging planner turns prices, the solar forecast and
-> your consumption history into a proposed charging plan, shown in the Energy
-> Manager's *Charging plan* tab. It is a dry-run preview only and never controls
-> the battery.
+> **Preview:** the dynamic charging planner turns prices, solar forecast and consumption
+> history into a proposed plan (*Charging plan* tab). It is a dry run and never controls the
+> battery.
 
 ---
 
 ## ✨ More highlights
 
-- **REST API** for the full protocol catalogue, with JSON responses and clear
-  error messages. [API overview](https://gill-bates.github.io/rct-manager/api/overview/)
-- **Admin GUI and dashboard** for inverters, Energy Manager, export, API tokens
-  and settings, all in one place.
-- **Your own analytics** through an opt-in Prometheus `/metrics` endpoint or push
-  export to InfluxDB 2 or QuestDB, with a ready-made
+- **REST API** for the full protocol catalogue with JSON responses.
+  [API overview](https://gill-bates.github.io/rct-manager/api/overview/)
+- **Admin GUI and dashboard** for inverters, Energy Manager, export, API tokens and settings.
+- **Analytics:** opt-in Prometheus `/metrics` or push export to InfluxDB 2 or QuestDB, with a
   [Grafana dashboard](grafana/dashboard_questdb.json).
   [Push export](https://gill-bates.github.io/rct-manager/configuration/export/)
-- **Guarded access** with API tokens, separate admin sessions and writes that are
-  off by default. [Authentication](https://gill-bates.github.io/rct-manager/configuration/authentication/)
-- **Multiple inverters** behind one API, with coordinated device access.
-- **Hardened container** for `linux/amd64` and `linux/arm64`: read-only root file
-  system, non-root process, health check.
+- **Guarded access:** API tokens, separate admin sessions, writes off by default.
+  [Authentication](https://gill-bates.github.io/rct-manager/configuration/authentication/)
+- **Multiple inverters** behind one API.
+- **Hardened container** for `linux/amd64` and `linux/arm64`: read-only root file system,
+  non-root process, health check.
 
 ---
 
@@ -88,20 +80,20 @@ cp settings.env.example settings.env   # set HMAC_SECRET, e.g. openssl rand -bas
 RCT_API_TAG=latest docker compose -f docker/compose.yaml up -d
 ```
 
-Open `http://127.0.0.1:8000/` and log in with the one-time `admin` password from
-the startup log. The [Quick Start guide](https://gill-bates.github.io/rct-manager/getting-started/quick-start/)
-covers everything else, including running without Docker.
+Open `http://127.0.0.1:8000/` and log in with the one-time `admin` password from the startup
+log. See the [Quick Start guide](https://gill-bates.github.io/rct-manager/getting-started/quick-start/)
+for details and running without Docker.
 
 > [!WARNING]
-> Reaching the service from beyond localhost? Terminate TLS in a reverse proxy in
-> front of it and switch on "behind reverse proxy" in the admin GUI.
+> Reachable beyond localhost? Terminate TLS in a reverse proxy and enable "behind reverse
+> proxy" in the admin GUI.
 > [Network and TLS](https://gill-bates.github.io/rct-manager/configuration/network/)
 
 ---
 
 ## 📚 Documentation
 
-Everything in detail lives at **<https://gill-bates.github.io/rct-manager/>**:
+Full documentation: **<https://gill-bates.github.io/rct-manager/>**
 [Docker](https://gill-bates.github.io/rct-manager/getting-started/docker/) ·
 [Configuration](https://gill-bates.github.io/rct-manager/getting-started/configuration/) ·
 [Energy Manager](https://gill-bates.github.io/rct-manager/energy-manager/) ·
@@ -110,10 +102,8 @@ Everything in detail lives at **<https://gill-bates.github.io/rct-manager/>**:
 [Troubleshooting](https://gill-bates.github.io/rct-manager/troubleshooting/) ·
 [Changelog](CHANGELOG.md)
 
-If RCT Manager works well for you, please leave a
-[star on GitHub](https://github.com/Gill-Bates/rct-manager). If something is
-missing or does not work as expected, open an
-[issue](https://github.com/Gill-Bates/rct-manager/issues/new/choose).
+Like it? Leave a [star](https://github.com/Gill-Bates/rct-manager). Problems or missing
+features: open an [issue](https://github.com/Gill-Bates/rct-manager/issues/new/choose).
 
 ---
 

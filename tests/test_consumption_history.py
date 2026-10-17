@@ -490,19 +490,29 @@ def test_daily_values_never_enter_the_forecast_history_or_the_pruned_window(tmp_
     assert kept == ["2026-10-14"]
 
 
-async def test_daily_backfill_always_starts_without_a_switch() -> None:
-    from unittest.mock import patch
+async def test_daily_backfill_always_starts_without_a_switch(tmp_path) -> None:
+    from unittest.mock import AsyncMock, patch
 
+    from app.admin.store import AdminStore
     from tests.api_helpers import make_settings, running_app
 
-    settings = make_settings()
+    # Runtime components the import needs: an admin store (history persistence) with the bootstrap
+    # password changed, so the device jobs start, plus the gateway.
+    settings = make_settings(hmac_secret="s" * 48, admin_db_path=tmp_path / "rct.db")
+    store = AdminStore(settings.admin_db_path, "s" * 48)
+    try:
+        assert store.change_password(store.initialize(), "a much stronger password")
+    finally:
+        store.close()
     # The import is not optional: no settings switch exists to turn it off.
     assert not hasattr(settings, "consumption_daily_backfill_enabled")
     # The service is built synchronously during lifespan startup, so a settled app proves it was.
     with patch("app.admin.consumption_backfill.ConsumptionHistoryBackfillService") as service:
+        service.return_value.run = AsyncMock()
         async with running_app(settings):
             pass
     service.assert_called_once()
+    service.return_value.run.assert_awaited_once()
 
 
 def test_several_logger_points_for_one_local_date_log_once_and_the_last_one_wins(caplog) -> None:

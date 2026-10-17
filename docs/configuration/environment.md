@@ -5,9 +5,8 @@ settings saved through the GUI are persisted in `data/rct.db`. `HMAC_SECRET`
 always stays outside the database. Timeouts, retries, cache, limits and intervals
 remain fixed in code.
 
-A set variable that is an internal setting but not one of these operator names is
-logged once at start (never its value). Completely unknown variables are
-ignored.
+A set variable that is an internal setting but not one of these names is logged once at start
+(never its value); unknown variables are ignored.
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
@@ -29,19 +28,16 @@ ignored.
 | `METRICS_EXPORT_ENABLED` | `true` | `false` pauses the push export without losing its connection settings |
 | `METRICS_EXPORT_INTERVAL_SECONDS` | `30` | Export interval in seconds, 5 to 3600 |
 
-The dispatch values are deliberately not guessed. The strategy code and both sign conventions used
-to live as the three environment variables `DISPATCH_SOC_STRATEGY_EXTERNAL_CODE`,
-`DISPATCH_BATTERY_DISCHARGE_POSITIVE` and `DISPATCH_GRID_IMPORT_POSITIVE`; **this is a
-non-backward-compatible configuration change**: all three are now fields of a persisted,
-per-device capability record, set through the admin dispatch API after hardware verification, not
-through the environment. A set value for any of the three is ignored with a `WARNING` naming the
-variable (never its value). See [Operation](../operation.md#battery-dispatch-capabilities) for the
-capability workflow and the engineering-mode escape hatch.
-The dispatch database must be backed up together with `HMAC_SECRET`, just like `data/rct.db`.
+**Breaking change:** `DISPATCH_SOC_STRATEGY_EXTERNAL_CODE`, `DISPATCH_BATTERY_DISCHARGE_POSITIVE`
+and `DISPATCH_GRID_IMPORT_POSITIVE` are no longer environment variables. They are fields of a
+persisted per-device capability record, set through the admin dispatch API after hardware
+verification. A set value is ignored with a `WARNING` naming the variable (never its value). See
+[Operation](../operation.md#battery-dispatch-capabilities). Back up the dispatch database together
+with `HMAC_SECRET`, like `data/rct.db`.
 
 ## GUI-only settings
 
-Authentication, API tokens, devices, write support and reverse-proxy mode are set in the admin GUI. The variables `AUTH_REQUIRED`, `API_TOKENS`, `API_TOKENS_FILE`, `BEHIND_REVERSE_PROXY` and `ENABLE_WRITE_SUPPORT` are ignored with a startup warning; `DEVICES` is ignored with an `INFO` note.
+Authentication, API tokens, devices, write support and reverse-proxy mode are set in the admin GUI. `AUTH_REQUIRED`, `API_TOKENS`, `API_TOKENS_FILE`, `BEHIND_REVERSE_PROXY` and `ENABLE_WRITE_SUPPORT` are ignored with a startup warning; `DEVICES` with an `INFO` note.
 
 ## Validate a configuration
 
@@ -49,5 +45,4 @@ Authentication, API tokens, devices, write support and reverse-proxy mode are se
 python -m app validate
 ```
 
-The command checks the settings, the object registry and the write allowlist
-and exits with a non-zero status on an invalid configuration.
+Checks settings, object registry and write allowlist; exits non-zero on an invalid configuration.

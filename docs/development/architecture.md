@@ -21,7 +21,7 @@ flowchart LR
 | `app/admin` | Admin sessions, password setup, encrypted SQLite persistence, PATs, GUI templates and local assets |
 | `app/api` | FastAPI app factory (`app_factory.py`), routers, RFC 9457 problems, middleware, body limit, server |
 | `app/security` | PAT format and verification, rate limit, client address |
-| `app/gateway` | `DeviceGateway` port and vendor-neutral DTOs (`base.py`); `RctGateway` (`rct.py`) is the only adapter that turns metric names into frames. The RCT-specific register names behind the Live Charge Envelope and Charge Characterization seams live here (`live_charge_limit.py`, `characterization_readings.py`); the live-limit producer is wired but unconditionally returns `None` on this build until a per-device hardware-verification contract exists, and the characterization adapter reads the cache only |
+| `app/gateway` | `DeviceGateway` port and vendor-neutral DTOs (`base.py`); `RctGateway` (`rct.py`) is the only adapter that turns metric names into frames. The RCT register names behind the Live Charge Envelope and Charge Characterization seams live here (`live_charge_limit.py`, `characterization_readings.py`); the live-limit producer is wired but always returns `None` on this build, and the characterization adapter reads the cache only |
 | `app/catalog` | Object registry loaded from `app/catalog/objects.json` |
 | `app/security/allowlist.py` | Validates write targets and values; admin selection is persisted in `data/rct.db` |
 | `app/protocol` | Frames, CRC, escaping, stream parser, value codecs, `net.slave_data` |
@@ -29,7 +29,7 @@ flowchart LR
 | `app/scheduling` | Access serializer (one worker and bounded FIFO queue per endpoint), work budget, retry, single-flight, periodic reads, heartbeat, shutdown |
 | `app/gateway/cache.py` | Value store with freshness handling |
 | `app/observability` | Prometheus exporter, names and statistics |
-| `app/dispatch` | Battery dispatch: state machine and recovery (`controller.py`), per-device capabilities and gate, SoC-target policy, encrypted crash-durable store, and the Live Charge Envelope seam (`live_limit.py`): a safety clamp that can only lower charge power, `min(requested, configured static limit, verified-and-fresh live limit)`. The live-limit term defaults to `NullLiveChargeLimitProvider` and never raises the static bound |
+| `app/dispatch` | Battery dispatch: state machine and recovery (`controller.py`), per-device capabilities and gate, SoC-target policy, encrypted crash-durable store, and the Live Charge Envelope seam (`live_limit.py`): a clamp that can only lower charge power, `min(requested, configured static limit, verified-and-fresh live limit)`; the live-limit term defaults to `NullLiveChargeLimitProvider` |
 | `app/energy` | Energy Manager: business actions in front of battery dispatch, operating mode (off/manual/external), readings port, and the read-only Charge Characterization contract (`characterization.py`): a vendor-neutral capture of independently-aged cached values with per-field freshness and explicit unavailability. `soc_window.py` is the single definition of the effective SoC target window shared with the planner. Characterization is preparation only — no power stepping, no efficiency/AC2BAT computation |
 | `app/spotmarket` | Energy-Charts price provider, bidding-zone metadata and cached price snapshots; read-only input to the admin preview and dashboard |
 | `app/weather` | Open-Meteo solar-forecast provider (tilted-plane irradiance → `SolarForecast`), a read-only geocoding client for location search, and a last-known-good forecast cache; read-only input to the admin preview and dashboard, never a control-path dependency |
@@ -38,17 +38,15 @@ flowchart LR
 
 ## Request path
 
-A request is authenticated and rate limited in the API layer, resolved to a
-device and metric through the catalog, and handed to the gateway. The gateway
-submits a transaction to the endpoint's serializer, which executes one
-transaction at a time against the inverter. Reads may be served from the cache;
-`fresh=true` forces a device transaction.
+The API layer authenticates and rate limits a request, resolves device and metric through the
+catalog and hands it to the gateway. The gateway submits a transaction to the endpoint's
+serializer, which runs one transaction at a time against the inverter. Reads may come from the
+cache; `fresh=true` forces a device transaction.
 
 ## Adapter port
 
-Another device vendor implements the `DeviceGateway` protocol from
-`app/gateway/base.py` and fills the same DTOs, without changing paths, error
-keys or status codes.
+Another vendor implements `DeviceGateway` from `app/gateway/base.py` and fills the same DTOs;
+paths, error keys and status codes stay unchanged.
 
 ## Consumption capture and adaptive next-day forecast
 
@@ -60,7 +58,7 @@ next to the integrated `household_load_power`. A gap of at most 300 s is measure
 rejected and counted; the day counter is the fallback. A `HistoryBucket` is COMPLETE (at least 810 s
 measured), PARTIAL (at least 600 s), ESTIMATED or MISSING.
 
-Unverified without hardware evidence: the unit and day semantics of the day history (`logger_day_eload_log_ts`, TIMESERIES reply; the wire layout follows the rctclient protocol notes; the backfill is off by default), the reset
+Unverified without hardware evidence: the unit and day semantics of the day history (`logger_day_eload_log_ts`, TIMESERIES reply; the wire layout follows the rctclient protocol notes; the backfill always runs), the reset
 instant and time zone of the day counter, total-counter reset or overflow behaviour, and whether the
 counter includes external power. Nothing beyond "non-decreasing between resets" is assumed.
 
