@@ -403,9 +403,6 @@ class Settings(BaseSettings):
     max_fresh_metrics_per_request: int = Field(8, ge=1, le=64)
     fresh_periodic_mode: FreshPeriodicMode = FreshPeriodicMode.OBSERVE
     enable_vendor_diagnostics: bool = False
-    # Inverter day-history backfill: unit and day semantics of logger.day_eload_log_ts are unverified
-    # on hardware, so it stays off until verified. Internal switch, not an operator setting.
-    consumption_daily_backfill_enabled: bool = False
     # Commissioning-date derivation from logger_year/month_eac_log_ts: same unverified logger history
     # query contract, so it is off until verified on hardware. A manual date works regardless.
     battery_commissioning_derivation_enabled: bool = False

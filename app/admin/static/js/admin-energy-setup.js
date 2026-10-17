@@ -1665,11 +1665,10 @@ function setConsumptionVisible(visible) {
   if (section) section.hidden = !visible;
 }
 
-// The import-status badge is always meaningful, independent of whether the chart draws: it reports
-// whether inverter day totals are imported and, when they are, how many of the window's days have a
-// value yet. It consumes only the already-fetched history (no extra request). A null/undefined
-// history clears the badge; a missing or non-true inverter_import_enabled renders the disabled text
-// (never implying import is on when the field is absent).
+// The recording-status badge is always meaningful, independent of whether the chart draws: live
+// recording and the inverter day-history import always run, so it reports how many of the window's
+// days have a value yet. It consumes only the already-fetched history (no extra request). A
+// null/undefined history clears the badge.
 function renderInverterHistoryStatus(history) {
   const slot = $('energy-consumption-import-status');
   if (!slot) return false;
@@ -1678,11 +1677,6 @@ function renderInverterHistoryStatus(history) {
     return false;
   }
   const days = Array.isArray(history.days) ? history.days : [];
-  if (history.inverter_import_enabled !== true) {
-    slot.replaceChildren(element('span', 'badge rounded-pill text-bg-secondary',
-      'Inverter history: Disabled – awaiting hardware verification'));
-    return true;
-  }
   const total = days.length;
   const available = days.filter((day) => Number.isFinite(day.energy_wh)).length;
   const since = Date.parse(history.recording_since);
@@ -1693,7 +1687,7 @@ function renderInverterHistoryStatus(history) {
     detail = `${available}/${total} days available`;
   }
   slot.replaceChildren(element('span', 'badge rounded-pill text-bg-success',
-    `Inverter history: Enabled · ${detail}`));
+    `Live recording · ${detail}`));
   return true;
 }
 

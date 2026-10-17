@@ -1690,9 +1690,9 @@ def test_energy_page_wires_the_read_only_dry_run_plan_preview():
     css = (ADMIN_DIR / "static/css/admin.css").read_text(encoding="utf-8")
     assert "energy-plan-highlights" in js and "spot-market-highlights-row" not in js + css
     assert "repeat(3, minmax(0, 1fr))" in css[css.index(".energy-plan-highlights {"):]
-    # The static header reads as a card: a neutral "Preview" qualifier badge beside the title and
-    # the inverter select + Expert switch grouped as one labelled controls block.
-    assert 'id="energy-plan-qualifier"' in plan_pane and "status-badge-neutral" in plan_pane
+    # The static header reads as a card: a plain title (no "Preview" qualifier badge, the plan either
+    # has data or says it has none) and the inverter select + Expert switch as one labelled controls block.
+    assert 'id="energy-plan-qualifier"' not in plan_pane and ">Preview<" not in plan_pane
     assert 'role="group"' in plan_pane and 'aria-label="Charging plan controls"' in plan_pane
 
 

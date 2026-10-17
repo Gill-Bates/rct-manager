@@ -1324,9 +1324,7 @@ async def test_consumption_history_lists_the_last_60_completed_days_from_the_sto
             for day in days[:-1]
         )
         body = response.json()
-        assert (
-            body["recording_since"] is None and body["inverter_import_enabled"] is False
-        )
+        assert body["recording_since"] is None and "inverter_import_enabled" not in body
         store.upsert_consumption_intervals(
             "main",
             [

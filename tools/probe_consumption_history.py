@@ -7,9 +7,8 @@
 """Read-only hardware diagnostic for the RCT logger consumption-history registers.
 
 This standalone CLI probes an inverter's logger history time series so an operator can verify the
-unit, the day/time assignment and the retained history depth *before* the 60-day consumption
-backfill is enabled (``Settings.consumption_daily_backfill_enabled``). This tool NEVER touches that
-gate, any production start path or the UI; it only reads.
+unit, the day/time assignment and the retained history depth that the always-on 60-day consumption
+backfill relies on. This tool NEVER touches any production start path or the UI; it only reads.
 
 The two metrics probed are:
 
@@ -535,8 +534,7 @@ def _render_report(reports: list[MetricReport], *, pages: int, live: bool) -> st
         "",
         "This probe is strictly read-only: the only frame it emits is the logger history query, a",
         "WRITE-frame carrying a timestamp that stores nothing on the device. It never writes",
-        "`logger_log_rate` or any other register, and it does not touch",
-        "`consumption_daily_backfill_enabled`.",
+        "`logger_log_rate` or any other register.",
         "",
         "## Operator run command",
         "",

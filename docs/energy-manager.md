@@ -195,9 +195,9 @@ The inverter's daily load logger is used as a read-only reconciliation source fo
 
 A background service asks the inverter, through the normal device queue and without any write permission, for the last 60 completed local days (the running day is excluded) once shortly after start, after a device came back from an outage, and about once a day. Only days that are neither measured locally nor stored yet are fetched; as many real values as the inverter provides are stored in their own table (`consumption_daily_history`), the rest stays unavailable. A day counts as locally measured when at least 90 % of its local seconds are covered; otherwise a stored inverter total is used, never the sum of both. The days are local calendar dates of the site time zone, so a 23 h or 25 h DST day is one date.
 
-The query is not a write, but it is sent as a request frame with a timestamp. A firmware that ignores it makes the request time out; the transport keeps the connection for other objects after the first unanswered attempt, re-reads that object on a new connection, and reconnects on a second miss in a row, before the service backs off for six hours. The backfill is disabled by default (`consumption_daily_backfill_enabled`) until unit, day assignment and response behaviour are verified on real hardware.
+The query is not a write, but it is sent as a request frame with a timestamp. A firmware that ignores it makes the request time out; the transport keeps the connection for other objects after the first unanswered attempt, re-reads that object on a new connection, and reconnects on a second miss in a row, before the service backs off for six hours. The backfill always runs; it is read-only and never applies anything to the inverter.
 
-The service is switched off by default (`consumption_daily_backfill_enabled`) because the unit and the day semantics of `logger.day_eload_log_ts` are not verified on hardware: Wh per local calendar day is assumed. Read it with `GET /api/v1/devices/{device_id}/consumption/day?date=YYYY-MM-DD` and `GET /api/v1/devices/{device_id}/consumption/days?from=...&to=...` (at most 60 days, local store only, no device access). `source` is `local_measured`, `inverter_history` or `unavailable`.
+The unit and the day semantics of `logger.day_eload_log_ts` are assumed to be Wh per local calendar day; `tools/probe_consumption_history.py` checks them read-only on a real inverter. Read it with `GET /api/v1/devices/{device_id}/consumption/day?date=YYYY-MM-DD` and `GET /api/v1/devices/{device_id}/consumption/days?from=...&to=...` (at most 60 days, local store only, no device access). `source` is `local_measured`, `inverter_history` or `unavailable`.
 
 ### Consumption forecast
 
@@ -444,8 +444,8 @@ table of usable capacity against the datasheet capacity (100 %). The curve start
 commissioning date: a background service derives it once per inverter serial from the earliest
 energy in the inverter's year and month logs (`logger_year_eac_log_ts`, `logger_month_eac_log_ts`),
 retrying with backoff. This derivation is unverified on hardware (logger history query contract), so the service is
-switched off by default (`battery_commissioning_derivation_enabled`, an internal switch like
-`consumption_daily_backfill_enabled`, not an environment variable). A date entered by an operator always works and wins.
+switched off by default (`battery_commissioning_derivation_enabled`, an internal switch, not an
+environment variable). A date entered by an operator always works and wins.
 After a battery replacement a derived date is not used for the new series; enter the replacement date.
 
 | Method | Path | Effect |

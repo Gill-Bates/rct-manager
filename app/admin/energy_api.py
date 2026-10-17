@@ -2657,9 +2657,8 @@ class ConsumptionHistoryView(BaseModel):
     device_id: str
     timezone: str
     days: list[ConsumptionDayView]
-    # Explain an empty chart: when local recording began, and whether inverter day totals are imported.
+    # Explain an empty chart: when local recording began.
     recording_since: str | None
-    inverter_import_enabled: bool
 
 
 @router.get("/devices/{device_id}/consumption-history")
@@ -2702,7 +2701,6 @@ async def consumption_history(
             for d in days
         ],
         recording_since=recording_since,
-        inverter_import_enabled=runtime.settings.consumption_daily_backfill_enabled,
     )
 
 

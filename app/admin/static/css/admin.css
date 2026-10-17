@@ -1917,7 +1917,8 @@ body {
     display: flex;
     flex-wrap: wrap;
     justify-content: space-between;
-    align-items: flex-end;
+    /* Title top-left: the taller controls column must not push it down to its baseline. */
+    align-items: flex-start;
     gap: .75rem 1.5rem;
 }
 

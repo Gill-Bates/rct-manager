@@ -490,38 +490,19 @@ def test_daily_values_never_enter_the_forecast_history_or_the_pruned_window(tmp_
     assert kept == ["2026-10-14"]
 
 
-async def test_disabled_daily_backfill_sends_no_logger_history_query() -> None:
+async def test_daily_backfill_always_starts_without_a_switch() -> None:
     from unittest.mock import patch
 
-    from app.catalog.registry import RegistryCatalog
-    from app.gateway.rct import RctGateway
-    from tests.api_helpers import ROOT_CATALOG, make_settings, running_app
+    from tests.api_helpers import make_settings, running_app
 
     settings = make_settings()
-    assert settings.consumption_daily_backfill_enabled is False
-    compound_ids = {
-        e.object_id for e in (RegistryCatalog.from_file(ROOT_CATALOG).object_entry(n) for n in _compound_names())
-    }
-    # The service is built synchronously during lifespan startup, so a settled app proves it never was.
-    with (
-        patch.object(RctGateway, "query_history_series") as query,
-        patch("app.admin.consumption_backfill.ConsumptionHistoryBackfillService") as service,
-    ):
-        async with running_app(settings) as harness:
-            sent = {frame.object_id for _, frame in harness.net.frames}
-    service.assert_not_called()
-    query.assert_not_called()
-    assert sent.isdisjoint(compound_ids)
-
-
-def _compound_names() -> list[str]:
-    import json
-
-    from tests.api_helpers import ROOT_CATALOG
-
-    entries = json.loads(ROOT_CATALOG.read_text(encoding="utf-8"))
-    entries = entries["entries"] if isinstance(entries, dict) else entries
-    return [e["name"] for e in entries if e.get("response_type")]
+    # The import is not optional: no settings switch exists to turn it off.
+    assert not hasattr(settings, "consumption_daily_backfill_enabled")
+    # The service is built synchronously during lifespan startup, so a settled app proves it was.
+    with patch("app.admin.consumption_backfill.ConsumptionHistoryBackfillService") as service:
+        async with running_app(settings):
+            pass
+    service.assert_called_once()
 
 
 def test_several_logger_points_for_one_local_date_log_once_and_the_last_one_wins(caplog) -> None:

@@ -2522,7 +2522,7 @@ try {
           date: new Date(day.getTime() - back * 86400000).toISOString().slice(0, 10),
           energy_wh: 9000 + index * 500, source: index % 2 ? 'inverter_history' : 'local_measured',
         }));
-        let consumption = { days: consumptionDays(), recording_since: '2026-10-01T00:00:00+00:00', inverter_import_enabled: true };
+        let consumption = { days: consumptionDays(), recording_since: '2026-10-01T00:00:00+00:00' };
         let consumptionGate = null;
         let planStatus = 'ok';
         let planRequests = 0;
@@ -2658,7 +2658,7 @@ try {
         releaseConsumption();
         await ep.waitForSelector('#energy-consumption canvas');
         check('consumption chart is drawn once after a reload', (await chartsIn('#energy-consumption')) === 1);
-        consumption = { days: [], recording_since: null, inverter_import_enabled: false };
+        consumption = { days: [], recording_since: null };
         await ep.locator('#energy-plan-device').dispatchEvent('change');
         await ep.waitForFunction(() => window.Chart && /No (consumption|inverter)|./.test(document.querySelector('#energy-plan-result').textContent));
         check('without consumption data the whole section is hidden: no heading, no explanation',

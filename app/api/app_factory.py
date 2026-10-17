@@ -1173,11 +1173,8 @@ def _lifespan(
             if historian is not None:
                 # Drains the household-load buffer into 15-minute SQLite buckets off the receiver path.
                 tasks.append(asyncio.create_task(historian.run()))
-            if (
-                historian is not None
-                and store is not None
-                and runtime.settings.consumption_daily_backfill_enabled
-            ):
+            if historian is not None and store is not None:
+                # Read-only import of the inverter's day totals; always on, it never writes to the device.
                 from app.admin.consumption_backfill import (
                     ConsumptionHistoryBackfillService,
                 )
