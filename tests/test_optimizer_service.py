@@ -639,6 +639,136 @@ async def test_capacity_retry_is_quick_only_while_the_source_settles() -> None:
                 await task
 
 
+async def test_valid_to_valid_transition_plans_on_trusted_capacity_and_retries_quickly() -> (
+    None
+):
+    # A new topology candidate keeps the old trusted capacity, but the second debounce
+    # observation must follow within the quick retry, not one full recompute interval.
+    clock = _live_clock()
+    now = clock.now()
+    settling = {"value": True}
+    asked: list[str] = []
+
+    def pending(device_id: str) -> bool:
+        asked.append(device_id)
+        return settling["value"]
+
+    service = _service(
+        clock,
+        _PricesSource(_prices(now)),
+        _SolarSource(_solar(now)),
+        _BatterySource(_battery(now)),
+        capacity_pending=pending,
+        recompute_interval_seconds=3600.0,
+    )
+    waits: list[float] = []
+    real_wait_for = asyncio.wait_for
+
+    async def recording_wait_for(awaitable, timeout):
+        waits.append(timeout)
+        service.request_recompute()  # end the wait at once; only the requested timeout matters
+        return await real_wait_for(awaitable, timeout)
+
+    with patch("app.optimizer.service.asyncio.wait_for", recording_wait_for):
+        task = asyncio.create_task(service.run())
+        try:
+            await _wait_for(lambda: len(waits) >= 1)
+            assert waits[0] == 5.0
+            view = service.current_view()
+            assert view is not None
+            assert view.plan is not None
+            assert len(asked) == len(waits)  # consulted exactly once per recompute
+            settling["value"] = False
+            await _wait_for(lambda: waits[-1] == 3600.0)
+            assert service.current_view() is not None
+        finally:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+
+async def test_settled_capacity_with_battery_keeps_normal_planning(caplog) -> None:
+    clock = _live_clock()
+    now = clock.now()
+    asked: list[str] = []
+    service = _service(
+        clock,
+        _PricesSource(_prices(now)),
+        _SolarSource(_solar(now)),
+        _BatterySource(_battery(now)),
+        capacity_pending=lambda device_id: asked.append(device_id) or False,
+    )
+    with caplog.at_level("DEBUG", logger="app.optimizer.service"):
+        assert await service.recompute() is not None
+    assert asked == [DEVICE]
+    assert service._pending_reason is None
+    assert not [r for r in caplog.records if "settling" in r.getMessage()]
+
+
+async def test_settling_with_battery_logs_info_once_and_never_claims_missing_battery(
+    caplog,
+) -> None:
+    clock = _live_clock()
+    now = clock.now()
+    service = _service(
+        clock,
+        _PricesSource(_prices(now)),
+        _SolarSource(_solar(now)),
+        _BatterySource(_battery(now)),
+        capacity_pending=lambda _device_id: True,
+    )
+    with caplog.at_level("DEBUG", logger="app.optimizer.service"):
+        for _ in range(3):
+            assert await service.recompute() is not None
+    settling = [r for r in caplog.records if "settling" in r.getMessage()]
+    assert [r.levelname for r in settling] == ["INFO", "DEBUG", "DEBUG"]
+    assert all("last trusted battery capacity" in r.getMessage() for r in settling)
+    assert not [r for r in caplog.records if "is pending" in r.getMessage()]
+    assert not [r for r in caplog.records if r.levelname == "INFO"][1:]
+
+
+def test_runtime_battery_state_uses_module_capacity_without_override() -> None:
+    from types import SimpleNamespace
+
+    from app.dispatch.models import DeviceLimits
+    from app.energy.readings import DeviceReading
+    from app.gateway.battery_inventory import MeasuredBatteryCapacity
+    from app.optimizer.service import ReadingsBatteryStateProvider
+
+    serials = {f"battery_module_sn_{slot}": f"SN-{slot}" for slot in range(6)}
+    serials["battery_module_sn_6"] = ""
+    runtime = SimpleNamespace(
+        catalog=SimpleNamespace(exists=lambda _name: True),
+        gateway=SimpleNamespace(
+            cached_reading=lambda _device_id, name: (
+                (serials[name], None) if name in serials else None
+            ),
+            read_failed=lambda _device_id, name: name
+            == "battery_placeholder_0_module_sn_0",
+        ),
+    )
+
+    class _Limits:
+        def device_limits(self, device_id: str):
+            return DeviceLimits(max_charge_power_w=3000.0, max_discharge_power_w=3000.0)
+
+    provider = ReadingsBatteryStateProvider(
+        readings=SimpleNamespace(
+            readings=lambda _device_id: SimpleNamespace(
+                battery_soc_percent=DeviceReading(50.0, 1.0, False)
+            )
+        ),
+        dispatch=_Limits(),
+        clock=_live_clock(),
+        usable_capacity_wh=None,
+        max_age_seconds=300.0,
+        capacity_source=MeasuredBatteryCapacity(runtime),
+    )
+    state = provider.current(DEVICE)
+    assert state is not None
+    assert state.usable_capacity_wh == pytest.approx(10_368)
+
+
 def test_missing_capacity_after_readiness_still_reports_not_configured(caplog) -> None:
     from app.dispatch.battery_facts import NoVerifiedCapacity
     from app.dispatch.models import DeviceLimits

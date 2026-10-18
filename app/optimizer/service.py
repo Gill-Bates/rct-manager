@@ -277,8 +277,8 @@ class PlanningService:
         # None means "always ready". False marks the startup race: the device is not connected yet,
         # so a missing input is pending, not a configuration or hardware-fact gap.
         self._device_ready = device_ready
-        # Asked only after the battery state came back None: True while the automatic capacity
-        # source still settles, so the retry is quick instead of one full recompute interval.
+        # Asked once per recompute: True while the capacity source settles, so the retry is quick;
+        # without a battery state the plan is dropped, with one it plans on the last trusted value.
         self._capacity_pending = capacity_pending
         # None means "always active"; with an activity, mode ``off`` suspends every computation.
         self._activity = activity
@@ -358,18 +358,21 @@ class PlanningService:
             self._consumption.forecast, now, forecast_horizon
         )
         battery = await asyncio.to_thread(self._battery.current, self._device_id)
-        if (
-            battery is None
-            and self._capacity_pending is not None
-            and await asyncio.to_thread(self._capacity_pending, self._device_id)
+        if self._capacity_pending is not None and await asyncio.to_thread(
+            self._capacity_pending, self._device_id
         ):
             self._pending_reason = "capacity"
             (log.debug if previous_reason == "capacity" else log.info)(
-                "Planning for device %s is pending: battery module inventory/topology is still settling",
+                (
+                    "Planning for device %s is pending: battery module inventory/topology is still settling"
+                    if battery is None
+                    else "Planning for device %s uses the last trusted battery capacity: battery module inventory/topology is still settling"
+                ),
                 self._device_id,
             )
-            self._invalidate()
-            return None
+            if battery is None:
+                self._invalidate()
+                return None
         # Ages are computed locally and only ever published together with a successful plan, so a
         # surviving old plan can never be paired with a newer failed recompute's data ages.
         ages = self._ages(now, prices, solar, consumption, battery)
