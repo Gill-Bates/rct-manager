@@ -1850,15 +1850,43 @@ body {
     line-height: 1;
 }
 
-/* The result column is only 7/12 wide next to the consumption history: while the plan is loading,
-   it spans the whole tile so the spinner sits in the horizontal middle of the card. */
-#energy-plan-result:has(> .plan-loading) {
-    width: 100%;
-}
+@media (min-width: 768px) {
+    #energy-plan-card .card-body:has(> #energy-plan-result > .plan-loading) {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) minmax(16rem, 20rem);
+        grid-template-rows: minmax(15rem, auto);
+    }
 
-.col-xl-7:has(> #energy-plan-result > .plan-loading) {
-    flex: 0 0 auto;
-    width: 100%;
+    #energy-plan-card .card-body:has(> #energy-plan-result > .plan-loading) > .energy-plan-head {
+        display: contents;
+    }
+
+    #energy-plan-card .card-body:has(> #energy-plan-result > .plan-loading) .energy-plan-head-title {
+        grid-area: 1 / 1;
+        align-self: start;
+        z-index: 1;
+    }
+
+    #energy-plan-card .card-body:has(> #energy-plan-result > .plan-loading) .energy-plan-head-controls {
+        grid-area: 1 / 2;
+        align-self: start;
+    }
+
+    #energy-plan-card .card-body:has(> #energy-plan-result > .plan-loading) > #energy-plan-result {
+        grid-area: 1 / 1;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+    }
+
+    #energy-plan-card .card-body:has(> #energy-plan-result > .plan-loading) .plan-loading {
+        flex: 0 1 auto;
+        min-height: 0;
+    }
+
+    #energy-plan-card .card-body:has(> #energy-plan-result > .plan-loading) > :not(.energy-plan-head):not(#energy-plan-result) {
+        grid-column: 1 / -1;
+    }
 }
 
 .spot-market-chart-box {

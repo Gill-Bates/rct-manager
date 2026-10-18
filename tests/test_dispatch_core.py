@@ -282,6 +282,7 @@ def test_dispatch_store_round_trips_capabilities_and_device_configs(tmp_path: Pa
         verified_firmware="1.0.0",
         verified_at=datetime(2026, 10, 6, 12, 0, tzinfo=UTC),
         verified_by="tester",
+        note="verified on site",  # required non-blank evidence for a VERIFIED WRITE_PATH (P3-4)
     )
     store.put_capability(record)
     store.put_capability(CapabilityRecord("slave1", CapabilityName.GRID_POWER_SIGN))
@@ -424,6 +425,7 @@ def test_dispatch_store_status_and_engineering_mode_stay_readable_without_the_se
             bool_byte_width=1,
             write_frame_layout_verified=True,
             apply_sequence_verified=True,
+            note="verified on site",  # required non-blank evidence for a VERIFIED WRITE_PATH (P3-4)
         )
     )
     store.put_device_config("main", DeviceLimits(3000, 5000, engineering_mode=True))
@@ -451,6 +453,7 @@ def test_dispatch_store_detects_a_capability_blob_moved_to_another_row(
             bool_byte_width=1,
             write_frame_layout_verified=True,
             apply_sequence_verified=True,
+            note="verified on site",  # required non-blank evidence for a VERIFIED WRITE_PATH (P3-4)
         )
     )
     with store.connect() as db:

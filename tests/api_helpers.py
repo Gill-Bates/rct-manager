@@ -273,6 +273,9 @@ def dispatch_capabilities(
                     verified_device_model="RCT-Power-Storage-DC",
                     verified_firmware="1.0.0",
                     verified_by="integration test",
+                    # WRITE_PATH needs non-blank note evidence to read back as VERIFIED (P3-4); a
+                    # sign record governs no note and keeps None.
+                    note="integration test" if name is CapabilityName.WRITE_PATH else None,
                 )
             )
     return path

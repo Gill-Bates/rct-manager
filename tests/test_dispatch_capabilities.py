@@ -76,6 +76,9 @@ def verified(
             write_frame_layout_verified=True,
             apply_sequence_verified=True,
             sequence_order_relevant=True,
+            # note is required non-blank evidence for a VERIFIED WRITE_PATH (REQUIRED_FOR_VERIFIED);
+            # a test may still override it. Explicit overrides below win over this default.
+            note="verified on site",
         )
     if name is CapabilityName.EXPORT_LIMIT:
         evidence["export_limit_zero_blocks_export"] = True
@@ -365,6 +368,17 @@ def test_verified_from_dict_requires_explicit_evidence_keys(name: CapabilityName
     rejects an older VERIFIED row that predates the now-mandatory soc_target_unit."""
     data = verified("main", name).to_dict()
     del data[missing_key]
+    with pytest.raises(ValueError, match="missing evidence"):
+        CapabilityRecord.from_dict(data)
+
+
+@pytest.mark.parametrize("note", [None, "", "   "])
+def test_verified_write_path_from_dict_rejects_a_present_but_blank_note(note) -> None:
+    """P3-4: WRITE_PATH defines note as required evidence, so a persisted VERIFIED record whose note
+    is present but null/empty/whitespace is NOT valid evidence and must be rejected — the old
+    presence-only check let "note": null or "" pass, weaker than REQUIRED_FOR_VERIFIED."""
+    data = verified("main", CapabilityName.WRITE_PATH).to_dict()
+    data["note"] = note
     with pytest.raises(ValueError, match="missing evidence"):
         CapabilityRecord.from_dict(data)
 

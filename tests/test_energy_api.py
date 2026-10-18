@@ -3122,16 +3122,10 @@ async def test_spot_market_preview_summarises_available_series_when_tomorrow_unp
                 "Energy-Charts next-day prices are not published yet"
             )
 
-    # The preview route reads the wall clock directly (``datetime.now(UTC)``), not the injected
-    # clock, so pin that module reference to the fixed instant. The preview then classifies today
-    # and selects the current-slot price deterministically, whatever time the suite runs at.
-    class _FixedDatetime(datetime):
-        @classmethod
-        def now(cls, tz=None):
-            return fetched if tz is None else fetched.astimezone(tz)
-
-    monkeypatch.setattr("app.admin.energy_api.datetime", _FixedDatetime)
     async with running_app(spot_market_settings(tmp_path)) as harness:
+        # The preview takes ``now`` from the injected runtime clock; pin it so the three-day window
+        # and the current-slot price are deterministic whatever time the suite runs at.
+        monkeypatch.setattr(harness.runtime.clock, "now", lambda: fetched)
         _activate_spot_market(harness)
         _seed_spot_prices(
             harness.app.state.admin_store,

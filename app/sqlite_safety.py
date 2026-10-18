@@ -26,14 +26,10 @@ Any violation raises ``UnsafeDatabasePath`` and the caller must refuse to open t
 than fall back to a less safe location. See the OWASP File Upload and Injection Prevention cheat
 sheets for the underlying directory-trust reasoning.
 
-OPERATOR DECISION PENDING: these checks are currently gated behind ``RCT_SQLITE_STRICT_PATH`` and
-are OFF by default, because the shipped database path (``/opt/rct-manager/data/rct.db``) sits under
-``/opt``, which is owner-foreign to the service user in the reference environment, so a fail-closed
-default would block startup there. An off-by-default security check is NOT an acceptable final
-resolution (it reproduces the false sense of security the review flagged); whether the default
-becomes on — and how the parent-chain owner check is relaxed so it does not break ``/opt`` — is a
-deliberate operator decision that is still open. Do not flip the default without resolving that
-tension. The validation logic and the env flag below are intentionally left intact meanwhile.
+This path hardening is opt-in via ``RCT_SQLITE_STRICT_PATH`` and OFF by default by operator
+decision: the shipped database path sits under ``/opt`` (owner-foreign to the service user in the
+reference environment), where a fail-closed default would block startup, so strict checking is
+enabled per deployment rather than globally.
 """
 
 import os
