@@ -21,7 +21,7 @@ import logging
 from collections.abc import Callable
 
 from app.weather.base import WeatherResponseError
-from app.weather.geocoding import optional_timezone
+from app.weather.geocoding import is_finite_number, optional_timezone
 from app.weather.http_json import JsonHttpClient, TtlCache
 from app.weather.models import OPEN_METEO_URL
 
@@ -61,7 +61,7 @@ class TimezoneResolver:
         Coordinates are validated here as a guard even though callers pass validated config values;
         an out-of-range pair is a response error, never a request to the provider.
         """
-        if not _is_finite(latitude) or not _is_finite(longitude):
+        if not is_finite_number(latitude) or not is_finite_number(longitude):
             raise WeatherResponseError("Coordinates must be finite numbers")
         if not (-90 <= latitude <= 90) or not (-180 <= longitude <= 180):
             raise WeatherResponseError("Coordinates are out of range")
@@ -89,13 +89,3 @@ class TimezoneResolver:
             ("forecast_days", "1"),
         ]
         return self._http.build_url(OPEN_METEO_URL, params)
-
-
-def _is_finite(value: object) -> bool:
-    import math
-
-    return (
-        not isinstance(value, bool)
-        and isinstance(value, (int, float))
-        and math.isfinite(value)
-    )

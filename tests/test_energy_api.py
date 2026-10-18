@@ -36,7 +36,7 @@ from app.api.app_factory import (
 from app.api.problems import _is_write_path
 from app.catalog.base import is_numeric
 from app.catalog.registry import RegistryCatalog
-from app.energy.models import EnergyMode
+from app.energy.models import EnergyMode, ModeRecord
 from app.gateway.battery_inventory import (
     CapacityCalibrationSample,
     MeasuredBatteryCapacity,
@@ -2781,6 +2781,101 @@ def _seed_solar_forecast(store, config: WeatherConfig, forecast: SolarForecast) 
             for interval in forecast.intervals
         ]
     )
+
+
+async def test_dynamic_plan_uses_real_module_inventory_without_capacity_override(
+    tmp_path: Path,
+) -> None:
+    config = energy_settings(tmp_path, enable_write_support=False, enable_periodic_reads=False)
+    registry_path = Path(config.object_registry_path)
+    registry = json.loads(registry_path.read_text(encoding="utf-8"))
+    production = json.loads((ROOT / "app/catalog/objects.json").read_text(encoding="utf-8"))
+    module_names = {
+        f"{prefix}_module_sn_{slot}"
+        for prefix in ("battery", "battery_placeholder_0")
+        for slot in range(7)
+    }
+    present = {entry["name"] for entry in registry["entries"]}
+    registry["entries"].extend(
+        entry
+        for entry in production["entries"]
+        if entry["name"] in module_names - present
+    )
+    registry_path.write_text(json.dumps(registry), encoding="utf-8")
+
+    async with running_app(config) as harness:
+        runtime = harness.runtime
+        assert isinstance(runtime.battery_capacity, MeasuredBatteryCapacity)
+        assert runtime.settings.dispatch_usable_battery_capacity_wh is None
+        assert runtime.dispatch is None
+        now = runtime.clock.now()
+        start = now.replace(
+            minute=(now.minute // 15) * 15, second=0, microsecond=0
+        ) + timedelta(minutes=15)
+        cache = runtime.gateway._cache
+        for slot in range(7):
+            cache.put(
+                ("main", f"battery_module_sn_{slot}"),
+                f"SN-{slot}" if slot < 6 else "",
+                measured_at=now,
+                received_monotonic=runtime.clock.monotonic(),
+                origin="transaction",
+            )
+        runtime.gateway._refresh_failures[("main", "battery_placeholder_0_module_sn_0")] = 3
+        cache.put(
+            ("main", "battery_soc"),
+            0.5,
+            measured_at=now,
+            received_monotonic=runtime.clock.monotonic(),
+            origin="transaction",
+        )
+
+        spot = SpotMarketConfig.model_validate(_spot_body())
+        weather = WeatherConfig(
+            enabled=True,
+            latitude=52.5,
+            longitude=13.4,
+            timezone="UTC",
+            pv_peak_power_wp=10000,
+            tilt_deg=30,
+            azimuth_deg=0,
+        )
+        harness.app.state.spotmarket_config = spot
+        harness.app.state.weather_config = weather
+        intervals = tuple(
+            SpotPriceInterval(
+                start + timedelta(minutes=15 * slot),
+                start + timedelta(minutes=15 * (slot + 1)),
+                Decimal("0.20"),
+            )
+            for slot in range(40)
+        )
+        _seed_spot_prices(harness.app.state.admin_store, intervals)
+        forecast = SolarForecast(
+            now,
+            tuple(
+                SolarForecastInterval(interval.start, interval.end, 0.0)
+                for interval in intervals
+            ),
+        )
+        _seed_solar_forecast(harness.app.state.admin_store, weather, forecast)
+        runtime.energy._mode_states["main"] = ModeRecord("main", mode=EnergyMode.MANUAL)
+        headers = await admin_session(harness)
+
+        listing = await harness.client.get("/admin/api/energy/planning-devices", headers=headers)
+        assert listing.status_code == 200, listing.text
+        main = next(item for item in listing.json() if item["device_id"] == "main")
+        assert main["battery_capacity_source"] == "verified"
+        assert main["limits"]["usable_capacity_wh"] is None
+
+        response = await harness.client.get(
+            "/admin/api/energy/devices/main/dynamic-plan", headers=headers
+        )
+        assert response.status_code == 200, response.text
+        plan = response.json()
+        assert plan["status"] == "ok", plan
+        assert plan["battery"]["usable_capacity_wh"] == pytest.approx(10_368)
+        assert plan["battery"]["remaining_energy_wh"] == pytest.approx(5_184)
 
 
 async def test_spot_market_config_defaults_then_saves_and_reloads(

@@ -1074,6 +1074,7 @@ def test_incomplete_or_invalid_module_inventory_has_no_planning_capacity() -> No
     gapped = _single_tower(6)
     gapped["battery_module_sn_2"] = ""
     assert _measured_capacity(_runtime(gapped, unanswered=_PLACEHOLDER_SILENT)) is None
+    assert _measured_capacity(_runtime(_single_tower(7), unanswered=_PLACEHOLDER_SILENT)) is None
     assert (
         _measured_capacity(_runtime(_single_tower(1), unanswered=_PLACEHOLDER_SILENT))
         is None
@@ -1321,9 +1322,10 @@ def test_mixed_or_small_two_towers_remain_diagnostic_only(
 
 
 @pytest.mark.parametrize("modules", range(2, 7))
-def test_single_tower_module_range_keeps_diagnostic_count(modules: int) -> None:
+def test_single_tower_module_range_provides_rated_capacity(modules: int) -> None:
     runtime = _runtime(_single_tower(modules), unanswered=_PLACEHOLDER_SILENT)
     assert _battery_module_report(runtime, "dev", "battery")["module_count"] == modules
+    assert _measured_capacity(runtime) == pytest.approx(modules * 1920 * 0.9)
 
 
 # ---- Live reconfiguration must not carry the old hardware's topology forward ---------------------
