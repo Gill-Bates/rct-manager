@@ -179,6 +179,23 @@ _SCHEMA: dict[str, str] = {
         "source TEXT NOT NULL CHECK (source IN ('logger_derived', 'manual')), "
         "determined_at TEXT NOT NULL, PRIMARY KEY (inverter_serial, source)) STRICT;"
     ),
+    # Admin-UI dashboard layout as structured rows, one per placed widget, not an opaque JSON blob.
+    # position preserves the widgets-list order the API round-trips; the whole layout is read and
+    # replaced atomically. This holds non-secret UI config, so it is stored in plain columns rather
+    # than the encrypted settings table.
+    "dashboard_layout": (
+        "CREATE TABLE dashboard_layout ("
+        "widget_id TEXT PRIMARY KEY, position INTEGER NOT NULL, "
+        "x INTEGER NOT NULL, y INTEGER NOT NULL, w INTEGER NOT NULL, h INTEGER NOT NULL, "
+        "visible INTEGER NOT NULL CHECK (visible IN (0, 1))) STRICT;"
+    ),
+    # The layout's version scalar lives in its own one-row companion: it is a layout-level field,
+    # not a per-widget attribute, and its presence is the "a layout is stored" marker, so an empty
+    # widget list can still be a stored (versioned) layout and absence means "no layout".
+    "dashboard_layout_meta": (
+        "CREATE TABLE dashboard_layout_meta ("
+        "id INTEGER PRIMARY KEY CHECK (id = 1), version INTEGER NOT NULL) STRICT;"
+    ),
 }
 
 # Retention prunes several consumption tables by a non-PK-leading timestamp column. Only the two
@@ -1045,6 +1062,77 @@ class AdminStore:
             ).fetchone()
         return None if row is None else dict(row)
 
+    def get_dashboard_layout(self) -> dict | None:
+        """The stored dashboard layout as ``{"version": int, "widgets": [...]}``, or None if absent.
+
+        Widgets are returned in their stored ``position`` order, reconstructing the exact JSON shape
+        the API persisted. ``None`` means no layout is stored (the meta row is the presence marker),
+        mirroring the "no layout stored" result the GET endpoint returns in that case.
+        """
+        with self.connect() as db:
+            meta = db.execute(
+                "SELECT version FROM dashboard_layout_meta WHERE id=1"
+            ).fetchone()
+            if meta is None:
+                return None
+            rows = db.execute(
+                "SELECT widget_id, x, y, w, h, visible FROM dashboard_layout ORDER BY position"
+            ).fetchall()
+        return {
+            "version": meta["version"],
+            "widgets": [
+                {
+                    "id": row["widget_id"],
+                    "x": row["x"],
+                    "y": row["y"],
+                    "w": row["w"],
+                    "h": row["h"],
+                    "visible": bool(row["visible"]),
+                }
+                for row in rows
+            ],
+        }
+
+    def replace_dashboard_layout(self, layout: dict) -> None:
+        """Atomically replace the whole layout: clear every widget row and the meta, then rewrite.
+
+        ``layout`` is the validated ``{"version": int, "widgets": [...]}`` shape; each widget carries
+        ``id``, ``x``, ``y``, ``w``, ``h`` and ``visible``. The widgets-list order is persisted as
+        ``position`` so a later read returns the widgets in the same order.
+        """
+        widgets = layout["widgets"]
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            db.execute("DELETE FROM dashboard_layout")
+            db.execute("DELETE FROM dashboard_layout_meta")
+            db.execute(
+                "INSERT INTO dashboard_layout_meta (id, version) VALUES (1, ?)",
+                (layout["version"],),
+            )
+            db.executemany(
+                "INSERT INTO dashboard_layout "
+                "(widget_id, position, x, y, w, h, visible) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                [
+                    (
+                        widget["id"],
+                        position,
+                        widget["x"],
+                        widget["y"],
+                        widget["w"],
+                        widget["h"],
+                        1 if widget["visible"] else 0,
+                    )
+                    for position, widget in enumerate(widgets)
+                ],
+            )
+
+    def clear_dashboard_layout(self) -> None:
+        """Remove the stored layout; a missing layout is not an error (idempotent reset-to-default)."""
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            db.execute("DELETE FROM dashboard_layout")
+            db.execute("DELETE FROM dashboard_layout_meta")
+
     def prune_consumption_daily(self, cutoff_date: str) -> None:
         """Drop day totals older than the ISO local date ``cutoff_date``."""
         with self.connect() as db:
@@ -1231,7 +1319,11 @@ class AdminStore:
         expires_at = payload["expires_at"]
         if lifetime and "issued_at" in payload:
             current_limit = payload["issued_at"] + lifetime
-            expires_at = min(expires_at, current_limit) if expires_at is not None else current_limit
+            expires_at = (
+                min(expires_at, current_limit)
+                if expires_at is not None
+                else current_limit
+            )
         return expires_at is not None and expires_at <= now
 
     def _purge_sessions(self, db: sqlite3.Connection, lifetime: int) -> None:

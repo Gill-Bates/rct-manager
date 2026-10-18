@@ -29,21 +29,35 @@ class _Clock:
     def now(self) -> datetime:
         return datetime(2026, 1, 15, 12, 0, tzinfo=UTC)
 
+    def monotonic(self) -> float:
+        return 1000.0
+
 
 async def _fail_if_called(*args, **kwargs):  # pragma: no cover - asserted never reached
-    raise AssertionError("set_capabilities must not run while the control test holds the mutex")
+    raise AssertionError(
+        "set_capabilities must not run while the control test holds the mutex"
+    )
 
 
 def _request(sessions: dict[str, ev._Session]):
     """A minimal Request-like object: just the app.state the refusal paths read before any I/O."""
     dispatch = SimpleNamespace(set_capabilities=_fail_if_called)
-    runtime = SimpleNamespace(devices={DEVICE: object()}, clock=_Clock(), dispatch=dispatch)
+    runtime = SimpleNamespace(
+        devices={DEVICE: object()}, clock=_Clock(), dispatch=dispatch
+    )
     state = SimpleNamespace(runtime=runtime, energy_verification_sessions=sessions)
     return SimpleNamespace(app=SimpleNamespace(state=state))
 
 
 def _ready_session() -> ev._Session:
-    session = ev._Session(_Clock().now(), "MODEL", "FW", "percent")
+    clock = _Clock()
+    session = ev._Session(
+        clock.now(),
+        clock.monotonic() + ev.SESSION_TTL.total_seconds(),
+        "MODEL",
+        "FW",
+        "percent",
+    )
     # A completed-looking session so can_commit would otherwise pass; the point under test is the lock.
     session.battery_discharge_positive = True
     session.grid_import_positive = True
@@ -61,7 +75,9 @@ def test_commit_refuses_while_a_control_test_holds_the_lock() -> None:
     async def scenario() -> None:
         async with session.busy:  # stand in for an in-flight control test
             with pytest.raises(HTTPException) as caught:
-                await ev.commit(request, DEVICE, ev.ConfirmBody(confirm=True), admin=None)
+                await ev.commit(
+                    request, DEVICE, ev.ConfirmBody(confirm=True), admin=None
+                )
             assert caught.value.status_code == 409
             assert caught.value.detail == "The control test is running."
         # The session was neither stored nor removed: the in-flight operation keeps its session.
@@ -87,7 +103,9 @@ def test_start_refuses_to_replace_a_busy_session() -> None:
     asyncio.run(scenario())
 
 
-def test_commit_runs_its_whole_body_under_the_lock(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_commit_runs_its_whole_body_under_the_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     # With no control test active, commit must still hold the mutex across its awaited reads and the
     # store, so a control test that starts mid-commit blocks instead of racing in. _state() is the
     # first awaited call inside the critical section; observing the lock held there proves the body
@@ -98,7 +116,9 @@ def test_commit_runs_its_whole_body_under_the_lock(monkeypatch: pytest.MonkeyPat
 
     async def fake_state(req, device_id, sess, *, readings=True):
         observed["locked_during_body"] = sess.busy.locked()
-        raise HTTPException(409, "stop after observing the lock")  # short-circuit the rest of commit
+        raise HTTPException(
+            409, "stop after observing the lock"
+        )  # short-circuit the rest of commit
 
     monkeypatch.setattr(ev, "_state", fake_state)
 

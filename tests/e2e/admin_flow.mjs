@@ -2770,10 +2770,19 @@ try {
           && !(await ep.getByText('Usable battery capacity').first().isVisible()), waitText);
         planStatus = 'battery_state_unavailable';
         await Promise.all([ep.waitForResponse((r) => r.url().includes('/dynamic-plan')), ep.locator('#energy-plan-device').dispatchEvent('change')]);
-        const batteryWaitText = await ep.locator('#energy-plan-result [role="status"]').first().innerText();
-        check('a pending battery plan omits the capacity warning in Basic mode',
-          /Plan is being prepared.*Please check back in a few minutes/s.test(batteryWaitText)
-          && !batteryWaitText.includes('Usable battery capacity is not verified yet.'), batteryWaitText);
+        // battery_state_unavailable is operator-actionable: the renderer shows the readiness card with
+        // the concrete capacity instruction at once (no hourglass wait state), matching renderDryRunPlan
+        // and tests/test_admin_ui.py. Polling continues in the background.
+        await ep.waitForFunction(() => /Check that the inverter is connected and reports its battery state and capacity/
+          .test(document.querySelector('#energy-plan-result').textContent));
+        const batteryText = await ep.locator('#energy-plan-result').innerText();
+        check('a missing battery plan shows the capacity instruction at once, not a generic wait state',
+          /Check that the inverter is connected and reports its battery state and capacity/.test(batteryText)
+          && /Usable battery capacity: could not be verified/.test(batteryText)
+          && !/Plan is being prepared/.test(batteryText)
+          && (await ep.locator('#energy-plan-result [role="status"]').count()) === 0, batteryText);
+        check('the verified-capacity override hint stays Expert-only in Basic mode',
+          !(await ep.getByText('A verified capacity override can be entered in Advanced diagnostics.').first().isVisible()), batteryText);
         planStatus = 'spot_prices_unavailable';
         await Promise.all([ep.waitForResponse((r) => r.url().includes('/dynamic-plan')), ep.locator('#energy-plan-device').dispatchEvent('change')]);
         let before = planRequests;

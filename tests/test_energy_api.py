@@ -22,7 +22,11 @@ from pathlib import Path
 import pytest
 from starlette.requests import Request
 
-from app.admin.energy_verification import BalanceProof, BalanceSample, prove_signs_from_balance
+from app.admin.energy_verification import (
+    BalanceProof,
+    BalanceSample,
+    prove_signs_from_balance,
+)
 from app.admin.store import AdminStore
 from app.api.app_factory import (
     _ENERGY_METRIC_NAMES,
@@ -33,7 +37,10 @@ from app.api.problems import _is_write_path
 from app.catalog.base import is_numeric
 from app.catalog.registry import RegistryCatalog
 from app.energy.models import EnergyMode
-from app.gateway.battery_inventory import CapacityCalibrationSample, MeasuredBatteryCapacity
+from app.gateway.battery_inventory import (
+    CapacityCalibrationSample,
+    MeasuredBatteryCapacity,
+)
 from app.protocol.types import WRITE_COMMANDS
 from app.protocol.values import encode_value
 from app.scheduling.shutdown import ShutdownPlan
@@ -74,11 +81,15 @@ def energy_settings(tmp_path: Path, *, unpinned: bool = True, **overrides):
     """
     paths = dispatch_fixtures(tmp_path)
     if unpinned:
-        registry = json.loads(Path(paths["object_registry_path"]).read_text(encoding="utf-8"))
+        registry = json.loads(
+            Path(paths["object_registry_path"]).read_text(encoding="utf-8")
+        )
         for entry in registry["entries"]:
             if entry["name"] in _ENERGY_METRIC_NAMES:
                 entry["preselected"] = False
-        Path(paths["object_registry_path"]).write_text(json.dumps(registry), encoding="utf-8")
+        Path(paths["object_registry_path"]).write_text(
+            json.dumps(registry), encoding="utf-8"
+        )
     admin_path = tmp_path / "admin.db"
     store = AdminStore(admin_path, SECRET)
     password = store.initialize()
@@ -93,7 +104,9 @@ def energy_settings(tmp_path: Path, *, unpinned: bool = True, **overrides):
         "admin_db_path": admin_path,
         # The dispatch gate blocks unverified hardware, so an integration test that drives a device
         # has to seed the verification of exactly that device explicitly.
-        "dispatch_db_path": dispatch_capabilities(tmp_path, ("main", "slave1"), secret=SECRET),
+        "dispatch_db_path": dispatch_capabilities(
+            tmp_path, ("main", "slave1"), secret=SECRET
+        ),
         "dispatch_max_charge_power_w": 3000,
         "dispatch_max_discharge_power_w": 5000,
         "write_response_timeout_ms": 50,
@@ -105,9 +118,16 @@ def characterization_settings(tmp_path: Path, **overrides):
     settings = energy_settings(tmp_path, **overrides)
     path = Path(settings.object_registry_path)
     registry = json.loads(path.read_text(encoding="utf-8"))
-    production = json.loads((ROOT / "app/catalog/objects.json").read_text(encoding="utf-8"))
-    names = {"power_mng_battery_type", "battery_ah_capacity", "battery_voltage", "battery_placeholder_0_ah_capacity",
-             "battery_placeholder_0_maximum_charge_current"}
+    production = json.loads(
+        (ROOT / "app/catalog/objects.json").read_text(encoding="utf-8")
+    )
+    names = {
+        "power_mng_battery_type",
+        "battery_ah_capacity",
+        "battery_voltage",
+        "battery_placeholder_0_ah_capacity",
+        "battery_placeholder_0_maximum_charge_current",
+    }
     present = {entry["name"] for entry in registry["entries"]}
     registry["entries"].extend(
         entry for entry in production["entries"] if entry["name"] in names - present
@@ -141,7 +161,9 @@ async def arm(harness, device_id: str = "main", mode: str = "external") -> dict:
     """
     headers = await admin_session(harness)
     response = await harness.client.put(
-        f"/admin/api/energy/devices/{device_id}/mode", headers=headers, json={"mode": mode}
+        f"/admin/api/energy/devices/{device_id}/mode",
+        headers=headers,
+        json={"mode": mode},
     )
     assert response.status_code == 200, response.text
     return response.json()
@@ -175,27 +197,31 @@ def energy_object_ids(harness) -> set[int]:
     return {catalog.object_entry(name).object_id for name in _ENERGY_METRIC_NAMES}
 
 
-
-
 async def test_the_task_body_charges_the_battery_to_the_target(tmp_path: Path) -> None:
     """The literal body from the task: an action and a business target SoC, nothing else."""
     async with running_app(energy_settings(tmp_path)) as harness:
         seed_payloads(harness)
         await arm(harness)
-        response = await command(harness, {"action": "charge", "target_soc_percent": 80})
+        response = await command(
+            harness, {"action": "charge", "target_soc_percent": 80}
+        )
         assert response.status_code == 200, response.text
         body = response.json()
         assert body["state"] == "charging"
         assert body["action"] == "charge"
         assert body["target_soc_percent"] == 80
-        assert body["power_limit_w"] == 3000  # the configured device limit, chosen server-side
+        assert (
+            body["power_limit_w"] == 3000
+        )  # the configured device limit, chosen server-side
         assert body["power_limit_clamped"] is False
         assert body["commanded_direction"] == "charge"
         assert body["until"] is not None
         assert body["armed"] is True
 
 
-async def test_an_explicit_power_above_the_device_limit_is_clamped(tmp_path: Path) -> None:
+async def test_an_explicit_power_above_the_device_limit_is_clamped(
+    tmp_path: Path,
+) -> None:
     async with running_app(energy_settings(tmp_path)) as harness:
         seed_payloads(harness)
         await arm(harness)
@@ -207,12 +233,16 @@ async def test_an_explicit_power_above_the_device_limit_is_clamped(tmp_path: Pat
         assert response.json()["power_limit_clamped"] is True
 
 
-async def test_discharge_hold_and_auto_each_reach_their_business_state(tmp_path: Path) -> None:
+async def test_discharge_hold_and_auto_each_reach_their_business_state(
+    tmp_path: Path,
+) -> None:
     async with running_app(energy_settings(tmp_path)) as harness:
         seed_payloads(harness)
         await arm(harness)
 
-        discharging = await command(harness, {"action": "discharge", "target_soc_percent": 30})
+        discharging = await command(
+            harness, {"action": "discharge", "target_soc_percent": 30}
+        )
         assert discharging.status_code == 200, discharging.text
         assert discharging.json()["state"] == "discharging"
         assert discharging.json()["power_limit_w"] == 5000
@@ -252,7 +282,11 @@ async def test_auto_on_an_untouched_device_is_not_an_error(tmp_path: Path) -> No
         {"action": "charge", "target_soc_percent": 99},  # above the hard bound
         {"action": "charge", "target_soc_percent": 80, "max_power_w": 0},
         {"action": "charge", "target_soc_percent": 80, "max_power_w": 50_001},
-        {"action": "charge", "target_soc_percent": 80, "unexpected": 1},  # extra="forbid"
+        {
+            "action": "charge",
+            "target_soc_percent": 80,
+            "unexpected": 1,
+        },  # extra="forbid"
         {"action": "shutdown_everything", "target_soc_percent": 80},
     ],
 )
@@ -267,11 +301,15 @@ async def test_an_invalid_command_body_is_rejected_by_the_request_model(
         assert response.json()["code"] == "invalid_request"
 
 
-@pytest.mark.parametrize("body", [{"mode": "true"}, {"mode": "auto"}, {"armed": True}, {}])
+@pytest.mark.parametrize(
+    "body", [{"mode": "true"}, {"mode": "auto"}, {"armed": True}, {}]
+)
 async def test_an_unknown_mode_is_a_422(tmp_path: Path, body: dict) -> None:
     async with running_app(energy_settings(tmp_path)) as harness:
         headers = await admin_session(harness)
-        response = await harness.client.put("/admin/api/energy/devices/main/mode", headers=headers, json=body)
+        response = await harness.client.put(
+            "/admin/api/energy/devices/main/mode", headers=headers, json=body
+        )
         assert response.status_code == 422, response.text
 
 
@@ -280,19 +318,23 @@ async def test_the_public_api_has_no_mode_endpoint(tmp_path: Path) -> None:
     async with running_app(energy_settings(tmp_path)) as harness:
         for headers in (WRITER, READER):
             response = await harness.client.put(
-                "/api/v1/devices/main/energy/mode", headers=headers, json={"mode": "external"}
+                "/api/v1/devices/main/energy/mode",
+                headers=headers,
+                json={"mode": "external"},
             )
-            assert response.status_code == 404, response.text  # 403 would mean the route still exists
+            assert (
+                response.status_code == 404
+            ), response.text  # 403 would mean the route still exists
         status = await harness.client.get("/api/v1/devices/main/energy", headers=WRITER)
         assert status.json()["armed"] is False
-
-
 
 
 async def test_a_device_in_mode_off_refuses_a_command(tmp_path: Path) -> None:
     async with running_app(energy_settings(tmp_path)) as harness:
         seed_payloads(harness)
-        response = await command(harness, {"action": "charge", "target_soc_percent": 80})
+        response = await command(
+            harness, {"action": "charge", "target_soc_percent": 80}
+        )
         assert response.status_code == 409, response.text
         assert response.json()["code"] == "energy_manager_off"
 
@@ -307,12 +349,16 @@ async def test_an_unknown_device_is_a_404(tmp_path: Path) -> None:
             assert response.json()["code"] == "unknown_device"
 
 
-async def test_a_read_only_token_cannot_reach_the_energy_manager(tmp_path: Path) -> None:
+async def test_a_read_only_token_cannot_reach_the_energy_manager(
+    tmp_path: Path,
+) -> None:
     async with running_app(energy_settings(tmp_path)) as harness:
         for response in (
             await harness.client.get("/api/v1/devices/main/energy", headers=READER),
             await harness.client.post(
-                "/api/v1/devices/main/energy/command", headers=READER, json={"action": "auto"}
+                "/api/v1/devices/main/energy/command",
+                headers=READER,
+                json={"action": "auto"},
             ),
         ):
             assert response.status_code == 403, response.text
@@ -334,7 +380,9 @@ async def test_without_write_support_the_public_router_is_absent_and_the_admin_s
 
         headers = await admin_session(harness)
         arming = await harness.client.put(
-            "/admin/api/energy/devices/main/mode", headers=headers, json={"mode": "external"}
+            "/admin/api/energy/devices/main/mode",
+            headers=headers,
+            json={"mode": "external"},
         )
         assert arming.status_code == 409, arming.text
         assert arming.json()["code"] == "energy_write_support_required"
@@ -354,20 +402,26 @@ async def test_without_write_support_the_public_router_is_absent_and_the_admin_s
 async def test_hardware_soc_strategy_is_cache_only_and_available_without_dispatch(
     tmp_path: Path, payload: bytes | None, expected_code: int | None
 ) -> None:
-    async with running_app(energy_settings(tmp_path, enable_write_support=False)) as harness:
+    async with running_app(
+        energy_settings(tmp_path, enable_write_support=False)
+    ) as harness:
         seed_payloads(harness)
         headers = await admin_session(harness)
         gateway = harness.runtime.gateway
         if payload is not None:
-            strategy_id = RegistryCatalog.from_file(
-                harness.runtime.settings.object_registry_path
-            ).object_entry("power_mng_soc_strategy").object_id
+            strategy_id = (
+                RegistryCatalog.from_file(harness.runtime.settings.object_registry_path)
+                .object_entry("power_mng_soc_strategy")
+                .object_id
+            )
             harness.net.payloads[strategy_id] = payload
             # An explicit read warms the cache. The UI endpoint itself must not perform this read.
             await gateway.read_metric("main", "power_mng_soc_strategy", fresh=False)
         before = gateway.device_status("main").transactions
 
-        response = await harness.client.get("/admin/api/energy/hardware-strategies", headers=headers)
+        response = await harness.client.get(
+            "/admin/api/energy/hardware-strategies", headers=headers
+        )
 
         assert response.status_code == 200, response.text
         main = next(item for item in response.json() if item["device_id"] == "main")
@@ -378,7 +432,9 @@ async def test_hardware_soc_strategy_is_cache_only_and_available_without_dispatc
         assert harness.runtime.energy.mode("main") is EnergyMode.OFF
 
 
-async def test_hardware_soc_strategy_stale_cache_is_na_without_device_read(tmp_path: Path) -> None:
+async def test_hardware_soc_strategy_stale_cache_is_na_without_device_read(
+    tmp_path: Path,
+) -> None:
     async with running_app(
         energy_settings(tmp_path, enable_write_support=False, cache_ttl_seconds=0.0)
     ) as harness:
@@ -389,7 +445,9 @@ async def test_hardware_soc_strategy_stale_cache_is_na_without_device_read(tmp_p
         await asyncio.sleep(0.01)  # ttl=0: cached value is stale/grace, not fresh
         before = gateway.device_status("main").transactions
 
-        response = await harness.client.get("/admin/api/energy/hardware-strategies", headers=headers)
+        response = await harness.client.get(
+            "/admin/api/energy/hardware-strategies", headers=headers
+        )
 
         assert response.status_code == 200, response.text
         main = next(item for item in response.json() if item["device_id"] == "main")
@@ -398,8 +456,14 @@ async def test_hardware_soc_strategy_stale_cache_is_na_without_device_read(tmp_p
         assert gateway.device_status("main").transactions == before
 
 
-async def test_battery_characterization_is_authorized_cache_only_and_never_derives_wh(tmp_path: Path) -> None:
-    async with running_app(characterization_settings(tmp_path, enable_write_support=False, enable_periodic_reads=False)) as harness:
+async def test_battery_characterization_is_authorized_cache_only_and_never_derives_wh(
+    tmp_path: Path,
+) -> None:
+    async with running_app(
+        characterization_settings(
+            tmp_path, enable_write_support=False, enable_periodic_reads=False
+        )
+    ) as harness:
         path = "/admin/api/energy/devices/main/battery-characterization"
         denied = await harness.client.get(path)
         assert denied.status_code == 401
@@ -416,18 +480,31 @@ async def test_battery_characterization_is_authorized_cache_only_and_never_deriv
         assert "usable_capacity_wh" not in body
         metrics = {item["name"]: item for item in body["metrics"]}
         assert set(metrics) == {
-            "power_mng_n_batteries", "power_mng_battery_type", "power_mng_amp_hours_measured",
-            "battery_ah_capacity", "battery_placeholder_0_ah_capacity", "battery_soh", "battery_voltage",
-            "battery_maximum_charge_current", "battery_maximum_discharge_current",
-            "battery_placeholder_0_current", "battery_placeholder_0_maximum_charge_current",
+            "power_mng_n_batteries",
+            "power_mng_battery_type",
+            "power_mng_amp_hours_measured",
+            "battery_ah_capacity",
+            "battery_placeholder_0_ah_capacity",
+            "battery_soh",
+            "battery_voltage",
+            "battery_maximum_charge_current",
+            "battery_maximum_discharge_current",
+            "battery_placeholder_0_current",
+            "battery_placeholder_0_maximum_charge_current",
             "battery_placeholder_0_maximum_discharge_current",
         }
         assert metrics["battery_ah_capacity"] == {
-            "name": "battery_ah_capacity", "value": None, "unit": "Ah", "age_seconds": None,
+            "name": "battery_ah_capacity",
+            "value": None,
+            "unit": "Ah",
+            "age_seconds": None,
             "status": "unavailable",
         }
         assert metrics["battery_placeholder_0_maximum_charge_current"]["unit"] == "A"
-        assert [tower["id"] for tower in body["towers"]] == ["battery", "battery_placeholder_0"]
+        assert [tower["id"] for tower in body["towers"]] == [
+            "battery",
+            "battery_placeholder_0",
+        ]
         assert all(
             tower["present"] is False and tower["module_count_status"] == "not_present"
             for tower in body["towers"]
@@ -440,17 +517,34 @@ async def test_battery_characterization_is_authorized_cache_only_and_never_deriv
         response = await harness.client.get(path, headers=headers)
         assert response.status_code == 200, response.text
         primary, second = response.json()["towers"]
-        assert primary["present"] is True and primary["module_count_status"] == "pending"
-        assert second["present"] is False and second["module_count_status"] == "not_present"
+        assert (
+            primary["present"] is True and primary["module_count_status"] == "pending"
+        )
+        assert (
+            second["present"] is False
+            and second["module_count_status"] == "not_present"
+        )
 
 
-def _calibration_sample(serial: str = "SN-A", bms: str | None = "BMS-1", at: datetime | None = None, ah: float = 14.0):
+def _calibration_sample(
+    serial: str = "SN-A",
+    bms: str | None = "BMS-1",
+    at: datetime | None = None,
+    ah: float = 14.0,
+):
     return CapacityCalibrationSample(
-        device_id="main", inverter_serial=serial, battery_bms_sn=bms,
-        measured_at=at or datetime(2026, 10, 16, 12, tzinfo=UTC), battery_cycles=128,
-        reference_ah=17.0, measured_ah=ah, rated_usable_capacity_wh=10368.0,
-        current_usable_capacity_wh=8538.35, remaining_capacity_percent=82.35,
-        module_counts=(6,), source_contract="test_qualified_calibration",
+        device_id="main",
+        inverter_serial=serial,
+        battery_bms_sn=bms,
+        measured_at=at or datetime(2026, 10, 16, 12, tzinfo=UTC),
+        battery_cycles=128,
+        reference_ah=17.0,
+        measured_ah=ah,
+        rated_usable_capacity_wh=10368.0,
+        current_usable_capacity_wh=8538.35,
+        remaining_capacity_percent=82.35,
+        module_counts=(6,),
+        source_contract="test_qualified_calibration",
     )
 
 
@@ -459,13 +553,18 @@ def _allow_synthetic_qualified_contract(monkeypatch: pytest.MonkeyPatch) -> None
     import app.admin.store as store_module
 
     monkeypatch.setattr(
-        store_module, "_QUALIFIED_BATTERY_CALIBRATION_CONTRACTS",
+        store_module,
+        "_QUALIFIED_BATTERY_CALIBRATION_CONTRACTS",
         frozenset({"test_qualified_calibration"}),
     )
 
 
-async def test_battery_calibration_history_is_authorized_local_only_and_bounded(tmp_path: Path) -> None:
-    settings = characterization_settings(tmp_path, enable_write_support=False, enable_periodic_reads=False)
+async def test_battery_calibration_history_is_authorized_local_only_and_bounded(
+    tmp_path: Path,
+) -> None:
+    settings = characterization_settings(
+        tmp_path, enable_write_support=False, enable_periodic_reads=False
+    )
     async with running_app(settings) as harness:
         path = "/admin/api/energy/devices/main/battery-calibration-history"
         assert (await harness.client.get(path)).status_code == 401
@@ -478,7 +577,11 @@ async def test_battery_calibration_history_is_authorized_local_only_and_bounded(
 
         # Without a known inverter serial nothing is returned: there is no device_id fallback.
         unknown = (await harness.client.get(path, headers=headers)).json()
-        assert unknown["inverter_serial"] is None and unknown["points"] == [] and unknown["baseline"] is None
+        assert (
+            unknown["inverter_serial"] is None
+            and unknown["points"] == []
+            and unknown["baseline"] is None
+        )
         assert unknown["baseline_unavailable_reason"] == "inverter_serial_unknown"
 
         harness.runtime.gateway.set_reported_serial("main", "SN-A")
@@ -486,7 +589,11 @@ async def test_battery_calibration_history_is_authorized_local_only_and_bounded(
 
         assert response.status_code == 200, response.text
         body = response.json()
-        assert (body["device_id"], body["inverter_serial"], body["battery_bms_sn"]) == ("main", "SN-A", "BMS-1")
+        assert (body["device_id"], body["inverter_serial"], body["battery_bms_sn"]) == (
+            "main",
+            "SN-A",
+            "BMS-1",
+        )
         assert body["battery_replaced"] is False
         point = body["points"][0]
         assert point["battery_cycles"] == 128
@@ -495,8 +602,15 @@ async def test_battery_calibration_history_is_authorized_local_only_and_bounded(
         assert point["module_counts"] == [6]
         assert body["baseline"] is None and body["commissioning"] is None
         assert body["baseline_unavailable_reason"] == "no_commissioning_date"
-        assert (await harness.client.get(path + "?limit=5001", headers=headers)).status_code == 422
-        assert (await harness.client.get("/admin/api/energy/devices/missing/battery-calibration-history", headers=headers)).status_code == 404
+        assert (
+            await harness.client.get(path + "?limit=5001", headers=headers)
+        ).status_code == 422
+        assert (
+            await harness.client.get(
+                "/admin/api/energy/devices/missing/battery-calibration-history",
+                headers=headers,
+            )
+        ).status_code == 404
         assert harness.runtime.gateway.device_status("main").transactions == before
         assert len(harness.net.frames) == frames
 
@@ -506,8 +620,12 @@ async def test_legacy_ah_ratio_remains_stored_but_is_not_api_calibration(
 ) -> None:
     import app.admin.store as store_module
 
-    monkeypatch.setattr(store_module, "_QUALIFIED_BATTERY_CALIBRATION_CONTRACTS", frozenset())
-    async with running_app(characterization_settings(tmp_path, enable_periodic_reads=False)) as harness:
+    monkeypatch.setattr(
+        store_module, "_QUALIFIED_BATTERY_CALIBRATION_CONTRACTS", frozenset()
+    )
+    async with running_app(
+        characterization_settings(tmp_path, enable_periodic_reads=False)
+    ) as harness:
         headers = await admin_session(harness)
         store = harness.app.state.admin_store
         harness.runtime.gateway.set_reported_serial("main", "SN-A")
@@ -517,21 +635,41 @@ async def test_legacy_ah_ratio_remains_stored_but_is_not_api_calibration(
                 "battery_cycles, reference_ah, measured_ah, rated_usable_capacity_wh, "
                 "current_usable_capacity_wh, module_counts, source_contract) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                ("main", "SN-A", "2026-10-17T12:00:00+00:00", 128, 25.0, 23.8531,
-                 10368.0, 9892.4, "[6]", "bms_ah_ratio_v1"),
+                (
+                    "main",
+                    "SN-A",
+                    "2026-10-17T12:00:00+00:00",
+                    128,
+                    25.0,
+                    23.8531,
+                    10368.0,
+                    9892.4,
+                    "[6]",
+                    "bms_ah_ratio_v1",
+                ),
             )
         response = await harness.client.get(
-            "/admin/api/energy/devices/main/battery-calibration-history", headers=headers
+            "/admin/api/energy/devices/main/battery-calibration-history",
+            headers=headers,
         )
         assert response.status_code == 200
         body = response.json()
         assert body["points"] == [] and body["baseline"] is None
         with store.connect() as db:
-            assert db.execute("SELECT count(*) FROM battery_calibration_history").fetchone()[0] == 1
+            assert (
+                db.execute(
+                    "SELECT count(*) FROM battery_calibration_history"
+                ).fetchone()[0]
+                == 1
+            )
 
 
-async def test_battery_calibration_baseline_shape_and_manual_override(tmp_path: Path) -> None:
-    settings = characterization_settings(tmp_path, enable_write_support=False, enable_periodic_reads=False)
+async def test_battery_calibration_baseline_shape_and_manual_override(
+    tmp_path: Path,
+) -> None:
+    settings = characterization_settings(
+        tmp_path, enable_write_support=False, enable_periodic_reads=False
+    )
     async with running_app(settings) as harness:
         path = "/admin/api/energy/devices/main/battery-calibration-history"
         commissioning = "/admin/api/energy/devices/main/battery-commissioning"
@@ -539,42 +677,69 @@ async def test_battery_calibration_baseline_shape_and_manual_override(tmp_path: 
         store = harness.app.state.admin_store
         harness.runtime.gateway.set_reported_serial("main", "SN-A")
         store.record_battery_calibration(_calibration_sample())
-        store.set_inverter_commissioning("SN-A", datetime(2021, 5, 1, tzinfo=UTC), "logger_derived")
+        store.set_inverter_commissioning(
+            "SN-A", datetime(2021, 5, 1, tzinfo=UTC), "logger_derived"
+        )
 
         body = (await harness.client.get(path, headers=headers)).json()
         assert body["baseline_unavailable_reason"] is None
         assert body["baseline"] == {
-            "date": "2021-05-01T00:00:00Z", "battery_cycles": 0, "rated_usable_capacity_wh": 10368.0,
-            "current_usable_capacity_wh": 10368.0, "remaining_capacity_percent": 100.0, "source": "logger_derived",
+            "date": "2021-05-01T00:00:00Z",
+            "battery_cycles": 0,
+            "rated_usable_capacity_wh": 10368.0,
+            "current_usable_capacity_wh": 10368.0,
+            "remaining_capacity_percent": 100.0,
+            "source": "logger_derived",
         }
         assert body["commissioning"]["source"] == "logger_derived"
-        assert len(body["points"]) == 1  # the baseline is not inserted as a measurement row
+        assert (
+            len(body["points"]) == 1
+        )  # the baseline is not inserted as a measurement row
 
-        assert (await harness.client.put(commissioning, json={"commissioned_on": "2021-06-15"})).status_code in (401, 403)
-        put = await harness.client.put(commissioning, json={"commissioned_on": "2021-06-15"}, headers=headers)
+        assert (
+            await harness.client.put(
+                commissioning, json={"commissioned_on": "2021-06-15"}
+            )
+        ).status_code in (401, 403)
+        put = await harness.client.put(
+            commissioning, json={"commissioned_on": "2021-06-15"}, headers=headers
+        )
         assert put.status_code == 200, put.text
-        assert put.json()["baseline"]["date"].startswith("2021-06-15") and put.json()["baseline"]["source"] == "manual"
+        assert (
+            put.json()["baseline"]["date"].startswith("2021-06-15")
+            and put.json()["baseline"]["source"] == "manual"
+        )
         for bad in ("2009-12-31", "2999-01-01"):
-            rejected = await harness.client.put(commissioning, json={"commissioned_on": bad}, headers=headers)
+            rejected = await harness.client.put(
+                commissioning, json={"commissioned_on": bad}, headers=headers
+            )
             assert rejected.status_code == 422
         deleted = await harness.client.delete(commissioning, headers=headers)
         assert deleted.json()["baseline"]["source"] == "logger_derived"
 
         # A swapped battery: the derived date belongs to the first battery, so no baseline for the new series.
-        store.record_battery_calibration(_calibration_sample(bms="BMS-2", at=datetime(2026, 11, 1, tzinfo=UTC)))
+        store.record_battery_calibration(
+            _calibration_sample(bms="BMS-2", at=datetime(2026, 11, 1, tzinfo=UTC))
+        )
         replaced = (await harness.client.get(path, headers=headers)).json()
         assert replaced["battery_replaced"] is True and replaced["baseline"] is None
         assert replaced["baseline_unavailable_reason"] == "battery_replaced"
-        manual = await harness.client.put(commissioning, json={"commissioned_on": "2022-01-01"}, headers=headers)
+        manual = await harness.client.put(
+            commissioning, json={"commissioned_on": "2022-01-01"}, headers=headers
+        )
         assert manual.json()["baseline"]["source"] == "manual"
 
 
 async def test_commissioning_override_needs_a_known_serial(tmp_path: Path) -> None:
-    settings = characterization_settings(tmp_path, enable_write_support=False, enable_periodic_reads=False)
+    settings = characterization_settings(
+        tmp_path, enable_write_support=False, enable_periodic_reads=False
+    )
     async with running_app(settings) as harness:
         headers = await admin_session(harness)
         response = await harness.client.put(
-            "/admin/api/energy/devices/main/battery-commissioning", json={"commissioned_on": "2021-06-15"}, headers=headers
+            "/admin/api/energy/devices/main/battery-commissioning",
+            json={"commissioned_on": "2021-06-15"},
+            headers=headers,
         )
         assert response.status_code == 409
 
@@ -586,7 +751,9 @@ async def test_background_ah_reads_do_not_record_calibration(tmp_path: Path) -> 
     from app.api.app_factory import _inventory_loop
     from app.gateway.base import DeviceState
 
-    settings = characterization_settings(tmp_path, enable_write_support=False, enable_periodic_reads=False)
+    settings = characterization_settings(
+        tmp_path, enable_write_support=False, enable_periodic_reads=False
+    )
     async with running_app(settings) as harness:
         runtime = harness.runtime
         assert runtime.dispatch is None  # the Energy Manager is off
@@ -618,27 +785,49 @@ async def test_background_ah_reads_do_not_record_calibration(tmp_path: Path) -> 
 
         gateway = SimpleNamespace(
             read_module_inventory=inventory,
-            device_status=lambda _d: SimpleNamespace(state=DeviceState.OK, queue_length=0),
+            device_status=lambda _d: SimpleNamespace(
+                state=DeviceState.OK, queue_length=0
+            ),
             read_system=read_system,
         )
 
         with pytest.raises(StopLoop):
             await _inventory_loop(
-                gateway, "main", LoopClock(), capacity_ah_names=("battery_ah_capacity",),
+                gateway,
+                "main",
+                LoopClock(),
+                capacity_ah_names=("battery_ah_capacity",),
             )
         assert store.get_battery_calibration_history("SN-A")["points"] == []
 
 
-async def test_battery_characterization_refresh_is_bounded_to_requested_numeric_reads(tmp_path: Path) -> None:
-    async with running_app(characterization_settings(tmp_path, enable_write_support=False, enable_periodic_reads=False)) as harness:
+async def test_battery_characterization_refresh_is_bounded_to_requested_numeric_reads(
+    tmp_path: Path,
+) -> None:
+    async with running_app(
+        characterization_settings(
+            tmp_path, enable_write_support=False, enable_periodic_reads=False
+        )
+    ) as harness:
         path = "/admin/api/energy/devices/main/battery-characterization"
-        catalog = RegistryCatalog.from_file(harness.runtime.settings.object_registry_path)
-        harness.net.payloads[catalog.object_entry("power_mng_battery_type").object_id] = b"\x02"
-        harness.net.payloads[catalog.object_entry("battery_ah_capacity").object_id] = float_payload(180.0)
-        harness.net.payloads[catalog.object_entry("battery_voltage").object_id] = float_payload(52.0)
-        read_pat = harness.app.state.admin_store.create_token("diagnostics", "read", None)[1]
+        catalog = RegistryCatalog.from_file(
+            harness.runtime.settings.object_registry_path
+        )
+        harness.net.payloads[
+            catalog.object_entry("power_mng_battery_type").object_id
+        ] = b"\x02"
+        harness.net.payloads[catalog.object_entry("battery_ah_capacity").object_id] = (
+            float_payload(180.0)
+        )
+        harness.net.payloads[catalog.object_entry("battery_voltage").object_id] = (
+            float_payload(52.0)
+        )
+        read_pat = harness.app.state.admin_store.create_token(
+            "diagnostics", "read", None
+        )[1]
         pat_response = await harness.client.post(
-            f"{path}/refresh", headers={"Authorization": f"Bearer {read_pat}"},
+            f"{path}/refresh",
+            headers={"Authorization": f"Bearer {read_pat}"},
             json={"names": ["power_mng_battery_type"]},
         )
         assert pat_response.status_code == 200, pat_response.text
@@ -647,16 +836,21 @@ async def test_battery_characterization_refresh_is_bounded_to_requested_numeric_
         headers = await admin_session(harness)
         before_denied = harness.runtime.gateway.device_status("main").transactions
         csrf_denied = await harness.client.post(
-            f"{path}/refresh", headers={"X-CSRF-Token": "invalid"}, json={"names": ["battery_voltage"]}
+            f"{path}/refresh",
+            headers={"X-CSRF-Token": "invalid"},
+            json={"names": ["battery_voltage"]},
         )
         assert csrf_denied.status_code == 403
-        assert harness.runtime.gateway.device_status("main").transactions == before_denied
+        assert (
+            harness.runtime.gateway.device_status("main").transactions == before_denied
+        )
         await wait_startup_traffic_done(harness.app)
         before = harness.runtime.gateway.device_status("main").transactions
         frames = len(harness.net.frames)
 
         response = await harness.client.post(
-            f"{path}/refresh", headers=headers,
+            f"{path}/refresh",
+            headers=headers,
             json={"names": ["battery_ah_capacity", "battery_voltage"]},
         )
 
@@ -673,25 +867,53 @@ async def test_battery_characterization_refresh_is_bounded_to_requested_numeric_
         assert cached.status_code == 200, cached.text
         cached_metrics = {item["name"]: item for item in cached.json()["metrics"]}
         assert cached_metrics["power_mng_battery_type"]["value"] == 2
-        assert not any(frame.command in WRITE_COMMANDS for _, frame in harness.net.frames[frames:])
-        refused = await harness.client.post(f"{path}/refresh", headers=headers, json={"names": ["battery_module_sn_0"]})
+        assert not any(
+            frame.command in WRITE_COMMANDS for _, frame in harness.net.frames[frames:]
+        )
+        refused = await harness.client.post(
+            f"{path}/refresh", headers=headers, json={"names": ["battery_module_sn_0"]}
+        )
         assert refused.status_code == 422
-        too_many = await harness.client.post(f"{path}/refresh", headers=headers, json={
-            "names": ["battery_voltage", "battery_ah_capacity", "battery_soh",
-                      "battery_maximum_charge_current", "battery_maximum_discharge_current"],
-        })
+        too_many = await harness.client.post(
+            f"{path}/refresh",
+            headers=headers,
+            json={
+                "names": [
+                    "battery_voltage",
+                    "battery_ah_capacity",
+                    "battery_soh",
+                    "battery_maximum_charge_current",
+                    "battery_maximum_discharge_current",
+                ],
+            },
+        )
         assert too_many.status_code == 422
-        assert not any(frame.command in WRITE_COMMANDS for _, frame in harness.net.frames[frames:])
+        assert not any(
+            frame.command in WRITE_COMMANDS for _, frame in harness.net.frames[frames:]
+        )
 
 
-async def test_battery_characterization_reports_stale_age_without_refreshing(tmp_path: Path) -> None:
-    async with running_app(characterization_settings(
-        tmp_path, enable_write_support=False, enable_periodic_reads=False, cache_ttl_seconds=0.0
-    )) as harness:
+async def test_battery_characterization_reports_stale_age_without_refreshing(
+    tmp_path: Path,
+) -> None:
+    async with running_app(
+        characterization_settings(
+            tmp_path,
+            enable_write_support=False,
+            enable_periodic_reads=False,
+            cache_ttl_seconds=0.0,
+        )
+    ) as harness:
         path = "/admin/api/energy/devices/main/battery-characterization"
-        catalog = RegistryCatalog.from_file(harness.runtime.settings.object_registry_path)
-        harness.net.payloads[catalog.object_entry("battery_voltage").object_id] = float_payload(52.0)
-        await harness.runtime.gateway.read_metric("main", "battery_voltage", fresh=False)
+        catalog = RegistryCatalog.from_file(
+            harness.runtime.settings.object_registry_path
+        )
+        harness.net.payloads[catalog.object_entry("battery_voltage").object_id] = (
+            float_payload(52.0)
+        )
+        await harness.runtime.gateway.read_metric(
+            "main", "battery_voltage", fresh=False
+        )
         await asyncio.sleep(0.01)
         headers = await admin_session(harness)
         before = harness.runtime.gateway.device_status("main").transactions
@@ -699,15 +921,25 @@ async def test_battery_characterization_reports_stale_age_without_refreshing(tmp
         response = await harness.client.get(path, headers=headers)
 
         assert response.status_code == 200, response.text
-        metric = next(item for item in response.json()["metrics"] if item["name"] == "battery_voltage")
+        metric = next(
+            item
+            for item in response.json()["metrics"]
+            if item["name"] == "battery_voltage"
+        )
         assert metric["value"] == pytest.approx(52.0)
         assert metric["status"] == "stale"
         assert metric["age_seconds"] > 0
         assert harness.runtime.gateway.device_status("main").transactions == before
 
 
-async def test_battery_characterization_refresh_never_probes_unconfirmed_second_tower(tmp_path: Path) -> None:
-    async with running_app(characterization_settings(tmp_path, enable_write_support=False, enable_periodic_reads=False)) as harness:
+async def test_battery_characterization_refresh_never_probes_unconfirmed_second_tower(
+    tmp_path: Path,
+) -> None:
+    async with running_app(
+        characterization_settings(
+            tmp_path, enable_write_support=False, enable_periodic_reads=False
+        )
+    ) as harness:
         path = "/admin/api/energy/devices/main/battery-characterization/refresh"
         headers = await admin_session(harness)
         await wait_startup_traffic_done(harness.app)
@@ -719,13 +951,21 @@ async def test_battery_characterization_refresh_never_probes_unconfirmed_second_
         )
 
         assert response.status_code == 200, response.text
-        metric = next(item for item in response.json()["metrics"] if item["name"] == "battery_placeholder_0_ah_capacity")
+        metric = next(
+            item
+            for item in response.json()["metrics"]
+            if item["name"] == "battery_placeholder_0_ah_capacity"
+        )
         assert metric["status"] == "unavailable"
         assert harness.runtime.gateway.device_status("main").transactions == before
-        assert not any(frame.command in WRITE_COMMANDS for _, frame in harness.net.frames[frames:])
+        assert not any(
+            frame.command in WRITE_COMMANDS for _, frame in harness.net.frames[frames:]
+        )
 
 
-async def test_revoking_the_register_approvals_disables_the_actions(tmp_path: Path) -> None:
+async def test_revoking_the_register_approvals_disables_the_actions(
+    tmp_path: Path,
+) -> None:
     async with running_app(energy_settings(tmp_path)) as harness:
         seed_payloads(harness)
         await arm(harness)
@@ -736,14 +976,12 @@ async def test_revoking_the_register_approvals_disables_the_actions(tmp_path: Pa
         # The handback needs no write approval, so `auto` stays available.
         by_action = {item["action"]: item for item in status.json()["actions"]}
         assert by_action["auto"]["available"] is True
-        assert {item["reason"] for name, item in by_action.items() if name != "auto"} == {
-            "write_not_permitted"
-        }
+        assert {
+            item["reason"] for name, item in by_action.items() if name != "auto"
+        } == {"write_not_permitted"}
         refused = await command(harness, {"action": "charge", "target_soc_percent": 80})
         assert refused.status_code == 409, refused.text
         assert refused.json()["code"] == "energy_action_unavailable"
-
-
 
 
 async def test_the_status_get_serves_the_whole_card_in_one_call(tmp_path: Path) -> None:
@@ -756,7 +994,9 @@ async def test_the_status_get_serves_the_whole_card_in_one_call(tmp_path: Path) 
         )
         assert filled.status_code == 200, filled.text
 
-        response = await harness.client.get("/api/v1/devices/main/energy", headers=WRITER)
+        response = await harness.client.get(
+            "/api/v1/devices/main/energy", headers=WRITER
+        )
         assert response.status_code == 200, response.text
         body = response.json()
         assert body["state"] == "automatic" and body["action"] is None
@@ -770,22 +1010,29 @@ async def test_the_status_get_serves_the_whole_card_in_one_call(tmp_path: Path) 
         assert readings["pv_power_w"]["value"] == pytest.approx(2400.0)
         assert readings["house_load_w"]["value"] == pytest.approx(800.0)
         assert all(not readings[name]["stale"] for name in readings)
-        assert [item["action"] for item in body["actions"]] == ["charge", "discharge", "hold", "auto"]
+        assert [item["action"] for item in body["actions"]] == [
+            "charge",
+            "discharge",
+            "hold",
+            "auto",
+        ]
 
 
 async def test_a_device_without_any_cached_reading_answers_with_five_absent_figures(
     tmp_path: Path,
 ) -> None:
     """AC-21/AC-24: absent is a published state, not an error — and never a device read."""
-    async with running_app(energy_settings(tmp_path, enable_periodic_reads=False)) as harness:
-        response = await harness.client.get("/api/v1/devices/slave1/energy", headers=WRITER)
+    async with running_app(
+        energy_settings(tmp_path, enable_periodic_reads=False)
+    ) as harness:
+        response = await harness.client.get(
+            "/api/v1/devices/slave1/energy", headers=WRITER
+        )
         assert response.status_code == 200, response.text
         readings = response.json()["readings"]
         assert len(readings) == 5
         for reading in readings.values():
             assert reading == {"value": None, "age_seconds": None, "stale": True}
-
-
 
 
 def fake_request(method: str, path: str) -> Request:
@@ -815,6 +1062,20 @@ def fake_request(method: str, path: str) -> Request:
         ("GET", "/api/v1/devices/main/energy", True),
         ("POST", "/api/v1/devices/main/energy/command", True),
         ("PUT", "/api/v1/devices/main/energy/mode", False),  # no public mode switch
+        # /energy/command is a POST-only write route. An undefined method on it must be classified
+        # method-exact, not matched for every verb (the earlier duplicate in problems.py did the
+        # latter, so a 405 there was misreported); these lock that contract per method.
+        ("GET", "/api/v1/devices/main/energy/command", False),
+        ("PUT", "/api/v1/devices/main/energy/command", False),
+        ("DELETE", "/api/v1/devices/main/energy/command", False),
+        # Method-exactness of the other write routes: the defined verb matches, an undefined one
+        # on the same path does not.
+        ("POST", "/api/v1/devices/main/metrics/battery_target", False),
+        ("DELETE", "/api/v1/devices/main/metrics/battery_target", False),
+        ("PUT", "/api/v1/devices/main/actions/com_service", False),
+        ("GET", "/api/v1/devices/main/actions/com_service", False),
+        ("PUT", "/api/v1/devices/main/battery/dispatch", False),
+        ("POST", "/api/v1/devices/main/energy", False),  # energy status is GET-only
         # Short paths must return False, not raise: this runs inside the global exception handler,
         # where an IndexError would turn a plain 404 into an unhandled 500.
         ("GET", "/api/v1/devices", False),
@@ -840,15 +1101,15 @@ async def test_a_404_on_a_short_path_stays_a_plain_404_without_write_support() -
             assert response.json()["code"] == "not_found"
 
 
-
-
 async def test_the_shutdown_drain_refuses_commands_on_both_surfaces_but_still_reports(
     tmp_path: Path,
 ) -> None:
     async with running_app(energy_settings(tmp_path)) as harness:
         seed_payloads(harness)
         headers = await admin_session(harness)
-        harness.runtime.shutdown.plan = ShutdownPlan(harness.runtime.clock.now(), 0.0, 0.0)
+        harness.runtime.shutdown.plan = ShutdownPlan(
+            harness.runtime.clock.now(), 0.0, 0.0
+        )
         try:
             refused = [
                 await command(harness, {"action": "charge", "target_soc_percent": 80}),
@@ -858,18 +1119,20 @@ async def test_the_shutdown_drain_refuses_commands_on_both_surfaces_but_still_re
                     json={"action": "charge", "target_soc_percent": 80},
                 ),
                 await harness.client.put(
-                    "/admin/api/energy/devices/main/mode", headers=headers, json={"mode": "external"}
+                    "/admin/api/energy/devices/main/mode",
+                    headers=headers,
+                    json={"mode": "external"},
                 ),
             ]
             for response in refused:
                 assert response.status_code == 503, response.text
                 assert response.json()["code"] == "not_ready"
-            status = await harness.client.get("/api/v1/devices/main/energy", headers=WRITER)
+            status = await harness.client.get(
+                "/api/v1/devices/main/energy", headers=WRITER
+            )
             assert status.status_code == 200, status.text
         finally:
             harness.runtime.shutdown.plan = None
-
-
 
 
 async def test_the_energy_metrics_are_pinned_at_startup_and_after_a_device_list_change(
@@ -883,23 +1146,34 @@ async def test_the_energy_metrics_are_pinned_at_startup_and_after_a_device_list_
         assert wanted <= set(periodic_object_ids(harness))
 
         headers = await admin_session(harness)
-        current = (await harness.client.get("/admin/api/settings", headers=headers)).json()
+        current = (
+            await harness.client.get("/admin/api/settings", headers=headers)
+        ).json()
         devices = current["settings"]["devices"]
         saved = await harness.client.put(
             "/admin/api/settings",
             headers=headers,
-            json={"devices": [*devices, {"host": HOST, "port": PORT, "network_id": 1234567}]},
+            json={
+                "devices": [
+                    *devices,
+                    {"host": HOST, "port": PORT, "network_id": 1234567},
+                ]
+            },
         )
         assert saved.status_code == 200, saved.text
         assert wanted <= set(periodic_object_ids(harness))
 
 
-async def test_without_dispatch_the_flow_metrics_are_still_pinned(tmp_path: Path) -> None:
+async def test_without_dispatch_the_flow_metrics_are_still_pinned(
+    tmp_path: Path,
+) -> None:
     # The dashboard flow graphic reads the same cache-only figures, so a narrowed exposed list must
     # not drop them when write support is off.
     settings = energy_settings(tmp_path, enable_write_support=False)
     async with running_app(settings) as harness:
-        catalog = RegistryCatalog.from_file(harness.runtime.settings.object_registry_path)
+        catalog = RegistryCatalog.from_file(
+            harness.runtime.settings.object_registry_path
+        )
         pinned = {catalog.object_entry(name).object_id for name in _ENERGY_METRIC_NAMES}
         assert pinned <= set(periodic_object_ids(harness))
 
@@ -910,7 +1184,8 @@ def test_the_periodic_cap_prefers_flow_metrics_over_card_and_module_metrics(
     settings = energy_settings(tmp_path, enable_write_support=False)
     catalog = RegistryCatalog.from_file(settings.object_registry_path)
     filler = [
-        e.name for e in catalog.entries()
+        e.name
+        for e in catalog.entries()
         if e.name not in _ENERGY_METRIC_NAMES and is_numeric(e.value_type)
     ]
     # Room for exactly the flow metrics on top of the selection: nothing else may squeeze in.
@@ -928,7 +1203,8 @@ def test_a_fully_used_periodic_budget_still_pins_the_flow_metrics(
     settings = energy_settings(tmp_path, enable_write_support=False)
     catalog = RegistryCatalog.from_file(settings.object_registry_path)
     filler = [
-        e.name for e in catalog.entries()
+        e.name
+        for e in catalog.entries()
         if e.name not in _ENERGY_METRIC_NAMES and is_numeric(e.value_type)
     ]
     # The user selection alone fills the cap exactly, so no room is left for the flow metrics.
@@ -936,7 +1212,10 @@ def test_a_fully_used_periodic_budget_still_pins_the_flow_metrics(
     names = _effective_periodic_names(settings, catalog, filler)
     assert len(names) == len(filler)
     assert set(_ENERGY_METRIC_NAMES) <= set(names)
-    assert names[: len(filler) - len(_ENERGY_METRIC_NAMES)] == filler[: len(filler) - len(_ENERGY_METRIC_NAMES)]
+    assert (
+        names[: len(filler) - len(_ENERGY_METRIC_NAMES)]
+        == filler[: len(filler) - len(_ENERGY_METRIC_NAMES)]
+    )
 
 
 async def test_with_periodic_reads_disabled_the_list_is_empty(tmp_path: Path) -> None:
@@ -948,31 +1227,41 @@ async def test_with_periodic_reads_disabled_the_list_is_empty(tmp_path: Path) ->
         assert all(item["stale"] for item in status.json()["readings"].values())
 
 
-
-
-async def test_the_admin_surface_requires_a_session_and_the_csrf_header(tmp_path: Path) -> None:
+async def test_the_admin_surface_requires_a_session_and_the_csrf_header(
+    tmp_path: Path,
+) -> None:
     async with running_app(energy_settings(tmp_path)) as harness:
-        assert (await harness.client.get("/admin/api/energy/devices")).status_code == 401
+        assert (
+            await harness.client.get("/admin/api/energy/devices")
+        ).status_code == 401
         headers = await admin_session(harness)
-        assert (await harness.client.get("/admin/api/energy/devices")).status_code == 200
+        assert (
+            await harness.client.get("/admin/api/energy/devices")
+        ).status_code == 200
         # A mutation without the CSRF header is refused even with a valid session.
         without_csrf = await harness.client.put(
             "/admin/api/energy/devices/main/mode", json={"mode": "external"}
         )
         assert without_csrf.status_code == 403, without_csrf.text
         with_csrf = await harness.client.put(
-            "/admin/api/energy/devices/main/mode", headers=headers, json={"mode": "external"}
+            "/admin/api/energy/devices/main/mode",
+            headers=headers,
+            json={"mode": "external"},
         )
         assert with_csrf.status_code == 200, with_csrf.text
 
 
-async def test_admin_arming_adds_the_register_approvals_add_only(tmp_path: Path) -> None:
+async def test_admin_arming_adds_the_register_approvals_add_only(
+    tmp_path: Path,
+) -> None:
     async with running_app(energy_settings(tmp_path)) as harness:
         seed_payloads(harness)
         headers = await admin_session(harness)
         assert harness.app.state.admin_store.get("write_names") == list(PRE_APPROVED)
         armed = await harness.client.put(
-            "/admin/api/energy/devices/main/mode", headers=headers, json={"mode": "external"}
+            "/admin/api/energy/devices/main/mode",
+            headers=headers,
+            json={"mode": "external"},
         )
         assert armed.status_code == 200, armed.text
         names = harness.app.state.admin_store.get("write_names")
@@ -981,7 +1270,9 @@ async def test_admin_arming_adds_the_register_approvals_add_only(tmp_path: Path)
         assert set(names) == set(DISPATCH_WRITE_NAMES)
         assert armed.json()["mode_changed_by"] == "admin"
         assert armed.json()["mode_changed_at"] is not None
-        assert set(armed.json()["added_write_names"]) == set(DISPATCH_WRITE_NAMES) - set(PRE_APPROVED)
+        assert set(armed.json()["added_write_names"]) == set(
+            DISPATCH_WRITE_NAMES
+        ) - set(PRE_APPROVED)
 
         disarmed = await harness.client.put(
             "/admin/api/energy/devices/main/mode", headers=headers, json={"mode": "off"}
@@ -992,7 +1283,9 @@ async def test_admin_arming_adds_the_register_approvals_add_only(tmp_path: Path)
         assert harness.app.state.admin_store.get("write_names") == names
 
 
-async def test_admin_status_carries_state_independent_approved_write_names(tmp_path: Path) -> None:
+async def test_admin_status_carries_state_independent_approved_write_names(
+    tmp_path: Path,
+) -> None:
     """``approved_write_names`` is the live write allowlist, authoritative in every arm state —
     unlike ``added_write_names``, which only records what arming itself contributed. With all four
     required writes approved up front but the device never armed, the Setup checklist's
@@ -1003,7 +1296,9 @@ async def test_admin_status_carries_state_independent_approved_write_names(tmp_p
         # Approve all four required writes on the admin store before any arming.
         harness.app.state.admin_store.put("write_names", list(DISPATCH_WRITE_NAMES))
         headers = await admin_session(harness)
-        response = await harness.client.get("/admin/api/energy/devices", headers=headers)
+        response = await harness.client.get(
+            "/admin/api/energy/devices", headers=headers
+        )
         assert response.status_code == 200, response.text
         main = next(item for item in response.json() if item["device_id"] == "main")
         assert "approved_write_names" in main
@@ -1013,7 +1308,9 @@ async def test_admin_status_carries_state_independent_approved_write_names(tmp_p
         assert set(DISPATCH_WRITE_NAMES) <= set(main["approved_write_names"])
 
 
-async def test_required_dispatch_registers_cannot_be_revoked_while_a_device_is_armed(tmp_path: Path) -> None:
+async def test_required_dispatch_registers_cannot_be_revoked_while_a_device_is_armed(
+    tmp_path: Path,
+) -> None:
     """A restore writes those registers through the allowlist, so revoking them under an armed
     device would leave the handback rejected forever."""
     async with running_app(energy_settings(tmp_path)) as harness:
@@ -1021,20 +1318,31 @@ async def test_required_dispatch_registers_cannot_be_revoked_while_a_device_is_a
         headers = await admin_session(harness)
         exposed = harness.app.state.admin_store.get("exposed_names")
         refused = await harness.client.put(
-            "/admin/api/parameters", headers=headers, json={"exposed_names": exposed, "write_names": []}
+            "/admin/api/parameters",
+            headers=headers,
+            json={"exposed_names": exposed, "write_names": []},
         )
         assert refused.status_code == 409, refused.text
-        assert set(harness.app.state.admin_store.get("write_names")) == set(DISPATCH_WRITE_NAMES)
+        assert set(harness.app.state.admin_store.get("write_names")) == set(
+            DISPATCH_WRITE_NAMES
+        )
 
 
-async def test_the_admin_status_carries_the_raw_gate_detail_and_the_policy(tmp_path: Path) -> None:
+async def test_the_admin_status_carries_the_raw_gate_detail_and_the_policy(
+    tmp_path: Path,
+) -> None:
     async with running_app(energy_settings(tmp_path)) as harness:
         headers = await admin_session(harness)
         del headers
         devices = await harness.client.get("/admin/api/energy/devices")
         assert devices.status_code == 200, devices.text
         entry = next(item for item in devices.json() if item["device_id"] == "main")
-        assert [gate["action"] for gate in entry["gates"]] == ["charge", "discharge", "hold", "auto"]
+        assert [gate["action"] for gate in entry["gates"]] == [
+            "charge",
+            "discharge",
+            "hold",
+            "auto",
+        ]
         auto = next(gate for gate in entry["gates"] if gate["action"] == "auto")
         assert auto == {
             "action": "auto",
@@ -1058,7 +1366,12 @@ async def test_the_admin_status_carries_the_raw_gate_detail_and_the_policy(tmp_p
 
         public = await harness.client.get("/api/v1/devices/main/energy", headers=WRITER)
         assert public.status_code == 200, public.text
-        for admin_only in ("gates", "soc_target_policy", "added_write_names", "mode_changed_by"):
+        for admin_only in (
+            "gates",
+            "soc_target_policy",
+            "added_write_names",
+            "mode_changed_by",
+        ):
             assert admin_only not in public.json()
 
 
@@ -1075,7 +1388,11 @@ VERIFICATION = {
     "grid_import_positive": False,
     "soc_target_unit": "ratio",
 }
-_VERIFICATION_NAMES = ("write_path_convention", "battery_power_sign_convention", "grid_power_sign_convention")
+_VERIFICATION_NAMES = (
+    "write_path_convention",
+    "battery_power_sign_convention",
+    "grid_power_sign_convention",
+)
 VERIFICATION_URL = "/admin/api/energy/devices/main/hardware-verification"
 
 
@@ -1083,34 +1400,54 @@ def _capabilities(entry: dict) -> dict[str, dict]:
     return {item["name"]: item for item in entry["capabilities"]}
 
 
-async def test_hardware_verification_is_atomic_and_round_trips_its_evidence(tmp_path: Path) -> None:
+async def test_hardware_verification_is_atomic_and_round_trips_its_evidence(
+    tmp_path: Path,
+) -> None:
     async with running_app(energy_settings(tmp_path)) as harness:
         headers = await admin_session(harness)
         # The fixture ships verified hardware; start from an unverified one.
         await harness.client.delete(VERIFICATION_URL, headers=headers)
         before = (await harness.client.get("/admin/api/energy/devices")).json()
-        assert {c["status"] for n, c in _capabilities(before[0]).items() if n in _VERIFICATION_NAMES} == {"unverified"}
+        assert {
+            c["status"]
+            for n, c in _capabilities(before[0]).items()
+            if n in _VERIFICATION_NAMES
+        } == {"unverified"}
         # A missing attestation refuses the whole request and verifies nothing.
         refused = await harness.client.put(
-            VERIFICATION_URL, headers=headers, json={**VERIFICATION, "apply_sequence_verified": False}
+            VERIFICATION_URL,
+            headers=headers,
+            json={**VERIFICATION, "apply_sequence_verified": False},
         )
         assert refused.status_code == 400, refused.text
         after_refusal = (await harness.client.get("/admin/api/energy/devices")).json()
         assert _capabilities(after_refusal[0]) == _capabilities(before[0])
 
-        saved = await harness.client.put(VERIFICATION_URL, headers=headers, json=VERIFICATION)
+        saved = await harness.client.put(
+            VERIFICATION_URL, headers=headers, json=VERIFICATION
+        )
         assert saved.status_code == 200, saved.text
         caps = _capabilities(saved.json())
         assert {caps[name]["status"] for name in _VERIFICATION_NAMES} == {"verified"}
         write = caps["write_path_convention"]
         # The flags the form prefills from must come back, or a reload loses them.
-        assert write["write_frame_layout_verified"] is True and write["apply_sequence_verified"] is True
-        assert write["soc_strategy_external_code"] == 2 and write["note"] == VERIFICATION["note"]
-        assert caps["battery_power_sign_convention"]["battery_discharge_positive"] is False
+        assert (
+            write["write_frame_layout_verified"] is True
+            and write["apply_sequence_verified"] is True
+        )
+        assert (
+            write["soc_strategy_external_code"] == 2
+            and write["note"] == VERIFICATION["note"]
+        )
+        assert (
+            caps["battery_power_sign_convention"]["battery_discharge_positive"] is False
+        )
         assert caps["grid_power_sign_convention"]["grid_import_positive"] is False
 
 
-async def test_revoking_the_verification_changes_only_the_status(tmp_path: Path) -> None:
+async def test_revoking_the_verification_changes_only_the_status(
+    tmp_path: Path,
+) -> None:
     async with running_app(energy_settings(tmp_path)) as harness:
         headers = await admin_session(harness)
         await harness.client.put(VERIFICATION_URL, headers=headers, json=VERIFICATION)
@@ -1119,16 +1456,27 @@ async def test_revoking_the_verification_changes_only_the_status(tmp_path: Path)
         caps = _capabilities(revoked.json())
         assert {caps[name]["status"] for name in _VERIFICATION_NAMES} == {"unverified"}
         write = caps["write_path_convention"]
-        assert write["soc_strategy_external_code"] == 2 and write["enum_byte_width"] == 1
-        assert write["write_frame_layout_verified"] is True and write["note"] == VERIFICATION["note"]
-        assert caps["battery_power_sign_convention"]["battery_discharge_positive"] is False
+        assert (
+            write["soc_strategy_external_code"] == 2 and write["enum_byte_width"] == 1
+        )
+        assert (
+            write["write_frame_layout_verified"] is True
+            and write["note"] == VERIFICATION["note"]
+        )
+        assert (
+            caps["battery_power_sign_convention"]["battery_discharge_positive"] is False
+        )
         assert caps["grid_power_sign_convention"]["grid_import_positive"] is False
         # The evidence survives, so the same form can verify again without retyping.
-        again = await harness.client.put(VERIFICATION_URL, headers=headers, json=VERIFICATION)
+        again = await harness.client.put(
+            VERIFICATION_URL, headers=headers, json=VERIFICATION
+        )
         assert again.status_code == 200, again.text
 
 
-async def test_hardware_verification_keeps_a_note_already_stored_on_a_sign_record(tmp_path: Path) -> None:
+async def test_hardware_verification_keeps_a_note_already_stored_on_a_sign_record(
+    tmp_path: Path,
+) -> None:
     """The form has no note field for the sign records, so a verification must not erase theirs."""
     async with running_app(energy_settings(tmp_path)) as harness:
         headers = await admin_session(harness)
@@ -1143,10 +1491,15 @@ async def test_hardware_verification_keeps_a_note_already_stored_on_a_sign_recor
         )
         assert seeded.status_code == 200, seeded.text
 
-        saved = await harness.client.put(VERIFICATION_URL, headers=headers, json=VERIFICATION)
+        saved = await harness.client.put(
+            VERIFICATION_URL, headers=headers, json=VERIFICATION
+        )
         assert saved.status_code == 200, saved.text
         caps = _capabilities(saved.json())
-        assert caps["battery_power_sign_convention"]["note"] == "clamp meter on PV string, 2026-01-04"
+        assert (
+            caps["battery_power_sign_convention"]["note"]
+            == "clamp meter on PV string, 2026-01-04"
+        )
         # The body note documents the write path; it must not spread onto a sign record.
         assert caps["write_path_convention"]["note"] == VERIFICATION["note"]
         assert caps["grid_power_sign_convention"]["note"] is None
@@ -1156,7 +1509,8 @@ async def test_hardware_verification_drops_a_sign_note_recorded_under_different_
     tmp_path: Path,
 ) -> None:
     """A sign-record note observed under one model/firmware must not be re-stamped as if it were
-    evidence for a different one the next verification attests (release-blocking finding)."""
+    evidence for a different one the next verification attests (release-blocking finding).
+    """
     async with running_app(energy_settings(tmp_path)) as harness:
         headers = await admin_session(harness)
         # "unverified" on purpose (AC-20: no test may write a verified record directly) — the
@@ -1175,40 +1529,68 @@ async def test_hardware_verification_drops_a_sign_note_recorded_under_different_
         assert seeded.status_code == 200, seeded.text
 
         # Re-verify under a different model/firmware: the old note must not survive the carry-over.
-        saved = await harness.client.put(VERIFICATION_URL, headers=headers, json=VERIFICATION)
+        saved = await harness.client.put(
+            VERIFICATION_URL, headers=headers, json=VERIFICATION
+        )
         assert saved.status_code == 200, saved.text
         caps = _capabilities(saved.json())
         assert caps["battery_power_sign_convention"]["note"] is None
-        assert caps["battery_power_sign_convention"]["verified_device_model"] == VERIFICATION["verified_device_model"]
-        assert caps["battery_power_sign_convention"]["verified_firmware"] == VERIFICATION["verified_firmware"]
+        assert (
+            caps["battery_power_sign_convention"]["verified_device_model"]
+            == VERIFICATION["verified_device_model"]
+        )
+        assert (
+            caps["battery_power_sign_convention"]["verified_firmware"]
+            == VERIFICATION["verified_firmware"]
+        )
 
 
-async def test_hardware_verification_needs_a_session_and_validates_the_body(tmp_path: Path) -> None:
+async def test_hardware_verification_needs_a_session_and_validates_the_body(
+    tmp_path: Path,
+) -> None:
     async with running_app(energy_settings(tmp_path)) as harness:
         # The default client carries a bearer PAT and no session cookie. This privileged route is
         # session-only (SEC-01), so a PAT is refused outright with 403 before the token is even
         # checked, rather than falling through to the generic 401 login prompt.
-        assert (await harness.client.put(VERIFICATION_URL, json=VERIFICATION)).status_code == 403
+        assert (
+            await harness.client.put(VERIFICATION_URL, json=VERIFICATION)
+        ).status_code == 403
         headers = await admin_session(harness)
-        for bad in ({"enum_byte_width": 9}, {"note": ""}, {"battery_discharge_positive": "yes"}):
-            response = await harness.client.put(VERIFICATION_URL, headers=headers, json={**VERIFICATION, **bad})
+        for bad in (
+            {"enum_byte_width": 9},
+            {"note": ""},
+            {"battery_discharge_positive": "yes"},
+        ):
+            response = await harness.client.put(
+                VERIFICATION_URL, headers=headers, json={**VERIFICATION, **bad}
+            )
             assert response.status_code == 422, (bad, response.text)
         unknown = await harness.client.put(
-            "/admin/api/energy/devices/nope/hardware-verification", headers=headers, json=VERIFICATION
+            "/admin/api/energy/devices/nope/hardware-verification",
+            headers=headers,
+            json=VERIFICATION,
         )
         assert unknown.status_code == 404
 
 
-async def test_the_soc_target_policy_round_trips_through_the_admin_surface(tmp_path: Path) -> None:
+async def test_the_soc_target_policy_round_trips_through_the_admin_surface(
+    tmp_path: Path,
+) -> None:
     async with running_app(energy_settings(tmp_path)) as harness:
         headers = await admin_session(harness)
         saved = await harness.client.put(
             "/admin/api/energy/devices/main/soc-target-policy",
             headers=headers,
-            json={"mode": "below_current_soc", "below_margin_percent": 7.5, "note": "H-1 probe"},
+            json={
+                "mode": "below_current_soc",
+                "below_margin_percent": 7.5,
+                "note": "H-1 probe",
+            },
         )
         assert saved.status_code == 200, saved.text
-        read_back = await harness.client.get("/admin/api/energy/devices/main/soc-target-policy")
+        read_back = await harness.client.get(
+            "/admin/api/energy/devices/main/soc-target-policy"
+        )
         assert read_back.json() == {
             "mode": "below_current_soc",
             "below_margin_percent": 7.5,
@@ -1222,15 +1604,17 @@ async def test_the_soc_target_policy_round_trips_through_the_admin_surface(tmp_p
         assert refused.status_code == 422, refused.text
 
 
-
-
 @pytest.mark.parametrize("vendor", [True, False])
-def test_the_public_document_names_no_vendor_internal(tmp_path: Path, vendor: bool) -> None:
+def test_the_public_document_names_no_vendor_internal(
+    tmp_path: Path, vendor: bool
+) -> None:
     """AC-19. ``byte_width`` is asserted within the energy and dispatch schemas only: the vendor
     diagnostics router legitimately publishes ``effective_byte_width``, so a document-wide scan
     would pass only by virtue of that flag's default and fail falsely once a harness turns it on.
     """
-    settings = energy_settings(tmp_path, enable_vendor_diagnostics=vendor, docs_public=True)
+    settings = energy_settings(
+        tmp_path, enable_vendor_diagnostics=vendor, docs_public=True
+    )
     document = create_app(settings).openapi()
     whole = json.dumps(document)
     for forbidden in ("power_mng", "soc_strategy", "discharge_positive"):
@@ -1245,7 +1629,9 @@ def test_the_public_document_names_no_vendor_internal(tmp_path: Path, vendor: bo
     assert scoped, "the energy and dispatch schemas must be part of the public document"
     assert "byte_width" not in json.dumps(scoped)
     energy_paths = {
-        path: item for path, item in document["paths"].items() if path.endswith(("/energy", "/energy/command", "/energy/mode"))
+        path: item
+        for path, item in document["paths"].items()
+        if path.endswith(("/energy", "/energy/command", "/energy/mode"))
     }
     assert sorted(energy_paths) == [
         "/api/v1/devices/{device_id}/energy",
@@ -1253,8 +1639,6 @@ def test_the_public_document_names_no_vendor_internal(tmp_path: Path, vendor: bo
     ]
     assert "byte_width" not in json.dumps(energy_paths)
     assert "grid_import_positive" not in json.dumps(energy_paths)
-
-
 
 
 def test_only_the_rct_adapter_layer_names_the_soc_target_register() -> None:
@@ -1281,7 +1665,9 @@ _VERIFIED_FIXTURES = {
     "app/admin/energy_api.py",  # the same operator action as one atomic request
     "app/api/app_factory.py",  # only resets a record when a device is re-addressed
 }
-_VERIFIED = re.compile(r"CapabilityStatus\.VERIFIED|\"status\"\s*:\s*\"verified\"|status=\"verified\"")
+_VERIFIED = re.compile(
+    r"CapabilityStatus\.VERIFIED|\"status\"\s*:\s*\"verified\"|status=\"verified\""
+)
 
 
 def test_no_new_code_marks_a_capability_as_verified() -> None:
@@ -1292,7 +1678,9 @@ def test_no_new_code_marks_a_capability_as_verified() -> None:
         for path in (ROOT / base).rglob("*.py")
         if _VERIFIED.search(path.read_text(encoding="utf-8"))
     }
-    assert named <= _VERIFIED_FIXTURES, f"new file marks a capability verified: {named - _VERIFIED_FIXTURES}"
+    assert (
+        named <= _VERIFIED_FIXTURES
+    ), f"new file marks a capability verified: {named - _VERIFIED_FIXTURES}"
 
 
 async def test_a_failing_status_projection_after_an_executed_action_still_reports_success(
@@ -1304,12 +1692,21 @@ async def test_a_failing_status_projection_after_an_executed_action_still_report
         seed_payloads(harness)
         await arm(harness, mode="manual")
         headers = await admin_session(harness)
-        with patch("app.admin.energy_api._admin_status", side_effect=RuntimeError("projection broke")):
+        with patch(
+            "app.admin.energy_api._admin_status",
+            side_effect=RuntimeError("projection broke"),
+        ):
             response = await harness.client.post(
-                "/admin/api/energy/devices/main/command", headers=headers, json={"action": "auto"}
+                "/admin/api/energy/devices/main/command",
+                headers=headers,
+                json={"action": "auto"},
             )
         assert response.status_code == 202, response.text
-        assert response.json() == {"executed": True, "status_available": False, "device_id": "main"}
+        assert response.json() == {
+            "executed": True,
+            "status_available": False,
+            "device_id": "main",
+        }
 
 
 async def test_the_admin_status_shows_the_restore_retry_state_but_the_public_status_does_not(
@@ -1318,24 +1715,35 @@ async def test_the_admin_status_shows_the_restore_retry_state_but_the_public_sta
     async with running_app(energy_settings(tmp_path)) as harness:
         seed_payloads(harness)
         headers = await admin_session(harness)
-        admin = (await harness.client.get("/admin/api/energy/devices", headers=headers)).json()[0]
+        admin = (
+            await harness.client.get("/admin/api/energy/devices", headers=headers)
+        ).json()[0]
         assert admin["restore_attempts"] == 0 and admin["next_restore_at"] is None
-        public = (await harness.client.get("/api/v1/devices/main/energy", headers=WRITER)).json()
+        public = (
+            await harness.client.get("/api/v1/devices/main/energy", headers=WRITER)
+        ).json()
         assert "restore_attempts" not in public and "next_restore_at" not in public
 
 
-async def test_enabling_write_support_approves_the_required_writes_and_never_removes(tmp_path: Path) -> None:
+async def test_enabling_write_support_approves_the_required_writes_and_never_removes(
+    tmp_path: Path,
+) -> None:
     """Switching write access on adds REQUIRED_WRITES to the allowlist (add-only, live); switching
-    it off leaves the allowlist untouched. The Setup checklist's list is served by the backend."""
+    it off leaves the allowlist untouched. The Setup checklist's list is served by the backend.
+    """
     settings = energy_settings(tmp_path)
     async with running_app(settings) as harness:
         store = harness.app.state.admin_store
         store.put_many({"write_names": []})
         headers = await admin_session(harness)
-        off = await harness.client.put("/admin/api/settings", headers=headers, json={"enable_write_support": False})
+        off = await harness.client.put(
+            "/admin/api/settings", headers=headers, json={"enable_write_support": False}
+        )
         assert off.status_code == 200, off.text
         assert store.get("write_names") == []  # switching off changes nothing
-        on = await harness.client.put("/admin/api/settings", headers=headers, json={"enable_write_support": True})
+        on = await harness.client.put(
+            "/admin/api/settings", headers=headers, json={"enable_write_support": True}
+        )
         assert on.status_code == 200, on.text
         assert set(DISPATCH_WRITE_NAMES) <= set(store.get("write_names"))
         parameters = await harness.client.get("/admin/api/parameters")
@@ -1345,25 +1753,42 @@ async def test_enabling_write_support_approves_the_required_writes_and_never_rem
         assert set(main["required_write_names"]) == set(DISPATCH_WRITE_NAMES)
         assert set(DISPATCH_WRITE_NAMES) <= set(main["approved_write_names"])
         exposed = store.get("exposed_names")
-        trimmed = [name for name in store.get("write_names") if name != DISPATCH_WRITE_NAMES[0]]
-        assert (await harness.client.put(
-            "/admin/api/parameters", headers=headers, json={"exposed_names": exposed, "write_names": trimmed}
-        )).status_code == 200
-        assert (await harness.client.put(
-            "/admin/api/settings", headers=headers, json={"enable_write_support": False}
-        )).status_code == 200
+        trimmed = [
+            name for name in store.get("write_names") if name != DISPATCH_WRITE_NAMES[0]
+        ]
+        assert (
+            await harness.client.put(
+                "/admin/api/parameters",
+                headers=headers,
+                json={"exposed_names": exposed, "write_names": trimmed},
+            )
+        ).status_code == 200
+        assert (
+            await harness.client.put(
+                "/admin/api/settings",
+                headers=headers,
+                json={"enable_write_support": False},
+            )
+        ).status_code == 200
         assert store.get("write_names") == trimmed  # switching off changes nothing
-        assert (await harness.client.put(
-            "/admin/api/settings", headers=headers, json={"enable_write_support": True}
-        )).status_code == 200
+        assert (
+            await harness.client.put(
+                "/admin/api/settings",
+                headers=headers,
+                json={"enable_write_support": True},
+            )
+        ).status_code == 200
         # Applied once: a register the operator cleared on purpose stays cleared.
         assert store.get("write_names") == trimmed
         assert store.get("write_defaults_applied") is True
 
 
-async def test_clearing_a_required_register_closes_the_gate_and_the_checklist(tmp_path: Path) -> None:
+async def test_clearing_a_required_register_closes_the_gate_and_the_checklist(
+    tmp_path: Path,
+) -> None:
     """Disarmed: clearing a required register leaves the actions refused (write_not_permitted) and
-    the Setup data shows it missing. Armed: the clearing is refused (409), see the test above."""
+    the Setup data shows it missing. Armed: the clearing is refused (409), see the test above.
+    """
     async with running_app(energy_settings(tmp_path)) as harness:
         seed_payloads(harness)
         headers = await admin_session(harness)
@@ -1371,13 +1796,25 @@ async def test_clearing_a_required_register_closes_the_gate_and_the_checklist(tm
         store.put_many({"write_names": list(DISPATCH_WRITE_NAMES)})
         exposed = store.get("exposed_names")
         trimmed = [n for n in DISPATCH_WRITE_NAMES if n != DISPATCH_WRITE_NAMES[1]]
-        assert (await harness.client.put(
-            "/admin/api/parameters", headers=headers, json={"exposed_names": exposed, "write_names": trimmed}
-        )).status_code == 200
-        main = next(i for i in (await harness.client.get("/admin/api/energy/devices")).json() if i["device_id"] == "main")
-        assert DISPATCH_WRITE_NAMES[1] in set(main["required_write_names"]) - set(main["approved_write_names"])
+        assert (
+            await harness.client.put(
+                "/admin/api/parameters",
+                headers=headers,
+                json={"exposed_names": exposed, "write_names": trimmed},
+            )
+        ).status_code == 200
+        main = next(
+            i
+            for i in (await harness.client.get("/admin/api/energy/devices")).json()
+            if i["device_id"] == "main"
+        )
+        assert DISPATCH_WRITE_NAMES[1] in set(main["required_write_names"]) - set(
+            main["approved_write_names"]
+        )
         status = await harness.client.get("/api/v1/devices/main/energy", headers=WRITER)
-        reasons = {i["reason"] for i in status.json()["actions"] if i["action"] != "auto"}
+        reasons = {
+            i["reason"] for i in status.json()["actions"] if i["action"] != "auto"
+        }
         assert reasons <= {"write_not_permitted", "mode_off"}
 
 
@@ -1387,14 +1824,21 @@ async def _put_write_support(harness, headers: dict[str, str], value: bool):
     )
 
 
-async def test_write_support_switches_on_and_off_live_without_a_restart(tmp_path: Path) -> None:
+async def test_write_support_switches_on_and_off_live_without_a_restart(
+    tmp_path: Path,
+) -> None:
     """Boot with writes off, enable through Settings, use dispatch, disable: no restart notice, the
-    routers follow the switch, disabling disarms and hands the inverter back to automatic."""
-    async with running_app(energy_settings(tmp_path, enable_write_support=False)) as harness:
+    routers follow the switch, disabling disarms and hands the inverter back to automatic.
+    """
+    async with running_app(
+        energy_settings(tmp_path, enable_write_support=False)
+    ) as harness:
         seed_payloads(harness)
         headers = await admin_session(harness)
         assert harness.runtime.dispatch is None
-        assert (await command(harness, {"action": "auto"})).json()["code"] == "write_disabled"
+        assert (await command(harness, {"action": "auto"})).json()[
+            "code"
+        ] == "write_disabled"
 
         on = await _put_write_support(harness, headers, True)
         assert on.status_code == 200, on.text
@@ -1403,13 +1847,17 @@ async def test_write_support_switches_on_and_off_live_without_a_restart(tmp_path
         assert harness.runtime.dispatch is not None
 
         await arm(harness)
-        charging = await command(harness, {"action": "charge", "target_soc_percent": 80})
+        charging = await command(
+            harness, {"action": "charge", "target_soc_percent": 80}
+        )
         assert charging.status_code == 200, charging.text
         assert charging.json()["state"] == "charging"
         panel = (await harness.client.get("/admin/api/energy/devices")).json()[0]
         assert panel["armed"] is True and panel["state"] == "charging"
 
-        headers = await admin_session(harness)  # arm() logged in again and rotated the CSRF token
+        headers = await admin_session(
+            harness
+        )  # arm() logged in again and rotated the CSRF token
         off = await _put_write_support(harness, headers, False)
         assert off.status_code == 200, off.text
         assert "restart_required" not in off.json()
@@ -1419,22 +1867,32 @@ async def test_write_support_switches_on_and_off_live_without_a_restart(tmp_path
         panel = (await harness.client.get("/admin/api/energy/devices")).json()[0]
         assert panel["armed"] is False and panel["state"] == "automatic"
         rearm = await harness.client.put(
-            "/admin/api/energy/devices/main/mode", headers=headers, json={"mode": "external"}
+            "/admin/api/energy/devices/main/mode",
+            headers=headers,
+            json={"mode": "external"},
         )
-        assert rearm.status_code == 409 and rearm.json()["code"] == "energy_write_support_required"
+        assert (
+            rearm.status_code == 409
+            and rearm.json()["code"] == "energy_write_support_required"
+        )
 
         # Back on: dispatch is reused, a fresh arming is needed.
         assert (await _put_write_support(harness, headers, True)).status_code == 200
-        assert (await command(harness, {"action": "auto"})).json()["code"] == "energy_manager_off"
-
-
+        assert (await command(harness, {"action": "auto"})).json()[
+            "code"
+        ] == "energy_manager_off"
 
 
 async def test_a_pat_cannot_switch_the_mode_and_the_session_can(tmp_path: Path) -> None:
     async with running_app(energy_settings(tmp_path)) as harness:
-        for headers in (WRITER, READER):  # before any login: the client carries no session cookie yet
+        for headers in (
+            WRITER,
+            READER,
+        ):  # before any login: the client carries no session cookie yet
             response = await harness.client.put(
-                "/admin/api/energy/devices/main/mode", headers=headers, json={"mode": "external"}
+                "/admin/api/energy/devices/main/mode",
+                headers=headers,
+                json={"mode": "external"},
             )
             assert response.status_code == 403, response.text
         public = await harness.client.get("/api/v1/devices/main/energy", headers=WRITER)
@@ -1442,7 +1900,9 @@ async def test_a_pat_cannot_switch_the_mode_and_the_session_can(tmp_path: Path) 
         assert (await arm(harness, mode="manual"))["mode"] == "manual"
 
 
-async def test_the_admin_gui_fails_fast_when_the_inverter_is_not_connected(tmp_path: Path) -> None:
+async def test_the_admin_gui_fails_fast_when_the_inverter_is_not_connected(
+    tmp_path: Path,
+) -> None:
     from dataclasses import replace
 
     from app.gateway.base import DeviceState
@@ -1452,22 +1912,35 @@ async def test_the_admin_gui_fails_fast_when_the_inverter_is_not_connected(tmp_p
         headers = await admin_session(harness)
         gateway = harness.runtime.gateway
         real = gateway.device_status
-        for state in (DeviceState.UNREACHABLE, DeviceState.DEGRADED, DeviceState.STARTING):
-            gateway.device_status = lambda device_id, state=state: replace(real(device_id), state=state)
+        for state in (
+            DeviceState.UNREACHABLE,
+            DeviceState.DEGRADED,
+            DeviceState.STARTING,
+        ):
+            gateway.device_status = lambda device_id, state=state: replace(
+                real(device_id), state=state
+            )
             try:
                 before = real("main").transactions
-                listing = await harness.client.get("/admin/api/energy/devices", headers=headers)
+                listing = await harness.client.get(
+                    "/admin/api/energy/devices", headers=headers
+                )
                 assert listing.json()[0]["connected"] is False, state
                 for method, path, body in (
                     ("POST", "command", {"action": "hold"}),
                     ("PUT", "mode", {"mode": "manual"}),
                 ):
                     response = await harness.client.request(
-                        method, f"/admin/api/energy/devices/main/{path}", headers=headers, json=body
+                        method,
+                        f"/admin/api/energy/devices/main/{path}",
+                        headers=headers,
+                        json=body,
                     )
                     assert response.status_code == 502, (state, response.text)
                     assert response.json()["code"] == "device_unreachable"
-                assert real("main").transactions == before  # refused before any device access
+                assert (
+                    real("main").transactions == before
+                )  # refused before any device access
             finally:
                 gateway.device_status = real
         listing = await harness.client.get("/admin/api/energy/devices", headers=headers)
@@ -1487,7 +1960,10 @@ async def test_the_mode_decides_which_surface_may_command(tmp_path: Path) -> Non
         headers = await admin_session(harness)
         # off: both surfaces refuse
         for response in (await gui(headers), await command(harness, body)):
-            assert response.status_code == 409 and response.json()["code"] == "energy_manager_off"
+            assert (
+                response.status_code == 409
+                and response.json()["code"] == "energy_manager_off"
+            )
 
         # manual: the GUI commands, a PAT is told to ask the operator for External
         await arm(harness, mode="manual")
@@ -1497,35 +1973,54 @@ async def test_the_mode_decides_which_surface_may_command(tmp_path: Path) -> Non
         assert refused.status_code == 409, refused.text
         assert refused.json()["code"] == "energy_manager_not_external"
         assert "External" in refused.json()["detail"]
-        assert (await harness.client.get("/api/v1/devices/main/energy", headers=WRITER)).status_code == 200
+        assert (
+            await harness.client.get("/api/v1/devices/main/energy", headers=WRITER)
+        ).status_code == 200
 
         # external: a PAT commands, the GUI is refused; the running hold was handed back by the switch
         await arm(harness, mode="external")
         headers = await admin_session(harness)
-        status = (await harness.client.get("/api/v1/devices/main/energy", headers=WRITER)).json()
+        status = (
+            await harness.client.get("/api/v1/devices/main/energy", headers=WRITER)
+        ).json()
         assert status["mode"] == "external" and status["armed"] is True
-        assert status["accepts_commands_from"] == "api" and status["state"] == "automatic"
+        assert (
+            status["accepts_commands_from"] == "api" and status["state"] == "automatic"
+        )
         assert (await command(harness, body)).status_code == 200
         refused = await gui(headers)
-        assert refused.status_code == 409 and refused.json()["code"] == "energy_manager_external"
-        admin = (await harness.client.get("/admin/api/energy/devices", headers=headers)).json()[0]
+        assert (
+            refused.status_code == 409
+            and refused.json()["code"] == "energy_manager_external"
+        )
+        admin = (
+            await harness.client.get("/admin/api/energy/devices", headers=headers)
+        ).json()[0]
         assert admin["mode"] == "external" and admin["mode_changed_by"] == "admin"
 
         # back to off: every command is refused again
         await arm(harness, mode="off")
         assert (await command(harness, body)).json()["code"] == "energy_manager_off"
-        assert (await harness.client.get("/api/v1/devices/main/energy", headers=WRITER)).json()["armed"] is False
+        assert (
+            await harness.client.get("/api/v1/devices/main/energy", headers=WRITER)
+        ).json()["armed"] is False
 
 
-async def test_off_confirms_internal_strategy_and_records_initial_choice(tmp_path: Path) -> None:
+async def test_off_confirms_internal_strategy_and_records_initial_choice(
+    tmp_path: Path,
+) -> None:
     async with running_app(energy_settings(tmp_path)) as harness:
         seed_payloads(harness)
         headers = await admin_session(harness)
-        strategy_id = RegistryCatalog.from_file(
-            harness.runtime.settings.object_registry_path
-        ).object_entry("power_mng_soc_strategy").object_id
+        strategy_id = (
+            RegistryCatalog.from_file(harness.runtime.settings.object_registry_path)
+            .object_entry("power_mng_soc_strategy")
+            .object_id
+        )
         harness.net.payloads[strategy_id] = b"\x01"
-        initial = (await harness.client.get("/admin/api/energy/devices", headers=headers)).json()[0]
+        initial = (
+            await harness.client.get("/admin/api/energy/devices", headers=headers)
+        ).json()[0]
         assert initial["mode"] == "off" and initial["mode_recorded"] is False
 
         response = await harness.client.put(
@@ -1536,13 +2031,17 @@ async def test_off_confirms_internal_strategy_and_records_initial_choice(tmp_pat
         assert harness.net.payloads[strategy_id] == b"\x04"
 
 
-async def test_off_write_failure_does_not_record_an_initial_choice(tmp_path: Path) -> None:
+async def test_off_write_failure_does_not_record_an_initial_choice(
+    tmp_path: Path,
+) -> None:
     async with running_app(energy_settings(tmp_path)) as harness:
         seed_payloads(harness)
         headers = await admin_session(harness)
-        strategy_id = RegistryCatalog.from_file(
-            harness.runtime.settings.object_registry_path
-        ).object_entry("power_mng_soc_strategy").object_id
+        strategy_id = (
+            RegistryCatalog.from_file(harness.runtime.settings.object_registry_path)
+            .object_entry("power_mng_soc_strategy")
+            .object_id
+        )
         harness.net.payloads[strategy_id] = b"\x01"
         harness.net.freeze_writes = True
         response = await harness.client.put(
@@ -1550,31 +2049,52 @@ async def test_off_write_failure_does_not_record_an_initial_choice(tmp_path: Pat
         )
         assert response.status_code != 200
         assert harness.net.payloads[strategy_id] == b"\x01"
-        status = (await harness.client.get("/admin/api/energy/devices", headers=headers)).json()[0]
+        status = (
+            await harness.client.get("/admin/api/energy/devices", headers=headers)
+        ).json()[0]
         assert status["mode_recorded"] is False
         assert "power_mng_soc_strategy" not in status["approved_write_names"]
-
 
 
 ASSIST = "/admin/api/energy/devices/main/verification-assistant"
 
 
 def seed_identity(
-    harness, *, battery_w: float = 400.0, target: float = 0.5, load_w: float | None = None, grid_w: float = 1200.0
+    harness,
+    *,
+    battery_w: float = 400.0,
+    target: float = 0.5,
+    load_w: float | None = None,
+    grid_w: float = 1200.0,
 ) -> None:
     """Identity plus a physically consistent house (solar 2400 W): load = solar + grid + battery."""
     catalog = RegistryCatalog.from_file(harness.runtime.settings.object_registry_path)
-    for name, text in (("android_description", "RCT Power DC 10.0"), ("svnversion", "2.3.5687")):
+    for name, text in (
+        ("android_description", "RCT Power DC 10.0"),
+        ("svnversion", "2.3.5687"),
+    ):
         entry = catalog.object_entry(name)
-        harness.net.payloads[entry.object_id] = encode_value(entry.data_type, text, byte_width=entry.byte_width)
-    harness.net.payloads[catalog.object_entry("battery_power").object_id] = float_payload(battery_w)
-    harness.net.payloads[catalog.object_entry("grid_power").object_id] = float_payload(grid_w)
+        harness.net.payloads[entry.object_id] = encode_value(
+            entry.data_type, text, byte_width=entry.byte_width
+        )
+    harness.net.payloads[catalog.object_entry("battery_power").object_id] = (
+        float_payload(battery_w)
+    )
+    harness.net.payloads[catalog.object_entry("grid_power").object_id] = float_payload(
+        grid_w
+    )
     load = 2400.0 + grid_w + battery_w if load_w is None else load_w
-    harness.net.payloads[catalog.object_entry("household_load_power").object_id] = float_payload(load)
-    harness.net.payloads[catalog.object_entry("power_mng_soc_target_set").object_id] = float_payload(target)
+    harness.net.payloads[catalog.object_entry("household_load_power").object_id] = (
+        float_payload(load)
+    )
+    harness.net.payloads[catalog.object_entry("power_mng_soc_target_set").object_id] = (
+        float_payload(target)
+    )
 
 
-async def follow_the_setpoint(harness, stop: asyncio.Event, *, grid_w: float | None = None) -> None:
+async def follow_the_setpoint(
+    harness, stop: asyncio.Event, *, grid_w: float | None = None
+) -> None:
     """Stand-in for the inverter's own control: with the external strategy active, battery power
     follows the written setpoint."""
     catalog = RegistryCatalog.from_file(harness.runtime.settings.object_registry_path)
@@ -1589,7 +2109,9 @@ async def follow_the_setpoint(harness, stop: asyncio.Event, *, grid_w: float | N
             if grid_w is not None:
                 battery_before = struct.unpack(">f", baseline_battery)[0]
                 battery_now = struct.unpack(">f", harness.net.payloads[extern])[0]
-                harness.net.payloads[grid] = float_payload(grid_w + battery_before - battery_now)
+                harness.net.payloads[grid] = float_payload(
+                    grid_w + battery_before - battery_now
+                )
         await asyncio.sleep(0.005)
 
 
@@ -1603,19 +2125,29 @@ def fast_probe(monkeypatch: pytest.MonkeyPatch) -> None:
 async def assistant_ready(harness) -> dict[str, str]:
     seed_payloads(harness)
     seed_identity(harness)
-    await harness.client.delete(VERIFICATION_URL, headers=await admin_session(harness))  # shipping state
+    await harness.client.delete(
+        VERIFICATION_URL, headers=await admin_session(harness)
+    )  # shipping state
     await arm(harness, mode="manual")
-    return await admin_session(harness)  # arm() logged in again, so the earlier CSRF token is stale
+    return await admin_session(
+        harness
+    )  # arm() logged in again, so the earlier CSRF token is stale
 
 
-async def unverified_command_status(harness, headers: dict[str, str]) -> tuple[int, str | None]:
+async def unverified_command_status(
+    harness, headers: dict[str, str]
+) -> tuple[int, str | None]:
     refused = await harness.client.post(
-        "/admin/api/energy/devices/main/command", headers=headers, json={"action": "hold"}
+        "/admin/api/energy/devices/main/command",
+        headers=headers,
+        json={"action": "hold"},
     )
     return refused.status_code, refused.json().get("code")
 
 
-async def test_the_guided_verification_stores_only_what_it_proved(tmp_path: Path, fast_probe: None) -> None:
+async def test_the_guided_verification_stores_only_what_it_proved(
+    tmp_path: Path, fast_probe: None
+) -> None:
     async with running_app(energy_settings(tmp_path)) as harness:
         headers = await assistant_ready(harness)
         before = await unverified_command_status(harness, headers)
@@ -1623,46 +2155,75 @@ async def test_the_guided_verification_stores_only_what_it_proved(tmp_path: Path
 
         started = (await harness.client.post(f"{ASSIST}/start", headers=headers)).json()
         assert started["blockers"] == [] and started["started"] is True
-        assert (started["model"], started["firmware"]) == ("RCT Power DC 10.0", "2.3.5687")
+        assert (started["model"], started["firmware"]) == (
+            "RCT Power DC 10.0",
+            "2.3.5687",
+        )
         assert not started["can_commit"]
-        early = await harness.client.post(f"{ASSIST}/commit", headers=headers, json={"confirm": True})
+        early = await harness.client.post(
+            f"{ASSIST}/commit", headers=headers, json={"confirm": True}
+        )
         assert early.status_code == 409  # nothing proven yet, so nothing can be stored
 
         for kind, answer in (("battery", "discharging"), ("grid", "importing")):
-            state = (await harness.client.post(
-                f"{ASSIST}/direction", headers=headers, json={"kind": kind, "answer": answer}
-            )).json()
+            state = (
+                await harness.client.post(
+                    f"{ASSIST}/direction",
+                    headers=headers,
+                    json={"kind": kind, "answer": answer},
+                )
+            ).json()
         assert [s["status"] for s in state["steps"]] == ["done", "done", "pending"]
 
-        refused = await harness.client.post(f"{ASSIST}/control-test", headers=headers, json={"confirm": False})
+        refused = await harness.client.post(
+            f"{ASSIST}/control-test", headers=headers, json={"confirm": False}
+        )
         assert refused.status_code == 400  # the active step needs explicit consent
 
         stop = asyncio.Event()
         follower = asyncio.create_task(follow_the_setpoint(harness, stop))
         try:
-            tested = await harness.client.post(f"{ASSIST}/control-test", headers=headers, json={"confirm": True})
+            tested = await harness.client.post(
+                f"{ASSIST}/control-test", headers=headers, json={"confirm": True}
+            )
         finally:
             stop.set()
             await follower
         assert tested.status_code == 200, tested.text
         assert tested.json()["can_commit"] is True, tested.json()
-        catalog = RegistryCatalog.from_file(harness.runtime.settings.object_registry_path)
-        restored = {name: harness.net.payloads[catalog.object_entry(name).object_id] for name in DISPATCH_WRITE_NAMES}
-        assert restored["power_mng_soc_strategy"] == b"\x00"  # handed back, not left under external control
+        catalog = RegistryCatalog.from_file(
+            harness.runtime.settings.object_registry_path
+        )
+        restored = {
+            name: harness.net.payloads[catalog.object_entry(name).object_id]
+            for name in DISPATCH_WRITE_NAMES
+        }
+        assert (
+            restored["power_mng_soc_strategy"] == b"\x00"
+        )  # handed back, not left under external control
         assert restored["power_mng_use_grid_power_enable"] == b"\x00"
 
-        done = await harness.client.post(f"{ASSIST}/commit", headers=headers, json={"confirm": True})
+        done = await harness.client.post(
+            f"{ASSIST}/commit", headers=headers, json={"confirm": True}
+        )
         assert done.status_code == 200, done.text
         caps = _capabilities(done.json())
         assert {caps[name]["status"] for name in _VERIFICATION_NAMES} == {"verified"}
         write = caps["write_path_convention"]
-        assert (write["verified_device_model"], write["verified_firmware"]) == ("RCT Power DC 10.0", "2.3.5687")
+        assert (write["verified_device_model"], write["verified_firmware"]) == (
+            "RCT Power DC 10.0",
+            "2.3.5687",
+        )
         assert write["enum_byte_width"] == 1 and write["bool_byte_width"] == 1
         assert write["write_frame_layout_verified"] and write["apply_sequence_verified"]
         assert write["note"].startswith("Guided:")
-        assert caps["battery_power_sign_convention"]["battery_discharge_positive"] is True
+        assert (
+            caps["battery_power_sign_convention"]["battery_discharge_positive"] is True
+        )
         assert caps["grid_power_sign_convention"]["grid_import_positive"] is True
-        assert (await unverified_command_status(harness, headers))[0] == 200  # now the gate is open
+        assert (await unverified_command_status(harness, headers))[
+            0
+        ] == 200  # now the gate is open
 
 
 async def test_a_failed_control_test_keeps_the_gate_closed_and_restores_the_inverter(
@@ -1671,54 +2232,111 @@ async def test_a_failed_control_test_keeps_the_gate_closed_and_restores_the_inve
     async with running_app(energy_settings(tmp_path)) as harness:
         headers = await assistant_ready(harness)
         await harness.client.post(f"{ASSIST}/start", headers=headers)
-        await harness.client.post(f"{ASSIST}/direction", headers=headers, json={"kind": "battery", "answer": "discharging"})
-        await harness.client.post(f"{ASSIST}/direction", headers=headers, json={"kind": "grid", "answer": "importing"})
+        await harness.client.post(
+            f"{ASSIST}/direction",
+            headers=headers,
+            json={"kind": "battery", "answer": "discharging"},
+        )
+        await harness.client.post(
+            f"{ASSIST}/direction",
+            headers=headers,
+            json={"kind": "grid", "answer": "importing"},
+        )
         # Nobody mirrors the setpoint: the battery keeps its 400 W, so external control is not proven.
-        tested = (await harness.client.post(f"{ASSIST}/control-test", headers=headers, json={"confirm": True})).json()
+        tested = (
+            await harness.client.post(
+                f"{ASSIST}/control-test", headers=headers, json={"confirm": True}
+            )
+        ).json()
         step = next(item for item in tested["steps"] if item["id"] == "control_test")
         assert step["status"] == "failed" and "did not follow" in step["message"]
         assert tested["can_commit"] is False
-        catalog = RegistryCatalog.from_file(harness.runtime.settings.object_registry_path)
-        assert harness.net.payloads[catalog.object_entry("power_mng_soc_strategy").object_id] == b"\x00"
-        commit = await harness.client.post(f"{ASSIST}/commit", headers=headers, json={"confirm": True})
+        catalog = RegistryCatalog.from_file(
+            harness.runtime.settings.object_registry_path
+        )
+        assert (
+            harness.net.payloads[
+                catalog.object_entry("power_mng_soc_strategy").object_id
+            ]
+            == b"\x00"
+        )
+        commit = await harness.client.post(
+            f"{ASSIST}/commit", headers=headers, json={"confirm": True}
+        )
         assert commit.status_code == 409
-        entry = (await harness.client.get("/admin/api/energy/devices", headers=headers)).json()[0]
-        assert {c["status"] for n, c in _capabilities(entry).items() if n in _VERIFICATION_NAMES} == {"unverified"}
+        entry = (
+            await harness.client.get("/admin/api/energy/devices", headers=headers)
+        ).json()[0]
+        assert {
+            c["status"]
+            for n, c in _capabilities(entry).items()
+            if n in _VERIFICATION_NAMES
+        } == {"unverified"}
         assert (await unverified_command_status(harness, headers))[0] != 200
 
 
-async def test_the_assistant_refuses_readings_it_cannot_interpret(tmp_path: Path, fast_probe: None) -> None:
+async def test_the_assistant_refuses_readings_it_cannot_interpret(
+    tmp_path: Path, fast_probe: None
+) -> None:
     async with running_app(energy_settings(tmp_path)) as harness:
         headers = await assistant_ready(harness)
         seed_identity(harness, battery_w=40.0)  # almost idle
         await harness.client.post(f"{ASSIST}/start", headers=headers)
-        weak = (await harness.client.post(
-            f"{ASSIST}/direction", headers=headers, json={"kind": "battery", "answer": "charging"}
-        )).json()
-        assert weak["steps"][0]["status"] == "failed" and "too little" in weak["steps"][0]["message"]
+        weak = (
+            await harness.client.post(
+                f"{ASSIST}/direction",
+                headers=headers,
+                json={"kind": "battery", "answer": "charging"},
+            )
+        ).json()
+        assert (
+            weak["steps"][0]["status"] == "failed"
+            and "too little" in weak["steps"][0]["message"]
+        )
         mismatched = await harness.client.post(
-            f"{ASSIST}/direction", headers=headers, json={"kind": "battery", "answer": "importing"}
+            f"{ASSIST}/direction",
+            headers=headers,
+            json={"kind": "battery", "answer": "importing"},
         )
         assert mismatched.status_code == 422
-        await harness.client.post(f"{ASSIST}/direction", headers=headers, json={"kind": "grid", "answer": "importing"})
+        await harness.client.post(
+            f"{ASSIST}/direction",
+            headers=headers,
+            json={"kind": "grid", "answer": "importing"},
+        )
         # An idle battery cannot show that the hold took effect, so the test must not pass.
-        seed_identity(harness, battery_w=400.0)  # the balance makes 400 W a discharge, so "charging" would be refused
-        await harness.client.post(f"{ASSIST}/direction", headers=headers, json={"kind": "battery", "answer": "discharging"})
+        seed_identity(
+            harness, battery_w=400.0
+        )  # the balance makes 400 W a discharge, so "charging" would be refused
+        await harness.client.post(
+            f"{ASSIST}/direction",
+            headers=headers,
+            json={"kind": "battery", "answer": "discharging"},
+        )
         seed_identity(harness, battery_w=0.0)
-        idle = (await harness.client.post(f"{ASSIST}/control-test", headers=headers, json={"confirm": True})).json()
+        idle = (
+            await harness.client.post(
+                f"{ASSIST}/control-test", headers=headers, json={"confirm": True}
+            )
+        ).json()
         step = next(item for item in idle["steps"] if item["id"] == "control_test")
         assert step["status"] == "failed" and "almost idle" in step["message"]
         assert idle["can_commit"] is False
 
 
-async def test_an_unreadable_target_unit_blocks_the_commit(tmp_path: Path, fast_probe: None) -> None:
+async def test_an_unreadable_target_unit_blocks_the_commit(
+    tmp_path: Path, fast_probe: None
+) -> None:
     async with running_app(energy_settings(tmp_path)) as harness:
         headers = await assistant_ready(harness)
-        seed_identity(harness, target=1.0)  # 100 % in ratio units reads like 1 % in percent units
+        seed_identity(
+            harness, target=1.0
+        )  # 100 % in ratio units reads like 1 % in percent units
         state = (await harness.client.post(f"{ASSIST}/start", headers=headers)).json()
         assert state["started"] is True and state["can_commit"] is False
-        assert any("unit cannot be determined" in blocker for blocker in state["blockers"])
-
+        assert any(
+            "unit cannot be determined" in blocker for blocker in state["blockers"]
+        )
 
 
 def sample(battery: float, grid: float, solar: float, load: float) -> BalanceSample:
@@ -1728,32 +2346,77 @@ def sample(battery: float, grid: float, solar: float, load: float) -> BalanceSam
 @pytest.mark.parametrize(
     ("readings", "expected"),
     [
-        pytest.param(sample(0, 500, 0, 500), (None, True), id="night-battery-idle-grid-import-fixes-grid"),
-        pytest.param(sample(1000, 0, 0, 1000), (True, None), id="night-battery-discharging-grid-idle"),
-        pytest.param(sample(600, 400, 0, 1000), (True, True), id="night-discharge-plus-import"),
-        pytest.param(sample(-1500, -500, 3000, 1000), (True, True), id="day-charging-and-export"),
-        pytest.param(sample(1500, 500, 3000, 1000), (False, False), id="same-day-with-both-signs-mirrored"),
+        pytest.param(
+            sample(0, 500, 0, 500),
+            (None, True),
+            id="night-battery-idle-grid-import-fixes-grid",
+        ),
+        pytest.param(
+            sample(1000, 0, 0, 1000),
+            (True, None),
+            id="night-battery-discharging-grid-idle",
+        ),
+        pytest.param(
+            sample(600, 400, 0, 1000), (True, True), id="night-discharge-plus-import"
+        ),
+        pytest.param(
+            sample(-1500, -500, 3000, 1000), (True, True), id="day-charging-and-export"
+        ),
+        pytest.param(
+            sample(1500, 500, 3000, 1000),
+            (False, False),
+            id="same-day-with-both-signs-mirrored",
+        ),
         pytest.param(sample(0, 0, 0, 0), (None, None), id="everything-idle"),
-        pytest.param(sample(0, 520, 0, 500), (None, True), id="meter-noise-inside-the-tolerance"),
-        pytest.param(sample(50, 450, 0, 500), (None, True), id="battery-below-the-direction-threshold"),
-        pytest.param(sample(100, 100, 0, 3000), (None, None), id="inconsistent-balance"),
-        pytest.param(sample(-500, 500, 0, 0), (None, None), id="symmetric-hypotheses-cannot-be-told-apart"),
-        pytest.param(sample(0, 500, 0, -500), (None, None), id="negative-load-is-not-a-load"),
-        pytest.param(sample(0, 500, -400, 100), (None, None), id="negative-solar-is-not-generation"),
+        pytest.param(
+            sample(0, 520, 0, 500), (None, True), id="meter-noise-inside-the-tolerance"
+        ),
+        pytest.param(
+            sample(50, 450, 0, 500),
+            (None, True),
+            id="battery-below-the-direction-threshold",
+        ),
+        pytest.param(
+            sample(100, 100, 0, 3000), (None, None), id="inconsistent-balance"
+        ),
+        pytest.param(
+            sample(-500, 500, 0, 0),
+            (None, None),
+            id="symmetric-hypotheses-cannot-be-told-apart",
+        ),
+        pytest.param(
+            sample(0, 500, 0, -500), (None, None), id="negative-load-is-not-a-load"
+        ),
+        pytest.param(
+            sample(0, 500, -400, 100),
+            (None, None),
+            id="negative-solar-is-not-generation",
+        ),
         pytest.param(sample(0, math.nan, 0, 500), (None, None), id="not-a-number"),
-        pytest.param(sample(2000, 0, 0, 500), (None, None), id="unmetered-extra-source-breaks-the-balance"),
+        pytest.param(
+            sample(2000, 0, 0, 500),
+            (None, None),
+            id="unmetered-extra-source-breaks-the-balance",
+        ),
     ],
 )
-def test_the_power_balance_proves_only_what_a_unique_fit_supports(readings: BalanceSample, expected) -> None:
+def test_the_power_balance_proves_only_what_a_unique_fit_supports(
+    readings: BalanceSample, expected
+) -> None:
     proof = prove_signs_from_balance([readings, readings])
     assert (proof.battery_discharge_positive, proof.grid_import_positive) == expected
 
 
 def test_samples_that_disagree_prove_nothing() -> None:
     discharging = sample(1000, 0, 0, 1000)
-    mirrored = sample(-1000, 0, 0, 1000)  # the same load explained by the opposite convention
+    mirrored = sample(
+        -1000, 0, 0, 1000
+    )  # the same load explained by the opposite convention
     proof = prove_signs_from_balance([discharging, mirrored])
-    assert (proof.battery_discharge_positive, proof.grid_import_positive) == (None, None)
+    assert (proof.battery_discharge_positive, proof.grid_import_positive) == (
+        None,
+        None,
+    )
     assert prove_signs_from_balance([]) == BalanceProof()
 
 
@@ -1761,31 +2424,54 @@ def step_of(state: dict, step_id: str) -> dict:
     return next(item for item in state["steps"] if item["id"] == step_id)
 
 
-async def test_proven_signs_skip_the_questions_and_are_recorded_as_such(tmp_path: Path, fast_probe: None) -> None:
+async def test_proven_signs_skip_the_questions_and_are_recorded_as_such(
+    tmp_path: Path, fast_probe: None
+) -> None:
     async with running_app(energy_settings(tmp_path)) as harness:
-        headers = await assistant_ready(harness)  # solar 2400 + import 1200 + discharge 400 = load 4000
+        headers = await assistant_ready(
+            harness
+        )  # solar 2400 + import 1200 + discharge 400 = load 4000
         await harness.client.post(f"{ASSIST}/start", headers=headers)
-        state = (await harness.client.post(f"{ASSIST}/auto-check", headers=headers)).json()
+        state = (
+            await harness.client.post(f"{ASSIST}/auto-check", headers=headers)
+        ).json()
         battery, grid = step_of(state, "battery"), step_of(state, "grid")
-        assert (battery["status"], battery["method"], battery["direction"]) == ("done", "balance", "discharging")
-        assert (grid["status"], grid["method"], grid["direction"]) == ("done", "balance", "importing")
+        assert (battery["status"], battery["method"], battery["direction"]) == (
+            "done",
+            "balance",
+            "discharging",
+        )
+        assert (grid["status"], grid["method"], grid["direction"]) == (
+            "done",
+            "balance",
+            "importing",
+        )
         assert battery["power_w"] == 400.0 and state["min_direction_w"] == 100.0
 
         stop = asyncio.Event()
         follower = asyncio.create_task(follow_the_setpoint(harness, stop))
         try:
-            tested = await harness.client.post(f"{ASSIST}/control-test", headers=headers, json={"confirm": True})
+            tested = await harness.client.post(
+                f"{ASSIST}/control-test", headers=headers, json={"confirm": True}
+            )
         finally:
             stop.set()
             await follower
         assert tested.json()["can_commit"] is True, tested.json()
-        done = await harness.client.post(f"{ASSIST}/commit", headers=headers, json={"confirm": True})
+        done = await harness.client.post(
+            f"{ASSIST}/commit", headers=headers, json={"confirm": True}
+        )
         assert done.status_code == 200, done.text
         caps = _capabilities(done.json())
-        assert caps["battery_power_sign_convention"]["battery_discharge_positive"] is True
+        assert (
+            caps["battery_power_sign_convention"]["battery_discharge_positive"] is True
+        )
         assert caps["grid_power_sign_convention"]["grid_import_positive"] is True
         note = caps["write_path_convention"]["note"]
-        assert "battery sign by power balance" in note and "grid sign by power balance" in note
+        assert (
+            "battery sign by power balance" in note
+            and "grid sign by power balance" in note
+        )
 
 
 @pytest.mark.parametrize("grid_follows", [True, False])
@@ -1796,14 +2482,20 @@ async def test_the_hold_can_prove_an_initially_idle_grid_without_guessing(
         headers = await assistant_ready(harness)
         seed_identity(harness, grid_w=2.0)
         await harness.client.post(f"{ASSIST}/start", headers=headers)
-        initial = (await harness.client.post(f"{ASSIST}/auto-check", headers=headers)).json()
+        initial = (
+            await harness.client.post(f"{ASSIST}/auto-check", headers=headers)
+        ).json()
         assert step_of(initial, "battery")["status"] == "done"
         assert step_of(initial, "grid")["status"] == "pending"
 
         stop = asyncio.Event()
-        follower = asyncio.create_task(follow_the_setpoint(harness, stop, grid_w=2.0 if grid_follows else None))
+        follower = asyncio.create_task(
+            follow_the_setpoint(harness, stop, grid_w=2.0 if grid_follows else None)
+        )
         try:
-            tested = await harness.client.post(f"{ASSIST}/control-test", headers=headers, json={"confirm": True})
+            tested = await harness.client.post(
+                f"{ASSIST}/control-test", headers=headers, json={"confirm": True}
+            )
         finally:
             stop.set()
             await follower
@@ -1812,25 +2504,41 @@ async def test_the_hold_can_prove_an_initially_idle_grid_without_guessing(
         assert step_of(state, "control_test")["status"] == "done"
         grid = step_of(state, "grid")
         if grid_follows:
-            assert (grid["status"], grid["method"], grid["direction"]) == ("done", "balance", "importing")
+            assert (grid["status"], grid["method"], grid["direction"]) == (
+                "done",
+                "balance",
+                "importing",
+            )
             assert state["can_commit"] is True
-            saved = await harness.client.post(f"{ASSIST}/commit", headers=headers, json={"confirm": True})
+            saved = await harness.client.post(
+                f"{ASSIST}/commit", headers=headers, json={"confirm": True}
+            )
             assert saved.status_code == 200, saved.text
         else:
             assert grid["status"] == "pending" and state["can_commit"] is False
-            refused = await harness.client.post(f"{ASSIST}/commit", headers=headers, json={"confirm": True})
+            refused = await harness.client.post(
+                f"{ASSIST}/commit", headers=headers, json={"confirm": True}
+            )
             assert refused.status_code == 409
 
 
-async def test_a_mirrored_register_convention_is_proven_as_such(tmp_path: Path, fast_probe: None) -> None:
+async def test_a_mirrored_register_convention_is_proven_as_such(
+    tmp_path: Path, fast_probe: None
+) -> None:
     async with running_app(energy_settings(tmp_path)) as harness:
         headers = await assistant_ready(harness)
         # The battery discharges 400 W but its register is negative: discharge is NOT positive here.
         seed_identity(harness, battery_w=-400.0, load_w=2400.0 + 1200.0 + 400.0)
         await harness.client.post(f"{ASSIST}/start", headers=headers)
-        state = (await harness.client.post(f"{ASSIST}/auto-check", headers=headers)).json()
+        state = (
+            await harness.client.post(f"{ASSIST}/auto-check", headers=headers)
+        ).json()
         battery = step_of(state, "battery")
-        assert (battery["status"], battery["direction"], battery["power_w"]) == ("done", "discharging", 400.0)
+        assert (battery["status"], battery["direction"], battery["power_w"]) == (
+            "done",
+            "discharging",
+            400.0,
+        )
         session = harness.app.state.energy_verification_sessions["main"]
         assert session.battery_discharge_positive is False
 
@@ -1840,30 +2548,64 @@ async def test_an_idle_battery_is_never_guessed_and_the_proof_arrives_when_it_mo
 ) -> None:
     async with running_app(energy_settings(tmp_path)) as harness:
         headers = await assistant_ready(harness)
-        seed_identity(harness, battery_w=0.0)  # night-like balance: the grid alone fixes only the grid sign
+        seed_identity(
+            harness, battery_w=0.0
+        )  # night-like balance: the grid alone fixes only the grid sign
         await harness.client.post(f"{ASSIST}/start", headers=headers)
-        state = (await harness.client.post(f"{ASSIST}/auto-check", headers=headers)).json()
-        assert step_of(state, "grid")["status"] == "done" and step_of(state, "grid")["method"] == "balance"
+        state = (
+            await harness.client.post(f"{ASSIST}/auto-check", headers=headers)
+        ).json()
+        assert (
+            step_of(state, "grid")["status"] == "done"
+            and step_of(state, "grid")["method"] == "balance"
+        )
         waiting = step_of(state, "battery")
-        assert (waiting["status"], waiting["message"], waiting["method"]) == ("pending", None, None)
+        assert (waiting["status"], waiting["message"], waiting["method"]) == (
+            "pending",
+            None,
+            None,
+        )
         # "Idle" is only a statement: validated, never a proof.
-        idle = (await harness.client.post(
-            f"{ASSIST}/direction", headers=headers, json={"kind": "battery", "answer": "idle"}
-        )).json()
-        assert (step_of(idle, "battery")["status"], step_of(idle, "battery")["message"]) == ("pending", None)
+        idle = (
+            await harness.client.post(
+                f"{ASSIST}/direction",
+                headers=headers,
+                json={"kind": "battery", "answer": "idle"},
+            )
+        ).json()
+        assert (
+            step_of(idle, "battery")["status"],
+            step_of(idle, "battery")["message"],
+        ) == ("pending", None)
         assert idle["can_commit"] is False
-        assert (await harness.client.post(f"{ASSIST}/commit", headers=headers, json={"confirm": True})).status_code == 409
+        assert (
+            await harness.client.post(
+                f"{ASSIST}/commit", headers=headers, json={"confirm": True}
+            )
+        ).status_code == 409
         # The inverter reports power, so "idle" contradicts it and is refused with a plain reason.
         seed_identity(harness, battery_w=400.0, load_w=0.0)
-        contradicted = (await harness.client.post(
-            f"{ASSIST}/direction", headers=headers, json={"kind": "battery", "answer": "idle"}
-        )).json()
+        contradicted = (
+            await harness.client.post(
+                f"{ASSIST}/direction",
+                headers=headers,
+                json={"kind": "battery", "answer": "idle"},
+            )
+        ).json()
         message = step_of(contradicted, "battery")["message"]
-        assert step_of(contradicted, "battery")["status"] == "failed" and "not idle" in message
+        assert (
+            step_of(contradicted, "battery")["status"] == "failed"
+            and "not idle" in message
+        )
         # The battery starts moving with a consistent balance: the next check proves it by itself.
         seed_identity(harness, battery_w=400.0)
-        proven = (await harness.client.post(f"{ASSIST}/auto-check", headers=headers)).json()
-        assert step_of(proven, "battery")["status"] == "done" and step_of(proven, "battery")["method"] == "balance"
+        proven = (
+            await harness.client.post(f"{ASSIST}/auto-check", headers=headers)
+        ).json()
+        assert (
+            step_of(proven, "battery")["status"] == "done"
+            and step_of(proven, "battery")["method"] == "balance"
+        )
 
 
 async def test_without_a_usable_balance_the_operator_is_asked_and_a_contradiction_is_refused(
@@ -1871,28 +2613,50 @@ async def test_without_a_usable_balance_the_operator_is_asked_and_a_contradictio
 ) -> None:
     async with running_app(energy_settings(tmp_path)) as harness:
         headers = await assistant_ready(harness)
-        seed_identity(harness, load_w=0.0)  # no usable load figure: the balance proves nothing
+        seed_identity(
+            harness, load_w=0.0
+        )  # no usable load figure: the balance proves nothing
         await harness.client.post(f"{ASSIST}/start", headers=headers)
-        state = (await harness.client.post(f"{ASSIST}/auto-check", headers=headers)).json()
-        assert [item["status"] for item in state["steps"]] == ["pending", "pending", "pending"]
-        answered = (await harness.client.post(
-            f"{ASSIST}/direction", headers=headers, json={"kind": "battery", "answer": "discharging"}
-        )).json()
-        assert (step_of(answered, "battery")["status"], step_of(answered, "battery")["method"]) == ("done", "operator")
+        state = (
+            await harness.client.post(f"{ASSIST}/auto-check", headers=headers)
+        ).json()
+        assert [item["status"] for item in state["steps"]] == [
+            "pending",
+            "pending",
+            "pending",
+        ]
+        answered = (
+            await harness.client.post(
+                f"{ASSIST}/direction",
+                headers=headers,
+                json={"kind": "battery", "answer": "discharging"},
+            )
+        ).json()
+        assert (
+            step_of(answered, "battery")["status"],
+            step_of(answered, "battery")["method"],
+        ) == ("done", "operator")
         # A consistent balance now proves discharge; an operator answer to the contrary is not stored.
         seed_identity(harness)
         await harness.client.delete(ASSIST, headers=headers)
         await harness.client.post(f"{ASSIST}/start", headers=headers)
-        conflict = (await harness.client.post(
-            f"{ASSIST}/direction", headers=headers, json={"kind": "battery", "answer": "charging"}
-        )).json()
+        conflict = (
+            await harness.client.post(
+                f"{ASSIST}/direction",
+                headers=headers,
+                json={"kind": "battery", "answer": "charging"},
+            )
+        ).json()
         step = step_of(conflict, "battery")
         assert step["status"] == "failed" and "points the other way" in step["message"]
-        agreed = (await harness.client.post(
-            f"{ASSIST}/direction", headers=headers, json={"kind": "battery", "answer": "discharging"}
-        )).json()
+        agreed = (
+            await harness.client.post(
+                f"{ASSIST}/direction",
+                headers=headers,
+                json={"kind": "battery", "answer": "discharging"},
+            )
+        ).json()
         assert step_of(agreed, "battery")["method"] == "both"
-
 
 
 from datetime import timedelta
@@ -1945,31 +2709,39 @@ def _seed_spot_prices(store, intervals, timezone="UTC") -> None:
     config = SpotMarketConfig.model_validate(_spot_body())
     fetched = datetime.now(UTC).isoformat()
     zone = ZoneInfo(timezone)
-    store.replace_spot_market_intervals([
-        {
-            "config_key": spot_config_key(config),
-            "local_date": interval.start.astimezone(zone).date().isoformat(),
-            "interval_start": interval.start.isoformat(),
-            "interval_end": interval.end.isoformat(),
-            "price_eur_per_kwh": float(interval.price_eur_per_kwh),
-            "timezone": timezone,
-            "fetched_at": fetched,
-        }
-        for interval in intervals
-    ])
+    store.replace_spot_market_intervals(
+        [
+            {
+                "config_key": spot_config_key(config),
+                "local_date": interval.start.astimezone(zone).date().isoformat(),
+                "interval_start": interval.start.isoformat(),
+                "interval_end": interval.end.isoformat(),
+                "price_eur_per_kwh": float(interval.price_eur_per_kwh),
+                "timezone": timezone,
+                "fetched_at": fetched,
+            }
+            for interval in intervals
+        ]
+    )
 
 
 def _activate_spot_market(harness) -> None:
     config = SpotMarketConfig.model_validate(_spot_body())
     harness.app.state.spotmarket_config = config
-    harness.app.state.admin_store.put("spotmarket_config", config.model_dump(mode="json"))
+    harness.app.state.admin_store.put(
+        "spotmarket_config", config.model_dump(mode="json")
+    )
 
 
 def _stub_background_refreshes(harness) -> None:
     class _SpotProvider:
         def _empty(self, config):
             return SpotPriceSnapshot(
-                SpotMarketProvider.ENERGY_CHARTS, config.bidding_zone, "EUR", datetime.now(UTC), (),
+                SpotMarketProvider.ENERGY_CHARTS,
+                config.bidding_zone,
+                "EUR",
+                datetime.now(UTC),
+                (),
                 timezone="Europe/Berlin",
             )
 
@@ -1995,21 +2767,25 @@ def _stub_background_refreshes(harness) -> None:
 
 def _seed_solar_forecast(store, config: WeatherConfig, forecast: SolarForecast) -> None:
     zone = ZoneInfo(config.timezone or "UTC")
-    store.replace_solar_forecast_intervals([
-        {
-            "config_key": solar_config_key(config),
-            "local_date": interval.start.astimezone(zone).date().isoformat(),
-            "interval_start": interval.start.isoformat(),
-            "interval_end": interval.end.isoformat(),
-            "energy_wh": interval.energy_wh,
-            "timezone": config.timezone or "UTC",
-            "fetched_at": forecast.created_at.isoformat(),
-        }
-        for interval in forecast.intervals
-    ])
+    store.replace_solar_forecast_intervals(
+        [
+            {
+                "config_key": solar_config_key(config),
+                "local_date": interval.start.astimezone(zone).date().isoformat(),
+                "interval_start": interval.start.isoformat(),
+                "interval_end": interval.end.isoformat(),
+                "energy_wh": interval.energy_wh,
+                "timezone": config.timezone or "UTC",
+                "fetched_at": forecast.created_at.isoformat(),
+            }
+            for interval in forecast.intervals
+        ]
+    )
 
 
-async def test_spot_market_config_defaults_then_saves_and_reloads(tmp_path: Path) -> None:
+async def test_spot_market_config_defaults_then_saves_and_reloads(
+    tmp_path: Path,
+) -> None:
     async with running_app(spot_market_settings(tmp_path)) as harness:
         _stub_background_refreshes(harness)
         headers = await admin_session(harness)
@@ -2018,7 +2794,9 @@ async def test_spot_market_config_defaults_then_saves_and_reloads(tmp_path: Path
         assert default.json()["enabled"] is False
         assert default.json()["bidding_zone"] == "DE-LU"
 
-        saved = await harness.client.put(SPOT_CONFIG, headers=headers, json=_spot_body())
+        saved = await harness.client.put(
+            SPOT_CONFIG, headers=headers, json=_spot_body()
+        )
         assert saved.status_code == 200, saved.text
         body = saved.json()
         assert body["enabled"] is True
@@ -2040,45 +2818,72 @@ async def test_spot_market_config_persists_in_the_admin_store(tmp_path: Path) ->
     async with running_app(spot_market_settings(tmp_path)) as harness:
         _stub_background_refreshes(harness)
         headers = await admin_session(harness)
-        await harness.client.put(SPOT_CONFIG, headers=headers, json=_spot_body(bidding_zone="AT"))
+        await harness.client.put(
+            SPOT_CONFIG, headers=headers, json=_spot_body(bidding_zone="AT")
+        )
         stored = harness.app.state.admin_store.get("spotmarket_config")
     assert stored["bidding_zone"] == "AT"
     assert stored["provider"] == "energy_charts"
 
 
-async def test_spot_market_save_leaves_db_and_runtime_in_agreement(tmp_path: Path) -> None:
+async def test_spot_market_save_leaves_db_and_runtime_in_agreement(
+    tmp_path: Path,
+) -> None:
     # Finding A invariant: the persist and the app.state swap happen in the same critical section,
     # so after a save the stored config and the in-process config describe the same bidding zone.
     # A concurrent save can no longer leave the DB on one config and runtime on another.
     async with running_app(spot_market_settings(tmp_path)) as harness:
         _stub_background_refreshes(harness)
         headers = await admin_session(harness)
-        saved = await harness.client.put(SPOT_CONFIG, headers=headers, json=_spot_body(bidding_zone="AT"))
+        saved = await harness.client.put(
+            SPOT_CONFIG, headers=headers, json=_spot_body(bidding_zone="AT")
+        )
         assert saved.status_code == 200, saved.text
         stored = harness.app.state.admin_store.get("spotmarket_config")
-        assert stored["bidding_zone"] == harness.app.state.spotmarket_config.bidding_zone == "AT"
+        assert (
+            stored["bidding_zone"]
+            == harness.app.state.spotmarket_config.bidding_zone
+            == "AT"
+        )
 
 
-async def test_identical_spot_config_save_preserves_prices_without_refresh(tmp_path: Path, monkeypatch) -> None:
+async def test_identical_spot_config_save_preserves_prices_without_refresh(
+    tmp_path: Path, monkeypatch
+) -> None:
     from app.admin import energy_api
 
     async with running_app(spot_market_settings(tmp_path)) as harness:
         _stub_background_refreshes(harness)
         headers = await admin_session(harness)
         body = _spot_body()
-        assert (await harness.client.put(SPOT_CONFIG, headers=headers, json=body)).status_code == 200
+        assert (
+            await harness.client.put(SPOT_CONFIG, headers=headers, json=body)
+        ).status_code == 200
         now = datetime.now(UTC)
         interval = SpotPriceInterval(now, now + timedelta(minutes=15), Decimal("0.23"))
         store = harness.app.state.admin_store
         _seed_spot_prices(store, (interval,))
         signals = []
-        monkeypatch.setattr(energy_api, "_signal_forecast_refresh", lambda *args: signals.append(args))
-        assert (await harness.client.put(SPOT_CONFIG, headers=headers, json=body)).status_code == 200
-        assert len(store.get_spot_market_intervals(spot_config_key(harness.app.state.spotmarket_config))) == 1
+        monkeypatch.setattr(
+            energy_api, "_signal_forecast_refresh", lambda *args: signals.append(args)
+        )
+        assert (
+            await harness.client.put(SPOT_CONFIG, headers=headers, json=body)
+        ).status_code == 200
+        assert (
+            len(
+                store.get_spot_market_intervals(
+                    spot_config_key(harness.app.state.spotmarket_config)
+                )
+            )
+            == 1
+        )
         assert signals == []
 
 
-async def test_spot_market_config_rejects_a_bad_provider_or_zone(tmp_path: Path) -> None:
+async def test_spot_market_config_rejects_a_bad_provider_or_zone(
+    tmp_path: Path,
+) -> None:
     async with running_app(spot_market_settings(tmp_path)) as harness:
         headers = await admin_session(harness)
         for bad in (
@@ -2089,13 +2894,17 @@ async def test_spot_market_config_rejects_a_bad_provider_or_zone(tmp_path: Path)
             assert response.status_code == 422, (bad, response.text)
 
 
-async def test_spot_market_config_rejects_an_operator_supplied_api_url(tmp_path: Path) -> None:
+async def test_spot_market_config_rejects_an_operator_supplied_api_url(
+    tmp_path: Path,
+) -> None:
     # The save body forbids extra fields, so an attempt to smuggle a network
     # target back in through ``api_url`` is a hard 422, never silently stored.
     async with running_app(spot_market_settings(tmp_path)) as harness:
         headers = await admin_session(harness)
         response = await harness.client.put(
-            SPOT_CONFIG, headers=headers, json=_spot_body(api_url="http://127.0.0.1/price")
+            SPOT_CONFIG,
+            headers=headers,
+            json=_spot_body(api_url="http://127.0.0.1/price"),
         )
         assert response.status_code == 422, response.text
 
@@ -2103,11 +2912,15 @@ async def test_spot_market_config_rejects_an_operator_supplied_api_url(tmp_path:
 async def test_spot_market_config_requires_an_admin_session(tmp_path: Path) -> None:
     async with running_app(spot_market_settings(tmp_path)) as harness:
         # No session cookie and no CSRF header: the mutation is refused.
-        anonymous = await harness.client.put(SPOT_CONFIG, json=_spot_body(), headers={"Origin": "http://test"})
+        anonymous = await harness.client.put(
+            SPOT_CONFIG, json=_spot_body(), headers={"Origin": "http://test"}
+        )
         assert anonymous.status_code in (401, 403)
 
 
-async def test_spot_market_preview_summarises_a_fetched_snapshot(tmp_path: Path) -> None:
+async def test_spot_market_preview_summarises_a_fetched_snapshot(
+    tmp_path: Path,
+) -> None:
     from decimal import Decimal
 
     # Each fetch returns its OWN calendar day (yesterday 01-01, today 01-02, tomorrow 01-03). The
@@ -2119,8 +2932,12 @@ async def test_spot_market_preview_summarises_a_fetched_snapshot(tmp_path: Path)
         base = datetime.combine(base_day, datetime.min.time(), tzinfo=UTC)
         return (
             SpotPriceInterval(base, base.replace(minute=15), Decimal("0.20")),
-            SpotPriceInterval(base.replace(minute=15), base.replace(minute=30), Decimal("0.10")),
-            SpotPriceInterval(base.replace(minute=30), base.replace(minute=45), Decimal("0.30")),
+            SpotPriceInterval(
+                base.replace(minute=15), base.replace(minute=30), Decimal("0.10")
+            ),
+            SpotPriceInterval(
+                base.replace(minute=30), base.replace(minute=45), Decimal("0.30")
+            ),
         )
 
     # "Now" is 01-02 00:20 — the real current day — so yesterday/today/tomorrow classify as
@@ -2149,9 +2966,13 @@ async def test_spot_market_preview_summarises_a_fetched_snapshot(tmp_path: Path)
 
     async with running_app(spot_market_settings(tmp_path)) as harness:
         _activate_spot_market(harness)
-        _seed_spot_prices(harness.app.state.admin_store, (*_three(1), *_three(2), *_three(3)))
+        _seed_spot_prices(
+            harness.app.state.admin_store, (*_three(1), *_three(2), *_three(3))
+        )
         headers = await admin_session(harness)
-        response = await harness.client.post(SPOT_PREVIEW, headers=headers, json=_spot_body())
+        response = await harness.client.post(
+            SPOT_PREVIEW, headers=headers, json=_spot_body()
+        )
         assert response.status_code == 200, response.text
         body = response.json()
         assert body["status"] == "connected"
@@ -2166,14 +2987,20 @@ async def test_spot_market_preview_summarises_a_fetched_snapshot(tmp_path: Path)
         assert body["current_price_eur_per_kwh"] is None
 
 
-async def test_spot_market_preview_reuses_the_overwritten_database_snapshot(tmp_path: Path) -> None:
+async def test_spot_market_preview_reuses_the_overwritten_database_snapshot(
+    tmp_path: Path,
+) -> None:
     today = datetime.now(UTC).date()
     intervals = []
     for day_offset, price in ((-1, "0.10"), (0, "0.20"), (1, "0.30")):
-        midnight = datetime.combine(today + timedelta(days=day_offset), datetime.min.time(), tzinfo=UTC)
+        midnight = datetime.combine(
+            today + timedelta(days=day_offset), datetime.min.time(), tzinfo=UTC
+        )
         for slot in range(96):
             start = midnight + timedelta(minutes=15 * slot)
-            intervals.append(SpotPriceInterval(start, start + timedelta(minutes=15), Decimal(price)))
+            intervals.append(
+                SpotPriceInterval(start, start + timedelta(minutes=15), Decimal(price))
+            )
 
     class _ProviderTripwire:
         def fetch_today(self, config):
@@ -2190,12 +3017,19 @@ async def test_spot_market_preview_reuses_the_overwritten_database_snapshot(tmp_
         _seed_spot_prices(harness.app.state.admin_store, intervals)
         harness.app.state.spotmarket_provider = _ProviderTripwire()
         headers = await admin_session(harness)
-        first = await harness.client.post(SPOT_PREVIEW, headers=headers, json=_spot_body())
+        first = await harness.client.post(
+            SPOT_PREVIEW, headers=headers, json=_spot_body()
+        )
         assert first.status_code == 200, first.text
         with harness.app.state.admin_store.connect() as db:
-            assert db.execute("SELECT COUNT(*) FROM spot_market_intervals").fetchone()[0] == 3 * 96
+            assert (
+                db.execute("SELECT COUNT(*) FROM spot_market_intervals").fetchone()[0]
+                == 3 * 96
+            )
 
-        second = await harness.client.post(SPOT_PREVIEW, headers=headers, json=_spot_body())
+        second = await harness.client.post(
+            SPOT_PREVIEW, headers=headers, json=_spot_body()
+        )
         assert second.status_code == 200, second.text
         assert second.json() == first.json()
 
@@ -2223,19 +3057,43 @@ async def test_spot_market_preview_summarises_available_series_when_tomorrow_unp
     fetched = now_local.astimezone(UTC)
 
     def _quarter(local_dt: datetime, price: str) -> SpotPriceInterval:
-        return SpotPriceInterval(local_dt, local_dt + timedelta(minutes=15), Decimal(price))
+        return SpotPriceInterval(
+            local_dt, local_dt + timedelta(minutes=15), Decimal(price)
+        )
 
     # The first interval starts at 00:30 LOCAL, which can belong to the previous UTC date.
-    current_start = now_local.replace(minute=now_local.minute // 15 * 15, second=0, microsecond=0)
+    current_start = now_local.replace(
+        minute=now_local.minute // 15 * 15, second=0, microsecond=0
+    )
     today_intervals = (
-        _quarter(datetime.combine(local_today, datetime.min.time(), tzinfo=berlin) + timedelta(minutes=30), "0.20"),
+        _quarter(
+            datetime.combine(local_today, datetime.min.time(), tzinfo=berlin)
+            + timedelta(minutes=30),
+            "0.20",
+        ),
         _quarter(current_start, "0.08"),
-        _quarter(datetime.combine(local_today, datetime.min.time(), tzinfo=berlin) + timedelta(hours=18), "0.25"),
+        _quarter(
+            datetime.combine(local_today, datetime.min.time(), tzinfo=berlin)
+            + timedelta(hours=18),
+            "0.25",
+        ),
     )
     # Yesterday in the configured bidding-zone timezone.
     yesterday_intervals = (
-        _quarter(datetime.combine(local_today - timedelta(days=1), datetime.min.time(), tzinfo=berlin) + timedelta(hours=12), "0.15"),
-        _quarter(datetime.combine(local_today - timedelta(days=1), datetime.min.time(), tzinfo=berlin) + timedelta(hours=13), "0.17"),
+        _quarter(
+            datetime.combine(
+                local_today - timedelta(days=1), datetime.min.time(), tzinfo=berlin
+            )
+            + timedelta(hours=12),
+            "0.15",
+        ),
+        _quarter(
+            datetime.combine(
+                local_today - timedelta(days=1), datetime.min.time(), tzinfo=berlin
+            )
+            + timedelta(hours=13),
+            "0.17",
+        ),
     )
 
     class _StubProvider:
@@ -2260,7 +3118,9 @@ async def test_spot_market_preview_summarises_available_series_when_tomorrow_unp
             )
 
         def fetch_day_ahead(self, config):
-            raise SpotMarketNotAvailableYet("Energy-Charts next-day prices are not published yet")
+            raise SpotMarketNotAvailableYet(
+                "Energy-Charts next-day prices are not published yet"
+            )
 
     # The preview route reads the wall clock directly (``datetime.now(UTC)``), not the injected
     # clock, so pin that module reference to the fixed instant. The preview then classifies today
@@ -2273,9 +3133,15 @@ async def test_spot_market_preview_summarises_available_series_when_tomorrow_unp
     monkeypatch.setattr("app.admin.energy_api.datetime", _FixedDatetime)
     async with running_app(spot_market_settings(tmp_path)) as harness:
         _activate_spot_market(harness)
-        _seed_spot_prices(harness.app.state.admin_store, (*today_intervals, *yesterday_intervals), "Europe/Berlin")
+        _seed_spot_prices(
+            harness.app.state.admin_store,
+            (*today_intervals, *yesterday_intervals),
+            "Europe/Berlin",
+        )
         headers = await admin_session(harness)
-        response = await harness.client.post(SPOT_PREVIEW, headers=headers, json=_spot_body())
+        response = await harness.client.post(
+            SPOT_PREVIEW, headers=headers, json=_spot_body()
+        )
         assert response.status_code == 200, response.text
         body = response.json()
         assert body["status"] == "connected"
@@ -2290,7 +3156,10 @@ async def test_spot_market_preview_summarises_available_series_when_tomorrow_unp
         assert today_starts.isdisjoint(yesterday_starts)
         # Midnight-boundary proof: the 00:30 LOCAL interval (23:30 UTC the previous day) is filed
         # under today, not yesterday — i.e. the bucketing used the zone, not UTC.
-        assert any(start.endswith("00:30:00+01:00") or "T00:30" in start for start in today_starts)
+        assert any(
+            start.endswith("00:30:00+01:00") or "T00:30" in start
+            for start in today_starts
+        )
         # The key assertion: Lowest/Highest are computed over today (the best available populated
         # series), not left null just because tomorrow is unpublished.
         assert body["min_price_eur_per_kwh"] == 0.08
@@ -2301,7 +3170,9 @@ async def test_spot_market_preview_summarises_available_series_when_tomorrow_unp
         assert body["current_price_eur_per_kwh"] == 0.08
 
 
-async def test_spot_market_preview_buckets_a_misfiled_today_curve_by_local_date(tmp_path: Path) -> None:
+async def test_spot_market_preview_buckets_a_misfiled_today_curve_by_local_date(
+    tmp_path: Path,
+) -> None:
     # The exact user regression: the provider's "today" fetch returns a curve whose intervals are
     # actually TODAY's local day, but a naive builder that trusts the fetch source would need the
     # provider to be perfect. Here the provider mislabels — fetch_today returns an EMPTY snapshot
@@ -2318,13 +3189,29 @@ async def test_spot_market_preview_buckets_a_misfiled_today_curve_by_local_date(
     local_today = fetched.date()
 
     def _quarter(local_dt: datetime, price: str) -> SpotPriceInterval:
-        return SpotPriceInterval(local_dt, local_dt + timedelta(minutes=15), Decimal(price))
+        return SpotPriceInterval(
+            local_dt, local_dt + timedelta(minutes=15), Decimal(price)
+        )
 
     # A mixed snapshot delivered through fetch_yesterday that actually spans both local days.
     mixed = (
-        _quarter(datetime.combine(local_today - timedelta(days=1), datetime.min.time(), tzinfo=berlin) + timedelta(hours=9), "0.15"),  # yesterday
-        _quarter(datetime.combine(local_today, datetime.min.time(), tzinfo=berlin) + timedelta(hours=9), "0.07"),  # today (lowest)
-        _quarter(datetime.combine(local_today, datetime.min.time(), tzinfo=berlin) + timedelta(hours=19), "0.28"),  # today (highest)
+        _quarter(
+            datetime.combine(
+                local_today - timedelta(days=1), datetime.min.time(), tzinfo=berlin
+            )
+            + timedelta(hours=9),
+            "0.15",
+        ),  # yesterday
+        _quarter(
+            datetime.combine(local_today, datetime.min.time(), tzinfo=berlin)
+            + timedelta(hours=9),
+            "0.07",
+        ),  # today (lowest)
+        _quarter(
+            datetime.combine(local_today, datetime.min.time(), tzinfo=berlin)
+            + timedelta(hours=19),
+            "0.28",
+        ),  # today (highest)
     )
 
     class _StubProvider:
@@ -2356,7 +3243,9 @@ async def test_spot_market_preview_buckets_a_misfiled_today_curve_by_local_date(
         _activate_spot_market(harness)
         _seed_spot_prices(harness.app.state.admin_store, mixed, "Europe/Berlin")
         headers = await admin_session(harness)
-        response = await harness.client.post(SPOT_PREVIEW, headers=headers, json=_spot_body())
+        response = await harness.client.post(
+            SPOT_PREVIEW, headers=headers, json=_spot_body()
+        )
         assert response.status_code == 200, response.text
         body = response.json()
         # Despite the empty "today" fetch, today's curve is recovered from the actual interval dates.
@@ -2367,7 +3256,9 @@ async def test_spot_market_preview_buckets_a_misfiled_today_curve_by_local_date(
         assert body["max_price_eur_per_kwh"] == 0.28
 
 
-async def test_spot_market_preview_reports_empty_database_without_fetching_provider(tmp_path: Path) -> None:
+async def test_spot_market_preview_reports_empty_database_without_fetching_provider(
+    tmp_path: Path,
+) -> None:
     class _ProviderTripwire:
         def fetch_today(self, config):
             raise AssertionError("preview requests must not fetch provider data")
@@ -2379,13 +3270,17 @@ async def test_spot_market_preview_reports_empty_database_without_fetching_provi
         _activate_spot_market(harness)
         harness.app.state.spotmarket_provider = _ProviderTripwire()
         headers = await admin_session(harness)
-        response = await harness.client.post(SPOT_PREVIEW, headers=headers, json=_spot_body())
+        response = await harness.client.post(
+            SPOT_PREVIEW, headers=headers, json=_spot_body()
+        )
         assert response.status_code == 200, response.text
         assert response.json()["status"] == "unavailable"
         assert "background" in response.json()["message"]
 
 
-async def test_spot_market_config_rejects_operator_currency_or_price_unit(tmp_path: Path) -> None:
+async def test_spot_market_config_rejects_operator_currency_or_price_unit(
+    tmp_path: Path,
+) -> None:
     # Currency and price unit are provider metadata, not operator input. The save body
     # forbids extra fields, so smuggling either one back in is a hard 422, never stored.
     async with running_app(spot_market_settings(tmp_path)) as harness:
@@ -2395,13 +3290,17 @@ async def test_spot_market_config_rejects_operator_currency_or_price_unit(tmp_pa
             assert response.status_code == 422, (bad, response.text)
 
 
-async def test_spot_market_config_preserves_the_fee_region_concept(tmp_path: Path) -> None:
+async def test_spot_market_config_preserves_the_fee_region_concept(
+    tmp_path: Path,
+) -> None:
     # The fee_region concept stays in the model and persistence even though the UI no
     # longer offers a field for it; a save that carries it through keeps the stored value.
     async with running_app(spot_market_settings(tmp_path)) as harness:
         headers = await admin_session(harness)
         await harness.client.put(
-            SPOT_CONFIG, headers=headers, json=_spot_body(fee_region={"code": "netze-bw", "label": "Netze BW"})
+            SPOT_CONFIG,
+            headers=headers,
+            json=_spot_body(fee_region={"code": "netze-bw", "label": "Netze BW"}),
         )
         reloaded = await harness.client.get(SPOT_CONFIG, headers=headers)
     assert reloaded.json()["fee_region"] == {"code": "netze-bw", "label": "Netze BW"}
@@ -2411,12 +3310,17 @@ async def test_spot_market_config_preserves_the_fee_region_concept(tmp_path: Pat
 SPOT_ZONES = "/admin/api/energy/spot-market/bidding-zones"
 
 
-async def test_spot_market_bidding_zones_are_served_from_the_cache(tmp_path: Path) -> None:
+async def test_spot_market_bidding_zones_are_served_from_the_cache(
+    tmp_path: Path,
+) -> None:
     # The endpoint reads the zone list cache-first; the stub cache answers without any network call.
     from app.spotmarket.metadata import ZoneListing
 
     listing = ZoneListing(
-        zones=("DE-LU", "AT", "FR"), default="DE-LU", stale=False, last_update=datetime(2026, 1, 1, tzinfo=UTC)
+        zones=("DE-LU", "AT", "FR"),
+        default="DE-LU",
+        stale=False,
+        last_update=datetime(2026, 1, 1, tzinfo=UTC),
     )
 
     class _StubCache:
@@ -2444,7 +3348,10 @@ async def test_spot_market_bidding_zones_report_a_stale_list(tmp_path: Path) -> 
     class _StaleCache:
         def get(self) -> ZoneListing:
             return ZoneListing(
-                zones=("DE-LU",), default="DE-LU", stale=True, last_update=datetime(2026, 1, 1, tzinfo=UTC)
+                zones=("DE-LU",),
+                default="DE-LU",
+                stale=True,
+                last_update=datetime(2026, 1, 1, tzinfo=UTC),
             )
 
     async with running_app(spot_market_settings(tmp_path)) as harness:
@@ -2472,11 +3379,18 @@ async def test_spot_market_bidding_zones_without_a_stored_list_answer_200_and_ne
         for _ in range(2):
             response = await harness.client.get(SPOT_ZONES, headers=headers)
             assert response.status_code == 200, response.text
-            assert response.json() == {"zones": [], "default": "", "stale": True, "last_update": None}
+            assert response.json() == {
+                "zones": [],
+                "default": "",
+                "stale": True,
+                "last_update": None,
+            }
         assert fetches == []  # opening the form never reaches the provider
 
 
-async def test_spot_market_preview_and_dashboard_never_call_the_provider(tmp_path: Path) -> None:
+async def test_spot_market_preview_and_dashboard_never_call_the_provider(
+    tmp_path: Path,
+) -> None:
     calls: list[str] = []
 
     class _Tripwire:
@@ -2494,7 +3408,11 @@ async def test_spot_market_preview_and_dashboard_never_call_the_provider(tmp_pat
         harness.app.state.spotmarket_provider = _Tripwire()
         harness.app.state.solar_forecast_provider = _Tripwire()
         for _ in range(2):
-            assert (await harness.client.post(SPOT_PREVIEW, headers=headers, json=_spot_body())).status_code == 200
+            assert (
+                await harness.client.post(
+                    SPOT_PREVIEW, headers=headers, json=_spot_body()
+                )
+            ).status_code == 200
             dashboard = await harness.client.get(
                 "/admin/api/energy/dashboard-forecast?include=spot_current&include=spot_day_ahead&include=solar",
                 headers=headers,
@@ -2557,7 +3475,9 @@ async def test_weather_config_defaults_then_saves_and_reloads(tmp_path: Path) ->
         # Read-only provider metadata is projected for the GUI, never operator input.
         assert body["provider_meta"]["source"] == "Open-Meteo"
 
-        saved = await harness.client.put(WEATHER_CONFIG, headers=headers, json=_weather_body())
+        saved = await harness.client.put(
+            WEATHER_CONFIG, headers=headers, json=_weather_body()
+        )
         assert saved.status_code == 200, saved.text
         stored = saved.json()
         assert stored["enabled"] is True
@@ -2570,7 +3490,10 @@ async def test_weather_config_defaults_then_saves_and_reloads(tmp_path: Path) ->
         reloaded = await harness.client.get(WEATHER_CONFIG, headers=headers)
         assert reloaded.json() == stored
         # The in-process copy on app.state is updated too, not only the stored record.
-        assert harness.app.state.weather_config.location_name == "Remscheid, North Rhine-Westphalia, Germany"
+        assert (
+            harness.app.state.weather_config.location_name
+            == "Remscheid, North Rhine-Westphalia, Germany"
+        )
         assert harness.app.state.weather_config.timezone == "Europe/Berlin"
 
 
@@ -2579,7 +3502,9 @@ async def test_weather_config_persists_in_the_admin_store(tmp_path: Path) -> Non
         _stub_weather_timezone(harness)
         _stub_background_refreshes(harness)
         headers = await admin_session(harness)
-        await harness.client.put(WEATHER_CONFIG, headers=headers, json=_weather_body(azimuth_deg=-90))
+        await harness.client.put(
+            WEATHER_CONFIG, headers=headers, json=_weather_body(azimuth_deg=-90)
+        )
         stored = harness.app.state.admin_store.get("weather_config")
     assert stored["azimuth_deg"] == -90
     assert stored["provider"] == "open_meteo"
@@ -2593,13 +3518,19 @@ async def test_weather_save_leaves_db_and_runtime_in_agreement(tmp_path: Path) -
         _stub_weather_timezone(harness)
         _stub_background_refreshes(harness)
         headers = await admin_session(harness)
-        saved = await harness.client.put(WEATHER_CONFIG, headers=headers, json=_weather_body(azimuth_deg=-90))
+        saved = await harness.client.put(
+            WEATHER_CONFIG, headers=headers, json=_weather_body(azimuth_deg=-90)
+        )
         assert saved.status_code == 200, saved.text
         stored = harness.app.state.admin_store.get("weather_config")
-        assert stored["azimuth_deg"] == harness.app.state.weather_config.azimuth_deg == -90
+        assert (
+            stored["azimuth_deg"] == harness.app.state.weather_config.azimuth_deg == -90
+        )
 
 
-async def test_identical_weather_config_save_preserves_forecast_without_refresh(tmp_path: Path, monkeypatch) -> None:
+async def test_identical_weather_config_save_preserves_forecast_without_refresh(
+    tmp_path: Path, monkeypatch
+) -> None:
     from app.admin import energy_api
 
     async with running_app(spot_market_settings(tmp_path)) as harness:
@@ -2607,19 +3538,32 @@ async def test_identical_weather_config_save_preserves_forecast_without_refresh(
         _stub_background_refreshes(harness)
         headers = await admin_session(harness)
         body = _weather_body()
-        assert (await harness.client.put(WEATHER_CONFIG, headers=headers, json=body)).status_code == 200
+        assert (
+            await harness.client.put(WEATHER_CONFIG, headers=headers, json=body)
+        ).status_code == 200
         now = datetime.now(UTC)
-        forecast = SolarForecast(now, (
-            SolarForecastInterval(now, now + timedelta(minutes=15), 100.0),
-        ))
+        forecast = SolarForecast(
+            now, (SolarForecastInterval(now, now + timedelta(minutes=15), 100.0),)
+        )
         store = harness.app.state.admin_store
         config = harness.app.state.weather_config
         _seed_solar_forecast(store, config, forecast)
         signals = []
-        monkeypatch.setattr(energy_api, "_signal_forecast_refresh", lambda *args: signals.append(args))
-        assert (await harness.client.put(WEATHER_CONFIG, headers=headers, json=body)).status_code == 200
+        monkeypatch.setattr(
+            energy_api, "_signal_forecast_refresh", lambda *args: signals.append(args)
+        )
+        assert (
+            await harness.client.put(WEATHER_CONFIG, headers=headers, json=body)
+        ).status_code == 200
         today = now.astimezone(ZoneInfo(config.timezone)).date().isoformat()
-        assert len(store.get_solar_forecast_intervals(solar_config_key(config), today, today)) == 1
+        assert (
+            len(
+                store.get_solar_forecast_intervals(
+                    solar_config_key(config), today, today
+                )
+            )
+            == 1
+        )
         assert signals == []
 
 
@@ -2640,30 +3584,43 @@ async def test_an_enabled_config_requires_every_forecast_value(tmp_path: Path) -
         incomplete = _weather_body()
         del incomplete["pv_peak_power_wp"]
         incomplete["pv_peak_power_wp"] = None
-        response = await harness.client.put(WEATHER_CONFIG, headers=headers, json=incomplete)
+        response = await harness.client.put(
+            WEATHER_CONFIG, headers=headers, json=incomplete
+        )
         assert response.status_code == 422, response.text
         # The 422 carries the real pydantic errors (a list of {loc, msg}) so the form can show which
         # field is missing, never the old opaque "Invalid weather configuration" string.
         detail = response.json()["detail"]
         assert isinstance(detail, list) and detail, detail
-        assert all(isinstance(item.get("msg"), str) and "loc" in item for item in detail), detail
+        assert all(
+            isinstance(item.get("msg"), str) and "loc" in item for item in detail
+        ), detail
         assert any("pv_peak_power_wp" in item["msg"] for item in detail), detail
         assert response.text.count("Invalid weather configuration") == 0
 
 
-async def test_an_enabled_config_with_an_out_of_range_field_returns_structured_errors(tmp_path: Path) -> None:
+async def test_an_enabled_config_with_an_out_of_range_field_returns_structured_errors(
+    tmp_path: Path,
+) -> None:
     # An out-of-range single field is rejected at the request-body boundary, so it already carries
     # a per-field problem-document entry naming the field; the client renders it inline.
     async with running_app(spot_market_settings(tmp_path)) as harness:
         _stub_weather_timezone(harness)
         headers = await admin_session(harness)
-        response = await harness.client.put(WEATHER_CONFIG, headers=headers, json=_weather_body(performance_ratio=1.5))
+        response = await harness.client.put(
+            WEATHER_CONFIG, headers=headers, json=_weather_body(performance_ratio=1.5)
+        )
         assert response.status_code == 422, response.text
         body = response.json()
-        assert any(err.get("parameter") == "performance_ratio" for err in body.get("errors", [])), body
+        assert any(
+            err.get("parameter") == "performance_ratio"
+            for err in body.get("errors", [])
+        ), body
 
 
-async def test_weather_config_rejects_out_of_range_and_unknown_fields(tmp_path: Path) -> None:
+async def test_weather_config_rejects_out_of_range_and_unknown_fields(
+    tmp_path: Path,
+) -> None:
     async with running_app(spot_market_settings(tmp_path)) as harness:
         _stub_weather_timezone(harness)
         headers = await admin_session(harness)
@@ -2672,9 +3629,14 @@ async def test_weather_config_rejects_out_of_range_and_unknown_fields(tmp_path: 
             _weather_body(azimuth_deg=270),
             _weather_body(performance_ratio=1.5),
             _weather_body(provider="made_up"),
-            {**_weather_body(), "api_url": "http://127.0.0.1/forecast"},  # extra="forbid"
+            {
+                **_weather_body(),
+                "api_url": "http://127.0.0.1/forecast",
+            },  # extra="forbid"
         ):
-            response = await harness.client.put(WEATHER_CONFIG, headers=headers, json=bad)
+            response = await harness.client.put(
+                WEATHER_CONFIG, headers=headers, json=bad
+            )
             assert response.status_code == 422, (bad, response.text)
 
 
@@ -2695,18 +3657,30 @@ async def test_weather_config_timezone_follows_coordinates(tmp_path: Path) -> No
 async def test_weather_config_requires_an_admin_session(tmp_path: Path) -> None:
     async with running_app(spot_market_settings(tmp_path)) as harness:
         _stub_weather_timezone(harness)
-        anonymous = await harness.client.put(WEATHER_CONFIG, json=_weather_body(), headers={"Origin": "http://test"})
+        anonymous = await harness.client.put(
+            WEATHER_CONFIG, json=_weather_body(), headers={"Origin": "http://test"}
+        )
         assert anonymous.status_code in (401, 403)
 
 
-async def test_weather_preview_summarises_yesterday_today_and_tomorrow(tmp_path: Path) -> None:
+async def test_weather_preview_summarises_yesterday_today_and_tomorrow(
+    tmp_path: Path,
+) -> None:
     async with running_app(spot_market_settings(tmp_path)) as harness:
         _stub_weather_timezone(harness)
-        config = WeatherConfig.model_validate({**_weather_body(), "timezone": "Europe/Berlin"})
+        config = WeatherConfig.model_validate(
+            {**_weather_body(), "timezone": "Europe/Berlin"}
+        )
         harness.app.state.weather_config = config
-        harness.app.state.admin_store.put("weather_config", config.model_dump(mode="json"))
+        harness.app.state.admin_store.put(
+            "weather_config", config.model_dump(mode="json")
+        )
         zone = ZoneInfo(config.timezone)
-        midnight = datetime.now(UTC).astimezone(zone).replace(hour=0, minute=0, second=0, microsecond=0)
+        midnight = (
+            datetime.now(UTC)
+            .astimezone(zone)
+            .replace(hour=0, minute=0, second=0, microsecond=0)
+        )
         starts = [
             midnight - timedelta(days=1) + timedelta(hours=12),
             midnight + timedelta(hours=12),
@@ -2716,14 +3690,18 @@ async def test_weather_preview_summarises_yesterday_today_and_tomorrow(tmp_path:
             created_at=datetime.now(UTC),
             intervals=tuple(
                 SolarForecastInterval(
-                    start.astimezone(UTC), (start + timedelta(minutes=15)).astimezone(UTC), 1000.0
+                    start.astimezone(UTC),
+                    (start + timedelta(minutes=15)).astimezone(UTC),
+                    1000.0,
                 )
                 for start in starts
             ),
         )
         _seed_solar_forecast(harness.app.state.admin_store, config, forecast)
         headers = await admin_session(harness)
-        response = await harness.client.post(WEATHER_PREVIEW, headers=headers, json=_weather_body())
+        response = await harness.client.post(
+            WEATHER_PREVIEW, headers=headers, json=_weather_body()
+        )
         assert response.status_code == 200, response.text
         body = response.json()
         assert body["status"] == "connected"
@@ -2739,18 +3717,24 @@ async def test_weather_preview_summarises_yesterday_today_and_tomorrow(tmp_path:
         assert body["energy_next_24h_kwh"] == pytest.approx(1.0)
 
 
-async def test_weather_preview_reports_disabled_for_an_incomplete_config(tmp_path: Path) -> None:
+async def test_weather_preview_reports_disabled_for_an_incomplete_config(
+    tmp_path: Path,
+) -> None:
     async with running_app(spot_market_settings(tmp_path)) as harness:
         _stub_weather_timezone(harness)
         headers = await admin_session(harness)
         response = await harness.client.post(
-            WEATHER_PREVIEW, headers=headers, json={"enabled": False, "provider": "open_meteo"}
+            WEATHER_PREVIEW,
+            headers=headers,
+            json={"enabled": False, "provider": "open_meteo"},
         )
         assert response.status_code == 200, response.text
         assert response.json()["status"] == "disabled"
 
 
-async def test_weather_preview_reports_disabled_for_an_enabled_but_incomplete_config(tmp_path: Path) -> None:
+async def test_weather_preview_reports_disabled_for_an_enabled_but_incomplete_config(
+    tmp_path: Path,
+) -> None:
     # Flipping enable on before the forecast fields are filled must not 422 the preview: an
     # enabled-but-incomplete config is simply not forecastable yet and reports the clean disabled
     # view, so the operator fills the form without hitting an opaque error.
@@ -2758,51 +3742,75 @@ async def test_weather_preview_reports_disabled_for_an_enabled_but_incomplete_co
         _stub_weather_timezone(harness)
         headers = await admin_session(harness)
         response = await harness.client.post(
-            WEATHER_PREVIEW, headers=headers, json={"enabled": True, "provider": "open_meteo"}
+            WEATHER_PREVIEW,
+            headers=headers,
+            json={"enabled": True, "provider": "open_meteo"},
         )
         assert response.status_code == 200, response.text
         assert response.json()["status"] == "disabled"
 
 
-async def test_weather_preview_still_rejects_an_out_of_range_field(tmp_path: Path) -> None:
+async def test_weather_preview_still_rejects_an_out_of_range_field(
+    tmp_path: Path,
+) -> None:
     # A genuinely invalid field value is still a structured 422 in the preview path; only the
     # enabled-but-incomplete case degrades to the disabled view.
     async with running_app(spot_market_settings(tmp_path)) as harness:
         _stub_weather_timezone(harness)
         headers = await admin_session(harness)
-        response = await harness.client.post(WEATHER_PREVIEW, headers=headers, json=_weather_body(tilt_deg=120))
+        response = await harness.client.post(
+            WEATHER_PREVIEW, headers=headers, json=_weather_body(tilt_deg=120)
+        )
         assert response.status_code == 422, response.text
         body = response.json()
-        assert any(err.get("parameter") == "tilt_deg" for err in body.get("errors", [])), body
+        assert any(
+            err.get("parameter") == "tilt_deg" for err in body.get("errors", [])
+        ), body
 
 
-async def test_weather_preview_reports_an_empty_database_without_fetching_provider(tmp_path: Path) -> None:
+async def test_weather_preview_reports_an_empty_database_without_fetching_provider(
+    tmp_path: Path,
+) -> None:
     class _ProviderTripwire:
         def fetch_preview(self, config, now):
             raise AssertionError("preview requests must not fetch provider data")
 
     async with running_app(spot_market_settings(tmp_path)) as harness:
         _stub_weather_timezone(harness)
-        config = WeatherConfig.model_validate({**_weather_body(), "timezone": "Europe/Berlin"})
+        config = WeatherConfig.model_validate(
+            {**_weather_body(), "timezone": "Europe/Berlin"}
+        )
         harness.app.state.weather_config = config
-        harness.app.state.admin_store.put("weather_config", config.model_dump(mode="json"))
+        harness.app.state.admin_store.put(
+            "weather_config", config.model_dump(mode="json")
+        )
         harness.app.state.solar_forecast_provider = _ProviderTripwire()
         headers = await admin_session(harness)
-        response = await harness.client.post(WEATHER_PREVIEW, headers=headers, json=_weather_body())
+        response = await harness.client.post(
+            WEATHER_PREVIEW, headers=headers, json=_weather_body()
+        )
         assert response.status_code == 200, response.text
         assert response.json()["status"] == "unavailable"
         assert "background" in response.json()["message"]
 
 
-async def test_weather_preview_of_an_unsaved_configuration_reports_unsaved_without_message(tmp_path: Path) -> None:
+async def test_weather_preview_of_an_unsaved_configuration_reports_unsaved_without_message(
+    tmp_path: Path,
+) -> None:
     async with running_app(spot_market_settings(tmp_path)) as harness:
         _stub_weather_timezone(harness)
-        config = WeatherConfig.model_validate({**_weather_body(), "timezone": "Europe/Berlin"})
+        config = WeatherConfig.model_validate(
+            {**_weather_body(), "timezone": "Europe/Berlin"}
+        )
         harness.app.state.weather_config = config
-        harness.app.state.admin_store.put("weather_config", config.model_dump(mode="json"))
+        harness.app.state.admin_store.put(
+            "weather_config", config.model_dump(mode="json")
+        )
         headers = await admin_session(harness)
         response = await harness.client.post(
-            WEATHER_PREVIEW, headers=headers, json=_weather_body(latitude=49.8728, longitude=8.6512),
+            WEATHER_PREVIEW,
+            headers=headers,
+            json=_weather_body(latitude=49.8728, longitude=8.6512),
         )
         assert response.status_code == 200, response.text
         body = response.json()
@@ -2817,14 +3825,29 @@ async def test_weather_locations_returns_mapped_hits(tmp_path: Path) -> None:
             assert query == "Rem"
             return [
                 GeocodingResult(
-                    name="Remscheid", latitude=51.1798, longitude=7.1925, country="Germany",
-                    country_code="de", admin1="North Rhine-Westphalia", admin2="Remscheid",
-                    district="Lüttringhausen", city="Remscheid", timezone=None, postal_code="42857",
+                    name="Remscheid",
+                    latitude=51.1798,
+                    longitude=7.1925,
+                    country="Germany",
+                    country_code="de",
+                    admin1="North Rhine-Westphalia",
+                    admin2="Remscheid",
+                    district="Lüttringhausen",
+                    city="Remscheid",
+                    timezone=None,
+                    postal_code="42857",
                 ),
                 GeocodingResult(
-                    name="Remagen", latitude=50.579, longitude=7.227, country="Germany",
-                    country_code="de", admin1="Rhineland-Palatinate", admin2=None,
-                    city=None, timezone=None, postal_code=None,
+                    name="Remagen",
+                    latitude=50.579,
+                    longitude=7.227,
+                    country="Germany",
+                    country_code="de",
+                    admin1="Rhineland-Palatinate",
+                    admin2=None,
+                    city=None,
+                    timezone=None,
+                    postal_code=None,
                 ),
             ]
 
@@ -2832,7 +3855,9 @@ async def test_weather_locations_returns_mapped_hits(tmp_path: Path) -> None:
         _stub_weather_timezone(harness)
         harness.app.state.solar_geocoder = _StubGeocoder()
         headers = await admin_session(harness)
-        response = await harness.client.get(f"{WEATHER_LOCATIONS}?q=Rem", headers=headers)
+        response = await harness.client.get(
+            f"{WEATHER_LOCATIONS}?q=Rem", headers=headers
+        )
         assert response.status_code == 200, response.text
         body = response.json()
         assert body["status"] == "ok"
@@ -2846,7 +3871,9 @@ async def test_weather_locations_returns_mapped_hits(tmp_path: Path) -> None:
         assert body["results"][1]["postal_code"] is None
 
 
-async def test_weather_config_attribution_reflects_the_active_geocoder(tmp_path: Path) -> None:
+async def test_weather_config_attribution_reflects_the_active_geocoder(
+    tmp_path: Path,
+) -> None:
     from app.weather.geocoding import OpenMeteoGeocoder, PhotonGeocoder
 
     async with running_app(spot_market_settings(tmp_path)) as harness:
@@ -2854,12 +3881,16 @@ async def test_weather_config_attribution_reflects_the_active_geocoder(tmp_path:
         headers = await admin_session(harness)
 
         harness.app.state.solar_geocoder = PhotonGeocoder()
-        meta = (await harness.client.get(WEATHER_CONFIG, headers=headers)).json()["provider_meta"]
+        meta = (await harness.client.get(WEATHER_CONFIG, headers=headers)).json()[
+            "provider_meta"
+        ]
         assert "Open-Meteo" in meta["attribution"]
         assert "OpenStreetMap" in meta["location_attribution"]
 
         harness.app.state.solar_geocoder = OpenMeteoGeocoder()
-        meta = (await harness.client.get(WEATHER_CONFIG, headers=headers)).json()["provider_meta"]
+        meta = (await harness.client.get(WEATHER_CONFIG, headers=headers)).json()[
+            "provider_meta"
+        ]
         assert "Open-Meteo" in meta["attribution"]
         assert "GeoNames" in meta["location_attribution"]
 
@@ -2878,8 +3909,12 @@ async def test_weather_locations_forwards_optional_country_code(tmp_path: Path) 
         geocoder = _RecordingGeocoder()
         harness.app.state.solar_geocoder = geocoder
         headers = await admin_session(harness)
-        with_code = await harness.client.get(f"{WEATHER_LOCATIONS}?q=London&country_code=gb", headers=headers)
-        without_code = await harness.client.get(f"{WEATHER_LOCATIONS}?q=London", headers=headers)
+        with_code = await harness.client.get(
+            f"{WEATHER_LOCATIONS}?q=London&country_code=gb", headers=headers
+        )
+        without_code = await harness.client.get(
+            f"{WEATHER_LOCATIONS}?q=London", headers=headers
+        )
         assert with_code.status_code == without_code.status_code == 200
         assert geocoder.calls == ["gb", None]
 
@@ -2893,12 +3928,16 @@ async def test_weather_locations_handles_an_empty_result(tmp_path: Path) -> None
         _stub_weather_timezone(harness)
         harness.app.state.solar_geocoder = _EmptyGeocoder()
         headers = await admin_session(harness)
-        response = await harness.client.get(f"{WEATHER_LOCATIONS}?q=zzzzz", headers=headers)
+        response = await harness.client.get(
+            f"{WEATHER_LOCATIONS}?q=zzzzz", headers=headers
+        )
         assert response.status_code == 200, response.text
         assert response.json() == {"status": "ok", "message": None, "results": []}
 
 
-async def test_weather_locations_reports_a_geocoder_failure_as_a_status(tmp_path: Path) -> None:
+async def test_weather_locations_reports_a_geocoder_failure_as_a_status(
+    tmp_path: Path,
+) -> None:
     class _DeadGeocoder:
         def search(self, query, *, count, country_code=None):
             raise WeatherConnectionError("geocoding is unreachable")
@@ -2907,7 +3946,9 @@ async def test_weather_locations_reports_a_geocoder_failure_as_a_status(tmp_path
         _stub_weather_timezone(harness)
         harness.app.state.solar_geocoder = _DeadGeocoder()
         headers = await admin_session(harness)
-        response = await harness.client.get(f"{WEATHER_LOCATIONS}?q=Rem", headers=headers)
+        response = await harness.client.get(
+            f"{WEATHER_LOCATIONS}?q=Rem", headers=headers
+        )
         # A dead geocoder is a 200 with status=error, never a 5xx, so location search cannot look
         # like a server fault or reach the inverter control path.
         assert response.status_code == 200, response.text
@@ -2915,7 +3956,9 @@ async def test_weather_locations_reports_a_geocoder_failure_as_a_status(tmp_path
         assert "unreachable" in response.json()["message"]
 
 
-async def test_weather_locations_short_query_makes_no_geocoder_call(tmp_path: Path) -> None:
+async def test_weather_locations_short_query_makes_no_geocoder_call(
+    tmp_path: Path,
+) -> None:
     class _TrippedGeocoder:
         def search(self, query, *, count, country_code=None):
             raise AssertionError("a one-character query must not reach the geocoder")
@@ -2965,7 +4008,9 @@ async def test_weather_timezone_resolves_a_second_zone(tmp_path: Path) -> None:
         assert response.json()["timezone"] == "America/New_York"
 
 
-async def test_weather_timezone_reports_a_derivation_failure_as_a_status(tmp_path: Path) -> None:
+async def test_weather_timezone_reports_a_derivation_failure_as_a_status(
+    tmp_path: Path,
+) -> None:
     class _DeadResolver:
         def resolve(self, latitude, longitude):
             raise WeatherConnectionError("Open-Meteo timezone lookup is unreachable")
@@ -2986,10 +4031,14 @@ async def test_weather_timezone_reports_a_derivation_failure_as_a_status(tmp_pat
         assert "unreachable" in body["message"]
 
 
-async def test_weather_timezone_rejects_out_of_range_coordinates(tmp_path: Path) -> None:
+async def test_weather_timezone_rejects_out_of_range_coordinates(
+    tmp_path: Path,
+) -> None:
     class _TrippedResolver:
         def resolve(self, latitude, longitude):
-            raise AssertionError("out-of-range coordinates must be rejected before the resolver")
+            raise AssertionError(
+                "out-of-range coordinates must be rejected before the resolver"
+            )
 
     async with running_app(spot_market_settings(tmp_path)) as harness:
         _stub_weather_timezone(harness)
@@ -3002,12 +4051,16 @@ async def test_weather_timezone_rejects_out_of_range_coordinates(tmp_path: Path)
         assert response.status_code == 422, response.text
 
 
-async def test_weather_config_derives_timezone_and_rejects_timezone_input(tmp_path: Path) -> None:
+async def test_weather_config_derives_timezone_and_rejects_timezone_input(
+    tmp_path: Path,
+) -> None:
     async with running_app(spot_market_settings(tmp_path)) as harness:
         _stub_weather_timezone(harness)
         _stub_background_refreshes(harness)
         headers = await admin_session(harness)
-        saved = await harness.client.put(WEATHER_CONFIG, headers=headers, json=_weather_body())
+        saved = await harness.client.put(
+            WEATHER_CONFIG, headers=headers, json=_weather_body()
+        )
         assert saved.status_code == 200, saved.text
         assert saved.json()["timezone"] == "Europe/Berlin"
         assert harness.app.state.weather_config.timezone == "Europe/Berlin"
@@ -3021,7 +4074,9 @@ async def test_weather_config_derives_timezone_and_rejects_timezone_input(tmp_pa
         assert rejected.status_code == 422, rejected.text
 
 
-async def test_dashboard_forecast_include_solar_loads_only_the_solar_projection(tmp_path: Path) -> None:
+async def test_dashboard_forecast_include_solar_loads_only_the_solar_projection(
+    tmp_path: Path,
+) -> None:
     start = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
     forecast = SolarForecast(
         created_at=datetime.now(UTC),
@@ -3030,9 +4085,13 @@ async def test_dashboard_forecast_include_solar_loads_only_the_solar_projection(
 
     async with running_app(spot_market_settings(tmp_path)) as harness:
         headers = await admin_session(harness)
-        config = WeatherConfig.model_validate({**_weather_body(), "timezone": "Europe/Berlin"})
+        config = WeatherConfig.model_validate(
+            {**_weather_body(), "timezone": "Europe/Berlin"}
+        )
         harness.app.state.weather_config = config
-        harness.app.state.admin_store.put("weather_config", config.model_dump(mode="json"))
+        harness.app.state.admin_store.put(
+            "weather_config", config.model_dump(mode="json")
+        )
         _seed_solar_forecast(harness.app.state.admin_store, config, forecast)
         response = await harness.client.get(
             "/admin/api/energy/dashboard-forecast?include=solar", headers=headers
@@ -3043,7 +4102,9 @@ async def test_dashboard_forecast_include_solar_loads_only_the_solar_projection(
         assert body["solar"]["source"] == "Open-Meteo"
 
 
-async def test_dashboard_forecast_solar_is_disabled_without_a_forecastable_config(tmp_path: Path) -> None:
+async def test_dashboard_forecast_solar_is_disabled_without_a_forecastable_config(
+    tmp_path: Path,
+) -> None:
     async with running_app(spot_market_settings(tmp_path)) as harness:
         _stub_weather_timezone(harness)
         headers = await admin_session(harness)
@@ -3060,13 +4121,17 @@ async def test_dashboard_forecast_solar_is_disabled_without_a_forecastable_confi
         assert response.json()["solar"]["status"] == "disabled"
 
 
-async def test_spot_market_preview_reports_a_failed_daily_retrieval(tmp_path: Path) -> None:
+async def test_spot_market_preview_reports_a_failed_daily_retrieval(
+    tmp_path: Path,
+) -> None:
     from app.admin.forecast_refresh import SPOT_STATUS_KEY, record_refresh_status
 
     today = datetime.now(UTC).date()
 
     def day(offset: int) -> SpotPriceInterval:
-        start = datetime.combine(today + timedelta(days=offset), datetime.min.time(), tzinfo=UTC)
+        start = datetime.combine(
+            today + timedelta(days=offset), datetime.min.time(), tzinfo=UTC
+        )
         return SpotPriceInterval(start, start + timedelta(minutes=15), Decimal("0.2"))
 
     async with running_app(spot_market_settings(tmp_path)) as harness:
@@ -3077,49 +4142,93 @@ async def test_spot_market_preview_reports_a_failed_daily_retrieval(tmp_path: Pa
 
         # No stored data: the failure replaces the endless "being loaded" hint, without the raw cause.
         record_refresh_status(store, SPOT_STATUS_KEY, key, False, "provider down")
-        empty = (await harness.client.post(SPOT_PREVIEW, headers=headers, json=_spot_body())).json()
+        empty = (
+            await harness.client.post(SPOT_PREVIEW, headers=headers, json=_spot_body())
+        ).json()
         assert empty["status"] == "error"
-        assert "provider down" not in empty["message"] and empty["refresh_error"] == "provider down"
+        assert (
+            "provider down" not in empty["message"]
+            and empty["refresh_error"] == "provider down"
+        )
 
         # Today is missing although it is due: stored data stays visible and the warning appears.
         _seed_spot_prices(store, [day(-1)])
-        stale = (await harness.client.post(SPOT_PREVIEW, headers=headers, json=_spot_body())).json()
-        assert stale["status"] == "connected" and stale["refresh_error"] == "provider down"
+        stale = (
+            await harness.client.post(SPOT_PREVIEW, headers=headers, json=_spot_body())
+        ).json()
+        assert (
+            stale["status"] == "connected" and stale["refresh_error"] == "provider down"
+        )
         assert stale["stale"] is True
-        dashboard = (await harness.client.get(
-            "/admin/api/energy/dashboard-forecast?include=spot_day_ahead", headers=headers)).json()["spot"]
-        assert dashboard["status"] == "stale" and dashboard["refresh_error"] == "provider down"
+        dashboard = (
+            await harness.client.get(
+                "/admin/api/energy/dashboard-forecast?include=spot_day_ahead",
+                headers=headers,
+            )
+        ).json()["spot"]
+        assert (
+            dashboard["status"] == "stale"
+            and dashboard["refresh_error"] == "provider down"
+        )
 
         # All three displayed days are stored: nothing is missing, so an old failure raises no warning.
         _seed_spot_prices(store, [day(-1), day(0), day(1)])
-        calm = (await harness.client.post(SPOT_PREVIEW, headers=headers, json=_spot_body())).json()
+        calm = (
+            await harness.client.post(SPOT_PREVIEW, headers=headers, json=_spot_body())
+        ).json()
         assert calm["stale"] is False and calm["refresh_error"] == "provider down"
-        dashboard = (await harness.client.get(
-            "/admin/api/energy/dashboard-forecast?include=spot_day_ahead", headers=headers)).json()["spot"]
+        dashboard = (
+            await harness.client.get(
+                "/admin/api/energy/dashboard-forecast?include=spot_day_ahead",
+                headers=headers,
+            )
+        ).json()["spot"]
         assert dashboard["status"] == "available"
 
         record_refresh_status(store, SPOT_STATUS_KEY, key, True)
-        ok = (await harness.client.post(SPOT_PREVIEW, headers=headers, json=_spot_body())).json()
+        ok = (
+            await harness.client.post(SPOT_PREVIEW, headers=headers, json=_spot_body())
+        ).json()
         assert ok["refresh_error"] is None and ok["refresh_error_at"] is None
 
 
-async def test_weather_preview_and_dashboard_report_a_failed_background_refresh(tmp_path: Path) -> None:
+async def test_weather_preview_and_dashboard_report_a_failed_background_refresh(
+    tmp_path: Path,
+) -> None:
     from app.admin.forecast_refresh import SOLAR_STATUS_KEY, record_refresh_status
 
     async with running_app(spot_market_settings(tmp_path)) as harness:
         headers = await admin_session(harness)
-        config = WeatherConfig.model_validate({**_weather_body(), "timezone": "Europe/Berlin"})
+        config = WeatherConfig.model_validate(
+            {**_weather_body(), "timezone": "Europe/Berlin"}
+        )
         harness.app.state.weather_config = config
         store = harness.app.state.admin_store
-        record_refresh_status(store, SOLAR_STATUS_KEY, solar_config_key(config), False, "weather down")
-        preview = (await harness.client.post(WEATHER_PREVIEW, headers=headers, json=_weather_body())).json()
-        assert preview["status"] == "error" and preview["refresh_error"] == "weather down"
-        dashboard = (await harness.client.get(
-            "/admin/api/energy/dashboard-forecast?include=solar", headers=headers)).json()["solar"]
-        assert dashboard["status"] == "error" and dashboard["refresh_error"] == "weather down"
+        record_refresh_status(
+            store, SOLAR_STATUS_KEY, solar_config_key(config), False, "weather down"
+        )
+        preview = (
+            await harness.client.post(
+                WEATHER_PREVIEW, headers=headers, json=_weather_body()
+            )
+        ).json()
+        assert (
+            preview["status"] == "error" and preview["refresh_error"] == "weather down"
+        )
+        dashboard = (
+            await harness.client.get(
+                "/admin/api/energy/dashboard-forecast?include=solar", headers=headers
+            )
+        ).json()["solar"]
+        assert (
+            dashboard["status"] == "error"
+            and dashboard["refresh_error"] == "weather down"
+        )
 
 
-async def test_config_save_clears_rows_under_the_refresh_lock_and_blocks_a_stale_refresh(tmp_path: Path) -> None:
+async def test_config_save_clears_rows_under_the_refresh_lock_and_blocks_a_stale_refresh(
+    tmp_path: Path,
+) -> None:
     from app.admin.forecast_refresh import refresh_spot_market
 
     today = datetime.now(UTC).date()
@@ -3133,8 +4242,16 @@ async def test_config_save_clears_rows_under_the_refresh_lock_and_blocks_a_stale
 
         def _snapshot(self, config):
             return SpotPriceSnapshot(
-                config.provider, config.bidding_zone, "EUR", datetime.now(UTC),
-                (SpotPriceInterval(midnight, midnight + timedelta(minutes=15), Decimal("0.1")),), timezone="UTC",
+                config.provider,
+                config.bidding_zone,
+                "EUR",
+                datetime.now(UTC),
+                (
+                    SpotPriceInterval(
+                        midnight, midnight + timedelta(minutes=15), Decimal("0.1")
+                    ),
+                ),
+                timezone="UTC",
             )
 
         def fetch_current(self, config):
@@ -3158,7 +4275,9 @@ async def test_config_save_clears_rows_under_the_refresh_lock_and_blocks_a_stale
         old = harness.app.state.spotmarket_config
         old_key = spot_config_key(old)
         wrote = await refresh_spot_market(
-            store, _Provider(harness), old,
+            store,
+            _Provider(harness),
+            old,
             lambda: spot_config_key(harness.app.state.spotmarket_config) == old_key,
         )
         assert wrote is False
@@ -3182,4 +4301,7 @@ def test_dry_run_price_disclaimer_matches_the_strict_latest_wins_planner() -> No
     assert "never moves charging into an earlier slot" in disclaimer
     assert "household cost" in disclaimer
     docstring = DryRunPlanView.__doc__ or ""
-    assert "break\n    ties" not in docstring and "ties between slots equivalent" not in docstring
+    assert (
+        "break\n    ties" not in docstring
+        and "ties between slots equivalent" not in docstring
+    )

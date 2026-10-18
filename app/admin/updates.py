@@ -13,12 +13,26 @@ import threading
 import time
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
-from urllib.request import Request, urlopen
+from urllib.request import Request, build_opener
 
 from app import __version__
+from app.net import SameOriginRedirectHandler
 
 _log = logging.getLogger(__name__)
 _RELEASE_API = "https://api.github.com/repos/Gill-Bates/rct-manager/releases/latest"
+# GitHub's release JSON is a few KB; cap the read so a hostile or broken endpoint cannot stream an
+# unbounded body into memory. The +1 lets the parse below detect an over-cap response.
+_MAX_RESPONSE_BYTES = 256 * 1024
+
+
+class _SameOriginRedirectHandler(SameOriginRedirectHandler):
+    provider_label = "GitHub"
+
+
+# One opener for the whole process: it refuses cross-origin redirects, so even the fixed GitHub URL
+# cannot be bounced to an internal target (SSRF). This reuses the single audited redirect rule in
+# app.net rather than letting urllib follow 30x responses to any origin.
+_OPENER = build_opener(_SameOriginRedirectHandler())
 _CACHE_TTL = 3600
 _ERROR_TTL = 60  # failures are retried soon instead of being cached for the full hour
 _FORCE_MIN_INTERVAL = 30  # a forced refresh may not hit GitHub more often than this
@@ -57,7 +71,7 @@ def _version_key(value: str) -> tuple[tuple[int, ...], int, int]:
     match = _VERSION_RE.fullmatch(value)
     if match is None or match.group(2) is None:
         return _version_parts(value), 3, 0
-    return _version_parts(value), _PRERELEASE_RANK[match.group(2).lower()], int(match.group(3) or 0)
+    return (_version_parts(value), _PRERELEASE_RANK[match.group(2).lower()], int(match.group(3) or 0))
 
 
 def _cached(force: bool) -> dict | None:
@@ -82,8 +96,10 @@ def _release_url(value: object) -> str | None:
         parts = urlsplit(value)
     except ValueError:
         return None
-    if parts.scheme == "https" and parts.hostname == _RELEASE_URL_HOST and parts.path.startswith(
-        _RELEASE_URL_PATH_PREFIX
+    if (
+        parts.scheme == "https"
+        and parts.hostname == _RELEASE_URL_HOST
+        and parts.path.startswith(_RELEASE_URL_PATH_PREFIX)
     ):
         return value
     return None
@@ -98,13 +114,15 @@ def _fetch() -> dict:
         "published_at": None,
         "error": None,
     }
-    request = Request(_RELEASE_API, headers={
-        "Accept": "application/vnd.github+json",
-        "User-Agent": f"rct-manager/{__version__}",
-    })
+    request = Request(
+        _RELEASE_API, headers={"Accept": "application/vnd.github+json", "User-Agent": f"rct-manager/{__version__}"}
+    )
     try:
-        with urlopen(request, timeout=10) as response:  # noqa: S310 - _RELEASE_API is a fixed https URL
-            data = json.load(response)
+        with _OPENER.open(request, timeout=10) as response:
+            raw = response.read(_MAX_RESPONSE_BYTES + 1)
+        if len(raw) > _MAX_RESPONSE_BYTES:
+            raise ValueError("GitHub returned an implausibly large release response")
+        data = json.loads(raw)
         if not isinstance(data, dict) or not isinstance(data.get("tag_name"), str):
             raise TypeError("GitHub returned an invalid release")
         latest = data["tag_name"].removeprefix("v")

@@ -48,22 +48,29 @@ def test_shipped_files_do_not_contain_the_wifi_password() -> None:
     allowed = Allowlist.load(ROOT / "app/catalog/default_write_allowlist.json", catalog)
     assert "wifi_password" not in {e.name for e in catalog.entries()}
     assert allowed.entry("wifi_password") is None
-    assert "wifi_authentication_method" in {e.name for e in catalog.entries()}  # an algorithm name, no secret
+    assert "wifi_authentication_method" in {
+        e.name for e in catalog.entries()
+    }  # an algorithm name, no secret
 
 
 async def test_wifi_password_is_unknown_over_the_read_api() -> None:
     settings = make_settings(
-        object_registry_path=ROOT / "app/catalog/objects.json", write_allowlist_path=ROOT / "app/catalog/default_write_allowlist.json"
+        object_registry_path=ROOT / "app/catalog/objects.json",
+        write_allowlist_path=ROOT / "app/catalog/default_write_allowlist.json",
     )
     async with running_app(settings, settle=False) as h:
         single = await h.client.get("/api/v1/devices/main/metrics/wifi_password")
-        batch = await h.client.get("/api/v1/devices/main/metrics", params={"names": "wifi_password"})
+        batch = await h.client.get(
+            "/api/v1/devices/main/metrics", params={"names": "wifi_password"}
+        )
     assert single.status_code == 404 and single.json()["code"] == "unknown_metric"
     assert batch.status_code == 422
 
 
 @pytest.mark.parametrize("name", ["wifi_password", "renamed_secret"])
-def test_registry_with_the_wifi_password_aborts_the_start(tmp_path: Path, name: str) -> None:
+def test_registry_with_the_wifi_password_aborts_the_start(
+    tmp_path: Path, name: str
+) -> None:
     raw = json.loads((FIXTURES / "objects.json").read_text(encoding="utf-8"))
     raw["entries" if "entries" in raw else "objects"].append({**SECRET, "name": name})
     path = tmp_path / "objects_read.json"
@@ -77,7 +84,13 @@ def test_allowlist_with_the_wifi_password_aborts_the_start(tmp_path: Path) -> No
     catalog = RegistryCatalog.from_file(FIXTURES / "objects.json")
     path = tmp_path / "objects_write_allowed.json"
     path.write_text(
-        json.dumps({"version": 1, "entries": [{"name": "wifi_password", "data_type": "t_string"}]}), encoding="utf-8"
+        json.dumps(
+            {
+                "version": 1,
+                "entries": [{"name": "wifi_password", "data_type": "t_string"}],
+            }
+        ),
+        encoding="utf-8",
     )
     with pytest.raises(ConfigError):
         Allowlist.load(path, catalog)
@@ -91,7 +104,9 @@ def _settings(tmp_path):
     return make_settings(enable_write_support=True, **write_fixtures(tmp_path))
 
 
-async def test_oversized_content_length_is_413_before_auth_and_without_reading() -> None:
+async def test_oversized_content_length_is_413_before_auth_and_without_reading() -> (
+    None
+):
     reads = 0
 
     async def inner(scope, receive, send):  # pragma: no cover - must never run
@@ -121,6 +136,40 @@ async def test_oversized_content_length_is_413_before_auth_and_without_reading()
     assert reads == 0 and sent[0]["status"] == 413
 
 
+async def test_configured_body_limit_is_named_in_the_rejection_detail() -> None:
+    """A configured max_bytes must be reported truthfully, not as the hard-coded default."""
+
+    async def inner(scope, receive, send):  # pragma: no cover - must never run
+        raise AssertionError("the application must not be reached")
+
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    sent: list[dict] = []
+
+    async def send(message):
+        sent.append(message)
+
+    custom = 4 * 1024
+    scope = {
+        "type": "http",
+        "method": "PUT",
+        "path": URL,
+        "headers": [(b"content-length", str(custom + 1).encode())],
+        "query_string": b"",
+        "scheme": "http",
+        "server": ("test", 80),
+        "app": SimpleNamespace(state=SimpleNamespace()),
+    }
+    await BodyLimitMiddleware(inner, max_bytes=custom)(scope, receive, send)
+    assert sent[0]["status"] == 413
+    body = json.loads(
+        b"".join(m.get("body", b"") for m in sent if m["type"] == "http.response.body")
+    )
+    assert "4 KiB" in body["detail"] and "512 KiB" not in body["detail"]
+    assert body["errors"][0]["detail"] == body["detail"]
+
+
 async def test_oversized_declared_body_without_token_is_413_not_401(tmp_path) -> None:
     async with running_app(_settings(tmp_path), authorize=False) as h:
         response = await h.client.put(URL, content=b"x" * (MAX_BODY_BYTES + 1))
@@ -129,7 +178,10 @@ async def test_oversized_declared_body_without_token_is_413_not_401(tmp_path) ->
     body = response.json()
     assert body["code"] == "invalid_request"
     assert body["errors"][0]["parameter"] == "body"
-    assert response.headers["x-request-id"] and body["correlation_id"] == response.headers["x-request-id"]
+    assert (
+        response.headers["x-request-id"]
+        and body["correlation_id"] == response.headers["x-request-id"]
+    )
 
 
 async def test_oversized_chunked_body_is_413(tmp_path) -> None:
@@ -146,11 +198,15 @@ async def test_large_legal_body_passes_the_limit(tmp_path) -> None:
     body = json.dumps({"value": "a" * (MAX_BODY_BYTES - 64)}).encode()
     assert len(body) < MAX_BODY_BYTES
     async with running_app(_settings(tmp_path), authorize=False) as h:
-        response = await h.client.put(URL, content=body, headers={"Content-Type": "application/json"})
+        response = await h.client.put(
+            URL, content=body, headers={"Content-Type": "application/json"}
+        )
     assert response.status_code == 401  # reached the authentication layer
 
 
-def test_a_spoofed_forwarded_header_from_an_untrusted_peer_cannot_change_the_identity() -> None:
+def test_a_spoofed_forwarded_header_from_an_untrusted_peer_cannot_change_the_identity() -> (
+    None
+):
     """The rate-limit identity is the direct peer, never an attacker-controlled header, unless the
     peer is itself a configured trusted proxy. A client that is not in trusted_proxies cannot move
     its identity by sending X-Forwarded-For, so it cannot evade or impersonate a rate-limit bucket.
@@ -158,7 +214,9 @@ def test_a_spoofed_forwarded_header_from_an_untrusted_peer_cannot_change_the_ide
     resolver = ClientIpResolver([ip_network("10.0.0.0/8")], "X-Forwarded-For")
     # The peer 203.0.113.5 is NOT a trusted proxy; its forged header names someone else entirely.
     headers = Headers({"X-Forwarded-For": "198.51.100.7"})
-    assert resolver.resolve("203.0.113.5", headers) == "203.0.113.5"  # the peer, not the spoof
+    assert (
+        resolver.resolve("203.0.113.5", headers) == "203.0.113.5"
+    )  # the peer, not the spoof
     # Even a header naming a trusted-proxy address does not help an untrusted peer.
     headers = Headers({"X-Forwarded-For": "10.0.0.9"})
     assert resolver.resolve("203.0.113.5", headers) == "203.0.113.5"
@@ -175,8 +233,12 @@ def test_a_configured_forwarded_header_is_ignored_when_no_proxy_is_trusted() -> 
 
 def test_two_forwarding_header_lines_are_joined_in_order() -> None:
     resolver = ClientIpResolver([ip_network("10.0.0.0/8")], "X-Forwarded-For")
-    headers = Headers(raw=[(b"x-forwarded-for", b"203.0.113.9"), (b"x-forwarded-for", b"10.1.1.1")])
-    assert resolver.resolve("10.0.0.1", headers) == "203.0.113.9"  # the first line is not lost
+    headers = Headers(
+        raw=[(b"x-forwarded-for", b"203.0.113.9"), (b"x-forwarded-for", b"10.1.1.1")]
+    )
+    assert (
+        resolver.resolve("10.0.0.1", headers) == "203.0.113.9"
+    )  # the first line is not lost
 
 
 @pytest.mark.parametrize("hop", ["[203.0.113.9", "203.0.113.9]", "[[203.0.113.9]]"])
@@ -200,7 +262,9 @@ def test_partially_trusted_forwarding_chain_yields_the_first_untrusted_hop() -> 
     assert resolver.resolve("10.0.0.3", headers) == "203.0.113.9"
 
 
-async def test_access_log_marks_a_response_aborted_after_the_status_was_sent(caplog) -> None:
+async def test_access_log_marks_a_response_aborted_after_the_status_was_sent(
+    caplog,
+) -> None:
     """P3-5: once http.response.start sent a 2xx the wire status cannot change, but if the app then
     fails mid-body the request did not succeed. The access log must record that at ERROR with
     response_aborted=True while preserving the already-sent status, so an aborted 200 is not read as
@@ -228,11 +292,18 @@ async def test_access_log_marks_a_response_aborted_after_the_status_was_sent(cap
         "server": ("test", 80),
         "app": SimpleNamespace(state=SimpleNamespace()),
     }
-    with caplog.at_level(logging.DEBUG, logger="app.access"), pytest.raises(RuntimeError):
+    with (
+        caplog.at_level(logging.DEBUG, logger="app.access"),
+        pytest.raises(RuntimeError),
+    ):
         await RequestContextMiddleware(inner)(scope, receive, send)
 
     assert sent[0]["status"] == 200  # the wire status is preserved
-    record = next(r for r in caplog.records if r.name == "app.access" and hasattr(r, "response_aborted"))
+    record = next(
+        r
+        for r in caplog.records
+        if r.name == "app.access" and hasattr(r, "response_aborted")
+    )
     assert record.levelno == logging.ERROR
     assert record.response_aborted is True
     assert record.status == 200
@@ -262,8 +333,16 @@ async def test_access_log_level_is_unchanged_for_a_clean_response(caplog) -> Non
     with caplog.at_level(logging.DEBUG, logger="app.access"):
         await RequestContextMiddleware(inner)(scope, receive, lambda _m: _noop())
 
-    record = next(r for r in caplog.records if r.name == "app.access" and hasattr(r, "response_aborted"))
-    assert record.levelno == logging.DEBUG and record.response_aborted is False and record.status == 200
+    record = next(
+        r
+        for r in caplog.records
+        if r.name == "app.access" and hasattr(r, "response_aborted")
+    )
+    assert (
+        record.levelno == logging.DEBUG
+        and record.response_aborted is False
+        and record.status == 200
+    )
 
 
 async def _noop() -> None:

@@ -19,13 +19,16 @@ from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.api.models import DeviceReadiness, MetricError
+from app.api.write_surface import is_write_path
 from app.errors import DeviceApiError, DeviceTimeout, DeviceUnreachable, ProtocolError
 from app.protocol.values import ScalarValue
 
 log = logging.getLogger(__name__)
 
 PROBLEM_MEDIA_TYPE = "application/problem+json"
-INTERNAL_ERROR_DETAIL = "An internal error occurred. Quote the correlation id when reporting it."
+INTERNAL_ERROR_DETAIL = (
+    "An internal error occurred. Quote the correlation id when reporting it."
+)
 
 
 class ErrorCode(StrEnum):
@@ -137,46 +140,133 @@ STATUS: dict[ErrorCode, int] = {
 }
 
 _TEXT: dict[ErrorCode, tuple[str, str]] = {
-    E.MISSING_TOKEN: ("Authentication required", "The Authorization header is missing."),
+    E.MISSING_TOKEN: (
+        "Authentication required",
+        "The Authorization header is missing.",
+    ),
     E.INVALID_TOKEN: ("Invalid token", "The bearer token is not valid."),
-    E.INSUFFICIENT_SCOPE: ("Insufficient scope", "The token role does not permit this endpoint."),
-    E.WRITE_NOT_ALLOWED: ("Write not allowed", "This metric is not approved for writing."),
+    E.INSUFFICIENT_SCOPE: (
+        "Insufficient scope",
+        "The token role does not permit this endpoint.",
+    ),
+    E.WRITE_NOT_ALLOWED: (
+        "Write not allowed",
+        "This metric is not approved for writing.",
+    ),
     E.NOT_FOUND: ("Not found", "The requested path is not registered."),
-    E.METHOD_NOT_ALLOWED: ("Method not allowed", "The HTTP method is not allowed for this path."),
-    E.INVALID_REQUEST: ("Invalid request", "The request body or a parameter is invalid."),
+    E.METHOD_NOT_ALLOWED: (
+        "Method not allowed",
+        "The HTTP method is not allowed for this path.",
+    ),
+    E.INVALID_REQUEST: (
+        "Invalid request",
+        "The request body or a parameter is invalid.",
+    ),
     E.UNKNOWN_DEVICE: ("Unknown device", "The device id is not configured."),
     E.UNKNOWN_METRIC: ("Unknown metric", "The metric name is not known."),
     E.WRITE_DISABLED: ("Write disabled", "Write support is disabled."),
-    E.DOCS_NOT_AVAILABLE: ("Documentation not available", "The documentation is not released in this environment."),
-    E.METRIC_IS_ACTION: ("Metric is an action", "This metric is an action; use the action endpoint."),
-    E.FRESH_NOT_AVAILABLE: ("Fresh read not available", "This metric is delivered periodically; fresh is rejected."),
-    E.BATCH_TOO_LARGE: ("Batch too large", "The request names more metrics than allowed."),
-    E.FRESH_BATCH_TOO_LARGE: ("Fresh batch too large", "The fresh request names more metrics than allowed."),
-    E.VALUE_OUT_OF_RANGE: ("Value out of range", "The value is outside the approved range."),
-    E.VALUE_TYPE_MISMATCH: ("Value type mismatch", "The value does not match the metric type."),
+    E.DOCS_NOT_AVAILABLE: (
+        "Documentation not available",
+        "The documentation is not released in this environment.",
+    ),
+    E.METRIC_IS_ACTION: (
+        "Metric is an action",
+        "This metric is an action; use the action endpoint.",
+    ),
+    E.FRESH_NOT_AVAILABLE: (
+        "Fresh read not available",
+        "This metric is delivered periodically; fresh is rejected.",
+    ),
+    E.BATCH_TOO_LARGE: (
+        "Batch too large",
+        "The request names more metrics than allowed.",
+    ),
+    E.FRESH_BATCH_TOO_LARGE: (
+        "Fresh batch too large",
+        "The fresh request names more metrics than allowed.",
+    ),
+    E.VALUE_OUT_OF_RANGE: (
+        "Value out of range",
+        "The value is outside the approved range.",
+    ),
+    E.VALUE_TYPE_MISMATCH: (
+        "Value type mismatch",
+        "The value does not match the metric type.",
+    ),
     E.VALUE_NOT_FINITE: ("Value not finite", "The value is not a finite number."),
-    E.VALUE_STEP_MISMATCH: ("Value step mismatch", "The value is not a multiple of the approved step."),
-    E.INVALID_PARAMETER: ("Invalid parameter", "A query parameter has an invalid value."),
-    E.RATE_LIMITED: ("Rate limited", "The request rate or the failed-authentication limit was exceeded."),
-    E.DEVICE_BUDGET_EXHAUSTED: ("Device budget exhausted", "The device work budget is exhausted for this window."),
+    E.VALUE_STEP_MISMATCH: (
+        "Value step mismatch",
+        "The value is not a multiple of the approved step.",
+    ),
+    E.INVALID_PARAMETER: (
+        "Invalid parameter",
+        "A query parameter has an invalid value.",
+    ),
+    E.RATE_LIMITED: (
+        "Rate limited",
+        "The request rate or the failed-authentication limit was exceeded.",
+    ),
+    E.DEVICE_BUDGET_EXHAUSTED: (
+        "Device budget exhausted",
+        "The device work budget is exhausted for this window.",
+    ),
     E.INTERNAL_ERROR: ("Internal error", INTERNAL_ERROR_DETAIL),
-    E.DEVICE_UNREACHABLE: ("Device unreachable", "The device connection could not be established."),
+    E.DEVICE_UNREACHABLE: (
+        "Device unreachable",
+        "The device connection could not be established.",
+    ),
     E.DEVICE_TIMEOUT: ("Device timeout", "The device did not answer in time."),
     E.PROTOCOL_ERROR: ("Protocol error", "The device answer could not be decoded."),
-    E.DEVICE_UNAVAILABLE: ("Device unavailable", "None of the requested metrics could be determined."),
-    E.WRITE_OUTCOME_UNKNOWN: ("Write outcome unknown", "The write was sent but could not be confirmed."),
-    E.ACTION_OUTCOME_UNKNOWN: ("Action outcome unknown", "The action was sent but its outcome is unclear."),
+    E.DEVICE_UNAVAILABLE: (
+        "Device unavailable",
+        "None of the requested metrics could be determined.",
+    ),
+    E.WRITE_OUTCOME_UNKNOWN: (
+        "Write outcome unknown",
+        "The write was sent but could not be confirmed.",
+    ),
+    E.ACTION_OUTCOME_UNKNOWN: (
+        "Action outcome unknown",
+        "The action was sent but its outcome is unclear.",
+    ),
     E.QUEUE_FULL: ("Queue full", "The device queue is full; retry later."),
-    E.DEVICE_MAINTENANCE: ("Device in maintenance", "The device is temporarily not being addressed."),
+    E.DEVICE_MAINTENANCE: (
+        "Device in maintenance",
+        "The device is temporarily not being addressed.",
+    ),
     E.NOT_READY: ("Not ready", "The service or a device is not ready."),
-    E.QUEUE_TIMEOUT: ("Queue timeout", "The request waited too long in the device queue."),
-    E.DISPATCH_MODE_UNAVAILABLE: ("Dispatch mode unavailable", "The requested dispatch mode is not available."),
-    E.DISPATCH_LIMITS_MISSING: ("Dispatch limits missing", "Charge and discharge limits must be configured first."),
-    E.DISPATCH_RESTORE_REQUIRED: ("Restore required", "The previous device state must be restored first."),
-    E.DISPATCH_OPERATION_CONFLICT: ("Dispatch conflict", "The expected operation is no longer active."),
-    E.DISPATCH_NOT_FOUND: ("Dispatch not found", "No battery dispatch operation is active."),
-    E.DISPATCH_STORE_UNAVAILABLE: ("Dispatch unavailable", "The durable dispatch store is unavailable."),
-    E.DISPATCH_UNVERIFIED: ("Dispatch unverified", "The hardware-specific external-control mode is not configured."),
+    E.QUEUE_TIMEOUT: (
+        "Queue timeout",
+        "The request waited too long in the device queue.",
+    ),
+    E.DISPATCH_MODE_UNAVAILABLE: (
+        "Dispatch mode unavailable",
+        "The requested dispatch mode is not available.",
+    ),
+    E.DISPATCH_LIMITS_MISSING: (
+        "Dispatch limits missing",
+        "Charge and discharge limits must be configured first.",
+    ),
+    E.DISPATCH_RESTORE_REQUIRED: (
+        "Restore required",
+        "The previous device state must be restored first.",
+    ),
+    E.DISPATCH_OPERATION_CONFLICT: (
+        "Dispatch conflict",
+        "The expected operation is no longer active.",
+    ),
+    E.DISPATCH_NOT_FOUND: (
+        "Dispatch not found",
+        "No battery dispatch operation is active.",
+    ),
+    E.DISPATCH_STORE_UNAVAILABLE: (
+        "Dispatch unavailable",
+        "The durable dispatch store is unavailable.",
+    ),
+    E.DISPATCH_UNVERIFIED: (
+        "Dispatch unverified",
+        "The hardware-specific external-control mode is not configured.",
+    ),
     E.DISPATCH_CAPABILITY_CONFLICT: (
         "Dispatch capability conflict",
         "The capability has an active operation; retry with force to withdraw it anyway.",
@@ -254,8 +344,12 @@ class ProblemDetails(BaseModel):
     correlation_id: str
     timestamp: datetime
     errors: list[FieldError] | list[MetricError] = Field(default_factory=list)
-    readback_value: ScalarValue | None = None  # only on write_outcome_unknown and action_outcome_unknown
-    devices: list[DeviceReadiness] | None = None  # only on not_ready of the readiness endpoint
+    readback_value: ScalarValue | None = (
+        None  # only on write_outcome_unknown and action_outcome_unknown
+    )
+    devices: list[DeviceReadiness] | None = (
+        None  # only on not_ready of the readiness endpoint
+    )
 
 
 def normalize_code(exc: DeviceApiError) -> ErrorCode:
@@ -314,7 +408,11 @@ def _now(request: Request) -> datetime:
 
 def _base_uri(request: Request) -> str:
     runtime = getattr(request.app.state, "runtime", None)
-    return runtime.settings.problem_type_base_uri if runtime is not None else "urn:device-api:problem"
+    return (
+        runtime.settings.problem_type_base_uri
+        if runtime is not None
+        else "urn:device-api:problem"
+    )
 
 
 def build_problem(
@@ -334,7 +432,9 @@ def build_problem(
         "type": f"{_base_uri(request)}:{code.value}",
         "title": title,
         "status": status,
-        "detail": INTERNAL_ERROR_DETAIL if status == 500 else (detail or default_detail),
+        "detail": (
+            INTERNAL_ERROR_DETAIL if status == 500 else (detail or default_detail)
+        ),
         "instance": request.url.path,
         "code": code.value,
         "correlation_id": correlation_of(request),
@@ -349,7 +449,9 @@ def build_problem(
     out = dict(headers or {})
     if status == 401:
         out["WWW-Authenticate"] = "Bearer"
-    return JSONResponse(body, status_code=status, headers=out, media_type=PROBLEM_MEDIA_TYPE)
+    return JSONResponse(
+        body, status_code=status, headers=out, media_type=PROBLEM_MEDIA_TYPE
+    )
 
 
 def _retry_headers(exc: DeviceApiError) -> dict[str, str]:
@@ -364,7 +466,9 @@ async def _device_error(request: Request, exc: DeviceApiError) -> JSONResponse:
     if code is E.INTERNAL_ERROR:
         log.error("Unmapped internal error code %s", exc.code, exc_info=exc)
     readback = exc.context.get("readback_value")
-    return build_problem(request, code, readback_value=readback, headers=_retry_headers(exc))
+    return build_problem(
+        request, code, readback_value=readback, headers=_retry_headers(exc)
+    )
 
 
 async def _problem_error(request: Request, exc: ProblemError) -> JSONResponse:
@@ -375,34 +479,21 @@ async def _problem_error(request: Request, exc: ProblemError) -> JSONResponse:
 
 
 def _is_write_path(request: Request) -> bool:
-    """Method- and path-exact match of the endpoints that only exist with write support."""
-    path = request.url.path.rstrip("/").split("/")
-    if path[:4] != ["", "api", "v1", "devices"]:
-        return False
-    # Bounded, never dropped: the energy status sits at depth 6, every other pattern at depth 7.
-    # This runs inside the global HTTP exception handler, where an IndexError on /api/v1/devices or
-    # /api/v1/devices/main would turn a plain 404 into an unhandled 500, so each clause below
-    # checks its own length too.
-    if not 6 <= len(path) <= 7:
-        return False
-    return (
-        (len(path) == 7 and request.method == "PUT" and path[5] == "metrics")
-        or (len(path) == 7 and request.method == "POST" and path[5] == "actions")
-        or (
-            len(path) == 7
-            and path[5:7] == ["battery", "dispatch"]
-            and request.method in {"POST", "GET", "DELETE"}
-        )
-        or (len(path) == 6 and path[5] == "energy" and request.method == "GET")
-        or (len(path) == 7 and path[5] == "energy" and path[6] == "command")
-    )
+    """Method- and path-exact match of the endpoints that only exist with write support.
+
+    The write surface is declared once in ``app.api.write_surface``; this only adapts a request to
+    that matcher so the protocol knowledge is not maintained a second time here.
+    """
+    return is_write_path(request.method, request.url.path)
 
 
 async def _http_error(request: Request, exc: StarletteHTTPException) -> JSONResponse:
     keep = {k: v for k, v in (exc.headers or {}).items() if k.lower() == "allow"}
     if request.url.path.startswith("/admin/api/"):
         # The admin GUI shows `detail` itself; the API problem texts (e.g. "bearer token") do not apply here.
-        return JSONResponse({"detail": exc.detail}, status_code=exc.status_code, headers=keep or None)
+        return JSONResponse(
+            {"detail": exc.detail}, status_code=exc.status_code, headers=keep or None
+        )
     runtime = getattr(request.app.state, "runtime", None)
     write_off = runtime is not None and not runtime.settings.enable_write_support
     if exc.status_code in (404, 405) and write_off and _is_write_path(request):
@@ -422,7 +513,9 @@ async def _http_error(request: Request, exc: StarletteHTTPException) -> JSONResp
             return build_problem(request, E.INTERNAL_ERROR, status=exc.status_code)
 
 
-async def _validation_error(request: Request, exc: RequestValidationError) -> JSONResponse:
+async def _validation_error(
+    request: Request, exc: RequestValidationError
+) -> JSONResponse:
     top_code = E.INVALID_REQUEST
     fields: list[FieldError] = []
     for err in exc.errors():
@@ -434,7 +527,13 @@ async def _validation_error(request: Request, exc: RequestValidationError) -> JS
         field_code = E.INVALID_PARAMETER if is_query else E.INVALID_REQUEST
         name = ".".join(str(p) for p in loc[1:]) or (str(loc[0]) if loc else "request")
         # Only the validator message is echoed, never the rejected input.
-        fields.append(FieldError(parameter=name, code=field_code.value, detail=str(err.get("msg", "invalid value"))))
+        fields.append(
+            FieldError(
+                parameter=name,
+                code=field_code.value,
+                detail=str(err.get("msg", "invalid value")),
+            )
+        )
     return build_problem(request, top_code, errors=fields)
 
 
@@ -453,7 +552,8 @@ def problem_responses(*codes: ErrorCode) -> dict[int | str, dict[str, Any]]:
     return {
         status: {
             "model": ProblemDetails,
-            "description": "Problem details. Possible codes: " + ", ".join(sorted(keys)),
+            "description": "Problem details. Possible codes: "
+            + ", ".join(sorted(keys)),
             "content": {PROBLEM_MEDIA_TYPE: {}},
         }
         for status, keys in by_status.items()

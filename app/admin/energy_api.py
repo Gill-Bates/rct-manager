@@ -38,7 +38,7 @@ from app.admin.api import (
     require_admin,
 )
 from app.admin.consumption_backfill import WINDOW_DAYS as CONSUMPTION_WINDOW_DAYS
-from app.admin.consumption_backfill import load_daily_consumption
+from app.admin.consumption_backfill import load_daily_consumption, resolve_zone
 from app.admin.dispatch_api import (
     _ADMIN_ACTOR,
     _conflict,
@@ -60,7 +60,14 @@ from app.admin.forecast_refresh import (
 from app.api.routers.energy import EnergyCommandBody, EnergyStatusResponse
 from app.catalog.base import is_numeric
 from app.dispatch.battery_facts import resolve_device_battery_facts
-from app.dispatch.capabilities import CapabilityName, CapabilityRecord, CapabilityStatus
+from app.dispatch.capabilities import (
+    REGISTER_BYTE_WIDTH_MAX,
+    REGISTER_BYTE_WIDTH_MIN,
+    SOC_STRATEGY_CODE_MAX,
+    CapabilityName,
+    CapabilityRecord,
+    CapabilityStatus,
+)
 from app.dispatch.controller import CapabilityConflict
 from app.dispatch.models import DeviceLimits
 from app.dispatch.soc_policy import (
@@ -77,7 +84,12 @@ from app.errors import DeviceApiError, DeviceUnreachable
 from app.gateway.base import DeviceState
 from app.gateway.cache import CacheFreshness
 from app.gateway.rct_history import MIN_COMMISSIONING_DATE
-from app.limits import MAX_POWER_W, TARGET_SOC_MAX_PERCENT, TARGET_SOC_MIN_PERCENT
+from app.limits import (
+    MAX_POWER_W,
+    MAX_USABLE_CAPACITY_WH,
+    TARGET_SOC_MAX_PERCENT,
+    TARGET_SOC_MIN_PERCENT,
+)  # noqa: E501
 from app.optimizer.adapters import (
     DryRunInputs,
     EnergyReadingsBatteryStateProvider,
@@ -219,9 +231,9 @@ class HardwareVerificationBody(BaseModel):
     verified_device_model: str = Field(min_length=1, max_length=128)
     verified_firmware: str = Field(min_length=1, max_length=64)
     note: str = Field(min_length=1, max_length=NOTE_MAX_LENGTH)
-    soc_strategy_external_code: int = Field(ge=0, le=255)
-    enum_byte_width: int = Field(ge=1, le=4)
-    bool_byte_width: int = Field(ge=1, le=4)
+    soc_strategy_external_code: int = Field(ge=0, le=SOC_STRATEGY_CODE_MAX)
+    enum_byte_width: int = Field(ge=REGISTER_BYTE_WIDTH_MIN, le=REGISTER_BYTE_WIDTH_MAX)
+    bool_byte_width: int = Field(ge=REGISTER_BYTE_WIDTH_MIN, le=REGISTER_BYTE_WIDTH_MAX)
     write_frame_layout_verified: StrictBool
     apply_sequence_verified: StrictBool
     battery_discharge_positive: StrictBool
@@ -658,7 +670,13 @@ async def put_soc_target_policy(
 # EnergyManager nor the dispatch layer, so an external API failure cannot affect inverter control.
 
 
-def _spotmarket_store(request: Request):
+def _admin_store_or_503(request: Request):
+    """The admin store, or HTTP 503 when administration is not configured.
+
+    Single source for the spot-market, weather and commissioning routes, which all persist through
+    the same admin store: the "store present, else 503" rule must have one definition, not one per
+    data domain.
+    """
     store = getattr(request.app.state, "admin_store", None)
     if store is None:
         raise HTTPException(503, "Administration is unavailable")
@@ -1225,8 +1243,8 @@ async def dashboard_forecast(
     del admin
     if len(set(include)) != len(include):
         raise HTTPException(422, "Duplicate forecast selection")
-    store = _spotmarket_store(request)
-    now = datetime.now(UTC)
+    store = _admin_store_or_503(request)
+    now = request.app.state.runtime.clock.now()
     config = request.app.state.spotmarket_config
     requested = set(include)
     result = {}
@@ -1343,7 +1361,7 @@ def put_spot_market_config(
         config = SpotMarketConfig.model_validate(body.model_dump())
     except ValueError as exc:
         raise HTTPException(422, "Invalid spot-market configuration") from exc
-    store = _spotmarket_store(request)
+    store = _admin_store_or_503(request)
     # Read previous, persist, clear and adopt all under the refresh write lock so two concurrent
     # saves (sync routes run in a threadpool) cannot interleave the DB write and the state swap and
     # leave the persisted config and runtime state disagreeing. A refresh that started under the old
@@ -1378,7 +1396,7 @@ async def preview_spot_market(
         config = SpotMarketConfig.model_validate(body.model_dump())
     except ValueError as exc:
         raise HTTPException(422, "Invalid spot-market configuration") from exc
-    store = _spotmarket_store(request)
+    store = _admin_store_or_503(request)
     saved_config = getattr(request.app.state, "spotmarket_config", None)
     if not config.enabled or saved_config is None or not saved_config.enabled:
         return SpotMarketPreviewView(
@@ -1396,7 +1414,7 @@ async def preview_spot_market(
             status="unavailable",
             message="Save the configuration to refresh its database-backed prices.",
         )
-    now = datetime.now(UTC)
+    now = request.app.state.runtime.clock.now()
     key = spot_config_key(config)
     rows = await asyncio.to_thread(store.get_spot_market_intervals, key)
     status = await asyncio.to_thread(load_refresh_status, store, SPOT_STATUS_KEY, key)
@@ -1412,13 +1430,6 @@ async def preview_spot_market(
 # Open-Meteo provider only supplies irradiance for a later optimizer; it never writes a register, so
 # a provider failure cannot reach inverter control. These routes read/write the persisted config and
 # run a one-off preview fetch off the event loop, touching neither the EnergyManager nor dispatch.
-
-
-def _weather_store(request: Request):
-    store = getattr(request.app.state, "admin_store", None)
-    if store is None:
-        raise HTTPException(503, "Administration is unavailable")
-    return store
 
 
 class WeatherConfigBody(BaseModel):
@@ -1778,7 +1789,7 @@ async def put_weather_config(
         # out of range, instead of a single opaque "Invalid weather configuration" string. Enabling
         # the forecast with empty fields is a specific, field-level validation result, not a mystery.
         raise HTTPException(422, _weather_validation_errors(exc)) from exc
-    store = _weather_store(request)
+    store = _admin_store_or_503(request)
 
     def _save_weather() -> tuple[WeatherConfig | None, bool]:
         # Persist, clear and adopt under the refresh write lock (see put_spot_market_config); the
@@ -1849,7 +1860,7 @@ async def preview_weather(
             status="disabled",
             timezone=config.timezone,
         )
-    now = datetime.now(UTC)
+    now = request.app.state.runtime.clock.now()
     if saved_config is None or solar_config_key(config) != solar_config_key(
         saved_config
     ):
@@ -1861,7 +1872,7 @@ async def preview_weather(
         )
     zone, first_day, last_day = local_three_day_window(now, config.timezone or "UTC")
     local_today = now.astimezone(zone).date()
-    weather_store = _weather_store(request)
+    weather_store = _admin_store_or_503(request)
     solar_key = solar_config_key(config)
     rows = await asyncio.to_thread(
         weather_store.get_solar_forecast_intervals,
@@ -2344,7 +2355,11 @@ def _battery_characterization_view(
             BatteryTowerModulesView(
                 id=prefix,
                 present=present,
-                **(report if present else {**report, "module_count_status": "not_present"}),
+                **(
+                    report
+                    if present
+                    else {**report, "module_count_status": "not_present"}
+                ),
             )
         )
     second_tower_present = towers[1].present
@@ -2461,7 +2476,7 @@ async def battery_calibration_history(
     _device_or_404(request, device_id)
     serial = request.app.state.runtime.gateway.reported_serial(device_id)
     return await asyncio.to_thread(
-        _calibration_view, _spotmarket_store(request), device_id, serial, limit
+        _calibration_view, _admin_store_or_503(request), device_id, serial, limit
     )
 
 
@@ -2487,7 +2502,7 @@ async def put_battery_commissioning(
         raise HTTPException(
             422, "The commissioning date must lie between 2010-01-01 and today"
         )
-    store = _spotmarket_store(request)
+    store = _admin_store_or_503(request)
     moment = datetime(
         body.commissioned_on.year,
         body.commissioned_on.month,
@@ -2516,7 +2531,7 @@ async def delete_battery_commissioning(
     serial = request.app.state.runtime.gateway.reported_serial(device_id)
     if not serial:
         raise HTTPException(409, "The inverter serial number is not known yet")
-    store = _spotmarket_store(request)
+    store = _admin_store_or_503(request)
     await asyncio.to_thread(store.delete_inverter_commissioning, serial, "manual")
     log.warning(
         "Battery commissioning date override removed: device=%s admin=%s",
@@ -2606,7 +2621,7 @@ class PlanningLimitsBody(BaseModel):
     max_discharge_power_w: float = Field(gt=0, le=MAX_POWER_W, allow_inf_nan=False)
     # Omitted keeps the stored value, explicit null clears it.
     usable_capacity_wh: float | None = Field(
-        default=None, gt=0, le=1_000_000, allow_inf_nan=False
+        default=None, gt=0, le=MAX_USABLE_CAPACITY_WH, allow_inf_nan=False
     )
 
 
@@ -2672,14 +2687,14 @@ async def consumption_history(
     """The last completed local days (the running day excluded), with no device I/O."""
     del admin
     _device_or_404(request, device_id)
-    store = _spotmarket_store(request)
+    store = _admin_store_or_503(request)
     runtime = request.app.state.runtime
     zone_name = (
         getattr(getattr(request.app.state, "weather_config", None), "timezone", None)
         or "UTC"
     )
     now = runtime.clock.now()
-    last = now.astimezone(_zone_or_utc(zone_name)).date() - timedelta(days=1)
+    last = now.astimezone(resolve_zone(zone_name)).date() - timedelta(days=1)
     first = last - timedelta(days=CONSUMPTION_WINDOW_DAYS - 1)
     days = await asyncio.to_thread(
         load_daily_consumption,
@@ -2704,13 +2719,6 @@ async def consumption_history(
         ],
         recording_since=recording_since,
     )
-
-
-def _zone_or_utc(name: str):
-    try:
-        return ZoneInfo(name)
-    except (ZoneInfoNotFoundError, ValueError):
-        return UTC
 
 
 @router.get("/devices/{device_id}/dynamic-plan")
@@ -2751,7 +2759,7 @@ async def get_dynamic_plan(
             detail="Energy Manager is off for this inverter; the charging plan is inactive.",
             horizon_hours=0.0,
         )
-    store = _spotmarket_store(request)
+    store = _admin_store_or_503(request)
     now = runtime.clock.now()
 
     # Spot prices and solar forecast from the rolling SQLite tables; no provider call is made here.

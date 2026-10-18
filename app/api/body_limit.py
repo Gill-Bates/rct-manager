@@ -14,7 +14,15 @@ from app.api.problems import ErrorCode, FieldError, build_problem
 # The largest legal write is 65527 payload bytes; as a JSON string with \uXXXX escapes that is
 # about 400 KB, so 512 KiB passes every legal value.
 MAX_BODY_BYTES = 512 * 1024
-_DETAIL = "The request body exceeds the maximum size of 512 KiB."
+
+
+def _limit_detail(max_bytes: int) -> str:
+    """Error text naming the limit actually enforced, so a configured limit is reported truthfully."""
+    if max_bytes % 1024 == 0:
+        size = f"{max_bytes // 1024} KiB"
+    else:
+        size = f"{max_bytes} bytes"
+    return f"The request body exceeds the maximum size of {size}."
 
 
 class BodyLimitMiddleware:
@@ -23,15 +31,24 @@ class BodyLimitMiddleware:
     def __init__(self, app: ASGIApp, max_bytes: int = MAX_BODY_BYTES) -> None:
         self.app = app
         self._max = max_bytes
+        self._detail = _limit_detail(max_bytes)
 
     async def _reject(self, scope: Scope, receive: Receive, send: Send) -> None:
         response = build_problem(
             Request(scope),
             ErrorCode.INVALID_REQUEST,
             status=413,  # Content Too Large; still a problem document with the invalid_request code
-            detail=_DETAIL,
-            errors=[FieldError(parameter="body", code=ErrorCode.INVALID_REQUEST.value, detail=_DETAIL)],
-            headers={"Connection": "close"},  # the unread body must not be parsed as the next request
+            detail=self._detail,
+            errors=[
+                FieldError(
+                    parameter="body",
+                    code=ErrorCode.INVALID_REQUEST.value,
+                    detail=self._detail,
+                )
+            ],
+            headers={
+                "Connection": "close"
+            },  # the unread body must not be parsed as the next request
         )
         await response(scope, receive, send)
 
@@ -39,9 +56,17 @@ class BodyLimitMiddleware:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
-        declared = next((v for k, v in scope["headers"] if k == b"content-length"), None)
-        if declared is not None and declared.strip().isdigit() and int(declared) > self._max:
-            await self._reject(scope, receive, send)  # rejected without reading a single body byte
+        declared = next(
+            (v for k, v in scope["headers"] if k == b"content-length"), None
+        )
+        if (
+            declared is not None
+            and declared.strip().isdigit()
+            and int(declared) > self._max
+        ):
+            await self._reject(
+                scope, receive, send
+            )  # rejected without reading a single body byte
             return
 
         received = 0

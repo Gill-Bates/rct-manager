@@ -39,7 +39,7 @@ from app.dispatch.capabilities import (
 )
 from app.dispatch.controller import CapabilityConflict
 from app.dispatch.models import DeviceLimits
-from app.limits import MAX_POWER_W
+from app.limits import MAX_POWER_W, MAX_USABLE_CAPACITY_WH
 
 
 def _require_admin_read(request: Request) -> dict | None:
@@ -99,7 +99,8 @@ def _misplaced_evidence(name: CapabilityName, body: "CapabilityUpdate") -> list[
     return sorted(
         field_name
         for field_name in body.model_fields_set & _GOVERNED_BY.keys()
-        if _GOVERNED_BY[field_name] is not name and getattr(body, field_name) is not None
+        if _GOVERNED_BY[field_name] is not name
+        and getattr(body, field_name) is not None
     )
 
 
@@ -117,7 +118,8 @@ def _dispatch_or_503(request: Request):
 
 
 def _conflict(
-    exc: CapabilityConflict, detail: str = "dispatch_capability_conflict: an operation of this device is active"
+    exc: CapabilityConflict,
+    detail: str = "dispatch_capability_conflict: an operation of this device is active",
 ) -> HTTPException:
     return HTTPException(
         409,
@@ -125,10 +127,15 @@ def _conflict(
     )
 
 
-_NON_NULL_UPDATE_FIELDS = frozenset({
-    "battery_discharge_positive", "grid_import_positive", "write_frame_layout_verified",
-    "apply_sequence_verified", "soc_target_unit",
-})
+_NON_NULL_UPDATE_FIELDS = frozenset(
+    {
+        "battery_discharge_positive",
+        "grid_import_positive",
+        "write_frame_layout_verified",
+        "apply_sequence_verified",
+        "soc_target_unit",
+    }
+)
 
 
 class CapabilityUpdate(BaseModel):
@@ -141,7 +148,8 @@ class CapabilityUpdate(BaseModel):
         # default that must read as "omitted", so a GET body can be edited and sent back.
         if isinstance(data, dict):
             return {
-                key: value for key, value in data.items()
+                key: value
+                for key, value in data.items()
                 if value is not None or key not in _NON_NULL_UPDATE_FIELDS
             }
         return data
@@ -150,15 +158,21 @@ class CapabilityUpdate(BaseModel):
     battery_discharge_positive: bool = True
     grid_import_positive: bool = True
     soc_strategy_external_code: int | None = Field(None, ge=0, le=SOC_STRATEGY_CODE_MAX)
-    enum_byte_width: int | None = Field(None, ge=REGISTER_BYTE_WIDTH_MIN, le=REGISTER_BYTE_WIDTH_MAX)
-    bool_byte_width: int | None = Field(None, ge=REGISTER_BYTE_WIDTH_MIN, le=REGISTER_BYTE_WIDTH_MAX)
+    enum_byte_width: int | None = Field(
+        None, ge=REGISTER_BYTE_WIDTH_MIN, le=REGISTER_BYTE_WIDTH_MAX
+    )
+    bool_byte_width: int | None = Field(
+        None, ge=REGISTER_BYTE_WIDTH_MIN, le=REGISTER_BYTE_WIDTH_MAX
+    )
     write_frame_layout_verified: bool = False
     apply_sequence_verified: bool = False
     sequence_order_relevant: bool | None = None
     export_limit_zero_blocks_export: bool | None = None
     soc_target_unit: Literal["ratio", "percent"] = "ratio"
     volatile: bool | None = None
-    refresh_interval_seconds: float | None = Field(None, ge=0, le=REFRESH_INTERVAL_SECONDS_MAX, allow_inf_nan=False)
+    refresh_interval_seconds: float | None = Field(
+        None, ge=0, le=REFRESH_INTERVAL_SECONDS_MAX, allow_inf_nan=False
+    )
     verified_device_model: str | None = Field(None, min_length=1, max_length=128)
     verified_firmware: str | None = Field(None, min_length=1, max_length=64)
     note: str | None = Field(None, max_length=NOTE_MAX_LENGTH)
@@ -207,36 +221,44 @@ class CapabilityResponse(BaseModel):
         " this field does not govern.",
     )
     enum_byte_width: int | None = Field(
-        default=None, description="WRITE_PATH evidence: byte width of enum register writes (1..4)."
-        " `null` on every other capability."
+        default=None,
+        description="WRITE_PATH evidence: byte width of enum register writes (1..4)."
+        " `null` on every other capability.",
     )
     bool_byte_width: int | None = Field(
-        default=None, description="WRITE_PATH evidence: byte width of bool register writes (1..4)."
-        " `null` on every other capability."
+        default=None,
+        description="WRITE_PATH evidence: byte width of bool register writes (1..4)."
+        " `null` on every other capability.",
     )
     write_frame_layout_verified: bool | None = Field(
-        default=None, description="WRITE_PATH evidence: the write frame layout was verified on hardware."
-        " `null` on every other capability."
+        default=None,
+        description="WRITE_PATH evidence: the write frame layout was verified on hardware."
+        " `null` on every other capability.",
     )
     apply_sequence_verified: bool | None = Field(
-        default=None, description="WRITE_PATH evidence: the apply sequence was verified on hardware."
-        " `null` on every other capability."
+        default=None,
+        description="WRITE_PATH evidence: the apply sequence was verified on hardware."
+        " `null` on every other capability.",
     )
     sequence_order_relevant: bool | None = Field(
-        default=None, description="WRITE_PATH evidence: whether the order of the writes matters."
-        " `null` when unknown or on every other capability."
+        default=None,
+        description="WRITE_PATH evidence: whether the order of the writes matters."
+        " `null` when unknown or on every other capability.",
     )
     export_limit_zero_blocks_export: bool | None = Field(
-        default=None, description="EXPORT_LIMIT evidence: whether a zero export limit stops grid"
-        " export. `null` when unknown or on every other capability."
+        default=None,
+        description="EXPORT_LIMIT evidence: whether a zero export limit stops grid"
+        " export. `null` when unknown or on every other capability.",
     )
     volatile: bool | None = Field(
-        default=None, description="SETPOINT_VOLATILITY evidence: whether the device resets a written"
-        " setpoint on its own. `null` when unknown or on every other capability."
+        default=None,
+        description="SETPOINT_VOLATILITY evidence: whether the device resets a written"
+        " setpoint on its own. `null` when unknown or on every other capability.",
     )
     refresh_interval_seconds: float | None = Field(
-        default=None, description="SETPOINT_VOLATILITY evidence: how often the setpoint must be"
-        " rewritten. `null` when unknown or on every other capability."
+        default=None,
+        description="SETPOINT_VOLATILITY evidence: how often the setpoint must be"
+        " rewritten. `null` when unknown or on every other capability.",
     )
     verified_device_model: str | None
     verified_firmware: str | None
@@ -256,10 +278,14 @@ class CapabilityResponse(BaseModel):
             soc_target_unit=_governed(record, "soc_target_unit"),
             enum_byte_width=_governed(record, "enum_byte_width"),
             bool_byte_width=_governed(record, "bool_byte_width"),
-            write_frame_layout_verified=_governed(record, "write_frame_layout_verified"),
+            write_frame_layout_verified=_governed(
+                record, "write_frame_layout_verified"
+            ),
             apply_sequence_verified=_governed(record, "apply_sequence_verified"),
             sequence_order_relevant=_governed(record, "sequence_order_relevant"),
-            export_limit_zero_blocks_export=_governed(record, "export_limit_zero_blocks_export"),
+            export_limit_zero_blocks_export=_governed(
+                record, "export_limit_zero_blocks_export"
+            ),
             volatile=_governed(record, "volatile"),
             refresh_interval_seconds=_governed(record, "refresh_interval_seconds"),
             verified_device_model=record.verified_device_model,
@@ -289,7 +315,9 @@ class DeviceLimitsUpdate(BaseModel):
     # Operator-supplied usable battery capacity in watt-hours; optional and per-device. Omitted
     # keeps the stored value, explicit null clears it (a device without one fails closed in the
     # Dry-Run plan). Never guessed.
-    usable_capacity_wh: float | None = Field(default=None, gt=0, le=1_000_000, allow_inf_nan=False)
+    usable_capacity_wh: float | None = Field(
+        default=None, gt=0, le=MAX_USABLE_CAPACITY_WH, allow_inf_nan=False
+    )
 
 
 class DeviceLimitsResponse(BaseModel):
@@ -301,19 +329,26 @@ class DeviceLimitsResponse(BaseModel):
 
 
 @router.get("/devices")
-def list_devices(request: Request, admin: Annotated[dict | None, Depends(_require_admin_read)]) -> list[str]:
+def list_devices(
+    request: Request, admin: Annotated[dict | None, Depends(_require_admin_read)]
+) -> list[str]:
     del admin
     return sorted(request.app.state.runtime.devices)
 
 
 @router.get("/devices/{device_id}/capabilities")
 def get_capabilities(
-    request: Request, device_id: str, admin: Annotated[dict | None, Depends(_require_admin_read)]
+    request: Request,
+    device_id: str,
+    admin: Annotated[dict | None, Depends(_require_admin_read)],
 ) -> list[CapabilityResponse]:
     del admin
     _device_or_404(request, device_id)
     dispatch = _dispatch_or_503(request)
-    return [CapabilityResponse.from_domain(record) for record in dispatch.capabilities(device_id)]
+    return [
+        CapabilityResponse.from_domain(record)
+        for record in dispatch.capabilities(device_id)
+    ]
 
 
 @router.put("/devices/{device_id}/capabilities/{name}")
@@ -331,7 +366,9 @@ async def put_capability(
 
     misplaced = _misplaced_evidence(name, body)
     if misplaced:
-        raise HTTPException(422, f"evidence not governed by {name.value}: {', '.join(misplaced)}")
+        raise HTTPException(
+            422, f"evidence not governed by {name.value}: {', '.join(misplaced)}"
+        )
 
     # This PUT replaces the record; it is not a partial update. An omitted field falls through to
     # the CapabilityRecord default, so a previously stored non-default value is RESET, not kept: a
@@ -342,7 +379,9 @@ async def put_capability(
 
     if body.status is CapabilityStatus.VERIFIED:
         if not body.verified_device_model or not body.verified_firmware:
-            raise HTTPException(400, "verified_device_model and verified_firmware are required")
+            raise HTTPException(
+                400, "verified_device_model and verified_firmware are required"
+            )
         try:
             candidate = CapabilityRecord(device_id=device_id, name=name, **evidence)
         except ValueError as exc:
@@ -353,10 +392,13 @@ async def put_capability(
         missing += [
             field_name
             for field_name in EXPLICIT_REQUIRED_FLAGS
-            if field_name in REQUIRED_FOR_VERIFIED[name] and field_name not in body.model_fields_set
+            if field_name in REQUIRED_FOR_VERIFIED[name]
+            and field_name not in body.model_fields_set
         ]
         if missing:
-            raise HTTPException(400, f"missing evidence for {name.value}: {', '.join(missing)}")
+            raise HTTPException(
+                400, f"missing evidence for {name.value}: {', '.join(missing)}"
+            )
 
     now = request.app.state.runtime.clock.now()
     try:
@@ -364,7 +406,9 @@ async def put_capability(
             device_id=device_id,
             name=name,
             verified_at=now if body.status is CapabilityStatus.VERIFIED else None,
-            verified_by=verified_by if body.status is CapabilityStatus.VERIFIED else None,
+            verified_by=(
+                verified_by if body.status is CapabilityStatus.VERIFIED else None
+            ),
             **evidence,
             status=body.status,
         )
@@ -398,16 +442,23 @@ async def copy_from(
     actor = _ADMIN_ACTOR
 
     if device_id == body.source_device_id:
-        raise HTTPException(status_code=400, detail="dispatch_copy_source_equals_target")
+        raise HTTPException(
+            status_code=400, detail="dispatch_copy_source_equals_target"
+        )
 
-    source_records = {record.name: record for record in dispatch.capabilities(body.source_device_id)}
+    source_records = {
+        record.name: record for record in dispatch.capabilities(body.source_device_id)
+    }
     # Server-side provenance: the copy is verified now, not when the source device was.
     now = request.app.state.runtime.clock.now()
     new_records: list[CapabilityRecord] = []
     for name, source in source_records.items():
         if source.status is not CapabilityStatus.VERIFIED:
             continue
-        if source.verified_device_model != body.target_device_model or source.verified_firmware != body.target_firmware:
+        if (
+            source.verified_device_model != body.target_device_model
+            or source.verified_firmware != body.target_firmware
+        ):
             log.warning(
                 "Dispatch capability copy refused: device=%s name=%s source=%s (model/firmware mismatch)",
                 device_id, name.value, body.source_device_id,
@@ -430,7 +481,9 @@ async def copy_from(
     try:
         await dispatch.set_capabilities(device_id, new_records)
     except CapabilityConflict as exc:
-        raise _conflict(exc, f"dispatch_capability_conflict: an operation of {device_id} is active") from exc
+        raise _conflict(
+            exc, f"dispatch_capability_conflict: an operation of {device_id} is active"
+        ) from exc
     for record in new_records:
         log.warning(
             "Dispatch capability copied: device=%s name=%s source=%s model=%s firmware=%s admin=%s",

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 #
-# app/observability/banner.py
+# app/utilities/banner.py
 # Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
 #
 
@@ -15,12 +15,9 @@ import functools
 import os
 import platform
 import sys
-from importlib import metadata
 
 from app import __build__, __version__
 from app.observability.logging_setup import use_colors
-
-DISTRIBUTION = "rct-manager"
 
 _WORDMARK = r"""
           _                                                     
@@ -37,11 +34,13 @@ _RESET = "\033[0m"
 
 @functools.cache
 def resolve_version() -> str:
-    """Installed distribution version, falling back to the packaged constant."""
-    try:
-        return metadata.version(DISTRIBUTION)
-    except metadata.PackageNotFoundError:
-        return __version__
+    """Version from pyproject.toml via app.__version__ — the single source the app runs from.
+
+    The app runs from source (only dependencies are pip-installed, see app/__init__.py), so
+    installed distribution metadata can be a stale frozen value from an earlier editable install.
+    Reading __version__ keeps the banner and the startup log in step with the application footer.
+    """
+    return __version__
 
 
 @functools.cache

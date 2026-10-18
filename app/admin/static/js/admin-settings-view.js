@@ -15,15 +15,18 @@
     return bar;
   }
 
-  // One builder for both renderSettings() and rerenderGroup(), so the Account relabel cannot drift
-  // and a group re-render cannot emit a second <h2>. The Prometheus page does not use this builder;
-  // it renders its master toggle and dependents through renderPrometheusSettings().
+  // One builder for both renderSettings() and rerenderGroup(), so a group re-render cannot emit a
+  // second <h2>. The Prometheus page does not use this builder; it renders its master toggle and
+  // dependents through renderPrometheusSettings().
   function buildGroupBody(group) {
     const body = element('div', 'card-body');
-    body.append(element('h2', 'h5 mb-3', { Account: 'Administrator account' }[group] || group));
-    if (group === 'Account') renderAccount(body);
-    else if (group === 'Inverters') renderDevicesSettings(body);
-    else for (const field of settingFields.filter((item) => item.group === group && Object.hasOwn(settingsDraft, item.key) && settingVisible(item))) body.append(settingControl(field));
+    body.append(element('h2', 'h5 mb-3', group));
+    if (group === 'Inverters') renderDevicesSettings(body);
+    else {
+      for (const field of settingFields.filter((item) => item.group === group && Object.hasOwn(settingsDraft, item.key) && settingVisible(item))) body.append(settingControl(field));
+      // The Change-password action lives at the bottom of the Access card, below its toggles.
+      if (group === 'Access') renderAccount(body);
+    }
     return body;
   }
 
@@ -70,7 +73,7 @@
     const host = $('settings-sections');
     host.replaceChildren();
     const groups = {
-      settings: ['Access', 'Server', 'Network', 'Session', 'Account'],
+      settings: ['Access', 'Server', 'Network', 'Session'],
       dashboard: ['Inverters'],
       inverters: ['Write access'],
       tsdb: ['Export'],
@@ -85,9 +88,12 @@
   }
 
   function renderAccount(body) {
+    // A .setting-row so the Change-password action shares the group card's hairline and row rhythm.
+    const row = element('div', 'setting-row');
     const change = element('a', 'btn btn-outline-secondary', 'Change password');
     change.href = '/change-password';
-    body.append(change);
+    row.append(change);
+    body.append(row);
   }
 
   async function initSettings() {

@@ -22,6 +22,7 @@ from datetime import UTC, date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 from app.admin.store import AdminStore
+from app.admin.store_threads import _inflight, drain_store_threads, store_thread
 from app.clock import Clock, SystemClock
 from app.energy.activity import EnergyActivity
 from app.optimizer.models import SolarForecast
@@ -53,40 +54,11 @@ MAX_IDLE_WAIT = timedelta(hours=1)
 SPOT_STATUS_KEY = "spot_refresh_status"
 SOLAR_STATUS_KEY = "solar_refresh_status"
 _MAX_ERROR_LENGTH = 200
-_DRAIN_TIMEOUT_SECONDS = 10.0
-_inflight: set[asyncio.Future] = set()
-
-
-def _reap(future: asyncio.Future) -> None:
-    _inflight.discard(future)
-    if not future.cancelled():
-        future.exception()  # mark retrieved: a shielded thread may finish after its awaiter was cancelled
-
-
-async def _store_thread(func, *args):
-    """Run a store call in a thread that survives cancellation of the awaiting task.
-
-    The shielded future stays registered until its thread ends, so shutdown can wait for it
-    (see :func:`drain_store_threads`) instead of closing the database underneath it.
-    """
-    future = asyncio.ensure_future(asyncio.to_thread(func, *args))
-    _inflight.add(future)
-    future.add_done_callback(_reap)
-    return await asyncio.shield(future)
-
-
-async def drain_store_threads(timeout: float = _DRAIN_TIMEOUT_SECONDS) -> None:
-    """Wait for store threads started by the refresh loops; bounded so a hung disk cannot block shutdown."""
-    pending = {future for future in _inflight if not future.done()}
-    if not pending:
-        return
-    _, still_running = await asyncio.wait(pending, timeout=timeout)
-    if still_running:
-        log.warning(
-            "%d forecast store operation(s) still running after %.0fs at shutdown",
-            len(still_running),
-            timeout,
-        )
+# The cancellation-safe store-thread mechanism now lives in the neutral app.admin.store_threads
+# module and is shared by every background service that writes the store. This alias keeps the
+# existing in-module callers (and importers that already reach _store_thread here) working while the
+# single _inflight registry and drain_store_threads stay the ones the neutral module owns.
+_store_thread = store_thread
 
 
 def record_refresh_status(

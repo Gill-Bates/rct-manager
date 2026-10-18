@@ -229,3 +229,135 @@ globalThis.__api = { renderAddWidgetList };`;
   assert.equal(after.textContent, 'Remove');
   assert.equal(doc.activeElement, after, 'focus moves to the re-rendered button of the same widget');
 });
+
+// --- Auto-placement when adding a hidden widget --------------------------------------------------
+
+// A faithful stand-in for the vendored GridStack 14.0.0 engine, limited to what
+// toggleWidgetVisibility touches. autoPosition mirrors the engine's findEmptyPosition: scan cells
+// row by row, left to right, and take the first where the w x h box hits no placed node (12 cols).
+function fakeGrid() {
+  const COLUMNS = 12;
+  const nodes = new Map(); // el -> { x, y, w, h }
+  const intercepts = (a, b) => a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
+  const firstFree = (w, h) => {
+    for (let r = 0; ; r += 1) {
+      const x = r % COLUMNS;
+      const y = Math.floor(r / COLUMNS);
+      if (x + w > COLUMNS) continue;
+      const box = { x, y, w, h };
+      if (![...nodes.values()].some((n) => intercepts(box, n))) return { x, y };
+    }
+  };
+  return {
+    nodes,
+    batchUpdate() {},
+    makeWidget(el, opts) {
+      const pos = opts.autoPosition ? firstFree(opts.w, opts.h) : { x: opts.x, y: opts.y };
+      const node = { x: pos.x, y: pos.y, w: opts.w, h: opts.h };
+      el.gridstackNode = node;
+      nodes.set(el, node);
+      return el;
+    },
+    removeWidget(el) {
+      nodes.delete(el);
+      el.gridstackNode = null;
+    },
+    update() {},
+  };
+}
+
+// Run the shipped toggleWidgetVisibility against the fake grid. `visibleIds` are the widgets already
+// shown (and thus occupying cells) before the toggle; they are placed in the grid and marked as
+// genuine positions, exactly as applyLayout would seed them from a saved layout.
+function toggleHarness(visibleIds) {
+  const start = DASHBOARD_SOURCE.indexOf('  function toggleWidgetVisibility(id, visible) {');
+  const end = DASHBOARD_SOURCE.indexOf('  function renderAddWidgetList() {', start);
+  assert.ok(start >= 0 && end > start, 'toggleWidgetVisibility must remain discoverable');
+
+  const elements = new Map(registry.map((def) => [def.id, { dataset: { widgetId: def.id }, classList: { add() {}, remove() {} } }]));
+  const grid = fakeGrid();
+  const widgetState = new Map();
+  const placedIds = new Set();
+  const defFor = (id) => registry.find((def) => def.id === id);
+  for (const def of registry) {
+    const visible = visibleIds.includes(def.id);
+    widgetState.set(def.id, { id: def.id, x: def.defaultX, y: def.defaultY, w: def.defaultSize.w, h: def.defaultSize.h, visible });
+    if (visible) {
+      placedIds.add(def.id);
+      grid.makeWidget(elements.get(def.id), { x: def.defaultX, y: def.defaultY, w: def.defaultSize.w, h: def.defaultSize.h });
+    }
+  }
+
+  const header = `
+  const DEFAULT_LAYOUT = ${JSON.stringify([...widgetState.values()])};
+  const grid = __grid, widgetState = __widgetState, placedIds = __placedIds;
+  const widgetElement = (id) => __elements.get(id);
+  const scheduleFit = () => {};
+  const renderAddWidgetList = () => {};
+`;
+  const source = `${header}
+${DASHBOARD_SOURCE.slice(start, end)}
+globalThis.__toggle = toggleWidgetVisibility;`;
+  const context = {
+    window: {}, __grid: grid, __widgetState: widgetState, __placedIds: placedIds, __elements: elements,
+  };
+  context.globalThis = context;
+  vm.runInNewContext(source, context);
+  return { toggle: context.__toggle, grid, widgetState, placedIds, defFor };
+}
+
+// The six factory KPI tiles (y=0) plus the full-width inverter overview (y=2, h=8) occupy rows 0-9.
+const FACTORY_VISIBLE = ['pv-power', 'grid-power', 'house-power', 'battery-soc', 'tsdb-status', 'metric-count', 'devices'];
+
+test('adding a hidden w=6/h=4 widget lands in the first free area, not its registry defaultY', () => {
+  // Requirements 1 and 2: battery-degradation ships defaultY:13, but with the factory block
+  // occupying rows 0-9 the earliest free 6x4 cell is (0,10) - directly below the inverter overview.
+  const h = toggleHarness(FACTORY_VISIBLE);
+  assert.equal(h.defFor('battery-degradation').defaultY, 13, 'registry default is still the far-off row');
+
+  h.toggle('battery-degradation', true);
+
+  const node = [...h.grid.nodes.values()].find((n) => n.w === 6 && n.h === 4);
+  assert.deepEqual({ x: node.x, y: node.y }, { x: 0, y: 10 }, 'placed in the first free 6x4 cell');
+  assert.notEqual(node.y, 13, 'does not stay on the registry defaultY while rows above are free');
+});
+
+test('the auto-placed position is written back into widgetState so Done persists it', () => {
+  // Requirement 5: after auto-placement the actually-chosen x/y must be the saved state, not the
+  // stale factory placeholder (0,13).
+  const h = toggleHarness(FACTORY_VISIBLE);
+  h.toggle('battery-degradation', true);
+
+  const state = h.widgetState.get('battery-degradation');
+  assert.deepEqual({ x: state.x, y: state.y, visible: state.visible }, { x: 0, y: 10, visible: true });
+});
+
+test('remove then re-add of a placed widget reuses its position, no auto-placement', () => {
+  // Requirement 4: a widget with a genuine user position keeps it across remove -> add; the
+  // reused cell is NOT recomputed from the current free space.
+  const h = toggleHarness([...FACTORY_VISIBLE, 'spot-price-curve']);
+  // Give spot-price-curve a user position that is NOT where auto-placement would put it.
+  h.widgetState.set('spot-price-curve', { id: 'spot-price-curve', x: 6, y: 20, w: 6, h: 4, visible: true });
+
+  h.toggle('spot-price-curve', false);
+  assert.equal(h.widgetState.get('spot-price-curve').visible, false);
+  assert.ok(h.placedIds.has('spot-price-curve'), 'a removed widget keeps its genuine-position flag');
+
+  h.toggle('spot-price-curve', true);
+  const state = h.widgetState.get('spot-price-curve');
+  assert.deepEqual({ x: state.x, y: state.y }, { x: 6, y: 20 }, 'saved user position is reused verbatim');
+  const node = [...h.grid.nodes.values()].find((n) => n.w === 6 && n.h === 4 && n.y === 20);
+  assert.ok(node, 'the widget is re-added at its saved cell');
+});
+
+test('a second never-placed widget stacks below the first auto-placed one', () => {
+  // The first free cell is recomputed after each add, so two opt-in charts do not collide.
+  const h = toggleHarness(FACTORY_VISIBLE);
+  h.toggle('battery-degradation', true); // -> (0,10)
+  h.toggle('pv-forecast-curve', true);   // 6x4; (0,10) is now taken, next free 6-wide cell is (6,10)
+
+  const first = h.widgetState.get('battery-degradation');
+  const second = h.widgetState.get('pv-forecast-curve');
+  assert.deepEqual({ x: first.x, y: first.y }, { x: 0, y: 10 });
+  assert.deepEqual({ x: second.x, y: second.y }, { x: 6, y: 10 });
+});

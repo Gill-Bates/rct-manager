@@ -23,6 +23,7 @@ from datetime import datetime, timedelta
 from typing import Protocol
 
 from app.admin.store import AdminStore
+from app.admin.store_threads import store_thread
 from app.clock import Clock
 from app.errors import DeviceApiError
 
@@ -77,12 +78,12 @@ class BatteryCommissioningService:
             if not serial:
                 continue  # the serial is the identity; there is no device_id fallback
             if (device_id, serial) not in self._attached:
-                await asyncio.to_thread(
+                await store_thread(
                     self._store.attach_inverter_serial, device_id, serial
                 )
                 self._attached.add((device_id, serial))
             if (
-                await asyncio.to_thread(self._store.get_inverter_commissioning, serial)
+                await store_thread(self._store.get_inverter_commissioning, serial)
                 is not None
             ):
                 continue
@@ -122,7 +123,7 @@ class BatteryCommissioningService:
                 device_id,
             )
             return False
-        await asyncio.to_thread(
+        await store_thread(
             self._store.set_inverter_commissioning, serial, earliest, "logger_derived"
         )
         self._next_try.pop(serial, None)

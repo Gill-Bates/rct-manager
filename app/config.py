@@ -32,7 +32,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from app.errors import ConfigError
 from app.export.endpoint import Endpoint, resolve_endpoint
 from app.hostnames import strip_ipv6_brackets
-from app.limits import MAX_POWER_W
+from app.limits import MAX_POWER_W, MAX_USABLE_CAPACITY_WH
 from app.weather.geocoding import GeocodingProvider
 
 log = logging.getLogger(__name__)
@@ -143,15 +143,16 @@ class DeviceEntry(BaseModel):
     @field_validator("host")
     @classmethod
     def _check_host(cls, value: str) -> str:
-        # Brackets are URL syntax for an IPv6 literal, not part of the socket host; strip them so
-        # text and structured/admin config agree on one canonical value.
+        # Brackets are URL syntax for an IPv6 literal, not part of the socket host; strip_ipv6_brackets
+        # also trims surrounding whitespace (its documented contract), so text and structured/admin
+        # config agree on one canonical value. Any whitespace that remains is internal and rejected.
         value = strip_ipv6_brackets(value)
         try:
             value = str(ip_address(value))
         except ValueError:
             value = value.lower()
         if not value or any(c.isspace() for c in value):
-            raise ValueError("host must not be empty or contain whitespace")
+            raise ValueError("host must not be empty or contain internal whitespace")
         return value
 
     @property
@@ -434,7 +435,9 @@ class Settings(BaseSettings):
     # capacities. This global survives ONLY as a one-time startup seed for a device that has no
     # per-device capacity yet (see _seed_limits); the per-device value is authoritative from then on
     # and a device with neither still fails closed. Do not rely on it for multi-device installs.
-    dispatch_usable_battery_capacity_wh: float | None = Field(None, gt=0, le=1_000_000)
+    dispatch_usable_battery_capacity_wh: float | None = Field(
+        None, gt=0, le=MAX_USABLE_CAPACITY_WH
+    )
     dispatch_min_soc: float = Field(5.0, ge=0, le=100)
     dispatch_max_soc: float = Field(95.0, ge=0, le=100)
     dispatch_grid_import_reserve_w: float = Field(100.0, ge=0, le=500)
@@ -485,7 +488,7 @@ class Settings(BaseSettings):
     cheap_percentile: float = Field(25.0, ge=0, le=100)
     expensive_percentile: float = Field(75.0, ge=0, le=100)
     baseline_household_load_w: float = Field(400.0, ge=0, le=50_000)
-    battery_usable_capacity_wh: float = Field(10_000.0, gt=0, le=1_000_000)
+    battery_usable_capacity_wh: float = Field(10_000.0, gt=0, le=MAX_USABLE_CAPACITY_WH)
     # Automatic hardware dispatch gate: default OFF. Must never be enabled without a separate
     # release and the full real-device verification checklist.
     enable_automatic_dispatch: bool = False

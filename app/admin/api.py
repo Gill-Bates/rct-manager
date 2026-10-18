@@ -1749,7 +1749,8 @@ def delete_token(token_id: str, request: Request) -> dict:
 
 
 # Server-side allowlist of widget ids the browser may place on the dashboard; the layout is admin-UI
-# config (not device configuration), so it is stored under its own key, never through PUT /settings.
+# config (not device configuration), persisted in its own dedicated dashboard_layout table, never
+# through PUT /settings.
 _DASHBOARD_WIDGETS = frozenset(
     {
         "device-count",
@@ -1776,7 +1777,6 @@ _DASHBOARD_WIDGETS = frozenset(
         "battery-degradation",
     }
 )
-_DASHBOARD_LAYOUT_KEY = "dashboard_layout"
 # The dashboard grid's vertical bound in rows, mirroring MAX_Y in dashboard.js. A widget must fit
 # within it (y + h <= limit): a layout that cannot be resolved below this bound is rejected here,
 # exactly as the client's overlap resolver refuses to push a box past it.
@@ -1823,7 +1823,7 @@ def _validate_dashboard_layout(body: DashboardLayout) -> None:
 @router.get("/dashboard-layout")
 def get_dashboard_layout(request: Request) -> dict:
     require_admin(request)
-    stored = _store(request).get(_DASHBOARD_LAYOUT_KEY)
+    stored = _store(request).get_dashboard_layout()
     return {"layout": stored}
 
 
@@ -1832,12 +1832,12 @@ def put_dashboard_layout(body: DashboardLayout, request: Request) -> dict:
     require_admin(request, mutation=True)
     _validate_dashboard_layout(body)
     layout = body.model_dump()
-    _store(request).put(_DASHBOARD_LAYOUT_KEY, layout)
+    _store(request).replace_dashboard_layout(layout)
     return {"layout": layout}
 
 
 @router.delete("/dashboard-layout")
 def delete_dashboard_layout(request: Request) -> dict:
     require_admin(request, mutation=True)
-    _store(request).delete(_DASHBOARD_LAYOUT_KEY)
+    _store(request).clear_dashboard_layout()
     return {"layout": None}

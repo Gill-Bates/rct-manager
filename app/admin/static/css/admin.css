@@ -2335,10 +2335,11 @@ body {
     font-weight: 600;
 }
 
-/* Cards in the settings grid use a tighter row rhythm, so the TSDB page (cards, console and Apply bar)
-   fits a 1536x864 viewport without touching the card gap token. */
+/* Settings-grid cards give each option clear breathing room; the .setting-row hairline
+   (border-top: var(--rct-line), dropped on :first-of-type) delimits one option from the next. Still
+   compact enough that the TSDB page (cards, console and Apply bar) fits a 1536x864 viewport. */
 .settings-grid .setting-row {
-    padding: .35rem 0;
+    padding: .7rem 0;
 }
 
 .settings-grid>.card>.card-body {

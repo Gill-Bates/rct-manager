@@ -35,10 +35,16 @@ ADMIN_DIR = Path(__file__).resolve().parent.parent / "app" / "admin"
 
 def _admin_js() -> str:
     base = (ADMIN_DIR / "templates/base.html").read_text(encoding="utf-8")
-    names = re.findall(r'<script src="/admin/static/js/(admin(?:-[\w-]+)?\.js)" defer></script>', base)
+    names = re.findall(
+        r'<script src="/admin/static/js/(admin(?:-[\w-]+)?\.js)" defer></script>', base
+    )
     assert names[-1] == "admin.js"
-    assert set(names) == {path.name for path in (ADMIN_DIR / "static/js").glob("admin-*.js")} | {"admin.js"}
-    return "\n".join((ADMIN_DIR / "static/js" / name).read_text(encoding="utf-8") for name in names)
+    assert set(names) == {
+        path.name for path in (ADMIN_DIR / "static/js").glob("admin-*.js")
+    } | {"admin.js"}
+    return "\n".join(
+        (ADMIN_DIR / "static/js" / name).read_text(encoding="utf-8") for name in names
+    )
 
 
 TEMPLATES = ADMIN_DIR / "templates"
@@ -50,11 +56,17 @@ def test_energy_power_inputs_match_the_server_limit() -> None:
         match = re.search(rf"const {field} = numberInput\(0\.001, (\d+), 0\.001\)", js)
         assert match is not None
         assert int(match[1]) * 1000 == MAX_POWER_W
-    bounds = {type(item).__name__: item for item in DeviceLimitsUpdate.model_fields["max_charge_power_w"].metadata}
+    bounds = {
+        type(item).__name__: item
+        for item in DeviceLimitsUpdate.model_fields["max_charge_power_w"].metadata
+    }
     assert bounds["Le"].le == MAX_POWER_W
 
 
-@pytest.mark.parametrize("key", ["metrics_rate_limit_requests", "metrics_rate_limit_window_seconds", "bind_port"])
+@pytest.mark.parametrize(
+    "key",
+    ["metrics_rate_limit_requests", "metrics_rate_limit_window_seconds", "bind_port"],
+)
 def test_settings_numeric_inputs_match_server_bounds(key: str) -> None:
     js = (ADMIN_DIR / "static/js/admin-settings.js").read_text(encoding="utf-8")
     match = re.search(rf"\{{ key: '{key}'[^\n]*min: (\d+), max: (\d+)", js)
@@ -90,14 +102,22 @@ def test_device_network_id_bound_matches_server() -> None:
 def test_settings_secret_keys_match_server() -> None:
     js = (ADMIN_DIR / "static/js/admin-settings.js").read_text(encoding="utf-8")
     match = re.search(r"const SECRET_KEYS = new Set\(\[([^\]]*)\]\);", js)
-    assert match is not None and frozenset(re.findall(r"'([^']+)'", match[1])) == _SECRET_EDITABLE
+    assert (
+        match is not None
+        and frozenset(re.findall(r"'([^']+)'", match[1])) == _SECRET_EDITABLE
+    )
 
 
 # Values that pass every other export rule, so a rejection can only come from a missing field.
 _EXPORT_VALUES: dict[str, object] = {
-    "influxdb_hostname": "https://db.example", "influxdb_organization": "org", "influxdb_bucket": "bucket",
-    "influxdb_token": "secret-token", "questdb_hostname": "localhost", "questdb_raw_retention_days": 3,
-    "questdb_username": "user", "questdb_password": "secret",
+    "influxdb_hostname": "https://db.example",
+    "influxdb_organization": "org",
+    "influxdb_bucket": "bucket",
+    "influxdb_token": "secret-token",
+    "questdb_hostname": "localhost",
+    "questdb_raw_retention_days": 3,
+    "questdb_username": "user",
+    "questdb_password": "secret",
 }
 
 
@@ -107,13 +127,31 @@ def _export_js_lists(pattern: str, js: str) -> list[list[str]]:
     return [re.findall(r"'([^']+)'", group) for group in match.groups()]
 
 
-@pytest.mark.parametrize(("db_type", "downsampling", "pattern", "index"), [
-    ("influxdb_v2", "off", r"if \(type === 'influxdb_v2'\) return \[([^\]]*)\];", 0),
-    ("questdb", "manual", r"=== 'manual'\s*\?\s*\[([^\]]*)\]\s*:\s*\[([^\]]*)\];", 0),
-    ("questdb", "off", r"=== 'manual'\s*\?\s*\[([^\]]*)\]\s*:\s*\[([^\]]*)\];", 1),
-])
+@pytest.mark.parametrize(
+    ("db_type", "downsampling", "pattern", "index"),
+    [
+        (
+            "influxdb_v2",
+            "off",
+            r"if \(type === 'influxdb_v2'\) return \[([^\]]*)\];",
+            0,
+        ),
+        (
+            "questdb",
+            "manual",
+            r"=== 'manual'\s*\?\s*\[([^\]]*)\]\s*:\s*\[([^\]]*)\];",
+            0,
+        ),
+        ("questdb", "off", r"=== 'manual'\s*\?\s*\[([^\]]*)\]\s*:\s*\[([^\]]*)\];", 1),
+    ],
+)
 def test_export_required_keys_match_server(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, db_type: str, downsampling: str, pattern: str, index: int,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    db_type: str,
+    downsampling: str,
+    pattern: str,
+    index: int,
 ) -> None:
     # Both directions: the client list alone is accepted, and dropping any one entry is rejected.
     monkeypatch.chdir(tmp_path)
@@ -126,19 +164,29 @@ def test_export_required_keys_match_server(
     Settings(**base, **{key: _EXPORT_VALUES[key] for key in keys})
     for dropped in keys:
         with pytest.raises(ValidationError):
-            Settings(**base, **{key: _EXPORT_VALUES[key] for key in keys if key != dropped})
+            Settings(
+                **base, **{key: _EXPORT_VALUES[key] for key in keys if key != dropped}
+            )
 
 
-def test_export_paired_fields_match_server(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_export_paired_fields_match_server(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     monkeypatch.chdir(tmp_path)
     js = (ADMIN_DIR / "static/js/admin-settings-export.js").read_text(encoding="utf-8")
     match = re.search(r"const EXPORT_PAIRED_FIELDS = \{ questdb: \[(.*)\] \};", js)
     assert match is not None
     pairs = re.findall(r"\['([^']+)', '([^']+)'\]", match[1])
     assert pairs
-    base = {"devices": "wr1=10.0.0.5:8899", "db_type": "questdb", "questdb_hostname": "localhost"}
+    base = {
+        "devices": "wr1=10.0.0.5:8899",
+        "db_type": "questdb",
+        "questdb_hostname": "localhost",
+    }
     for first, second in pairs:
-        Settings(**base, **{first: _EXPORT_VALUES[first], second: _EXPORT_VALUES[second]})
+        Settings(
+            **base, **{first: _EXPORT_VALUES[first], second: _EXPORT_VALUES[second]}
+        )
         for alone in (first, second):
             with pytest.raises(ValidationError):
                 Settings(**base, **{alone: _EXPORT_VALUES[alone]})
@@ -147,8 +195,12 @@ def test_export_paired_fields_match_server(monkeypatch: pytest.MonkeyPatch, tmp_
 def test_energy_controls_use_server_mode_and_capability_values() -> None:
     js = (ADMIN_DIR / "static/js/admin-energy-controls.js").read_text(encoding="utf-8")
     modes = js.split("const ENERGY_MODES = [", 1)[1].split("  ];", 1)[0]
-    capabilities = js.split("const ENERGY_REQUIRED_CAPABILITIES = [", 1)[1].split("];", 1)[0]
-    assert set(re.findall(r"\['([^']+)',", modes)) == {mode.value for mode in EnergyMode}
+    capabilities = js.split("const ENERGY_REQUIRED_CAPABILITIES = [", 1)[1].split(
+        "];", 1
+    )[0]
+    assert set(re.findall(r"\['([^']+)',", modes)) == {
+        mode.value for mode in EnergyMode
+    }
     assert set(re.findall(r"'([^']+)'", capabilities)) == {
         CapabilityName.WRITE_PATH.value,
         CapabilityName.BATTERY_POWER_SIGN.value,
@@ -164,7 +216,10 @@ E2E_ADMIN_FLOW = Path(__file__).resolve().parent / "e2e" / "admin_flow.mjs"
 # check covers those files as well, not only the Python module that injects the <link>/<script>.
 API_DIR = Path(__file__).resolve().parent.parent / "app" / "api"
 DOCS_NAV = API_DIR / "docs_nav.py"
-DOCS_NAV_ASSETS = [API_DIR / "docs_static" / "docs-nav.css", API_DIR / "docs_static" / "docs-nav.js"]
+DOCS_NAV_ASSETS = [
+    API_DIR / "docs_static" / "docs-nav.css",
+    API_DIR / "docs_static" / "docs-nav.js",
+]
 
 
 PAGES = ("dashboard", "inverters", "energy", "tsdb", "prometheus", "tokens", "settings")
@@ -174,7 +229,11 @@ def _send_block(js: str, part: str) -> str:
     """The success or the catch half of ``sendSettingsInner()``, the PUT body of a settings save."""
     start = js.index("async function sendSettingsInner(keys)")
     catch = js.index("} catch (error) {", start)
-    return js[start:catch] if part == "success" else js[catch:js.index("} finally {", start)]
+    return (
+        js[start:catch]
+        if part == "success"
+        else js[catch : js.index("} finally {", start)]
+    )
 
 
 @contextlib.asynccontextmanager
@@ -182,18 +241,38 @@ async def _logged_in(tmp_path) -> AsyncIterator[httpx.AsyncClient]:
     """Lifespan-aware admin client: ``app.router.lifespan_context(app)`` runs the real ASGI
     startup/shutdown events, unlike a bare ``ASGITransport``, and the client is always closed
     even on an early assertion failure (mirrors ``tests.api_helpers.running_app()``)."""
-    app = create_app(Settings(_env_file=None, hmac_secret="s" * 48, admin_db_path=tmp_path / "rct.db"))
+    app = create_app(
+        Settings(
+            _env_file=None, hmac_secret="s" * 48, admin_db_path=tmp_path / "rct.db"
+        )
+    )
     password = app.state.first_start_password
     async with (
         app.router.lifespan_context(app),
-        httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver", headers={"Origin": "http://testserver"}) as client,
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://testserver",
+            headers={"Origin": "http://testserver"},
+        ) as client,
     ):
         csrf = (await client.get("/admin/api/session")).json()["csrf_token"]
-        login = await client.post("/admin/api/login", headers={"X-CSRF-Token": csrf},
-                                  json={"username": "admin", "password": password})
-        changed = await client.post("/admin/api/change-password", headers={"X-CSRF-Token": login.json()["csrf_token"]},
-                                    json={"current_password": password, "new_password": "a much stronger password"})
-        await client.post("/admin/api/accept-disclaimer", headers={"X-CSRF-Token": changed.json()["csrf_token"]})
+        login = await client.post(
+            "/admin/api/login",
+            headers={"X-CSRF-Token": csrf},
+            json={"username": "admin", "password": password},
+        )
+        changed = await client.post(
+            "/admin/api/change-password",
+            headers={"X-CSRF-Token": login.json()["csrf_token"]},
+            json={
+                "current_password": password,
+                "new_password": "a much stronger password",
+            },
+        )
+        await client.post(
+            "/admin/api/accept-disclaimer",
+            headers={"X-CSRF-Token": changed.json()["csrf_token"]},
+        )
         yield client
 
 
@@ -211,7 +290,10 @@ async def test_pages_render_with_the_new_menu(tmp_path):
         assert 'id="exposed-list"' in (await client.get("/ui/prometheus")).text
         assert 'id="writable-list"' in (await client.get("/ui/inverters")).text
         # Both pages render the same table, search and pager through one shared macro.
-        for html, prefix in (((await client.get("/ui/prometheus")).text, "exposed"), ((await client.get("/ui/inverters")).text, "writable")):
+        for html, prefix in (
+            ((await client.get("/ui/prometheus")).text, "exposed"),
+            ((await client.get("/ui/inverters")).text, "writable"),
+        ):
             for suffix in ("search", "list", "range", "prev", "next"):
                 assert f'id="{prefix}-{suffix}"' in html
             assert "param-table-wrap" in html and 'data-bs-toggle="modal"' in html
@@ -225,34 +307,59 @@ async def test_pages_may_probe_their_own_host_on_another_port_only(tmp_path):
     async with _logged_in(tmp_path) as client:
         policy = (await client.get("/ui/settings")).headers["content-security-policy"]
         connect = next(part for part in policy.split(";") if "connect-src" in part)
-        assert connect.split() == ["connect-src", "'self'", f"{client.base_url.scheme}://{client.base_url.host}:*"]
+        assert connect.split() == [
+            "connect-src",
+            "'self'",
+            f"{client.base_url.scheme}://{client.base_url.host}:*",
+        ]
         assert "default-src 'self'" in policy and "script-src 'self'" in policy
     from types import SimpleNamespace
 
     from app.admin.ui import _page_headers
 
     for host in ("evil.example;script-src *", "a b", "", "::1;x"):
-        hostile = _page_headers(SimpleNamespace(url=SimpleNamespace(hostname=host, scheme="http")))
+        hostile = _page_headers(
+            SimpleNamespace(url=SimpleNamespace(hostname=host, scheme="http"))
+        )
         assert "connect-src 'self';" in hostile["Content-Security-Policy"], host
-    ipv6 = _page_headers(SimpleNamespace(url=SimpleNamespace(hostname="::1", scheme="http")))
+    ipv6 = _page_headers(
+        SimpleNamespace(url=SimpleNamespace(hostname="::1", scheme="http"))
+    )
     assert "connect-src 'self' http://[::1]:*;" in ipv6["Content-Security-Policy"]
 
 
 @pytest.mark.asyncio
-async def test_about_update_check_requires_login_and_renders_release_controls(tmp_path, monkeypatch):
+async def test_about_update_check_requires_login_and_renders_release_controls(
+    tmp_path, monkeypatch
+):
     calls = []
 
     def fake_check(force=False):
         calls.append(force)
-        return {"update_available": True, "current_version": "1.0.0", "latest_version": "1.1.0",
-                "release_url": "https://github.com/Gill-Bates/rct-manager/releases/tag/v1.1.0",
-                "published_at": "2026-10-01T12:00:00Z", "error": None}
+        return {
+            "update_available": True,
+            "current_version": "1.0.0",
+            "latest_version": "1.1.0",
+            "release_url": "https://github.com/Gill-Bates/rct-manager/releases/tag/v1.1.0",
+            "published_at": "2026-10-01T12:00:00Z",
+            "error": None,
+        }
 
     monkeypatch.setattr(updates, "check_for_updates", fake_check)
     # The route binds the imported function when the module loads.
     monkeypatch.setattr("app.admin.api.check_for_updates", fake_check)
-    app = create_app(Settings(_env_file=None, hmac_secret="s" * 48, admin_db_path=tmp_path / "anonymous.db"))
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver", headers={"Origin": "http://testserver"}) as anonymous:
+    app = create_app(
+        Settings(
+            _env_file=None,
+            hmac_secret="s" * 48,
+            admin_db_path=tmp_path / "anonymous.db",
+        )
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://testserver",
+        headers={"Origin": "http://testserver"},
+    ) as anonymous:
         assert (await anonymous.get("/admin/api/check-updates")).status_code == 401
     assert calls == []
 
@@ -262,10 +369,13 @@ async def test_about_update_check_requires_login_and_renders_release_controls(tm
         assert 'id="btn-check-updates"' in page.text
         assert 'id="update-current-version"' in page.text
         assert 'id="update-latest-version"' in page.text
-        assert '/admin/static/js/about.js' in page.text
+        assert "/admin/static/js/about.js" in page.text
         # The changelog is rendered as sanitized Markdown/HTML, not escaped text: the native
         # <details> disclosure must survive and nothing may arrive double-escaped.
-        assert "<details" in page.text and "<summary>Previous versions...</summary>" in page.text
+        assert (
+            "<details" in page.text
+            and "<summary>Previous versions...</summary>" in page.text
+        )
         assert "&lt;details&gt;" not in page.text
         result = await client.get("/admin/api/check-updates")
         assert result.status_code == 200
@@ -283,15 +393,23 @@ def test_frontend_has_no_german_text():
         r"klicken|Wechseln|Pfad|Methode|Beschreibung|Endpunkt|Endpunkte|automatisch|dunkel)\b"
         r"|Design: (?:automatisch|hell|dunkel)"
     )
-    for path in [*ADMIN_DIR.glob("templates/*.html"), *ADMIN_DIR.glob("static/js/*.js"),
-                 *ADMIN_DIR.glob("static/img/*.svg"),
-                 ADMIN_DIR / "static/css/admin.css", ADMIN_DIR / "static/css/about.css",
-                 ADMIN_DIR / "api.py", ADMIN_DIR / "ui.py",
-                 DOCS_NAV, *DOCS_NAV_ASSETS]:
+    for path in [
+        *ADMIN_DIR.glob("templates/*.html"),
+        *ADMIN_DIR.glob("static/js/*.js"),
+        *ADMIN_DIR.glob("static/img/*.svg"),
+        ADMIN_DIR / "static/css/admin.css",
+        ADMIN_DIR / "static/css/about.css",
+        ADMIN_DIR / "api.py",
+        ADMIN_DIR / "ui.py",
+        DOCS_NAV,
+        *DOCS_NAV_ASSETS,
+    ]:
         assert not german.search(path.read_text(encoding="utf-8")), path.name
 
 
-def test_render_changelog_sanitizes_markdown_and_keeps_the_details_disclosure(tmp_path, monkeypatch):
+def test_render_changelog_sanitizes_markdown_and_keeps_the_details_disclosure(
+    tmp_path, monkeypatch
+):
     """The About page renders CHANGELOG.md as sanitized Markdown: the <details>/<summary>
     disclosure and every list item survive, a disallowed tag is stripped, and nothing is
     double-escaped. This is the contract the old line parser broke (it escaped tags and dropped
@@ -306,7 +424,7 @@ def test_render_changelog_sanitizes_markdown_and_keeps_the_details_disclosure(tm
         "<summary>Previous versions...</summary>\n\n"
         "## [1.0.0] - 2026-10-11\n\n"
         "- Initial Release\n"
-        '<script>alert(1)</script>\n',
+        "<script>alert(1)</script>\n",
         encoding="utf-8",
     )
     monkeypatch.setattr(ui, "_CHANGELOG", changelog)
@@ -314,14 +432,18 @@ def test_render_changelog_sanitizes_markdown_and_keeps_the_details_disclosure(tm
 
     assert "<details" in html and "<summary>Previous versions...</summary>" in html
     assert "1.0.1" in html and "1.0.0" in html
-    assert "Initial Release" in html  # the old parser silently dropped this ungrouped item
+    assert (
+        "Initial Release" in html
+    )  # the old parser silently dropped this ungrouped item
     assert "<code>Fix</code>" in html
     # nh3 drops the script tag, and real HTML (not escaped entities) reaches the DOM.
     assert "<script" not in html and "alert(1)" not in html
     assert "&lt;details&gt;" not in html
 
 
-def test_render_changelog_reports_a_safe_fallback_when_the_file_is_missing(tmp_path, monkeypatch):
+def test_render_changelog_reports_a_safe_fallback_when_the_file_is_missing(
+    tmp_path, monkeypatch
+):
     from app.admin import ui
 
     monkeypatch.setattr(ui, "_CHANGELOG", tmp_path / "does-not-exist.md")
@@ -335,18 +457,27 @@ def test_connection_monitor_probes_health_and_the_modal_is_wired_into_every_page
     assert "pingUrl: '/health'" in js and "failThreshold: 3" in js
     assert "response.status === 401" in js and "'/login'" in js
     assert 'src="/admin/static/js/connection.js"' in base
-    modal = re.search(r'<div class="modal fade" id="reconnect-modal"[^>]*>', base).group(0)
+    modal = re.search(
+        r'<div class="modal fade" id="reconnect-modal"[^>]*>', base
+    ).group(0)
     assert 'data-bs-backdrop="static"' in modal and 'data-bs-keyboard="false"' in modal
-    assert 'aria-labelledby="reconnect-title"' in modal and 'id="reconnect-title"' in base
+    assert (
+        'aria-labelledby="reconnect-title"' in modal and 'id="reconnect-title"' in base
+    )
     assert "window.RCTReconnect?.start()" in _admin_js()
 
 
 def test_header_is_sticky_above_content_and_toasts_stay_on_top():
     css = (ADMIN_DIR / "static/css/admin.css").read_text(encoding="utf-8")
-    assert re.search(r"\.admin-navbar\s*\{[^}]*position:\s*sticky;\s*top:\s*0;\s*z-index:\s*1030", css)
+    assert re.search(
+        r"\.admin-navbar\s*\{[^}]*position:\s*sticky;\s*top:\s*0;\s*z-index:\s*1030",
+        css,
+    )
     assert re.search(r"\.mobile-nav\s*\{[^}]*position:\s*sticky;\s*top:\s*4\.1rem", css)
     assert re.search(r"html\s*\{\s*scroll-padding-top", css)
-    assert int(re.search(r"\.toast-region\s*\{[^}]*z-index:\s*(\d+)", css).group(1)) > 1030
+    assert (
+        int(re.search(r"\.toast-region\s*\{[^}]*z-index:\s*(\d+)", css).group(1)) > 1030
+    )
 
 
 def test_device_editor_has_host_port_and_network_id_fields():
@@ -362,26 +493,43 @@ def test_device_editor_has_host_port_and_network_id_fields():
 
 def test_device_duplicate_rule_matches_the_backend_key_and_a_save_adopts_the_server_list():
     js = _admin_js()
-    assert "networkId(other.network_id) === network" in js  # host, port and network id together
+    assert (
+        "networkId(other.network_id) === network" in js
+    )  # host, port and network id together
     assert "Object.assign(device, (result.settings" not in js
     # After a successful save the list is the server state, including newly assigned ids.
-    save_block = js[js.index("async function commitDevices(next)"):js.index("function deviceFailureMessage(")]
-    assert "adoptDevices(structuredClone(settingsCommitted.devices || payload.devices));" in save_block
+    save_block = js[
+        js.index("async function commitDevices(next)") : js.index(
+            "function deviceFailureMessage("
+        )
+    ]
+    assert (
+        "adoptDevices(structuredClone(settingsCommitted.devices || payload.devices));"
+        in save_block
+    )
 
 
 def test_numeric_settings_carry_their_own_bounds():
     js = _admin_js()
     assert "control.min = String(field.min); control.max = String(field.max)" in js
-    assert "min: 1, max: 10000" in js and "min: 1, max: 3600" in js and "min: 1024, max: 65535" in js
+    assert (
+        "min: 1, max: 10000" in js
+        and "min: 1, max: 3600" in js
+        and "min: 1024, max: 65535" in js
+    )
 
 
 def test_tsdb_secret_fields_render_even_though_their_raw_value_is_never_sent_to_the_browser():
     """Regression: _settings_view() exposes only "<key>_configured" for a secret, never the raw
     value, so a field-presence check keyed on settingsDraft[field.key] alone hid the password
-    input next to Username entirely (it has no raw value in settingsDraft until it is edited)."""
+    input next to Username entirely (it has no raw value in settingsDraft until it is edited).
+    """
     js = _admin_js()
     assert "function exportFieldKnown(field)" in js
-    assert "field.type === 'secret' && Object.hasOwn(settingsDraft, `${field.key}_configured`)" in js
+    assert (
+        "field.type === 'secret' && Object.hasOwn(settingsDraft, `${field.key}_configured`)"
+        in js
+    )
     # Both call sites that gate which export fields render/post must use the fixed helper.
     assert js.count("exportFieldKnown(field)") >= 2
     assert "!Object.hasOwn(settingsDraft, field.key)) continue" not in js
@@ -398,14 +546,20 @@ def test_inverters_and_prometheus_share_the_parameter_table_helpers():
     js = _admin_js()
     assert js.count("renderParameterTable(") == 3  # definition and both tables
     assert js.count("parameterActionMenu(") == 3
-    assert "renderParameterTable('writable'" in js and "renderParameterTable('exposed'" in js
+    assert (
+        "renderParameterTable('writable'" in js
+        and "renderParameterTable('exposed'" in js
+    )
     assert js.count("EXPOSED_PAGE_SIZE = 15") == 1
 
 
 def test_navbar_shows_the_short_label_and_an_enlarged_logo():
     base = (ADMIN_DIR / "templates/base.html").read_text(encoding="utf-8")
     css = (ADMIN_DIR / "static/css/admin.css").read_text(encoding="utf-8")
-    assert "<span>Administration</span>" in base and "<span>RCT Administration</span>" not in base
+    assert (
+        "<span>Administration</span>" in base
+        and "<span>RCT Administration</span>" not in base
+    )
     # The browser-tab title keeps the full product name.
     assert "{% block title %}RCT Administration{% endblock %}" in base
     assert re.search(r"\.nav-logo\s*\{[^}]*width:\s*5\.1rem;\s*height:\s*2\.78rem", css)
@@ -416,7 +570,9 @@ def test_navbar_shows_the_short_label_and_an_enlarged_logo():
 def test_settings_grid_stretches_its_cards_on_every_page_including_tsdb():
     css = (ADMIN_DIR / "static/css/admin.css").read_text(encoding="utf-8")
     assert re.search(r"\.settings-grid\s*\{[^}]*align-items:\s*stretch", css)
-    assert re.search(r"\.settings-grid>\.card>\.card-body\s*\{\s*flex:\s*1 1 auto;\s*\}", css)
+    assert re.search(
+        r"\.settings-grid>\.card>\.card-body\s*\{\s*flex:\s*1 1 auto;\s*\}", css
+    )
     assert ".export-grid" not in css
 
 
@@ -428,7 +584,8 @@ def test_admin_card_spacing_uses_one_token_and_sibling_rule():
     assert re.search(
         r"#main-content\s+\.page-heading\s*~\s*:is\(\.card,\s*\.settings-grid,\s*"
         r"\.energy-grid,\s*\.energy-tabs,\s*#export-actions,\s*\.prometheus-dependent-settings:not\(:empty\)\),\s*#main-content\s+\.about-top-row\s*~\s*"
-        r"\.card\s*\{\s*margin-top:\s*var\(--rct-card-gap\);\s*\}", css,
+        r"\.card\s*\{\s*margin-top:\s*var\(--rct-card-gap\);\s*\}",
+        css,
     )
     for selector in ("settings-grid", "energy-grid"):
         rule = re.search(rf"\.{selector}\s*\{{([^}}]*)\}}", css)
@@ -440,13 +597,22 @@ def test_admin_card_spacing_uses_one_token_and_sibling_rule():
     assert "--bs-gutter-y: var(--rct-card-gap);" in about_row.group(1)
 
 
-@pytest.mark.parametrize("page", ("prometheus", "tokens", "inverters", "settings", "tsdb", "energy", "about"))
+@pytest.mark.parametrize(
+    "page", ("prometheus", "tokens", "inverters", "settings", "tsdb", "energy", "about")
+)
 def test_admin_top_level_cards_and_grids_have_no_margin_utilities(page):
     html = (TEMPLATES / f"{page}.html").read_text(encoding="utf-8")
     targets = re.findall(r'<(?:section|details|div)\b[^>]*\bclass="([^"]+)"', html)
-    targets = [classes for classes in targets if set(classes.split()) & {"card", "settings-grid", "energy-grid", "about-top-row"}]
+    targets = [
+        classes
+        for classes in targets
+        if set(classes.split())
+        & {"card", "settings-grid", "energy-grid", "about-top-row"}
+    ]
     assert targets, page
-    assert all(not ({"mt-3", "mt-4"} & set(classes.split())) for classes in targets), page
+    assert all(
+        not ({"mt-3", "mt-4"} & set(classes.split())) for classes in targets
+    ), page
 
 
 def test_prometheus_and_inverters_share_parameter_table_markup():
@@ -456,17 +622,27 @@ def test_prometheus_and_inverters_share_parameter_table_markup():
         assert '{% from "_param_table.html" import param_table %}' in html
         assert re.search(r'<div class="page-heading">', html)
         assert re.search(rf"\{{\{{ param_table\('{prefix}',", html)
-    for shared_class in ("card", "param-card-head", "param-table-wrap", "param-table", "btn-group"):
+    for shared_class in (
+        "card",
+        "param-card-head",
+        "param-table-wrap",
+        "param-table",
+        "btn-group",
+    ):
         assert re.search(rf"\b{shared_class}\b", macro)
     for suffix in ("search", "list", "range", "prev", "next"):
-        assert f'{{{{ prefix }}}}-{suffix}' in macro
+        assert f"{{{{ prefix }}}}-{suffix}" in macro
 
 
 def test_metrics_fields_hide_behind_the_master_toggle():
     js = _admin_js()
     assert "label: 'Enable Metrics Endpoint'" in js
-    for key in ("metrics_require_token", "metrics_trusted_sources",
-                "metrics_rate_limit_requests", "metrics_rate_limit_window_seconds"):
+    for key in (
+        "metrics_require_token",
+        "metrics_trusted_sources",
+        "metrics_rate_limit_requests",
+        "metrics_rate_limit_window_seconds",
+    ):
         row = next(line for line in js.splitlines() if f"key: '{key}'" in line)
         assert "requires: 'enable_metrics_endpoint'" in row, key
     # Only the dependent fields are rebuilt, and the toggle keeps the focus it was operated with.
@@ -481,7 +657,11 @@ def test_token_table_shows_masked_suffix_between_permission_and_created():
     html = (ADMIN_DIR / "templates/tokens.html").read_text(encoding="utf-8")
     js = _admin_js()
     headers = re.findall(r'<th scope="col">([^<]+)</th>', html)
-    assert headers.index("Token") == headers.index("Permission") + 1 == headers.index("Created") - 1
+    assert (
+        headers.index("Token")
+        == headers.index("Permission") + 1
+        == headers.index("Created") - 1
+    )
     # The masked suffix renders as a boxed monospace code element; old tokens fall back to a placeholder.
     assert "element('code', 'token-suffix', `…${token.suffix}`)" in js
     assert "cell.append('—')" in js
@@ -492,7 +672,12 @@ def test_token_expiry_uses_presets_with_a_ninety_day_default():
     js = _admin_js()
     assert 'type="date"' not in html
     assert '<label for="token-expires" class="form-label">Expiry</label>' in html
-    for value, text in (("30d", "30 days"), ("90d", "90 days"), ("1y", "1 year"), ("never", "Never expires")):
+    for value, text in (
+        ("30d", "30 days"),
+        ("90d", "90 days"),
+        ("1y", "1 year"),
+        ("never", "Never expires"),
+    ):
         assert f'value="{value}"' in html and f">{text}<" in html
     assert 'value="90d" selected' in html
     assert "const EXPIRY_DEFAULT = '90d';" in js
@@ -516,23 +701,31 @@ def test_token_copy_has_a_browser_regression_check_for_the_http_modal_fallback()
 
 def test_parameter_action_buttons_have_touch_target_size():
     css = (ADMIN_DIR / "static/css/admin.css").read_text(encoding="utf-8")
-    assert re.search(r"\.parameter-actions\s*\.btn\s*\{\s*min-width:\s*2\.8rem;\s*min-height:\s*2\.8rem;\s*\}", css)
+    assert re.search(
+        r"\.parameter-actions\s*\.btn\s*\{\s*min-width:\s*2\.8rem;\s*min-height:\s*2\.8rem;\s*\}",
+        css,
+    )
 
 
 def test_dashboard_polling_is_sequential_bounded_and_incremental():
     js = _admin_js()
     start = js.index("function syncChildren(")
-    block = js[start:js.index("function formatDate(", start)]
+    block = js[start : js.index("function formatDate(", start)]
     # Recursive timeout instead of a fixed interval, with an in-flight guard and a stale-response guard.
-    assert "setInterval" not in js[js.index("async function bootstrapAdminPage()"):]
-    assert "setTimeout(" in block and "if (automatic && dashboardController) return 'skipped';" in block
+    assert "setInterval" not in js[js.index("async function bootstrapAdminPage()") :]
+    assert (
+        "setTimeout(" in block
+        and "if (automatic && dashboardController) return 'skipped';" in block
+    )
     assert "generation !== dashboardGeneration" in block
     # Fetch timeout, immediate refresh on tab visibility, and capped backoff with jitter.
     assert "DASHBOARD_TIMEOUT_MS = 8000" in block and "controller.abort(" in block
     assert "addEventListener('visibilitychange'" in block and "document.hidden" in block
     assert "DASHBOARD_MAX_INTERVAL_MS = 60000" in block and "Math.random()" in block
     # Parameters are loaded once and after device changes, never from the polling function.
-    assert "api('parameters')" not in block[block.index("async function loadDashboard("):]
+    assert (
+        "api('parameters')" not in block[block.index("async function loadDashboard(") :]
+    )
     assert "loadMetricCount()" in js
     # Cards are patched per device id; the list is never rebuilt wholesale.
     assert "list.replaceChildren" not in block and "dashboardCards.get(key)" in block
@@ -542,33 +735,49 @@ def test_dashboard_polling_is_sequential_bounded_and_incremental():
 def test_setting_control_and_export_control_share_the_field_builder():
     """Consolidation (behavior-preserving): both functions build their label/control/help markup
     through one shared helper instead of duplicating the select/toggle/number/text/list/secret
-    construction, so the number-range validation added for review item 3/4 lives in one place."""
+    construction, so the number-range validation added for review item 3/4 lives in one place.
+    """
     js = _admin_js()
     assert "function buildFieldControl(field, value)" in js
-    assert "const { wrap, control } = buildFieldControl(field, settingsDraft[field.key]);" in js
+    assert (
+        "const { wrap, control } = buildFieldControl(field, settingsDraft[field.key]);"
+        in js
+    )
     assert js.count("buildFieldControl(field, settingsDraft[field.key])") == 2
     assert "function numberFieldInvalid(control, field)" in js
     # Both number branches call the shared validator; neither writes an unguarded Number(control.value).
     assert js.count("numberFieldInvalid(control, field)") >= 2
     assert "Number(control.value) === 0" not in js
-    assert "(field.nullable ? null : field.min)" not in js  # old silent-fallback for an empty value
+    assert (
+        "(field.nullable ? null : field.min)" not in js
+    )  # old silent-fallback for an empty value
 
 
 def test_export_secret_is_cleared_from_the_draft_after_a_successful_save():
     """Review item 1 (HIGH): a saved secret must not stay in settingsDraft, or it keeps being
     resent on every later unrelated export-settings change. Finding 5: the clearing is gated by a
-    per-secret revision, so an older response cannot clear a value typed during the request."""
+    per-secret revision, so an older response cannot clear a value typed during the request.
+    """
     js = _admin_js()
     success_block = _send_block(js, "success")
     assert "for (const key of secretKeysIn(payload)) {" in success_block
-    assert "if (secretRevision.get(key) !== sendRevisions.get(key)) continue;" in success_block
+    assert (
+        "if (secretRevision.get(key) !== sendRevisions.get(key)) continue;"
+        in success_block
+    )
     assert "settingsDraft[key] = '';" in success_block
     assert "settingsDraft[`${key}_configured`] = true;" in success_block
     # The snapshot is taken by the sender and lives exactly one request.
-    assert "for (const key of keys) if (isSecretKey(key)) sendRevisions.set(key, secretRevision.get(key) || 0);" in js
+    assert (
+        "for (const key of keys) if (isSecretKey(key)) sendRevisions.set(key, secretRevision.get(key) || 0);"
+        in js
+    )
     assert "sendRevisions.clear();" in js
     # _configured only for a secret the server actually stored (an empty one is dropped, api.py:435).
-    assert "return Object.keys(payload).filter((key) => isSecretKey(key) && payload[key]);" in js
+    assert (
+        "return Object.keys(payload).filter((key) => isSecretKey(key) && payload[key]);"
+        in js
+    )
 
 
 def test_export_group_is_withheld_as_a_group_and_revalidated_at_send_time():
@@ -576,19 +785,40 @@ def test_export_group_is_withheld_as_a_group_and_revalidated_at_send_time():
     is re-checked immediately before sending."""
     js = _admin_js()
     assert "let pendingExportGroup = false;" in js
-    queue = js[js.index("function queueExportSettings()"):js.index("function refreshExportBar()")]
+    queue = js[
+        js.index("function queueExportSettings()") : js.index(
+            "function refreshExportBar()"
+        )
+    ]
     assert "setSectionState('export', 'incomplete', missingExportHint(type));" in queue
-    assert "scheduleSettingsFlush" not in queue and "flushSettings" not in queue  # no autosave for the export form
-    apply = js[js.index("async function applyExport()"):js.index("function appendTsdbConsoleLine(")]
+    assert (
+        "scheduleSettingsFlush" not in queue and "flushSettings" not in queue
+    )  # no autosave for the export form
+    apply = js[
+        js.index("async function applyExport()") : js.index(
+            "function appendTsdbConsoleLine("
+        )
+    ]
     assert "if (!exportReady(type)) { queueExportSettings(); return; }" in apply
-    assert "pendingExportGroup = true;" in apply and "flushSettings({ sections: ['export'] })" in apply
+    assert (
+        "pendingExportGroup = true;" in apply
+        and "flushSettings({ sections: ['export'] })" in apply
+    )
     # The debounced autosave only covers the general settings, never the export group.
     assert "flushSettings({ sections: ['general'] })" in js
     # The send-time re-check sits in the synchronous wrapper, before any key is computed.
-    send = js[js.index("function sendSettings(sections = null)"):js.index("function secretKeysIn(")]
+    send = js[
+        js.index("function sendSettings(sections = null)") : js.index(
+            "function secretKeysIn("
+        )
+    ]
     assert "if (pendingExportGroup && !exportReady(type)) {" in send
-    assert "devices" not in send  # the device list never goes through the autosave queue
-    assert send.index("if (pendingExportGroup && !exportReady(type)) {") < send.index("const keys = keysFor(sections);")
+    assert (
+        "devices" not in send
+    )  # the device list never goes through the autosave queue
+    assert send.index("if (pendingExportGroup && !exportReady(type)) {") < send.index(
+        "const keys = keysFor(sections);"
+    )
 
 
 def test_tsdb_form_has_a_button_only_apply_bar_and_only_the_master_switch_autosaves():
@@ -600,21 +830,46 @@ def test_tsdb_form_has_a_button_only_apply_bar_and_only_the_master_switch_autosa
     assert html.index('id="export-actions"') > html.index('id="settings-sections"')
     # The shared bar is parameterised, not overridden: TSDB asks for the button alone.
     assert "buildApplyBar('export', {" in js
-    builder = js[js.index("function buildApplyBar("):js.index("function buildGroupBody(")]
+    builder = js[
+        js.index("function buildApplyBar(") : js.index("function buildGroupBody(")
+    ]
     # Every explicit-apply form shows the button alone: no Discard, count badge or status text.
-    assert "'Discard'" not in builder and "badge" not in builder and "status" not in builder
+    assert (
+        "'Discard'" not in builder
+        and "badge" not in builder
+        and "status" not in builder
+    )
     assert "bar.append(apply);" in builder and "'Apply changes'" in builder
-    bar = js[js.index("function refreshExportBar()"):js.index("async function applyExport()")]
+    bar = js[
+        js.index("function refreshExportBar()") : js.index(
+            "async function applyExport()"
+        )
+    ]
     assert "apply.disabled = settingsSending || !exportDirty() || incomplete;" in bar
-    assert "export-discard" not in js and "export-change-count" not in js and "discardExport" not in js
+    assert (
+        "export-discard" not in js
+        and "export-change-count" not in js
+        and "discardExport" not in js
+    )
     # Export fields are marked dirty on change but never queued for the debounce timer. The master
     # switch has its own immediate, single-key save and then recomputes the remaining Apply draft.
-    control = js[js.index("function exportControl("):js.index("// _settings_view() never exposes")]
+    control = js[
+        js.index("function exportControl(") : js.index(
+            "// _settings_view() never exposes"
+        )
+    ]
     assert "queueExportSettings();" in control and "queueSettings(" not in control
-    immediate = js[js.index("async function saveExportEnabled("):js.index("function exportControl(")]
+    immediate = js[
+        js.index("async function saveExportEnabled(") : js.index(
+            "function exportControl("
+        )
+    ]
     assert "pendingKeys.add('metrics_export_enabled');" in immediate
     assert "flushSettings({ sections: ['export'] })" in immediate
-    assert "settingsDraft.metrics_export_enabled = Boolean(settingsCommitted.metrics_export_enabled);" in immediate
+    assert (
+        "settingsDraft.metrics_export_enabled = Boolean(settingsCommitted.metrics_export_enabled);"
+        in immediate
+    )
     assert "queueExportSettings();" in immediate
     # A rejected apply keeps what was typed.
     assert "if (sectionOf(key) === 'export') continue;" in js
@@ -630,21 +885,30 @@ def test_admin_scripts_never_open_the_native_leave_page_dialog():
 
 def test_missing_export_hint_names_both_failure_causes():
     """Review item 8 (MEDIUM): exportReady() also fails for an unpaired username/password, where
-    every required key is present — a single "… is required" message would name nothing missing."""
+    every required key is present — a single "… is required" message would name nothing missing.
+    """
     js = _admin_js()
-    hint = js[js.index("function missingExportHint(type)"):js.index("// The export group is applied explicitly")]
+    hint = js[
+        js.index("function missingExportHint(type)") : js.index(
+            "// The export group is applied explicitly"
+        )
+    ]
     assert "required for ${backendLabel(type)}" in hint
     assert "must be set together or left empty" in hint
     assert "return 'Not saved yet.';" in hint
     # Labels come from exportFields, never hard-coded.
-    assert "function labelOf(key) { return exportFields.find((field) => field.key === key)?.label || key; }" in js
+    assert (
+        "function labelOf(key) { return exportFields.find((field) => field.key === key)?.label || key; }"
+        in js
+    )
     assert "Organization" not in hint and "Bucket" not in hint
 
 
 def test_failed_settings_save_does_not_re_render_the_whole_page():
     """Review item 6 (MEDIUM): a global renderSettings() on a failed save would also rebuild a
     section the operator was mid-edit on but that was never part of this save. Finding 2: the
-    devices draft is not rolled back at all, because that would orphan the live row objects."""
+    devices draft is not rolled back at all, because that would orphan the live row objects.
+    """
     js = _admin_js()
     catch_block = _send_block(js, "catch")
     assert "renderSettings();" not in catch_block
@@ -652,7 +916,10 @@ def test_failed_settings_save_does_not_re_render_the_whole_page():
     assert "if (pendingKeys.has(key)) continue;" in catch_block
     assert "devices" not in catch_block
     assert "if (isSecretKey(key)) continue;" in catch_block
-    assert "for (const id of sentSections) reportSaveFailure(id, failureMessage(id, reason));" in catch_block
+    assert (
+        "for (const id of sentSections) reportSaveFailure(id, failureMessage(id, reason));"
+        in catch_block
+    )
 
 
 def test_device_list_has_no_autosave_path():
@@ -662,10 +929,18 @@ def test_device_list_has_no_autosave_path():
     assert "pendingKeys.has('devices')" not in js
     assert "function syncDeviceInputs(" not in js and "function addInverter(" not in js
     assert "function devicesValid()" not in js
-    editor = js[js.index("function renderDevicesSettings(card)"):js.index("function buildApplyBar(")]
+    editor = js[
+        js.index("function renderDevicesSettings(card)") : js.index(
+            "function buildApplyBar("
+        )
+    ]
     assert "addEventListener('change'" not in editor  # typing never saves anything
     # Exactly one request site sends the devices key.
-    assert js.count("body: JSON.stringify({ devices") + js.count("payload = { devices: devicesPayload(next) }") == 1
+    assert (
+        js.count("body: JSON.stringify({ devices")
+        + js.count("payload = { devices: devicesPayload(next) }")
+        == 1
+    )
     template = (TEMPLATES / "dashboard.html").read_text(encoding="utf-8")
     assert "saved automatically" not in template
 
@@ -673,52 +948,104 @@ def test_device_list_has_no_autosave_path():
 def test_inverters_dialog_has_no_apply_step_and_only_add_delete_and_close():
     js = _admin_js()
     html = (TEMPLATES / "dashboard.html").read_text(encoding="utf-8")
-    modal = html[html.index('<div id="inverters-modal"'):html.index("{% endblock %}", html.index('<div id="inverters-modal"'))]
+    modal = html[
+        html.index('<div id="inverters-modal"') : html.index(
+            "{% endblock %}", html.index('<div id="inverters-modal"')
+        )
+    ]
     # No apply concept left: no bar, no Apply/Discard/Reset text, no dirty tracking, no unload guard.
     assert "apply" not in modal.lower() and "Apply" not in modal
-    for gone in ("device-apply", "buildDeviceApplyBar", "applyDevices", "deviceChanges", "deviceBaseline",
-                 "deviceDirty", "discardDeviceChanges", "isBlankNewRow", "is-dirty", "Add another inverter"):
+    for gone in (
+        "device-apply",
+        "buildDeviceApplyBar",
+        "applyDevices",
+        "deviceChanges",
+        "deviceBaseline",
+        "deviceDirty",
+        "discardDeviceChanges",
+        "isBlankNewRow",
+        "is-dirty",
+        "Add another inverter",
+    ):
         assert gone not in js, gone
-    assert "beforeunload" not in js and "onbeforeunload" not in js and "returnValue" not in js
-    editor = js[js.index("function renderDeviceList("):js.index("function buildApplyBar(")]
+    assert (
+        "beforeunload" not in js
+        and "onbeforeunload" not in js
+        and "returnValue" not in js
+    )
+    editor = js[
+        js.index("function renderDeviceList(") : js.index("function buildApplyBar(")
+    ]
     # Controls of the dialog: the close button (template), one submit button, one trash per row.
     assert modal.count("<button") == 1 and 'data-bs-dismiss="modal"' in modal
     assert editor.count("element('button'") == 2
-    assert "const add = element('button', 'btn btn-primary mt-3', 'Add inverter');" in editor
+    assert (
+        "const add = element('button', 'btn btn-primary mt-3', 'Add inverter');"
+        in editor
+    )
     assert "add.type = 'submit';" in editor
     assert "const remove = element('button', 'btn btn-outline-danger');" in editor
-    assert "remove.setAttribute('aria-label', `Remove inverter ${deviceLabel(device)}`);" in editor
+    assert (
+        "remove.setAttribute('aria-label', `Remove inverter ${deviceLabel(device)}`);"
+        in editor
+    )
     # Saved rows are text, not inputs: re-addressing an inverter is not a function of the dialog.
-    item = js[js.index("function deviceItem(device)"):js.index("async function removeDevice(")]
+    item = js[
+        js.index("function deviceItem(device)") : js.index(
+            "async function removeDevice("
+        )
+    ]
     assert "element('input'" not in item
 
 
 def test_inverters_dialog_saves_each_add_and_delete_at_once_and_reports_inline():
     js = _admin_js()
-    remove = js[js.index("async function removeDevice("):js.index("// Validates the new row")]
+    remove = js[
+        js.index("async function removeDevice(") : js.index("// Validates the new row")
+    ]
     # Deleting is destructive (resets evidence and modes): the shared confirm dialog comes first.
     assert remove.index("await confirmAction({") < remove.index("await commitDevices(")
     assert "danger: true" in remove and "if (deviceUi.busy) return;" in remove
-    assert "setDeviceMessage('error', deviceFailureMessage(error, 'Removing the inverter'))" in remove
-    add = js[js.index("async function addDevice(card)"):js.index("function renderDevicesSettings(card)")]
+    assert (
+        "setDeviceMessage('error', deviceFailureMessage(error, 'Removing the inverter'))"
+        in remove
+    )
+    add = js[
+        js.index("async function addDevice(card)") : js.index(
+            "function renderDevicesSettings(card)"
+        )
+    ]
     assert "if (deviceUi.busy) return;" in add
     assert add.index("deviceProblem(candidate)") < add.index("await commitDevices(")
-    assert "setDeviceMessage('error', deviceFailureMessage(error, 'Adding the inverter'))" in add
+    assert (
+        "setDeviceMessage('error', deviceFailureMessage(error, 'Adding the inverter'))"
+        in add
+    )
     # The input is only cleared after the server accepted the new inverter.
     assert add.index("await commitDevices(") < add.index("input('host').value = '';")
     # The result nodes are persistent live regions, so announcements are not lost on a rebuild.
-    assert "error.setAttribute('role', 'alert');" in js and "status.setAttribute('role', 'status');" in js
+    assert (
+        "error.setAttribute('role', 'alert');" in js
+        and "status.setAttribute('role', 'status');" in js
+    )
     assert "error?.status === 409" in js and "error?.status === 504" in js
 
 
 def test_questdb_username_and_password_must_be_filled_together():
     """Regression: app/config.py's Settings._check_export rejects a PUT with exactly one of
     questdb_username/questdb_password set ("must be set together or not at all"); admin.js must
-    withhold the autosave until both are filled, or both are empty, same as a required field."""
+    withhold the autosave until both are filled, or both are empty, same as a required field.
+    """
     js = _admin_js()
-    assert "const EXPORT_PAIRED_FIELDS = { questdb: [['questdb_username', 'questdb_password']] };" in js
+    assert (
+        "const EXPORT_PAIRED_FIELDS = { questdb: [['questdb_username', 'questdb_password']] };"
+        in js
+    )
     assert "function exportPairsReady(type)" in js
-    assert "exportRequiredKeys(type).every(exportFieldFilled) && exportPairsReady(type)" in js
+    assert (
+        "exportRequiredKeys(type).every(exportFieldFilled) && exportPairsReady(type)"
+        in js
+    )
 
 
 def test_login_form_posts_and_registers_its_handler_before_any_await():
@@ -741,34 +1068,63 @@ def test_login_form_posts_and_registers_its_handler_before_any_await():
     # Registered during page parse, outside bootstrapAdminPage(): start() is synchronous, so the
     # handler exists before the detached async remainder starts.
     assert "async function start()" not in js
-    start = js[js.index("function start() {"):]
+    start = js[js.index("function start() {") :]
     assert "if (page === 'login') initAuthForm('login-form', submitLogin);" in start
-    assert start.index("initAuthForm('login-form'") < start.index("bootstrapAdminPage()")
-    assert "bootstrapAdminPage().catch((error) => toast(messageFrom(error), 'danger'));" in start
-    handler = js[js.index("function initAuthForm(formId, submit)"):js.index("async function submitLogin(")]
+    assert start.index("initAuthForm('login-form'") < start.index(
+        "bootstrapAdminPage()"
+    )
+    assert (
+        "bootstrapAdminPage().catch((error) => toast(messageFrom(error), 'danger'));"
+        in start
+    )
+    handler = js[
+        js.index("function initAuthForm(formId, submit)") : js.index(
+            "async function submitLogin("
+        )
+    ]
     assert handler.index("event.preventDefault();") < handler.index("await")
 
 
 def test_ensure_session_does_not_cache_a_rejection():
     """A rejected promise is truthy, so caching it would make every later submit await the same
-    failure and never issue a second request — the recovery path could not work at all."""
+    failure and never issue a second request — the recovery path could not work at all.
+    """
     js = _admin_js()
     assert "sessionPromise ||=" not in js
-    block = js[js.index("function ensureSession()"):js.index("// The status line of both auth pages")]
-    assert "sessionPromise = session().catch((error) => { sessionPromise = null; throw error; });" in block
+    block = js[
+        js.index("function ensureSession()") : js.index(
+            "// The status line of both auth pages"
+        )
+    ]
+    assert (
+        "sessionPromise = session().catch((error) => { sessionPromise = null; throw error; });"
+        in block
+    )
     # The first failure focuses #form-error; repeat attempts leave focus in the password field.
-    assert "if (!authInitReported) { authInitReported = true; formError(message); }" in js
-    assert "authInitReported = false;" in js[js.index("async function session()"):js.index("let sessionPromise")]
+    assert (
+        "if (!authInitReported) { authInitReported = true; formError(message); }" in js
+    )
+    assert (
+        "authInitReported = false;"
+        in js[js.index("async function session()") : js.index("let sessionPromise")]
+    )
 
 
 def test_flush_settings_propagates_the_result_of_an_in_flight_save():
     """Finding 3 (HIGH): the in-flight branch returned true regardless of what the running save
     resolved."""
     js = _admin_js()
-    flush = js[js.index("async function flushSettings({ sections = null } = {})"):js.index("// Synchronous wrapper")]
+    flush = js[
+        js.index("async function flushSettings({ sections = null } = {})") : js.index(
+            "// Synchronous wrapper"
+        )
+    ]
     assert "const result = await inFlight.promise.catch(() => false);" in flush
     # Only a request that carried one of the caller's sections may decide the caller's result.
-    assert "if (!sections || sections.some((id) => inFlight.sections.has(id))) ok = result && ok;" in flush
+    assert (
+        "if (!sections || sections.some((id) => inFlight.sections.has(id))) ok = result && ok;"
+        in flush
+    )
     assert "if (requestedIncomplete(sections)) return false;" in flush
     assert "ok = (await sendSettings(sections).catch(() => false)) && ok;" in flush
     assert "return true;" not in flush
@@ -776,19 +1132,35 @@ def test_flush_settings_propagates_the_result_of_an_in_flight_save():
 
 def test_the_settings_request_is_scoped_to_the_keys_it_carries():
     js = _admin_js()
-    send = js[js.index("function sendSettings(sections = null)"):js.index("function secretKeysIn(")]
+    send = js[
+        js.index("function sendSettings(sections = null)") : js.index(
+            "function secretKeysIn("
+        )
+    ]
     assert "const keys = keysFor(sections);" in send
     # The sent keys leave the queue before the await, which is what the rollback guard reads.
     assert "for (const key of keys) pendingKeys.delete(key);" in send
-    assert "if (keys.some((key) => sectionOf(key) === 'export')) pendingExportGroup = false;" in send
-    assert "settingsInFlight = { promise, keys: new Set(keys), sections: new Set(keys.map(sectionOf)) };" in send
+    assert (
+        "if (keys.some((key) => sectionOf(key) === 'export')) pendingExportGroup = false;"
+        in send
+    )
+    assert (
+        "settingsInFlight = { promise, keys: new Set(keys), sections: new Set(keys.map(sectionOf)) };"
+        in send
+    )
     assert "return Promise.resolve(!requestedIncomplete(sections));" in send
-    keys_for = js[js.index("function keysFor(sections)"):js.index("function hasPending(")]
+    keys_for = js[
+        js.index("function keysFor(sections)") : js.index("function hasPending(")
+    ]
     assert "const blocked = incompleteSections();" in keys_for
     assert "sectionOf(key)" in keys_for and "exportPayloadKeys(type)" in keys_for
     assert "isSecretKey(key) && !settingsDraft[key]" in keys_for
     # The finally re-arms the debounce instead of recursing.
-    finally_block = js[js.index("sendRevisions.clear();"):js.index("// Shared by settingControl() and exportControl(): builds")]
+    finally_block = js[
+        js.index("sendRevisions.clear();") : js.index(
+            "// Shared by settingControl() and exportControl(): builds"
+        )
+    ]
     assert "if (hasPending(['general'])) scheduleSettingsFlush();" in finally_block
     assert "flushSettings(" not in finally_block
     # Exactly one declaration, re-shaped from a bare promise rather than declared a second time.
@@ -817,52 +1189,95 @@ def test_secret_keys_mirror_the_server_secret_list():
 
 def test_save_state_has_one_writer_and_five_distinguishable_states():
     js = _admin_js()
-    assert "const SAVE_STATES = { idle: 0, saved: 1, incomplete: 2, unsaved: 3, saving: 4, failed: 5 };" in js
-    render = js[js.index("function renderSaveState()"):js.index("function reportSaveFailure(")]
-    for text in ("Save failed", "Saving …", "Unsaved changes", "Incomplete — not saved yet"):
+    assert (
+        "const SAVE_STATES = { idle: 0, saved: 1, incomplete: 2, unsaved: 3, saving: 4, failed: 5 };"
+        in js
+    )
+    render = js[
+        js.index("function renderSaveState()") : js.index("function reportSaveFailure(")
+    ]
+    for text in (
+        "Save failed",
+        "Saving …",
+        "Unsaved changes",
+        "Incomplete — not saved yet",
+    ):
         assert text in js, text
     # A successful save shows no label text (the toast reports it); the state stays readable as data-state.
-    assert "`Saved ${hhmm(savedAt)}`" not in render and "label.dataset.state = top;" in render
+    assert (
+        "`Saved ${hhmm(savedAt)}`" not in render
+        and "label.dataset.state = top;" in render
+    )
     # Absent on tokens/about/login/change-password: the alerts are reconciled first, then it returns.
-    assert render.index("renderSectionAlert(id, entry.failure)") < render.index("if (!label) return;")
+    assert render.index("renderSectionAlert(id, entry.failure)") < render.index(
+        "if (!label) return;"
+    )
     # The persistent alert is lifted out of a folded <details> and anchored before its section.
     # Both notice kinds share one builder, so `sectionAlert` is only the error-kind entry point and
     # the anchoring lives in `sectionNotice`; a folded disclosure is forced open for errors only,
     # because a hint must not unfold a section the operator deliberately collapsed.
-    alert = js[js.index("function sectionNotice(id, kind)"):js.index("// Retry only where a retry can do something")]
+    alert = js[
+        js.index("function sectionNotice(id, kind)") : js.index(
+            "// Retry only where a retry can do something"
+        )
+    ]
     assert "function sectionAlert(id) { return sectionNotice(id, 'error'); }" in alert
     assert "anchor.closest('details') || anchor" in alert
-    assert "if (host.tagName === 'DETAILS' && kind === 'error') host.open = true;" in alert
+    assert (
+        "if (host.tagName === 'DETAILS' && kind === 'error') host.open = true;" in alert
+    )
     assert "host.parentElement.insertBefore(node, host);" in alert
     assert "aria-live', 'off'" in alert
     # The danger toast stays as the visibility floor next to the persistent alert.
-    report = js[js.index("function reportSaveFailure(section, message)"):js.index("function scheduleSettingsFlush()")]
+    report = js[
+        js.index("function reportSaveFailure(section, message)") : js.index(
+            "function scheduleSettingsFlush()"
+        )
+    ]
     assert "toast(message, 'danger');" in report
     # No Retry for general or parameters; devices additionally offers Discard changes.
-    retries = js[js.index("const RETRY_ACTIONS = {"):js.index("function renderSectionAlert(")]
+    retries = js[
+        js.index("const RETRY_ACTIONS = {") : js.index("function renderSectionAlert(")
+    ]
     assert "export:" in retries and "devices:" not in retries
     assert "general:" not in retries and "parameters:" not in retries
     # The parameters path is wired, not just declared.
     assert "setSectionState('parameters', 'unsaved');" in js
     assert "setSectionState('parameters', 'saving');" in js
-    assert "reportSaveFailure('parameters', failureMessage('parameters', messageFrom(error)));" in js
+    assert (
+        "reportSaveFailure('parameters', failureMessage('parameters', messageFrom(error)));"
+        in js
+    )
 
 
 def test_devices_are_bound_by_a_stable_identity_not_by_array_index():
     """Finding 2 (HIGH): replacing settingsDraft.devices (and every object in it) on a failed save
     orphans the objects the live change handlers and the row DOM still reference."""
     js = _admin_js()
-    assert "function withUid(device) { if (!device._uid) device._uid = `d${++deviceUid}`; return device; }" in js
+    assert (
+        "function withUid(device) { if (!device._uid) device._uid = `d${++deviceUid}`; return device; }"
+        in js
+    )
     assert "settingsDraft.devices = (list || []).map(withUid);" in js
-    assert js.count("device._uid = `d${++deviceUid}`") == 1  # exactly one place mints a _uid
-    assert "if (Object.hasOwn(settingsDraft, 'devices')) adoptDevices(settingsDraft.devices);" in js
-    assert "function deviceByUid(uid) { return (settingsDraft.devices || []).find((device) => device._uid === uid) || null; }" in js
+    assert (
+        js.count("device._uid = `d${++deviceUid}`") == 1
+    )  # exactly one place mints a _uid
+    assert (
+        "if (Object.hasOwn(settingsDraft, 'devices')) adoptDevices(settingsDraft.devices);"
+        in js
+    )
+    assert (
+        "function deviceByUid(uid) { return (settingsDraft.devices || []).find((device) => device._uid === uid) || null; }"
+        in js
+    )
     # The delete handler resolves its row by _uid and skips a miss (a stale click after a save).
     assert js.count("const device = deviceByUid(uid);") == 1
     assert "settingsDraft.devices[Number(row.dataset.index)]" not in js
     assert "row.dataset.uid = device._uid;" in js
     # The payload is explicit instead of a spread, so no client-only key rides along.
-    payload = js[js.index("function devicesPayload(list)"):js.index("const deviceUi = ")]
+    payload = js[
+        js.index("function devicesPayload(list)") : js.index("const deviceUi = ")
+    ]
     assert "{ ...device" not in payload
     for field in ("host:", "port:", "network_id:", "device_id:", "display_name:"):
         assert field in payload, field
@@ -870,57 +1285,99 @@ def test_devices_are_bound_by_a_stable_identity_not_by_array_index():
 
 def test_device_remove_handler_confirms_saves_and_keeps_focus():
     js = _admin_js()
-    handler = js[js.index("async function removeDevice("):js.index("// Validates the new row")]
-    assert "confirm(" not in handler.replace("confirmAction(", "")  # the themed dialog, never window.confirm
-    assert "const device = deviceByUid(uid);" in handler  # identity, not a captured array index
+    handler = js[
+        js.index("async function removeDevice(") : js.index("// Validates the new row")
+    ]
+    assert "confirm(" not in handler.replace(
+        "confirmAction(", ""
+    )  # the themed dialog, never window.confirm
+    assert (
+        "const device = deviceByUid(uid);" in handler
+    )  # identity, not a captured array index
     assert "if (!device) return;" in handler
     assert "devices.splice(index, 1)" not in js
     # Focus: back to the trash on cancel or failure, else the next row or the new row's host input.
-    assert "if (button.isConnected) button.focus();" in handler and "#device-new-host" in handler
+    assert (
+        "if (button.isConnected) button.focus();" in handler
+        and "#device-new-host" in handler
+    )
 
 
 def test_dashboard_card_trash_icon_reuses_the_modal_delete_flow():
     """The dashboard inverter card surfaces the same delete as the modal: a danger trash icon that
     maps the GET /devices card to the draft inverter by its server id and hands off to removeDevice,
-    so the confirm dialog, busy-guard, PUT /settings and refresh stay a single implementation."""
+    so the confirm dialog, busy-guard, PUT /settings and refresh stay a single implementation.
+    """
     js = _admin_js()
     css = (ADMIN_DIR / "static/css/admin.css").read_text(encoding="utf-8")
     # The card builds the same Material danger button as the modal, with the icon kept aria-hidden.
-    card = js[js.index("function createDeviceCard("):js.index("function patchDeviceCard(")]
+    card = js[
+        js.index("function createDeviceCard(") : js.index("function patchDeviceCard(")
+    ]
     # The standard square icon-button shape, not the round .device-toggle: no border-radius: 50%.
-    assert "const remove = element('button', 'device-remove icon-button btn btn-outline-danger');" in card
+    assert (
+        "const remove = element('button', 'device-remove icon-button btn btn-outline-danger');"
+        in card
+    )
     assert "element('span', 'material-icons', 'delete_outline')" in card
     assert "removeIcon.setAttribute('aria-hidden', 'true');" in card
     # The trash click goes through the dashboard handler, never a second delete implementation.
     assert "removeDashboardDevice(ref, remove)" in card
     # The button is in the header row and carries an accessible label naming the inverter.
-    patch = js[js.index("function patchDeviceCard("):js.index("const DASHBOARD_INTERVAL_MS")]
+    patch = js[
+        js.index("function patchDeviceCard(") : js.index("const DASHBOARD_INTERVAL_MS")
+    ]
     assert "ref.removeId = device.id;" in patch
-    assert "`Remove inverter ${device.name || device.id || device.host || NOT_AVAILABLE}`" in patch
+    assert (
+        "`Remove inverter ${device.name || device.id || device.host || NOT_AVAILABLE}`"
+        in patch
+    )
     assert "ref.remove.setAttribute('aria-label', removeLabel);" in patch
-    assert "ref.remove]" in patch  # appended to both the connected and the disconnected header row
+    assert (
+        "ref.remove]" in patch
+    )  # appended to both the connected and the disconnected header row
     # The handler respects the busy-guard, loads the draft lazily (SEC-06) and reuses removeDevice.
-    handler = js[js.index("async function removeDashboardDevice("):js.index("// Deleting reconfigures")]
+    handler = js[
+        js.index("async function removeDashboardDevice(") : js.index(
+            "// Deleting reconfigures"
+        )
+    ]
     assert "if (deviceUi.busy) return;" in handler
     assert "await ensureDeviceDraft();" in handler
     # Mapped by the server-assigned id (card device.id === draft device_id), not a client _uid.
     assert "entry.device_id === ref.removeId" in handler
     assert "await removeDevice(device._uid, button);" in handler
     # The lazy loader fetches settings once and mints the draft identities via adoptDevices.
-    loader = js[js.index("async function ensureDeviceDraft("):js.index("async function removeDashboardDevice(")]
+    loader = js[
+        js.index("async function ensureDeviceDraft(") : js.index(
+            "async function removeDashboardDevice("
+        )
+    ]
     assert "if (Array.isArray(settingsDraft.devices)) return;" in loader
     assert "await api('settings')" in loader
     assert "adoptDevices(settingsDraft.devices)" in loader
     # The icon button is styled to sit in the compact header, and is NOT round (unlike .device-toggle).
-    remove_css = css[css.index(".device-remove {"):css.index(".device-remove .material-icons")]
+    remove_css = css[
+        css.index(".device-remove {") : css.index(".device-remove .material-icons")
+    ]
     assert "border-radius: 50%" not in remove_css
 
 
 def test_build_group_body_is_shared_so_a_group_rerender_adds_no_second_heading():
     js = _admin_js()
-    builder = js[js.index("function buildGroupBody(group)"):js.index("function groupSectionId(")]
-    # The Account relabel lives in one place, used by both renderSettings() and rerenderGroup().
-    assert "{ Account: 'Administrator account' }[group]" in builder
+    builder = js[
+        js.index("function buildGroupBody(group)") : js.index(
+            "function groupSectionId("
+        )
+    ]
+    # The separate "Administrator account" card was removed: there is no Account relabel, and the
+    # group heading is the group name itself.
+    assert "{ Account: 'Administrator account' }[group]" not in builder
+    assert "Administrator account" not in js
+    # The Change-password action now renders inside the Access card, below its toggles, so the
+    # builder calls renderAccount only for the Access group (and after that group's fields).
+    assert "if (group === 'Access') renderAccount(body);" in builder
+    assert "'Access', 'Server', 'Network', 'Session']" in js and "'Account'" not in js
     # One <h2> per group card, so a live group re-render never stacks a second heading.
     assert builder.count("element('h2'") == 1
     assert js.count("buildGroupBody(group)") == 3  # definition plus both call sites
@@ -934,21 +1391,46 @@ def test_dashboard_keeps_last_known_data_on_fetch_failure():
     """A failed or empty poll must not blank or shrink the Overview: values expire, the layout stays."""
     js = _admin_js()
     html = (TEMPLATES / "dashboard.html").read_text(encoding="utf-8")
-    block = js[js.index("async function loadDashboard("):js.index("function initDashboardPolling(")]
-    fail = block[block.index("} catch (error) {"):]
+    block = js[
+        js.index("async function loadDashboard(") : js.index(
+            "function initDashboardPolling("
+        )
+    ]
+    fail = block[block.index("} catch (error) {") :]
     assert "setDashboardStale(error)" in fail and "clearDashboardStale()" in block
     # The failure path only replaces the list with the error notice when nothing was ever known.
-    assert fail.index("if (dashboardSnapshot) setDashboardStale") < fail.index("dashboardNotices.error")
+    assert fail.index("if (dashboardSnapshot) setDashboardStale") < fail.index(
+        "dashboardNotices.error"
+    )
     # A successful poll renders from the merged last-known state, never from the raw payload.
-    assert "absorbDashboard(" in block and "refreshDashboard()" in block and "renderDashboard(data" not in block
+    assert (
+        "absorbDashboard(" in block
+        and "refreshDashboard()" in block
+        and "renderDashboard(data" not in block
+    )
     # Values run out by age (n/a), structure (towers, flow graphic) outlives them; a reload restores both.
-    for marker in ("VALUE_MAX_AGE_MS", "expired: metricShown(metric)", "flow_known", "restoreSnapshot()", "SNAPSHOT_MAX_AGE_MS", "localStorage"):
+    for marker in (
+        "VALUE_MAX_AGE_MS",
+        "expired: metricShown(metric)",
+        "flow_known",
+        "restoreSnapshot()",
+        "SNAPSHOT_MAX_AGE_MS",
+        "localStorage",
+    ):
         assert marker in js, marker
     # The note replaces the subtitle instead of being inserted above the grid, so nothing shifts.
-    assert "subtitle.after(dashboardBanner)" in js and "grid.before(dashboardBanner)" in js
-    assert "dashboard-offline-banner" in (ADMIN_DIR / "static/css/admin.css").read_text(encoding="utf-8")
+    assert (
+        "subtitle.after(dashboardBanner)" in js and "grid.before(dashboardBanner)" in js
+    )
+    assert "dashboard-offline-banner" in (ADMIN_DIR / "static/css/admin.css").read_text(
+        encoding="utf-8"
+    )
     # The removed 'Updated HH:MM' line stays removed.
-    for marker in ('dashboard-updated', 'dashboardLastSuccess', 'id="refresh-dashboard"'):
+    for marker in (
+        "dashboard-updated",
+        "dashboardLastSuccess",
+        'id="refresh-dashboard"',
+    ):
         assert marker not in html and marker not in js, marker
 
 
@@ -959,30 +1441,53 @@ def test_accessibility_wiring_for_help_texts_field_errors_and_icon_only_buttons(
     # The logout label text is hidden below the sm breakpoint and the icon is aria-hidden.
     assert 'id="logout-button"' in base and 'aria-label="Log out"' in base
     # Help text is associated with its field, and a field error is referenced too.
-    builder = js[js.index("function buildFieldControl(field, value)"):js.index("function settingControl(field)")]
+    builder = js[
+        js.index("function buildFieldControl(field, value)") : js.index(
+            "function settingControl(field)"
+        )
+    ]
     assert "help.id = `${id}-help`;" in builder
     assert "control.setAttribute('aria-describedby', help.id);" in builder
-    invalid = js[js.index("function reportInvalid(control, message)"):js.index("const exportFields = [")]
+    invalid = js[
+        js.index("function reportInvalid(control, message)") : js.index(
+            "const exportFields = ["
+        )
+    ]
     assert "control.setAttribute('aria-invalid', 'true');" in invalid
     assert "element('div', 'invalid-feedback d-block')" in invalid
-    assert "control.setAttribute('aria-describedby', `${control.id}-help ${errorId}`);" in invalid
-    assert "function clearInvalid(control)" in js and js.count("clearInvalid(control);") == 2
+    assert (
+        "control.setAttribute('aria-describedby', `${control.id}-help ${errorId}`);"
+        in invalid
+    )
+    assert (
+        "function clearInvalid(control)" in js
+        and js.count("clearInvalid(control);") == 2
+    )
     # The add row references its alert node and marks only the offending input.
-    assert "error.id = 'device-error';" in js and "error.setAttribute('role', 'alert');" in js
+    assert (
+        "error.id = 'device-error';" in js
+        and "error.setAttribute('role', 'alert');" in js
+    )
     assert "input.setAttribute('aria-invalid', 'true');" in js
-    assert "const described = offending ? 'device-error' : (input.dataset.help || '');" in js
+    assert (
+        "const described = offending ? 'device-error' : (input.dataset.help || '');"
+        in js
+    )
     # Focus survives the section rebuilds.
     assert "function preserveFocus(render)" in js
     assert "const rerender = () => preserveFocus(render);" in js
     # Prometheus descriptions stay reachable on mobile through a native disclosure.
     assert "element('details', 'metric-description-mobile')" in js
-    assert re.search(r"@media \(max-width: 767\.98px\) \{\s*\.metric-description-mobile \{\s*display: block", css)
+    assert re.search(
+        r"@media \(max-width: 767\.98px\) \{\s*\.metric-description-mobile \{\s*display: block",
+        css,
+    )
 
 
 def test_dashboard_metrics_are_whole_numbers_in_the_browser_locale():
     js = _admin_js()
     start = js.index("function metricParts(")
-    block = js[start:js.index("function showHeroMetrics(", start)]
+    block = js[start : js.index("function showHeroMetrics(", start)]
     # No decimal places; Intl.NumberFormat(undefined, ...) picks the separator from the browser locale.
     assert "new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 })" in block
     assert "toFixed" not in block and "'en-US'" not in block and "'en-GB'" not in block
@@ -996,38 +1501,53 @@ def test_grid_power_is_shown_as_magnitude_with_a_direction_indicator():
     assert "return value < 0\n      ? { dir: 'feed'" in js
     assert "Math.abs(grid)" in js and "isGrid ? Math.abs(value) : value" in js
     assert "icon: 'arrow_upward'" in js and "icon: 'arrow_downward'" in js
-    assert "node.setAttribute('aria-label', flow.label);" in js and "node.title = flow.label;" in js
+    assert (
+        "node.setAttribute('aria-label', flow.label);" in js
+        and "node.title = flow.label;" in js
+    )
     assert ".device-flow-feed" in css and ".device-flow-draw" in css
 
 
 def test_dates_follow_the_browser_locale():
     js = _admin_js()
     start = js.index("function formatDate(")
-    block = js[start:js.index("function ", start + 10)]
+    block = js[start : js.index("function ", start + 10)]
     assert "Intl.DateTimeFormat(undefined" in block
     assert "'en-GB'" not in block and "toLocaleDateString" not in block
 
 
 def test_time_and_power_helpers_follow_the_browser_locale():
     js = _admin_js()
-    hhmm = js[js.index("const hhmm"):js.index("function element(")]
+    hhmm = js[js.index("const hhmm") : js.index("function element(")]
     assert "toLocaleTimeString(undefined" in hhmm and "'en-GB'" not in hhmm
     power_start = js.index("const power = (value)")
-    power = js[power_start:js.index("const modalEl", power_start)]
+    power = js[power_start : js.index("const modalEl", power_start)]
     assert "toLocaleString(undefined" in power and "'en-GB'" not in power
 
 
 def test_shipped_admin_js_pins_no_region_locale():
     assert "'en-GB'" not in _admin_js()
-    assert "'en-GB'" not in (ADMIN_DIR / "static/js/connection.js").read_text(encoding="utf-8")
+    assert "'en-GB'" not in (ADMIN_DIR / "static/js/connection.js").read_text(
+        encoding="utf-8"
+    )
 
 
 @pytest.mark.asyncio
-async def test_about_requires_session_and_renders_project_details(tmp_path, monkeypatch):
+async def test_about_requires_session_and_renders_project_details(
+    tmp_path, monkeypatch
+):
     monkeypatch.setattr("app.admin.ui.__build__", "abc1234")
-    app = create_app(Settings(_env_file=None, hmac_secret="s" * 48, admin_db_path=tmp_path / "rct.db"))
+    app = create_app(
+        Settings(
+            _env_file=None, hmac_secret="s" * 48, admin_db_path=tmp_path / "rct.db"
+        )
+    )
     password = app.state.first_start_password
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver", headers={"Origin": "http://testserver"}) as client:
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://testserver",
+        headers={"Origin": "http://testserver"},
+    ) as client:
         unauthenticated = await client.get("/ui/about", follow_redirects=False)
         assert unauthenticated.status_code == 303
         assert unauthenticated.headers["location"] == "/login"
@@ -1044,19 +1564,30 @@ async def test_about_requires_session_and_renders_project_details(tmp_path, monk
         changed = await client.post(
             "/admin/api/change-password",
             headers={"X-CSRF-Token": login.json()["csrf_token"]},
-            json={"current_password": password, "new_password": "a much stronger password"},
+            json={
+                "current_password": password,
+                "new_password": "a much stronger password",
+            },
         )
         assert changed.status_code == 200
-        accepted = await client.post("/admin/api/accept-disclaimer",
-                                     headers={"X-CSRF-Token": changed.json()["csrf_token"]})
+        accepted = await client.post(
+            "/admin/api/accept-disclaimer",
+            headers={"X-CSRF-Token": changed.json()["csrf_token"]},
+        )
         assert accepted.status_code == 200
 
         response = await client.get("/ui/about")
         assert response.status_code == 200
         assert 'href="/ui/about" aria-current="page"' in response.text
         assert f"<code>{__version__}</code>" in response.text
-        assert 'class="admin-footer"' in response.text and f"v{__version__}" in response.text
-        assert f'v{__version__} (<span class="font-monospace">abc1234</span>)' in response.text
+        assert (
+            'class="admin-footer"' in response.text
+            and f"v{__version__}" in response.text
+        )
+        assert (
+            f'v{__version__} (<span class="font-monospace">abc1234</span>)'
+            in response.text
+        )
         assert "Application Details" in response.text
         assert "Dependencies" in response.text
         assert "<code>" in response.text
@@ -1075,15 +1606,34 @@ def test_dashboard_grid_has_the_gridstack_structure_and_stable_widget_ids():
     assert 'id="dashboard-add-widget"' in html and "Edit Widgets" in html
     assert 'id="dashboard-reset-layout"' in html and "Reset layout" in html
     assert 'id="dashboard-edit-done"' in html and ">Done<" in html
-    for widget_id in ("device-count", "connected-count", "metric-count", "tsdb-status",
-                      "pv-power", "house-power", "grid-power", "battery-soc",
-                      "days-to-calibration", "devices"):
+    for widget_id in (
+        "device-count",
+        "connected-count",
+        "metric-count",
+        "tsdb-status",
+        "pv-power",
+        "house-power",
+        "grid-power",
+        "battery-soc",
+        "days-to-calibration",
+        "devices",
+    ):
         assert f'data-widget-id="{widget_id}"' in html
         assert f'gs-id="{widget_id}"' in html
     # The business-data DOM ids the polling code reads/writes stay intact inside the wrappers.
-    for inner_id in ("device-count", "connected-count", "metric-count", "pv-power", "house-power",
-                     "grid-power", "battery-soc", "days-to-calibration", "tsdb-status-icon",
-                     "tsdb-status-label", "devices-list"):
+    for inner_id in (
+        "device-count",
+        "connected-count",
+        "metric-count",
+        "pv-power",
+        "house-power",
+        "grid-power",
+        "battery-soc",
+        "days-to-calibration",
+        "tsdb-status-icon",
+        "tsdb-status-label",
+        "devices-list",
+    ):
         assert f'id="{inner_id}"' in html
 
 
@@ -1093,9 +1643,11 @@ def test_dashboard_template_positions_equal_the_factory_default_layout():
     # dashboard-widgets.js), so the factory values are parsed from the registry entries. The
     # derivation keeps the same {x,y,w,h,visible} values, so this cross-check is unchanged.
     js = (ADMIN_DIR / "static/js/dashboard-widgets.js").read_text(encoding="utf-8")
-    html = Environment(loader=FileSystemLoader(TEMPLATES), autoescape=select_autoescape()).get_template(
-        "dashboard.html"
-    ).render(page="dashboard")
+    html = (
+        Environment(loader=FileSystemLoader(TEMPLATES), autoescape=select_autoescape())
+        .get_template("dashboard.html")
+        .render(page="dashboard")
+    )
     # Captured groups are reordered to (x, y, w, h, visible) to match the template tuple below.
     default = {
         m[0]: (int(m[4]), int(m[5]), int(m[1]), int(m[2]), m[3] == "true")
@@ -1103,19 +1655,28 @@ def test_dashboard_template_positions_equal_the_factory_default_layout():
             r"id: '([\w-]+)', label: '[^']*', kind: '[\w]+',"
             r" defaultSize: Object\.freeze\(\{ w: (\d+), h: (\d+) \}\),"
             r" defaultVisible: (true|false), defaultX: (\d+), defaultY: (\d+)",
-            js)
+            js,
+        )
     }
     template = {}
     for m in re.finditer(
-            r'<div class="grid-stack-item( d-none)?" gs-id="([\w-]+)"\s+gs-x="(\d+)" gs-y="(\d+)" gs-w="(\d+)" gs-h="(\d+)"',
-            html):
+        r'<div class="grid-stack-item( d-none)?" gs-id="([\w-]+)"\s+gs-x="(\d+)" gs-y="(\d+)" gs-w="(\d+)" gs-h="(\d+)"',
+        html,
+    ):
         template[m[2]] = (*map(int, m.group(3, 4, 5, 6)), not m[1])
     # Twenty-two widgets: the sixteen up to the charging schedule plus five battery-health tiles and the degradation chart.
     assert template == default and len(default) == 22
     # Off-by-default (visible:false) but still addable through the "Add widget" library.
     assert not default["days-to-calibration"][4]
     # Factory default: one row of six 2-column tiles, the inverter overview directly below it.
-    tiles = ["pv-power", "grid-power", "house-power", "battery-soc", "tsdb-status", "metric-count"]
+    tiles = [
+        "pv-power",
+        "grid-power",
+        "house-power",
+        "battery-soc",
+        "tsdb-status",
+        "metric-count",
+    ]
     assert [default[t][:4] for t in tiles] == [(x, 0, 2, 2) for x in range(0, 12, 2)]
     assert default["devices"][:4] == (0, 2, 12, 8)
     assert not default["device-count"][4] and not default["connected-count"][4]
@@ -1145,7 +1706,15 @@ def test_gridstack_assets_load_only_on_the_dashboard_page():
     base = (TEMPLATES / "base.html").read_text(encoding="utf-8")
     assert "gridstack.min.css" in dashboard and "gridstack-all.js" in dashboard
     assert "{% block extra_js %}{% endblock %}" in base
-    for other_page in ("inverters", "energy", "tsdb", "prometheus", "tokens", "settings", "about"):
+    for other_page in (
+        "inverters",
+        "energy",
+        "tsdb",
+        "prometheus",
+        "tokens",
+        "settings",
+        "about",
+    ):
         other = (TEMPLATES / f"{other_page}.html").read_text(encoding="utf-8")
         assert "gridstack" not in other.lower(), other_page
 
@@ -1157,17 +1726,24 @@ def test_dashboard_js_reuses_the_shared_api_helper_and_does_not_touch_polling():
     # Tiles are moved by mouse drag on the header strip; the old Move/Resize context menu is gone.
     assert "handle: '.dashboard-widget-header'" in js
     assert "Move up" not in js and "dashboard-layout-menu" not in js
-    assert "window.RCTAdmin = Object.freeze({ api, toast, messageFrom, element, confirmAction, pollDelay });" in admin_js
+    assert (
+        "window.RCTAdmin = Object.freeze({ api, toast, messageFrom, element, confirmAction, pollDelay });"
+        in admin_js
+    )
     assert "startDashboardLayout()" in admin_js and "rct:dashboard-ready" in js
     assert "initDashboardPolling()" in admin_js
     # dashboard.js never reimplements the polling helpers it must leave alone.
-    for forbidden in ("function loadDashboard", "function initDashboardPolling", "setInterval"):
+    for forbidden in (
+        "function loadDashboard",
+        "function initDashboardPolling",
+        "setInterval",
+    ):
         assert forbidden not in js
 
 
 def test_energy_poll_is_bounded_keeps_panels_and_never_overwrites_a_running_action():
     js = _admin_js()
-    poll = js[js.index("async function pollEnergy("):js.index("function initEnergy(")]
+    poll = js[js.index("async function pollEnergy(") : js.index("function initEnergy(")]
     # A caller-initiated abort (timeout or supersede) must not open the reconnect modal.
     assert "error?.name === 'TimeoutError'" in js and "options.signal?.aborted" in js
     assert "ENERGY_POLL_TIMEOUT_MS" in poll and "signal: controller.signal" in poll
@@ -1178,32 +1754,61 @@ def test_energy_poll_is_bounded_keeps_panels_and_never_overwrites_a_running_acti
     assert "device.mode === 'off' && !offView().recorded ? null : device.mode" in js
     # A selected mode that the unfinished setup blocks is shown as pending, never as active.
     assert "setupLead.hidden = !pendingSetup" in js and "'is-pending'" in js
-    assert ".energy-mode-option.is-selected.is-pending" in (ADMIN_DIR / "static/css/admin.css").read_text(encoding="utf-8")
+    assert ".energy-mode-option.is-selected.is-pending" in (
+        ADMIN_DIR / "static/css/admin.css"
+    ).read_text(encoding="utf-8")
     # The Setup step names the required writes that are not approved yet.
-    assert "(device.required_write_names || []).filter((name) => !approved.has(name))" in js
+    assert (
+        "(device.required_write_names || []).filter((name) => !approved.has(name))"
+        in js
+    )
 
 
 def test_energy_mode_is_a_three_state_radio_group_with_mode_dependent_controls():
     js = _admin_js()
     css = (ADMIN_DIR / "static/css/admin.css").read_text(encoding="utf-8")
     # Off / Manual / External as a radio group; the old on/off switch and the /armed call are gone.
-    assert "setAttribute('role', 'radiogroup')" in js and "setAttribute('role', 'radio')" in js
-    assert "['off', 'Off'" in js and "['manual', 'Manual'" in js and "['external', 'External'" in js
+    assert (
+        "setAttribute('role', 'radiogroup')" in js
+        and "setAttribute('role', 'radio')" in js
+    )
+    assert (
+        "['off', 'Off'" in js
+        and "['manual', 'Manual'" in js
+        and "['external', 'External'" in js
+    )
     assert "`${path}/mode`" in js and "/armed" not in js and "energy-armed" not in js
     # Keyboard: arrows move the focus only, a selection needs Space/Enter/click; aria-disabled keeps focus.
-    assert "ArrowRight: 1" in js and "'Home'" in js and "aria-disabled" in js and "aria-checked" in js
+    assert (
+        "ArrowRight: 1" in js
+        and "'Home'" in js
+        and "aria-disabled" in js
+        and "aria-checked" in js
+    )
     # Controls are enabled in Manual only; External shows the info line and disabled controls.
-    assert "const enabled = operable && item.available && !busy && device.connected && device.mode !== 'off';" in js
-    assert "This inverter is controlled by an external app through the API (PAT required)." in js
+    assert (
+        "const enabled = operable && item.available && !busy && device.connected && device.mode !== 'off';"
+        in js
+    )
+    assert (
+        "This inverter is controlled by an external app through the API (PAT required)."
+        in js
+    )
     assert "external: 'controlled by an external app'" in js and "mode_off:" in js
     assert "device.mode === 'off' ? 'mode_off'" in js
     assert "Manual control is off for this inverter" not in js
     assert "readyState.kind === 'setup' || !readyState.text" in js
     assert "Measurements are" not in js and "'Live data unavailable.'" in js
     # Operate actions use the shared filled brand button in every theme.
-    actions = js[js.index("const actions = element('div', 'energy-actions')"):js.index("const target = element('div', 'energy-target')")]
+    actions = js[
+        js.index("const actions = element('div', 'energy-actions')") : js.index(
+            "const target = element('div', 'energy-target')"
+        )
+    ]
     assert "element('button', 'btn btn-primary'" in actions
-    assert "btn-outline-primary" not in actions and "btn-outline-secondary" not in actions
+    assert (
+        "btn-outline-primary" not in actions and "btn-outline-secondary" not in actions
+    )
     assert ".energy-actions .btn:disabled" in css
     assert "--bs-btn-disabled-bg: var(--bs-secondary-bg);" in css
     # Write access off: hint with a link to the Inverters page.
@@ -1215,68 +1820,121 @@ def test_energy_controls_are_locked_while_the_inverter_is_not_connected():
     js = _admin_js()
     setup = (ADMIN_DIR / "static/js/admin-energy-setup.js").read_text(encoding="utf-8")
     # The header shows n/a instead of the internal device id; the strategy summary shows the configured host.
-    assert "nameNode.textContent = device.connected ? device.device_name : NOT_AVAILABLE;" in js
-    assert "energyPanels.get(device.device_id)?.isConnected() ? device.device_name : device.host" in setup
+    assert (
+        "nameNode.textContent = device.connected ? device.device_name : NOT_AVAILABLE;"
+        in js
+    )
+    assert (
+        "energyPanels.get(device.device_id)?.isConnected() ? device.device_name : device.host"
+        in setup
+    )
     # Mode buttons get the disabled attribute plus a visible hint, and every handler is guarded.
-    assert "button.disabled = !device.connected;" in js and "modeOffline.hidden = device.connected;" in js
+    assert (
+        "button.disabled = !device.connected;" in js
+        and "modeOffline.hidden = device.connected;" in js
+    )
     assert "!device.connected || (wanted === device.mode" in js
-    assert "const actionsLocked = () => !device.connected || device.mode === 'off';" in js
+    assert (
+        "const actionsLocked = () => !device.connected || device.mode === 'off';" in js
+    )
     assert "if (!actionsLocked()) send({ action: 'hold' });" in js
     assert "if (!selected || actionsLocked()) return;" in js
-    charge = js[js.index("for (const action of ['charge', 'discharge']) {\n      buttons[action].addEventListener"):]
+    charge = js[
+        js.index(
+            "for (const action of ['charge', 'discharge']) {\n      buttons[action].addEventListener"
+        ) :
+    ]
     assert "if (actionsLocked()) return;" in charge[:200]
 
 
 def test_destructive_actions_use_the_themed_confirm_modal_not_native_confirm():
     base = (TEMPLATES / "base.html").read_text(encoding="utf-8")
     assert 'id="confirm-modal"' in base and 'id="confirm-accept"' in base
-    for js in (_admin_js(), (ADMIN_DIR / "static/js/dashboard.js").read_text(encoding="utf-8")):
+    for js in (
+        _admin_js(),
+        (ADMIN_DIR / "static/js/dashboard.js").read_text(encoding="utf-8"),
+    ):
         assert not re.search(r"(?<![\w.])confirm\(", js)
 
 
 def test_toasts_are_dismissible_and_errors_do_not_vanish_quickly():
     js = _admin_js()
-    toast = js[js.index("function toast("):js.index("function messageFrom(")]
-    assert "'Dismiss notification'" in toast and "'mouseenter'" in toast and "'focusin'" in toast
+    toast = js[js.index("function toast(") : js.index("function messageFrom(")]
+    assert (
+        "'Dismiss notification'" in toast
+        and "'mouseenter'" in toast
+        and "'focusin'" in toast
+    )
     assert "danger: 30000" in js and "warning: 12000" in js
 
 
 def test_one_time_token_cannot_be_dismissed_by_backdrop_or_escape():
     js = _admin_js()
-    tokens = js[js.index("function initTokens()"):js.index("// Business labels for the Energy Manager")]
+    tokens = js[
+        js.index("function initTokens()") : js.index(
+            "// Business labels for the Energy Manager"
+        )
+    ]
     assert "'hide.bs.modal'" in tokens and "event.preventDefault()" in tokens
     assert "$('copy-token').focus()" in tokens
 
 
 def test_token_copy_button_is_icon_only_and_done_waits_for_a_successful_copy():
     html = (ADMIN_DIR / "templates/tokens.html").read_text(encoding="utf-8")
-    copy = html[html.index('id="copy-token"'):html.index("</button>", html.index('id="copy-token"'))]
+    copy = html[
+        html.index('id="copy-token"') : html.index(
+            "</button>", html.index('id="copy-token"')
+        )
+    ]
     assert 'aria-label="Copy token"' in copy and 'title="Copy token"' in copy
     assert 'class="material-icons"' in copy and ">Copy<" not in copy
     assert re.search(r'id="token-done"[^>]*\bdisabled\b', html)
     assert re.search(r'id="token-close"[^>]*\bdisabled\b', html)
     js = _admin_js()
-    tokens = js[js.index("function initTokens()"):js.index("// Business labels for the Energy Manager")]
+    tokens = js[
+        js.index("function initTokens()") : js.index(
+            "// Business labels for the Energy Manager"
+        )
+    ]
     assert "if (!copied) return;" in tokens
     assert tokens.index("setCopied(true)") > tokens.index("await copyToClipboard")
 
 
 def test_hardware_verification_form_is_expert_only_and_the_basic_step_only_points_to_it():
     js = _admin_js()
-    advanced = js[js.index("function energyAdvanced("):js.index("// Shows one status paragraph in the list")]
+    advanced = js[
+        js.index("function energyAdvanced(") : js.index(
+            "// Shows one status paragraph in the list"
+        )
+    ]
     # The form lives in the Expert section; no Setup slot hosts it, so Basic mode never shows
     # strategy code or byte widths.
     assert "verifyExpertSlot.append(verifyForm)" in advanced
     assert "verifySetupSlot" not in advanced and "place(verifyForm" not in advanced
     # The Basic step offers a button that opens the guided assistant; it never switches Expert mode on.
-    button = advanced[advanced.index("const openVerifyButton"):advanced.index("const renderHardwareText")]
+    button = advanced[
+        advanced.index("const openVerifyButton") : advanced.index(
+            "const renderHardwareText"
+        )
+    ]
     assert "'Verify hardware'" in button and "addEventListener('click'" in button
-    assert "openVerificationAssistant(" in button and "expertSwitch" not in button and "setExpert(true)" not in advanced
+    assert (
+        "openVerificationAssistant(" in button
+        and "expertSwitch" not in button
+        and "setExpert(true)" not in advanced
+    )
     # One start action authorizes the bounded test and save; server endpoints keep the gates.
-    assistant = js[js.index("function openVerificationAssistant("):js.index("function energyAdvanced(")]
+    assistant = js[
+        js.index("function openVerificationAssistant(") : js.index(
+            "function energyAdvanced("
+        )
+    ]
     assert "'Start verification'" in assistant
     assert "'Yes, continue'" not in assistant and "'Save verification'" not in assistant
-    assert "post('control-test', { confirm: true })" in assistant and "post('commit', { confirm: true })" in assistant
+    assert (
+        "post('control-test', { confirm: true })" in assistant
+        and "post('commit', { confirm: true })" in assistant
+    )
     assert "innerHTML" not in assistant and "hardware-verification" not in assistant
 
 
@@ -1298,7 +1956,7 @@ def test_resolve_build_accepts_only_hex(raw, expected):
 
 
 def test_banner_shows_build_hash(monkeypatch):
-    from app.observability import banner
+    from app.utilities import banner
 
     monkeypatch.setattr(banner, "__build__", "abc1234")
     banner.build_info.cache_clear()
@@ -1316,13 +1974,19 @@ def test_manual_mode_toast_does_not_promise_control_while_the_setup_is_incomplet
 
 def test_hardware_step_text_names_the_guided_check_and_the_expert_path():
     js = _admin_js()
-    assert "The check runs automatically and asks only when a measurement is unclear" in js
+    assert (
+        "The check runs automatically and asks only when a measurement is unclear" in js
+    )
     assert "Use the guided check or enter measured values below" in js
 
 
 def test_verification_assistant_explains_a_missing_route_without_calling_the_inverter_missing():
     js = _admin_js()
-    assistant = js[js.index("function openVerificationAssistant("):js.index("function energyAdvanced(")]
+    assistant = js[
+        js.index("function openVerificationAssistant(") : js.index(
+            "function energyAdvanced("
+        )
+    ]
     assert "error?.status === 404" in assistant
     assert "The verification service is unavailable" in assistant
     assert "The inverter may still be online" in assistant
@@ -1334,8 +1998,13 @@ def test_about_page_keeps_the_inline_code_style():
     about_css = (ADMIN_DIR / "static/css/about.css").read_text(encoding="utf-8")
     shared = re.search(r"\.about-page code\s*\{([^}]*)\}", css)
     assert shared
-    for declaration in ("color: var(--bs-body-color)", "background: var(--bs-secondary-bg)",
-                        "border-radius: .25rem", "padding: .15rem .35rem", "overflow-wrap: anywhere"):
+    for declaration in (
+        "color: var(--bs-body-color)",
+        "background: var(--bs-secondary-bg)",
+        "border-radius: .25rem",
+        "padding: .15rem .35rem",
+        "overflow-wrap: anywhere",
+    ):
         assert declaration in shared.group(1)
     assert ".about-page code" not in about_css
 
@@ -1347,13 +2016,18 @@ def test_tsdb_page_uses_the_shared_page_heading_cards_and_setting_rows():
     # No TSDB-specific layout or typography rules: only the log console keeps its own look.
     own = set(re.findall(r"\.(tsdb-[a-z-]+|export-[a-z-]+)", css))
     assert own <= {"tsdb-console", "tsdb-console-line", "tsdb-console-time"}, own
-    assert 'class="page-heading"' in html and 'id="save-state" class="save-state' in html
+    assert (
+        'class="page-heading"' in html and 'id="save-state" class="save-state' in html
+    )
     assert 'class="settings-grid"' in html and "tsdb-status-badge" not in html
-    render = js[js.index("function renderExportSettings("):js.index("// Mirrors the server-side host plausibility")]
+    render = js[
+        js.index("function renderExportSettings(") : js.index(
+            "// Mirrors the server-side host plausibility"
+        )
+    ]
     assert "element('h2', 'h5 mb-2', title)" in render and "'Status & Log'" in render
     assert "role', 'log'" in render and "aria-live', 'polite'" in render
     assert "Status & log" not in js
-
 
 
 def test_a_missing_metric_value_reads_n_a_in_every_formatter_and_placeholder():
@@ -1361,19 +2035,43 @@ def test_a_missing_metric_value_reads_n_a_in_every_formatter_and_placeholder():
     dash = (TEMPLATES / "dashboard.html").read_text(encoding="utf-8")
     # One spelling for "no value", whatever the reason; the unit is never attached to it.
     assert "const NOT_AVAILABLE = 'n/a';" in js
-    for fn in ("function metricParts(", "function formatPower(", "function formatPowerKw(", "function formatPercent("):
-        body = js[js.index(fn):js.index("\n  }\n", js.index(fn))]
+    # formatPowerKw was removed in Release 1.2.2 (211439f) together with its only caller; the kW
+    # formatter no longer exists, so it is no longer part of the "n/a, never an en-dash" contract.
+    for fn in (
+        "function metricParts(",
+        "function formatPower(",
+        "function formatPercent(",
+    ):
+        body = js[js.index(fn) : js.index("\n  }\n", js.index(fn))]
         assert "NOT_AVAILABLE" in body and "'–'" not in body, fn
-    assert "'–'" not in js[js.index("function energyFlowGraphic("):js.index("function energyAvailability(")]
+    assert (
+        "'–'"
+        not in js[
+            js.index("function energyFlowGraphic(") : js.index(
+                "function energyAvailability("
+            )
+        ]
+    )
     # The first paint before any data is the same text as a missing value.
-    for tile in ("pv-power", "grid-power", "house-power", "battery-soc", "tsdb-status-label", "metric-count",
-                 "device-count", "connected-count", "days-to-calibration"):
+    for tile in (
+        "pv-power",
+        "grid-power",
+        "house-power",
+        "battery-soc",
+        "tsdb-status-label",
+        "metric-count",
+        "device-count",
+        "connected-count",
+        "days-to-calibration",
+    ):
         assert f'<strong id="{tile}">n/a</strong>' in dash, tile
 
 
 def test_tsdb_tile_shows_n_a_without_an_export_value_and_keeps_the_reason_secondary():
     js = _admin_js()
-    tile = js[js.index("function renderTsdbTile("):js.index("function renderDashboard(")]
+    tile = js[
+        js.index("function renderTsdbTile(") : js.index("function renderDashboard(")
+    ]
     assert "label.textContent = 'Not configured'" not in tile and "'–'" not in tile
     assert tile.count("label.textContent = NOT_AVAILABLE") == 2
     # The reason survives as a tooltip / accessible name, never as the primary value.
@@ -1387,19 +2085,33 @@ def test_flow_icons_are_neutral_grey_unless_their_unit_is_active():
     js = _admin_js()
     # Inactive icons use one hue-free grey token per theme; active ones take the line colour.
     for theme, grey in (("", "#6b7280"), ('[data-bs-theme="dark"] ', "#9ca3af")):
-        assert re.search(rf"{re.escape(theme)}\.flow-node,\s*{re.escape(theme)}\.flow-badge\s*{{\s*--flow-idle-color:\s*{grey};", css), theme
+        assert re.search(
+            rf"{re.escape(theme)}\.flow-node,\s*{re.escape(theme)}\.flow-badge\s*{{\s*--flow-idle-color:\s*{grey};",
+            css,
+        ), theme
     assert re.search(r"\.flow-node-icon\s*{[^}]*fill:\s*var\(--flow-idle-color\)", css)
-    assert re.search(r"\.flow-badge-icon\s*{[^}]*color:\s*var\(--flow-idle-color\)", css)
-    assert re.search(r"\.flow-node\.is-active \.flow-node-icon\s*{\s*fill:\s*var\(--flow-color\)", css)
-    assert re.search(r"\.flow-badge\.is-active \.flow-badge-icon\s*{\s*color:\s*var\(--flow-color\)", css)
+    assert re.search(
+        r"\.flow-badge-icon\s*{[^}]*color:\s*var\(--flow-idle-color\)", css
+    )
+    assert re.search(
+        r"\.flow-node\.is-active \.flow-node-icon\s*{\s*fill:\s*var\(--flow-color\)",
+        css,
+    )
+    assert re.search(
+        r"\.flow-badge\.is-active \.flow-badge-icon\s*{\s*color:\s*var\(--flow-color\)",
+        css,
+    )
     # Nodes and legend entries share the line colour kinds, in light and dark.
     for kind in ("flow-pv", "flow-import", "flow-charge"):
         assert f".flow-node.{kind}" in css and f".flow-badge.{kind}" in css, kind
         assert f'[data-bs-theme="dark"] .flow-node.{kind}' in css, kind
-    assert "@media (forced-colors: active)" in css[css.index(".flow-node-icon {"):]
+    assert "@media (forced-colors: active)" in css[css.index(".flow-node-icon {") :]
     # One activity function drives lines, node icons and legend icons.
     assert "function energyFlowActivity(" in js and js.count("energyFlowActivity(") == 2
-    assert "setActive(nodes[key].group, activity[key])" in js and "setActive(badgeNodes[key].node, activity[unit])" in js
+    assert (
+        "setActive(nodes[key].group, activity[key])" in js
+        and "setActive(badgeNodes[key].node, activity[unit])" in js
+    )
 
 
 def test_all_status_badges_share_one_component_with_fixed_tones():
@@ -1409,27 +2121,67 @@ def test_all_status_badges_share_one_component_with_fixed_tones():
     # Every tone is defined once, light and dark through Bootstrap's theme-aware variables.
     for tone in tones:
         rule = re.search(rf"\.status-badge-{tone}\s*{{([^}}]*)}}", css)
-        assert rule and "--status-badge-fg" in rule[1] and "--status-badge-bg" in rule[1], tone
-        assert "#" not in rule[1] and "rgb(" not in rule[1], f"{tone} must use theme variables, not hardcoded colours"
+        assert (
+            rule and "--status-badge-fg" in rule[1] and "--status-badge-bg" in rule[1]
+        ), tone
+        assert (
+            "#" not in rule[1] and "rgb(" not in rule[1]
+        ), f"{tone} must use theme variables, not hardcoded colours"
     base = re.search(r"\n\.status-badge\s*{([^}]*)}", css)
-    assert base and all(prop in base[1] for prop in ("padding", "border-radius", "font-size", "font-weight"))
-    assert re.search(r"\.status-badge::before\s*{[^}]*width[^}]*height", css), "the status dot is part of the component"
+    assert base and all(
+        prop in base[1]
+        for prop in ("padding", "border-radius", "font-size", "font-weight")
+    )
+    assert re.search(
+        r"\.status-badge::before\s*{[^}]*width[^}]*height", css
+    ), "the status dot is part of the component"
     # The page-head badge, the card-head chips, the flow states and the token pills all use it.
-    for creation in ("'status-badge status-badge-success'", "element('span', 'status-badge status-badge-neutral')",
-                     "'flow-badge-state status-badge status-badge-neutral'", "status-badge ${write ? 'status-badge-warning' : 'status-badge-success'}"):
+    for creation in (
+        "'status-badge status-badge-success'",
+        "element('span', 'status-badge status-badge-neutral')",
+        "'flow-badge-state status-badge status-badge-neutral'",
+        "status-badge ${write ? 'status-badge-warning' : 'status-badge-success'}",
+    ):
         assert creation in js, creation
-    assert "'status-badge-warning', Boolean(notice)" in js and "'status-badge-neutral', !notice" in js
-    assert "'status-badge-success', favourable === true" in js and "'status-badge-neutral', favourable !== true" in js
-    assert "status-badge-danger" not in js[js.index("function setBadge("):js.index("function setLine(")]
+    assert (
+        "'status-badge-warning', Boolean(notice)" in js
+        and "'status-badge-neutral', !notice" in js
+    )
+    assert (
+        "'status-badge-success', favourable === true" in js
+        and "'status-badge-neutral', favourable !== true" in js
+    )
+    assert (
+        "status-badge-danger"
+        not in js[js.index("function setBadge(") : js.index("function setLine(")]
+    )
     # The old per-badge variants are gone; no other rule sets a badge's font or padding.
-    for legacy in ("device-status-badge", "device-chip", "token-role-", "flow-badge-state.is-", "badge text-bg-warning"):
+    for legacy in (
+        "device-status-badge",
+        "device-chip",
+        "token-role-",
+        "flow-badge-state.is-",
+        "badge text-bg-warning",
+    ):
         assert legacy not in css and legacy not in js, legacy
-    for selector, body in re.findall(r"([^{}]+){([^}]*)}", re.sub(r"/\*.*?\*/", "", css, flags=re.DOTALL)):
-        if "status-badge" in selector and selector.strip() != ".status-badge" and "::before" not in selector:
-            assert not re.search(r"(?:^|;)\s*(?:font-|padding|height|border-radius)", body), selector
+    for selector, body in re.findall(
+        r"([^{}]+){([^}]*)}", re.sub(r"/\*.*?\*/", "", css, flags=re.DOTALL)
+    ):
+        if (
+            "status-badge" in selector
+            and selector.strip() != ".status-badge"
+            and "::before" not in selector
+        ):
+            assert not re.search(
+                r"(?:^|;)\s*(?:font-|padding|height|border-radius)", body
+            ), selector
     # A stale reading must not dim the flow badges: that made their contrast flicker between polls.
-    assert ".flow-badge.is-stale" not in css and "opacity" not in css[css.index(".flow-badge {"):css.index(".flow-badge-caption {")]
-    set_badge = js[js.index("function setBadge("):js.index("function setLine(")]
+    assert (
+        ".flow-badge.is-stale" not in css
+        and "opacity"
+        not in css[css.index(".flow-badge {") : css.index(".flow-badge-caption {")]
+    )
+    set_badge = js[js.index("function setBadge(") : js.index("function setLine(")]
     assert "is-stale" not in set_badge
 
 
@@ -1438,24 +2190,43 @@ def test_all_status_badges_share_one_component_with_fixed_tones():
 CSS = ADMIN_DIR / "static/css/admin.css"
 
 # Pages whose cards, grids or export row stack below a .page-heading.
-STACKED_PAGES = ("prometheus", "tokens", "inverters", "settings", "tsdb", "energy", "about")
+STACKED_PAGES = (
+    "prometheus",
+    "tokens",
+    "inverters",
+    "settings",
+    "tsdb",
+    "energy",
+    "about",
+)
 
 
 def _css_rules() -> list[tuple[str, str]]:
     """(selector, body) of every innermost rule, comments removed, whitespace collapsed."""
     css = re.sub(r"/\*.*?\*/", "", CSS.read_text(encoding="utf-8"), flags=re.DOTALL)
-    return [(" ".join(sel.split()), " ".join(body.split())) for sel, body in re.findall(r"([^{}]+)\{([^{}]*)\}", css)]
+    return [
+        (" ".join(sel.split()), " ".join(body.split()))
+        for sel, body in re.findall(r"([^{}]+)\{([^{}]*)\}", css)
+    ]
 
 
 def test_card_gap_token_is_declared_once_in_root_as_twenty_pixels():
     css = CSS.read_text(encoding="utf-8")
     assert len(re.findall(r"--rct-card-gap\s*:", css)) == 1
-    root = [body for sel, body in _css_rules() if sel == ":root" and "--rct-card-gap" in body]
+    root = [
+        body
+        for sel, body in _css_rules()
+        if sel == ":root" and "--rct-card-gap" in body
+    ]
     assert len(root) == 1 and re.search(r"--rct-card-gap:\s*1\.25rem\s*;", root[0])
 
 
 def test_one_sibling_rule_spaces_every_top_level_card_below_the_page_heading():
-    spacing = [(sel, body) for sel, body in _css_rules() if "page-heading~" in sel.replace(" ", "")]
+    spacing = [
+        (sel, body)
+        for sel, body in _css_rules()
+        if "page-heading~" in sel.replace(" ", "")
+    ]
     assert len(spacing) == 1, spacing
     selector, body = spacing[0]
     for block in (".card", ".settings-grid", ".energy-grid", "#export-actions"):
@@ -1463,22 +2234,52 @@ def test_one_sibling_rule_spaces_every_top_level_card_below_the_page_heading():
     assert ".about-top-row~.card" in selector.replace(" ", "")
     assert body.rstrip(";").strip() == "margin-top: var(--rct-card-gap)"
     # No second rule may re-space the same blocks: that is how the pages drifted apart before.
-    blocks = {".card", ".settings-grid", ".energy-grid", "#export-actions", ".about-top-row", ".page-heading"}
+    blocks = {
+        ".card",
+        ".settings-grid",
+        ".energy-grid",
+        "#export-actions",
+        ".about-top-row",
+        ".page-heading",
+    }
     for sel, body in _css_rules():
         parts = {part.strip() for part in sel.split(",")}
-        if parts & blocks and sel != selector and "page-heading~" not in sel.replace(" ", ""):
-            assert not re.search(r"(?:^|;)\s*margin(?:-top|-block-start)?\s*:", body), sel
+        if (
+            parts & blocks
+            and sel != selector
+            and "page-heading~" not in sel.replace(" ", "")
+        ):
+            assert not re.search(
+                r"(?:^|;)\s*margin(?:-top|-block-start)?\s*:", body
+            ), sel
 
 
 def test_grid_gaps_and_about_gutters_come_from_the_card_gap_token():
     rules = _css_rules()
     for grid in (".settings-grid", ".energy-grid"):
-        bodies = [body for sel, body in rules if grid in {part.strip() for part in sel.split(",")}]
-        gaps = [value for body in bodies for value in re.findall(r"(?:^|;)\s*((?:row-|column-)?gap)\s*:\s*([^;]+)", body)]
+        bodies = [
+            body
+            for sel, body in rules
+            if grid in {part.strip() for part in sel.split(",")}
+        ]
+        gaps = [
+            value
+            for body in bodies
+            for value in re.findall(
+                r"(?:^|;)\s*((?:row-|column-)?gap)\s*:\s*([^;]+)", body
+            )
+        ]
         assert gaps, grid
-        assert all(value.strip() == "var(--rct-card-gap)" for _, value in gaps), (grid, gaps)
+        assert all(value.strip() == "var(--rct-card-gap)" for _, value in gaps), (
+            grid,
+            gaps,
+        )
     row = [body for sel, body in rules if sel.endswith(".about-top-row")]
-    assert row and "--bs-gutter-x: var(--rct-card-gap)" in row[0] and "--bs-gutter-y: var(--rct-card-gap)" in row[0]
+    assert (
+        row
+        and "--bs-gutter-x: var(--rct-card-gap)" in row[0]
+        and "--bs-gutter-y: var(--rct-card-gap)" in row[0]
+    )
 
 
 def test_stacked_page_templates_carry_no_margin_utilities_on_top_level_blocks():
@@ -1487,9 +2288,15 @@ def test_stacked_page_templates_carry_no_margin_utilities_on_top_level_blocks():
         html = (TEMPLATES / f"{page}.html").read_text(encoding="utf-8")
         for tag in re.findall(r"<(?:section|div|details|header)\b[^>]*>", html):
             classes = re.search(r'class="([^"]*)"', tag)
-            blocks = bool(classes and block_class.search(classes[1])) or 'id="export-actions"' in tag
+            blocks = (
+                bool(classes and block_class.search(classes[1]))
+                or 'id="export-actions"' in tag
+            )
             if blocks:
-                assert not re.search(r"(?:^|[\s\"])(?:mt|my)-[34](?:\s|\")", tag), (page, tag)
+                assert not re.search(r"(?:^|[\s\"])(?:mt|my)-[34](?:\s|\")", tag), (
+                    page,
+                    tag,
+                )
 
 
 def test_prometheus_and_inverters_build_their_table_from_the_one_shared_macro():
@@ -1502,42 +2309,74 @@ def test_prometheus_and_inverters_build_their_table_from_the_one_shared_macro():
         assert "<table" not in html and "btn-group" not in html, page
     for suffix in ("title", "search", "list", "range", "prev", "next"):
         assert f'id="{{{{ prefix }}}}-{suffix}"' in macro, suffix
-    for shared in ("param-table-wrap", "param-table", "btn btn-primary", "btn-group btn-group-sm"):
+    for shared in (
+        "param-table-wrap",
+        "param-table",
+        "btn btn-primary",
+        "btn-group btn-group-sm",
+    ):
         assert shared in macro, shared
     js = _admin_js()
     assert "const EXPOSED_PAGE_SIZE = 15;" in js
-    assert "renderParameterTable('exposed'" in js and "renderParameterTable('writable'" in js
+    assert (
+        "renderParameterTable('exposed'" in js
+        and "renderParameterTable('writable'" in js
+    )
 
 
 @pytest.mark.asyncio
 async def test_prometheus_and_inverters_render_the_same_table_card_structure(tmp_path):
     def card_classes(html: str, prefix: str) -> set[str]:
-        section = re.search(rf'<section class="card param-card" aria-labelledby="{prefix}-title">.*?</section>', html, re.DOTALL)
+        section = re.search(
+            rf'<section class="card param-card" aria-labelledby="{prefix}-title">.*?</section>',
+            html,
+            re.DOTALL,
+        )
         assert section, prefix
-        return {name for value in re.findall(r'class="([^"]*)"', section[0]) for name in value.split()}
+        return {
+            name
+            for value in re.findall(r'class="([^"]*)"', section[0])
+            for name in value.split()
+        }
 
     async with _logged_in(tmp_path) as client:
         exposed = card_classes((await client.get("/ui/prometheus")).text, "exposed")
         writable = card_classes((await client.get("/ui/inverters")).text, "writable")
     # Only the drag handle column is Prometheus-specific.
     assert exposed - {"col-handle", "param-table-reorder"} == writable
-    assert {"param-table", "param-table-wrap", "btn-primary", "btn-group-sm"} <= writable
+    assert {
+        "param-table",
+        "param-table-wrap",
+        "btn-primary",
+        "btn-group-sm",
+    } <= writable
 
 
 def test_incomplete_export_group_is_reported_by_toast_and_on_the_field_not_by_a_banner():
     js = _admin_js()
-    render = js[js.index("function renderSaveState()"):js.index("function reportSaveFailure(")]
-    assert "toast(entry.message, 'warning')" in render and "lastIncompleteToast.get(id) !== entry.message" in render
+    render = js[
+        js.index("function renderSaveState()") : js.index("function reportSaveFailure(")
+    ]
+    assert (
+        "toast(entry.message, 'warning')" in render
+        and "lastIncompleteToast.get(id) !== entry.message" in render
+    )
     assert "sectionNotice(id, 'hint')" not in render  # no persistent yellow banner
-    mark = js[js.index("function markMissingExportFields()"):js.index("function queueExportSettings()")]
+    mark = js[
+        js.index("function markMissingExportFields()") : js.index(
+            "function queueExportSettings()"
+        )
+    ]
     assert "aria-invalid" in mark and "control.dataset.touched === '1'" in mark
 
 
 def test_primary_button_themes_its_disabled_and_focus_state():
     css = CSS.read_text(encoding="utf-8")
-    rule = css[css.index(".btn-primary {"):css.index(".btn-outline-primary {")]
-    assert "--bs-btn-disabled-bg: var(--rct-brand);" in rule and "--bs-btn-focus-shadow-rgb: var(--bs-primary-rgb);" in rule
-
+    rule = css[css.index(".btn-primary {") : css.index(".btn-outline-primary {")]
+    assert (
+        "--bs-btn-disabled-bg: var(--rct-brand);" in rule
+        and "--bs-btn-focus-shadow-rgb: var(--bs-primary-rgb);" in rule
+    )
 
 
 def test_device_header_serial_number_is_text_only_and_omitted_when_unknown():
@@ -1548,9 +2387,12 @@ def test_device_header_serial_number_is_text_only_and_omitted_when_unknown():
 
 
 @pytest.mark.asyncio
-async def test_energy_page_renders_four_tabs_with_inverter_default_and_keeps_the_existing_ui(tmp_path):
+async def test_energy_page_renders_four_tabs_with_inverter_default_and_keeps_the_existing_ui(
+    tmp_path,
+):
     """The Energy Manager page is a four-tab layout: Inverter (default, carrying the existing
-    energy UI unchanged), Charging plan (the read-only Dry-Run preview), Spot Market and Weather. The tabs are keyboard-operable Bootstrap tabs."""
+    energy UI unchanged), Charging plan (the read-only Dry-Run preview), Spot Market and Weather. The tabs are keyboard-operable Bootstrap tabs.
+    """
     async with _logged_in(tmp_path) as client:
         html = (await client.get("/ui/energy")).text
     for tab in ("Inverter", "Charging plan", "Spot Market", "Weather"):
@@ -1559,10 +2401,19 @@ async def test_energy_page_renders_four_tabs_with_inverter_default_and_keeps_the
     assert html.count('data-bs-toggle="tab"') == 4
     for pane in ("inverter", "plan", "spot-market", "weather"):
         assert f'id="energy-pane-{pane}"' in html, pane
-    inverter_tab = re.search(r'<button[^>]*id="energy-tab-inverter"[^>]*>', html, re.DOTALL).group(0)
-    assert 'class="nav-link active"' in inverter_tab and 'aria-selected="true"' in inverter_tab
+    inverter_tab = re.search(
+        r'<button[^>]*id="energy-tab-inverter"[^>]*>', html, re.DOTALL
+    ).group(0)
+    assert (
+        'class="nav-link active"' in inverter_tab
+        and 'aria-selected="true"' in inverter_tab
+    )
     # The existing energy UI still lives on the page (Inverter tab), so initEnergy/pollEnergy drive it.
-    assert 'id="energy-expert-mode"' in html and 'id="energy-hardware-strategies"' in html and 'id="energy-list"' in html
+    assert (
+        'id="energy-expert-mode"' in html
+        and 'id="energy-hardware-strategies"' in html
+        and 'id="energy-list"' in html
+    )
     # Both Spot Market and Weather carry a config form and a preview area; the old Weather
     # placeholder ("Solar forecast integration is not configured yet.") is fully replaced by the
     # real Open-Meteo configuration and preview, the single control surface for the feature.
@@ -1587,7 +2438,9 @@ def test_energy_tabs_sync_with_the_url_fragment_without_a_full_reload():
 def test_spot_market_keeps_bidding_zone_and_fee_region_as_separate_fields():
     js = _admin_js()
     # The posted body nests fee_region separately from bidding_zone; the two are never one field.
-    body = js[js.index("function spotMarketBody()"):js.index("function renderSpotMarket(")]
+    body = js[
+        js.index("function spotMarketBody()") : js.index("function renderSpotMarket(")
+    ]
     assert "bidding_zone:" in body and "fee_region:" in body
     # The fee region is no longer an operator-editable form field; it is carried through from the
     # loaded config so the model concept and any stored value survive, still separate from the zone.
@@ -1596,10 +2449,18 @@ def test_spot_market_keeps_bidding_zone_and_fee_region_as_separate_fields():
 
 def test_spot_market_preview_uses_a_readable_time_axis_without_interval_counts():
     js = _admin_js()
-    chart = js[js.index("function drawSpotMarketChart("):js.index("function renderSpotMarketPreview(")]
+    chart = js[
+        js.index("function drawSpotMarketChart(") : js.index(
+            "function renderSpotMarketPreview("
+        )
+    ]
     assert "autoSkip: true" in chart and "maxTicksLimit: 7" in chart
     assert "minRotation: 0" in chart and "maxRotation: 0" in chart
-    preview = js[js.index("function renderSpotMarketPreview("):js.index("async function previewSpotMarket(")]
+    preview = js[
+        js.index("function renderSpotMarketPreview(") : js.index(
+            "async function previewSpotMarket("
+        )
+    ]
     assert "quarter-hour intervals" not in preview
     assert "spot-market-preview-intervals" not in preview
     assert "Source unit EUR/MWh · Bidding zone ${result.bidding_zone}" in preview
@@ -1607,17 +2468,30 @@ def test_spot_market_preview_uses_a_readable_time_axis_without_interval_counts()
 
 def test_weather_body_carries_location_and_pv_geometry_but_not_timezone():
     js = _admin_js()
-    body = js[js.index("function weatherBody()"):js.index("function weatherSectionHeading(")]
+    body = js[
+        js.index("function weatherBody()") : js.index("function weatherSectionHeading(")
+    ]
     # Timezone is server-derived from latitude/longitude and is deliberately not client input.
-    for key in ("location_name:", "latitude:", "longitude:", "pv_peak_power_wp:",
-                "tilt_deg:", "azimuth_deg:", "performance_ratio:"):
+    for key in (
+        "location_name:",
+        "latitude:",
+        "longitude:",
+        "pv_peak_power_wp:",
+        "tilt_deg:",
+        "azimuth_deg:",
+        "performance_ratio:",
+    ):
         assert key in body, key
     assert "timezone:" not in body
 
 
 def test_weather_location_search_calls_the_admin_endpoint_not_open_meteo():
     js = _admin_js()
-    search = js[js.index("async function searchWeatherLocations("):js.index("function weatherLocationLabel(")]
+    search = js[
+        js.index("async function searchWeatherLocations(") : js.index(
+            "function weatherLocationLabel("
+        )
+    ]
     # The browser talks only to the admin locations endpoint, never to Open-Meteo directly.
     assert "energy/weather/locations?q=" in search
     assert "open-meteo" not in search.lower()
@@ -1628,25 +2502,41 @@ def test_weather_location_search_calls_the_admin_endpoint_not_open_meteo():
 def test_weather_location_searching_state_shows_a_decorative_spinner_in_the_live_region():
     js = _admin_js()
     css = (ADMIN_DIR / "static" / "css" / "admin.css").read_text(encoding="utf-8")
-    searching = js[js.index("function showWeatherLocationSearching("):js.index("function setWeatherLocationStatus(")]
+    searching = js[
+        js.index("function showWeatherLocationSearching(") : js.index(
+            "function setWeatherLocationStatus("
+        )
+    ]
     assert "'Searching …', true" in searching
-    status = js[js.index("function setWeatherLocationStatus("):js.index("function clearWeatherLocationStatus(")]
+    status = js[
+        js.index("function setWeatherLocationStatus(") : js.index(
+            "function clearWeatherLocationStatus("
+        )
+    ]
     # The spinner is decorative; the polite live region announces the text once.
     assert "spinner-border spinner-border-sm" in status and "aria-hidden" in status
     # Clearing the status removes the spinner together with the text.
-    clear = js[js.index("function clearWeatherLocationStatus("):js.index("function hideWeatherLocationResults(")]
+    clear = js[
+        js.index("function clearWeatherLocationStatus(") : js.index(
+            "function hideWeatherLocationResults("
+        )
+    ]
     assert "textContent = ''" in clear
     assert ".weather-location-spinner" in css
-    assert "prefers-reduced-motion" in css[css.index(".weather-location-spinner"):][:300]
+    assert (
+        "prefers-reduced-motion" in css[css.index(".weather-location-spinner") :][:300]
+    )
 
 
 def test_selecting_a_location_sets_coordinates_and_derives_timezone():
     js = _admin_js()
     start = js.index("function selectWeatherLocation(")
-    select = js[start:start + 1400]
+    select = js[start : start + 1400]
     assert "set('latitude'" in select and "set('longitude'" in select
     assert "setWeatherTimezone(null)" in select
-    assert "resolveWeatherTimezone(Number(hit.latitude), Number(hit.longitude)" in select
+    assert (
+        "resolveWeatherTimezone(Number(hit.latitude), Number(hit.longitude)" in select
+    )
     assert "hit.timezone" not in select
     assert "weatherLocationName = weatherLocationLabel(hit)" in select
 
@@ -1654,29 +2544,50 @@ def test_selecting_a_location_sets_coordinates_and_derives_timezone():
 def test_a_manual_coordinate_change_does_not_trigger_geocoding():
     js = _admin_js()
     # Geocoding is bound only to the dedicated search field's input, never to the lat/lon controls.
-    bind = js[js.index("function bindWeatherLocationSearch("):js.index("function scheduleWeatherLocationSearch(")]
+    bind = js[
+        js.index("function bindWeatherLocationSearch(") : js.index(
+            "function scheduleWeatherLocationSearch("
+        )
+    ]
     assert "search.addEventListener('input'" in bind
     # The number-field input listener in initWeather only schedules a preview, not a location search.
-    init = js[js.index("async function initWeather("):js.index("function scheduleWeatherPreview(")]
+    init = js[
+        js.index("async function initWeather(") : js.index(
+            "function scheduleWeatherPreview("
+        )
+    ]
     assert "scheduleWeatherPreview" in init
-    assert "searchWeatherLocations" not in init and "scheduleWeatherLocationSearch" not in init
+    assert (
+        "searchWeatherLocations" not in init
+        and "scheduleWeatherLocationSearch" not in init
+    )
 
 
 def test_weather_preview_updates_automatically_from_form_state():
     js = _admin_js()
-    init = js[js.index("async function initWeather("):js.index("function scheduleWeatherPreview(")]
+    init = js[
+        js.index("async function initWeather(") : js.index(
+            "function scheduleWeatherPreview("
+        )
+    ]
     assert "weather-test" not in init
     assert "scheduleWeatherPreview({ immediate: true })" in init
     assert "fields.addEventListener('change'" in init
     assert "fields.addEventListener('input'" in init
-    preview = js[js.index("async function previewWeather("):js.index("function providerLabel(")]
+    preview = js[
+        js.index("async function previewWeather(") : js.index("function providerLabel(")
+    ]
     # Automatic preview posts current unsaved form state and never persists it.
     assert "energy/weather/preview" in preview and "weatherBody()" in preview
 
 
 def test_weather_preview_renders_disabled_connected_and_unavailable_states():
     js = _admin_js()
-    render = js[js.index("function renderWeatherPreview("):js.index("async function previewWeather(")]
+    render = js[
+        js.index("function renderWeatherPreview(") : js.index(
+            "async function previewWeather("
+        )
+    ]
     assert "Disabled" in render and "Connected" in render and "Unavailable" in render
     assert "Next 24 h" in render and "kWh" in render
     assert "Source: ${result.source" in render
@@ -1690,7 +2601,14 @@ def test_energy_page_wires_the_read_only_dry_run_plan_preview():
     assert "/dynamic-plan`" in js
     # The device list and the battery data do not go through the dispatch-sensitive status route.
     assert "api('energy/planning-devices')" in js and "/planning-limits`" in js
-    assert "api('energy/devices')" not in js[js.index("async function refreshPlanDevices"):js.index("async function loadDryRunPlan")]
+    assert (
+        "api('energy/devices')"
+        not in js[
+            js.index("async function refreshPlanDevices") : js.index(
+                "async function loadDryRunPlan"
+            )
+        ]
+    )
     assert 'id="energy-plan-schedule"' in html and "$('energy-plan-schedule')" in js
     assert 'id="energy-plan-limits"' in html and 'name="capacity"' in html
     assert "usable_capacity_wh" in js
@@ -1701,20 +2619,41 @@ def test_energy_page_wires_the_read_only_dry_run_plan_preview():
     assert "!capacityOverrideEnabled || capacity.value === ''" in js
     assert "setEnergyExpertMode(planExpertSwitch.checked)" in js
     # The preview lives in its own "Charging plan" tab, not inside the Inverter pane.
-    plan_pane = html[html.index('id="energy-pane-plan"'):html.index('id="energy-pane-spot-market"')]
+    plan_pane = html[
+        html.index('id="energy-pane-plan"') : html.index('id="energy-pane-spot-market"')
+    ]
     assert 'id="energy-plan-card"' in plan_pane
-    assert "method:" not in js[js.index("async function loadDryRunPlan"):js.index("function initDryRunPlan")]
+    assert (
+        "method:"
+        not in js[
+            js.index("async function loadDryRunPlan") : js.index(
+                "function initDryRunPlan"
+            )
+        ]
+    )
     # Full-width result area: no permanent 7/5 split, the optional consumption history sits below.
     assert "col-xl-7" not in plan_pane and "col-xl-5" not in plan_pane
-    assert plan_pane.index('id="energy-plan-result"') < plan_pane.index('id="energy-plan-schedule"') < plan_pane.index('id="energy-consumption-section"')
-    assert 'id="energy-consumption-section"' in plan_pane and "hidden>" in plan_pane[plan_pane.index('id="energy-consumption-section"'):][:200]
+    assert (
+        plan_pane.index('id="energy-plan-result"')
+        < plan_pane.index('id="energy-plan-schedule"')
+        < plan_pane.index('id="energy-consumption-section"')
+    )
+    assert (
+        'id="energy-consumption-section"' in plan_pane
+        and "hidden>"
+        in plan_pane[plan_pane.index('id="energy-consumption-section"') :][:200]
+    )
     # Plan-specific KPI grid; the shared two-column Spot Market grid and its tiles stay untouched.
     css = (ADMIN_DIR / "static/css/admin.css").read_text(encoding="utf-8")
-    assert "energy-plan-highlights" in js and "spot-market-highlights-row" not in js + css
-    assert "repeat(3, minmax(0, 1fr))" in css[css.index(".energy-plan-highlights {"):]
+    assert (
+        "energy-plan-highlights" in js and "spot-market-highlights-row" not in js + css
+    )
+    assert "repeat(3, minmax(0, 1fr))" in css[css.index(".energy-plan-highlights {") :]
     # The static header reads as a card: a plain title (no "Preview" qualifier badge, the plan either
     # has data or says it has none) and the inverter select + Expert switch as one labelled controls block.
-    assert 'id="energy-plan-qualifier"' not in plan_pane and ">Preview<" not in plan_pane
+    assert (
+        'id="energy-plan-qualifier"' not in plan_pane and ">Preview<" not in plan_pane
+    )
     # The header carries no Energy Manager mode badge; it was removed on purpose.
     assert 'id="energy-plan-manager-state"' not in plan_pane + js
     assert "planStatusCard('Energy Manager is off'" not in js
@@ -1722,17 +2661,30 @@ def test_energy_page_wires_the_read_only_dry_run_plan_preview():
     assert "Read-only preview" in plan_pane and "Preview only" not in plan_pane
     assert "Preliminary plan" not in js
     assert "energy-plan-confidence-note" not in plan_pane + js
-    assert 'id="energy-plan-confidence"' in plan_pane and "'Energy Manager off'" not in js
+    assert (
+        'id="energy-plan-confidence"' in plan_pane and "'Energy Manager off'" not in js
+    )
     assert "function syncPlanSelection" in js
     assert "const planEligible = (device) => device.mode === 'manual';" in js
-    assert "Show all intervals" in js and "element('details'" in js and "element('summary'" in js
+    assert (
+        "Show all intervals" in js
+        and "element('details'" in js
+        and "element('summary'" in js
+    )
     assert "History coverage" in js and "Live recording" not in js
     assert "Locally measured" in js and "Recovered from inverter history" in js
     assert "will feed later" not in html
     # Axis unit titles are sized like the legend and the legend entries are real buttons per series.
-    assert "chartAxisTitle('kW'" in js and "chartAxisTitle('%'" in js and "chartAxisTitle('kWh'" in js
+    assert (
+        "chartAxisTitle('kW'" in js
+        and "chartAxisTitle('%'" in js
+        and "chartAxisTitle('kWh'" in js
+    )
     assert "energy-consumption-legend-item" in js and "setDatasetVisibility(index" in js
-    assert 'role="group"' in plan_pane and 'aria-label="Charging plan controls"' in plan_pane
+    assert (
+        'role="group"' in plan_pane
+        and 'aria-label="Charging plan controls"' in plan_pane
+    )
 
 
 _PLAN_RENDER_DRIVER = r"""
@@ -1789,84 +2741,211 @@ def _render_plan(tmp_path, plan: dict, *, expert: bool = False) -> dict:
     driver.write_text(_PLAN_RENDER_DRIVER, encoding="utf-8")
     plan_file.write_text(json.dumps(plan), encoding="utf-8")
     js = ADMIN_DIR / "static/js/admin-energy-setup.js"
-    done = subprocess.run([node, str(driver), str(js), str(plan_file), str(expert).lower()], check=False, capture_output=True, text=True, timeout=30)
+    done = subprocess.run(
+        [node, str(driver), str(js), str(plan_file), str(expert).lower()],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
     assert done.returncode == 0, done.stderr
     return json.loads(done.stdout)
 
 
-def test_dry_run_plan_renderer_shows_idle_and_null_slots_with_horizon_and_windows(tmp_path):
-    slot = {"start": "2026-10-15T01:00:00+00:00", "end": "2026-10-15T02:00:00+00:00", "reason": "cheap"}
+def test_dry_run_plan_renderer_shows_idle_and_null_slots_with_horizon_and_windows(
+    tmp_path,
+):
+    slot = {
+        "start": "2026-10-15T01:00:00+00:00",
+        "end": "2026-10-15T02:00:00+00:00",
+        "reason": "cheap",
+    }
     plan = {
-        "device_id": "main", "status": "ok", "detail": None, "created_at": "2026-10-15T00:00:00+00:00",
-        "valid_until": "2026-10-16T00:00:00+00:00", "horizon_hours": 24.0, "preview_only": True,
+        "device_id": "main",
+        "status": "ok",
+        "detail": None,
+        "created_at": "2026-10-15T00:00:00+00:00",
+        "valid_until": "2026-10-16T00:00:00+00:00",
+        "horizon_hours": 24.0,
+        "preview_only": True,
         "slots": [
-            {**slot, "action": "charge", "max_power_w": 3000.0, "target_soc_percent": 80.0},
-            {**slot, "action": "idle", "max_power_w": None, "target_soc_percent": None, "reason": "expensive"},
+            {
+                **slot,
+                "action": "charge",
+                "max_power_w": 3000.0,
+                "target_soc_percent": 80.0,
+            },
+            {
+                **slot,
+                "action": "idle",
+                "max_power_w": None,
+                "target_soc_percent": None,
+                "reason": "expensive",
+            },
         ],
-        "window": {"consumption_from": "2026-10-01T00:00:00+00:00", "consumption_until": "2026-10-15T00:00:00+00:00",
-                   "solar_from": "2026-10-15T00:00:00+00:00", "solar_until": "2026-10-17T00:00:00+00:00",
-                   "prices_from": None, "prices_until": None},
+        "window": {
+            "consumption_from": "2026-10-01T00:00:00+00:00",
+            "consumption_until": "2026-10-15T00:00:00+00:00",
+            "solar_from": "2026-10-15T00:00:00+00:00",
+            "solar_until": "2026-10-17T00:00:00+00:00",
+            "prices_from": None,
+            "prices_until": None,
+        },
     }
     out = _render_plan(tmp_path, plan)
-    assert len(out["rows"]) == 3  # forecast window rows; the schedule is a chart, not a table
-    assert out["items"][1:3] == ["3000 W", "80 %"]  # first row of the charge-window table
-    assert [point["y"] for point in out["series"]["power"]] == [3.0, 3.0, None, 0, 0]  # idle reads 0; the overlapping duplicate slot breaks the line
+    assert (
+        len(out["rows"]) == 3
+    )  # forecast window rows; the schedule is a chart, not a table
+    assert out["items"][1:3] == [
+        "3000 W",
+        "80 %",
+    ]  # first row of the charge-window table
+    assert [point["y"] for point in out["series"]["power"]] == [
+        3.0,
+        3.0,
+        None,
+        0,
+        0,
+    ]  # idle reads 0; the overlapping duplicate slot breaks the line
     assert "Horizon: 24 h" in out["text"] and "Forecast inputs" in out["text"]
     assert out["rows"][2][1] == "n/a"  # spot prices window is unknown
 
 
-def test_dry_run_plan_renderer_shows_policy_flags_assumptions_and_limiting_reasons(tmp_path):
+def test_dry_run_plan_renderer_shows_policy_flags_assumptions_and_limiting_reasons(
+    tmp_path,
+):
     plan = {
-        "device_id": "main", "status": "ok", "detail": None, "created_at": "2026-10-15T00:00:00+00:00",
-        "valid_until": "2026-10-16T00:00:00+00:00", "horizon_hours": 24.0, "preview_only": True, "slots": [],
-        "window": {}, "policy": "gentle", "reserve_soc_percent": 7.0, "reserve_satisfied": True,
-        "reserve_shortfall_wh": 0.0, "target_soc_percent": 90.0, "target_time": "2026-10-15T06:00:00+00:00",
-        "target_reachable": False, "unserved_target_energy_wh": 3000.0,
-        "power": {"static_charge_limit_w": 4000.0, "live_charge_limit_w": None, "live_limit_available": False,
-                  "permitted_charge_power_w": 4000.0, "preferred_min_w": 500.0, "preferred_max_w": 1000.0},
-        "energy": {"commanded_charge_energy_wh": 3000.0, "battery_terminal_energy_wh": 3000.0,
-                   "stored_energy_delta_wh": 3000.0, "grid_charge_energy_wh": 3333.0},
-        "assumptions": {"charge_efficiency": 0.9, "charge_efficiency_source": "assumed",
-                        "power_reference": "battery-side charge setpoint, measuring point unverified",
-                        "power_reference_verified": False, "live_limit_status": "no verified live limit",
-                        "forecast_basis": "stored history", "battery_internal_losses": "not modelled",
-                        "charge_efficiency_note": "0.90 is an explicit planning assumption",
-                        "preferred_range_status": "unverified; a soft preference"},
-        "limiting_reasons": [{"code": "target_unreachable_in_preferred_range", "detail": "needs meet_deadline"},
-                             {"code": "live_limit_unavailable", "detail": "static limit applies"}],
-        "replan": {"triggers": [{"code": "soc_deviation", "description": "Measured SoC deviates"}], "thresholds": {}},
+        "device_id": "main",
+        "status": "ok",
+        "detail": None,
+        "created_at": "2026-10-15T00:00:00+00:00",
+        "valid_until": "2026-10-16T00:00:00+00:00",
+        "horizon_hours": 24.0,
+        "preview_only": True,
+        "slots": [],
+        "window": {},
+        "policy": "gentle",
+        "reserve_soc_percent": 7.0,
+        "reserve_satisfied": True,
+        "reserve_shortfall_wh": 0.0,
+        "target_soc_percent": 90.0,
+        "target_time": "2026-10-15T06:00:00+00:00",
+        "target_reachable": False,
+        "unserved_target_energy_wh": 3000.0,
+        "power": {
+            "static_charge_limit_w": 4000.0,
+            "live_charge_limit_w": None,
+            "live_limit_available": False,
+            "permitted_charge_power_w": 4000.0,
+            "preferred_min_w": 500.0,
+            "preferred_max_w": 1000.0,
+        },
+        "energy": {
+            "commanded_charge_energy_wh": 3000.0,
+            "battery_terminal_energy_wh": 3000.0,
+            "stored_energy_delta_wh": 3000.0,
+            "grid_charge_energy_wh": 3333.0,
+        },
+        "assumptions": {
+            "charge_efficiency": 0.9,
+            "charge_efficiency_source": "assumed",
+            "power_reference": "battery-side charge setpoint, measuring point unverified",
+            "power_reference_verified": False,
+            "live_limit_status": "no verified live limit",
+            "forecast_basis": "stored history",
+            "battery_internal_losses": "not modelled",
+            "charge_efficiency_note": "0.90 is an explicit planning assumption",
+            "preferred_range_status": "unverified; a soft preference",
+        },
+        "limiting_reasons": [
+            {
+                "code": "target_unreachable_in_preferred_range",
+                "detail": "needs meet_deadline",
+            },
+            {"code": "live_limit_unavailable", "detail": "static limit applies"},
+        ],
+        "replan": {
+            "triggers": [
+                {"code": "soc_deviation", "description": "Measured SoC deviates"}
+            ],
+            "thresholds": {},
+        },
     }
     text = _render_plan(tmp_path, plan)["text"]
     for expected in (
-        "Policy: Gentle", "Reserve kept:", "Yes", "Target 90 %", "Not reachable", "3 kWh missing",
-        "live limit not available", "preferred range 500 W", "from grid 3.33 kWh", "90 % (assumed)",
-        "[unverified]", "0.90 is an explicit planning assumption", "Preferred range: unverified; a soft preference", "Live limit: no verified live limit", "Forecast basis: stored history",
-        "Limiting reasons", "Target not reachable in the preferred range: needs meet_deadline",
-        "No verified live charge limit: static limit applies", "Replan when: measured soc deviates",
+        "Policy: Gentle",
+        "Reserve kept:",
+        "Yes",
+        "Target 90 %",
+        "Not reachable",
+        "3 kWh missing",
+        "live limit not available",
+        "preferred range 500 W",
+        "from grid 3.33 kWh",
+        "90 % (assumed)",
+        "[unverified]",
+        "0.90 is an explicit planning assumption",
+        "Preferred range: unverified; a soft preference",
+        "Live limit: no verified live limit",
+        "Forecast basis: stored history",
+        "Limiting reasons",
+        "Target not reachable in the preferred range: needs meet_deadline",
+        "No verified live charge limit: static limit applies",
+        "Replan when: measured soc deviates",
     ):
         assert expected in text, expected
     # Unreachable target and a violated reserve are both shown as such, independently.
-    violated = _render_plan(tmp_path, {**plan, "reserve_satisfied": False, "reserve_shortfall_wh": 500.0,
-                                       "target_reachable": True, "unserved_target_energy_wh": 0.0})["text"]
-    assert "No (0.5 kWh of demand not covered)" in violated and "Reachable under the currently known limits" in violated
+    violated = _render_plan(
+        tmp_path,
+        {
+            **plan,
+            "reserve_satisfied": False,
+            "reserve_shortfall_wh": 500.0,
+            "target_reachable": True,
+            "unserved_target_energy_wh": 0.0,
+        },
+    )["text"]
+    assert (
+        "No (0.5 kWh of demand not covered)" in violated
+        and "Reachable under the currently known limits" in violated
+    )
 
 
-def test_dry_run_plan_renderer_shows_pending_wait_state_and_keeps_readiness_for_experts(tmp_path):
+def test_dry_run_plan_renderer_shows_pending_wait_state_and_keeps_readiness_for_experts(
+    tmp_path,
+):
     pending = {"status": "spot_prices_unavailable", "slots": []}
     basic = _render_plan(tmp_path, pending)["waiting"]
-    assert basic["role"] == "status" and basic["icon"] == "hourglass_empty" and basic["iconHidden"]
-    assert "Plan is being prepared" in basic["text"] and "Please check back in a few minutes." in basic["text"]
+    assert (
+        basic["role"] == "status"
+        and basic["icon"] == "hourglass_empty"
+        and basic["iconHidden"]
+    )
+    assert (
+        "Plan is being prepared" in basic["text"]
+        and "Please check back in a few minutes." in basic["text"]
+    )
     assert basic["checklistHidden"] is True
     expert = _render_plan(tmp_path, pending, expert=True)["waiting"]
-    assert expert["checklistHidden"] is False and "Spot prices: not available yet" in expert["checklistText"]
+    assert (
+        expert["checklistHidden"] is False
+        and "Spot prices: not available yet" in expert["checklistText"]
+    )
 
-    battery_out = _render_plan(tmp_path, {"status": "battery_state_unavailable", "slots": []})
+    battery_out = _render_plan(
+        tmp_path, {"status": "battery_state_unavailable", "slots": []}
+    )
     assert battery_out.get("waiting") is None and battery_out["spinners"] == 0
-    assert "Check that the inverter is connected and reports its battery state and capacity" in battery_out["text"]
+    assert (
+        "Check that the inverter is connected and reports its battery state and capacity"
+        in battery_out["text"]
+    )
     assert "Plan is being prepared" not in battery_out["text"]
     assert "Usable battery capacity: could not be verified" in battery_out["text"]
 
-    waiting = _render_plan(tmp_path, {"status": "insufficient_history", "slots": []})["waiting"]
+    waiting = _render_plan(tmp_path, {"status": "insufficient_history", "slots": []})[
+        "waiting"
+    ]
     assert "Plan is being prepared" in waiting["text"]
     assert "conservative baseline" in waiting["checklistText"]
 
@@ -1874,71 +2953,148 @@ def test_dry_run_plan_renderer_shows_pending_wait_state_and_keeps_readiness_for_
 def test_dry_run_plan_renderer_tells_disabled_inputs_from_pending_ones(tmp_path):
     spot_out = _render_plan(tmp_path, {"status": "spot_disabled", "slots": []})
     spot = spot_out["text"]
-    assert spot_out["spinners"] == 0 and "Please wait" not in spot  # waiting cannot fix a disabled input
+    assert (
+        spot_out["spinners"] == 0 and "Please wait" not in spot
+    )  # waiting cannot fix a disabled input
     assert "The spot market integration is disabled." in spot
-    assert "Spot prices: disabled in settings" in spot and "Solar forecast: not checked yet" in spot
-    solar = _render_plan(tmp_path, {"status": "solar_not_configured", "slots": []})["text"]
+    assert (
+        "Spot prices: disabled in settings" in spot
+        and "Solar forecast: not checked yet" in spot
+    )
+    solar = _render_plan(tmp_path, {"status": "solar_not_configured", "slots": []})[
+        "text"
+    ]
     assert "The solar forecast is not configured." in solar
-    assert "Spot prices: available" in solar and "Solar forecast: not configured in settings" in solar
+    assert (
+        "Spot prices: available" in solar
+        and "Solar forecast: not configured in settings" in solar
+    )
 
 
 def test_every_forecast_basis_is_handled_by_the_plan_confidence_renderer():
     from app.optimizer.models import ForecastBasis
 
     js = (ADMIN_DIR / "static/js/admin-energy-setup.js").read_text(encoding="utf-8")
-    body = js[js.index("function renderPlanConfidence"):js.index("function renderDryRunPlan")]
-    block = js[js.index("const PLAN_CONFIDENCE_BASES"):js.index("function renderPlanConfidence")] + body
+    body = js[
+        js.index("function renderPlanConfidence") : js.index(
+            "function renderDryRunPlan"
+        )
+    ]
+    block = (
+        js[
+            js.index("const PLAN_CONFIDENCE_BASES") : js.index(
+                "function renderPlanConfidence"
+            )
+        ]
+        + body
+    )
     for basis in ForecastBasis:
-        assert basis.value in block, f"forecast basis {basis.value} has no confidence presentation"
+        assert (
+            basis.value in block
+        ), f"forecast basis {basis.value} has no confidence presentation"
 
 
 def test_every_planner_action_has_a_plan_label(tmp_path):
     from app.optimizer.models import EnergyAction
 
-    labels = _render_plan(tmp_path, {"status": "ok", "slots": [], "horizon_hours": 1, "window": {}})["labels"]
+    labels = _render_plan(
+        tmp_path, {"status": "ok", "slots": [], "horizon_hours": 1, "window": {}}
+    )["labels"]
     assert {action.value for action in EnergyAction} <= set(labels)
 
 
-def test_dry_run_schedule_chart_series_keep_uneven_slots_and_gaps_on_a_time_axis(tmp_path):
+def test_dry_run_schedule_chart_series_keep_uneven_slots_and_gaps_on_a_time_axis(
+    tmp_path,
+):
     def slot(start, end, action, watts, soc):
-        return {"start": start, "end": end, "action": action, "max_power_w": watts, "target_soc_percent": soc,
-                "reason": "forecast PV covers demand"}
+        return {
+            "start": start,
+            "end": end,
+            "action": action,
+            "max_power_w": watts,
+            "target_soc_percent": soc,
+            "reason": "forecast PV covers demand",
+        }
 
     plan = {
-        "device_id": "main", "status": "ok", "detail": None, "created_at": "2026-10-15T00:00:00+00:00",
-        "valid_until": "2026-10-16T00:00:00+00:00", "horizon_hours": 24.0, "preview_only": True, "window": {},
+        "device_id": "main",
+        "status": "ok",
+        "detail": None,
+        "created_at": "2026-10-15T00:00:00+00:00",
+        "valid_until": "2026-10-16T00:00:00+00:00",
+        "horizon_hours": 24.0,
+        "preview_only": True,
+        "window": {},
         "slots": [  # unsorted; the second slot starts after a gap and the first one ends the next day
-            slot("2026-10-15T20:00:00+00:00", "2026-10-16T09:00:00+00:00", "idle", None, None),
-            slot("2026-10-15T01:00:00+00:00", "2026-10-15T02:00:00+00:00", "charge", 2000.0, 70.0),
+            slot(
+                "2026-10-15T20:00:00+00:00",
+                "2026-10-16T09:00:00+00:00",
+                "idle",
+                None,
+                None,
+            ),
+            slot(
+                "2026-10-15T01:00:00+00:00",
+                "2026-10-15T02:00:00+00:00",
+                "charge",
+                2000.0,
+                70.0,
+            ),
         ],
     }
     out = _render_plan(tmp_path, plan)
     power, soc = out["series"]["power"], out["series"]["soc"]
     xs = [point["x"] for point in power if point["y"] is not None]
-    assert xs == sorted(xs) and len(xs) == 4  # a point at every slot start and end, chronological
-    assert [point["y"] for point in power] == [2.0, 2.0, None, 0, 0]  # a gap breaks the line, idle reads 0
+    assert (
+        xs == sorted(xs) and len(xs) == 4
+    )  # a point at every slot start and end, chronological
+    assert [point["y"] for point in power] == [
+        2.0,
+        2.0,
+        None,
+        0,
+        0,
+    ]  # a gap breaks the line, idle reads 0
     assert [point["y"] for point in soc] == [70.0, 70.0, None, None, None]
-    assert power[4]["x"] - power[3]["x"] == 13 * 3600 * 1000  # the long slot keeps its true length
+    assert (
+        power[4]["x"] - power[3]["x"] == 13 * 3600 * 1000
+    )  # the long slot keeps its true length
 
 
 # --- Mandatory usage-disclaimer UI (markup, navigation gate, client contract) -------------------
 
+
 @contextlib.asynccontextmanager
 async def _changed_not_accepted(tmp_path) -> AsyncIterator[httpx.AsyncClient]:
     """Like _logged_in, but stops after the password change WITHOUT accepting the disclaimer."""
-    app = create_app(Settings(_env_file=None, hmac_secret="s" * 48, admin_db_path=tmp_path / "rct.db"))
+    app = create_app(
+        Settings(
+            _env_file=None, hmac_secret="s" * 48, admin_db_path=tmp_path / "rct.db"
+        )
+    )
     password = app.state.first_start_password
     async with (
         app.router.lifespan_context(app),
-        httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver",
-                          headers={"Origin": "http://testserver"}) as client,
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://testserver",
+            headers={"Origin": "http://testserver"},
+        ) as client,
     ):
         csrf = (await client.get("/admin/api/session")).json()["csrf_token"]
-        login = await client.post("/admin/api/login", headers={"X-CSRF-Token": csrf},
-                                  json={"username": "admin", "password": password})
-        changed = await client.post("/admin/api/change-password",
-                                    headers={"X-CSRF-Token": login.json()["csrf_token"]},
-                                    json={"current_password": password, "new_password": "a much stronger password"})
+        login = await client.post(
+            "/admin/api/login",
+            headers={"X-CSRF-Token": csrf},
+            json={"username": "admin", "password": password},
+        )
+        changed = await client.post(
+            "/admin/api/change-password",
+            headers={"X-CSRF-Token": login.json()["csrf_token"]},
+            json={
+                "current_password": password,
+                "new_password": "a much stronger password",
+            },
+        )
         assert changed.json()["disclaimer_required"] is True
         yield client
 
@@ -1959,7 +3115,7 @@ def test_disclaimer_modal_markup_is_mandatory_and_not_dismissable():
     base = (TEMPLATES / "base.html").read_text(encoding="utf-8")
     start = base.index('id="disclaimer-modal"')
     # The modal element and its dialog/content/body/footer block.
-    block = base[base.rindex("<div", 0, start):]
+    block = base[base.rindex("<div", 0, start) :]
     block = block[: block.index("{% endif %}")]
     # Static backdrop and no keyboard dismiss (mirrors reconnect-modal).
     assert 'data-bs-backdrop="static"' in block
@@ -1993,12 +3149,18 @@ def test_disclaimer_client_accepts_and_handles_errors():
 
 def test_theme_toggle_is_a_three_state_button_naming_state_and_action():
     base = (TEMPLATES / "base.html").read_text(encoding="utf-8")
-    button = base[base.index('id="theme-toggle"'):]
-    button = button[:button.index("</button>")]
+    button = base[base.index('id="theme-toggle"') :]
+    button = button[: button.index("</button>")]
     assert 'aria-label="Theme: Auto (system). Click to switch to Light"' in button
     assert "brightness_auto" in button and "aria-pressed" not in button
-    assert base.index("js/theme.js") < base.index("css/admin.css")  # applied before first paint
+    assert base.index("js/theme.js") < base.index(
+        "css/admin.css"
+    )  # applied before first paint
     js = _admin_js()
     for glyph in ("brightness_auto", "light_mode", "dark_mode"):
         assert glyph in js
-    assert "'rct-theme-change'" in js and "setAttribute('aria-pressed'" not in js[js.index("function syncThemeToggle"):js.index("function initShell")]
+    assert (
+        "'rct-theme-change'" in js
+        and "setAttribute('aria-pressed'"
+        not in js[js.index("function syncThemeToggle") : js.index("function initShell")]
+    )

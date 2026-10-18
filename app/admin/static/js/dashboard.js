@@ -33,6 +33,10 @@
 
   let grid = null;
   const widgetState = new Map(); // id -> { id, x, y, w, h, visible }
+  // ids whose x/y is a genuine user position (shown in the saved layout or moved/placed since),
+  // as opposed to a widget still carrying only its factory placeholder. Re-adding a placed widget
+  // reuses its position; a never-placed widget is auto-positioned into the first free cell instead.
+  const placedIds = new Set();
   let savedLayout = null;
   let savedToastShownThisSession = false;
   const AUTO_HEIGHT_ID = 'devices'; // height follows content, is never a user layout value
@@ -117,6 +121,8 @@
       const shown = [];
       for (const entry of layout) {
         widgetState.set(entry.id, { ...entry });
+        // A shown widget carries a real position; a hidden one carries only its factory placeholder.
+        if (entry.visible) placedIds.add(entry.id); else placedIds.delete(entry.id);
         const el = widgetElement(entry.id);
         if (!el) continue;
         if (entry.visible) {
@@ -239,6 +245,7 @@
       const prev = widgetState.get(id);
       const h = prev && fitRows.get(id) === item.h ? prev.h : item.h;
       widgetState.set(id, { id, x: item.x, y: item.y, w: item.w, h, visible: true });
+      placedIds.add(id); // a user drag/resize is a genuine position
     }
   }
 
@@ -266,20 +273,32 @@
     const state = widgetState.get(id) || DEFAULT_LAYOUT.find((def) => def.id === id);
     const el = widgetElement(id);
     if (!el) return;
+    let placed = { x: state.x, y: state.y };
     grid.batchUpdate();
     try {
       if (visible) {
         el.classList.remove('d-none');
-        grid.makeWidget(el);
-        grid.update(el, { x: state.x, y: state.y, w: state.w, h: state.h });
+        if (placedIds.has(id)) {
+          // Re-adding a widget the user already placed: reuse its saved position verbatim.
+          grid.makeWidget(el, { x: state.x, y: state.y, w: state.w, h: state.h });
+        } else {
+          // First time shown: let GridStack pick the earliest free cell (float:true never
+          // compacts, so a fixed factory y would leave the gap above it unused). Only size travels.
+          grid.makeWidget(el, { autoPosition: true, w: state.w, h: state.h });
+          const node = el.gridstackNode;
+          if (node) placed = { x: node.x, y: node.y };
+          placedIds.add(id); // the chosen cell is now this widget's position
+        }
       } else if (el.gridstackNode) {
         grid.removeWidget(el, false);
         el.classList.add('d-none');
+        // Keep placedIds membership: a later re-add reuses the position removed here.
       }
     } finally {
       grid.batchUpdate(false);
     }
-    widgetState.set(id, { ...state, visible });
+    // Persist the actually-used position so "Done" saves exactly what the grid shows.
+    widgetState.set(id, { ...state, x: placed.x, y: placed.y, visible });
     window.RCTDashboardForecast?.sync();
     scheduleFit();
     renderAddWidgetList();
