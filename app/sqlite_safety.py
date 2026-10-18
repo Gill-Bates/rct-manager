@@ -33,6 +33,7 @@ enabled per deployment rather than globally.
 """
 
 import os
+import sqlite3
 import stat
 from pathlib import Path
 
@@ -40,10 +41,10 @@ from pathlib import Path
 # owner replace it, which is what makes the symlink/rename swap possible.
 _UNSAFE_WRITE_BITS = stat.S_IWGRP | stat.S_IWOTH
 
-# The fail-closed SQLite path hardening (this module's directory/file trust checks AND the admin
-# store's _ensure_secure_parent) is OPT-IN. By default the path is accepted without ownership or
-# permission checks, so the app runs from a developer's group-writable working tree (umask 0002) or
-# a path under a non-root-owned parent such as /opt. Set RCT_SQLITE_STRICT_PATH=1 (or true/yes/on)
+# The fail-closed SQLite path hardening (this module's directory/file trust checks, shared by both
+# stores through open_hardened_sqlite) is OPT-IN. By default the path is accepted without ownership
+# or permission checks, so the app runs from a developer's group-writable working tree (umask 0002)
+# or a path under a non-root-owned parent such as /opt. Set RCT_SQLITE_STRICT_PATH=1 (or true/yes/on)
 # to re-enable the checks for a hardened deployment.
 _STRICT_PATH_ENV = "RCT_SQLITE_STRICT_PATH"
 
@@ -152,3 +153,26 @@ def validated_sqlite_path(path: Path) -> str:
         _ensure_trusted_directory(path.parent)
         _ensure_trusted_file(path)
     return str(path)
+
+
+def open_hardened_sqlite(path: Path) -> sqlite3.Connection:
+    """Open ``path`` as a private SQLite database, fail closed, and apply the base PRAGMAs.
+
+    Both encrypted stores share this open-and-harden skeleton: create the parent with a tight 0o700
+    mode, open the file with ``O_NOFOLLOW`` and tighten its mode to 0o600, then connect by the
+    directory-validated path (see ``validated_sqlite_path`` for the TOCTOU reasoning). The returned
+    connection has ``row_factory = sqlite3.Row`` and ``foreign_keys``/``busy_timeout`` set. The
+    caller owns the per-store ``synchronous``/WAL policy and the transaction scope.
+    """
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    try:
+        if os.fstat(fd).st_mode & 0o077:
+            os.fchmod(fd, 0o600)  # tighten a database created with a looser umask
+    finally:
+        os.close(fd)
+    db = sqlite3.connect(validated_sqlite_path(path), timeout=5)
+    db.row_factory = sqlite3.Row
+    db.execute("PRAGMA foreign_keys = ON")
+    db.execute("PRAGMA busy_timeout = 5000")
+    return db

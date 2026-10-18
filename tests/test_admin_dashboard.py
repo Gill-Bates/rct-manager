@@ -23,6 +23,7 @@ from app.admin.energy_api import (
 )
 from app.admin.forecast_refresh import spot_config_key
 from app.api.app_factory import create_app
+from app.clock import SystemClock
 from app.config import Settings
 from app.optimizer.models import SolarForecast, SolarForecastInterval
 from app.spotmarket.models import (
@@ -172,6 +173,7 @@ async def test_forecast_projection_only_reads_requested_caches():
     state = SimpleNamespace(
         spotmarket_config=SpotMarketConfig(enabled=True),
         admin_store=SimpleNamespace(get_spot_market_intervals=get_spot),
+        runtime=SimpleNamespace(clock=SystemClock()),
     )
     request = Request({"type": "http", "app": SimpleNamespace(state=state)})
     current = await dashboard_forecast(request, None, ["spot_current"])
@@ -219,6 +221,7 @@ async def test_dashboard_empty_solar_cache_is_unavailable():
         spotmarket_config=SpotMarketConfig(),
         weather_config=config,
         admin_store=SimpleNamespace(get_solar_forecast_intervals=lambda *args: []),
+        runtime=SimpleNamespace(clock=SystemClock()),
     )
     request = Request({"type": "http", "app": SimpleNamespace(state=state)})
     result = await dashboard_forecast(request, None, ["solar"])

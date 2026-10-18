@@ -6,6 +6,7 @@
 
 """Battery dispatch API integration against the real RCT gateway and fake network."""
 
+import ast
 import asyncio
 import json
 import logging
@@ -42,12 +43,14 @@ ADMIN_WRITE_TOKEN = _fixed_pat("AdminWriteToken")
 ADMIN_WRITER = {"Authorization": f"Bearer {ADMIN_WRITE_TOKEN}"}
 
 
-
 def _activate_energy_manager(harness, *device_ids: str) -> None:
     """Planning is at rest in the factory Off state; these tests need the dry-run to compute."""
     for device_id in device_ids:
-        harness.runtime.energy._mode_states[device_id] = ModeRecord(device_id, mode=EnergyMode.MANUAL)
+        harness.runtime.energy._mode_states[device_id] = ModeRecord(
+            device_id, mode=EnergyMode.MANUAL
+        )
     harness.runtime.energy.activity.notify()
+
 
 def settings(tmp_path: Path, **overrides):
     paths = dispatch_fixtures(tmp_path)
@@ -518,7 +521,13 @@ def test_routers_import_max_power_w_from_limits_not_the_manager() -> None:
     for module in modules:
         assert module.MAX_POWER_W is limits_value
         src = Path(module.__file__).read_text(encoding="utf-8")
-        assert "from app.limits import MAX_POWER_W" in src
+        imported_from_limits = {
+            alias.name
+            for node in ast.walk(ast.parse(src))
+            if isinstance(node, ast.ImportFrom) and node.module == "app.limits"
+            for alias in node.names
+        }
+        assert "MAX_POWER_W" in imported_from_limits
         assert "from app.energy.manager import MAX_POWER_W" not in src
 
 
@@ -1375,7 +1384,9 @@ async def test_dynamic_plan_computes_nothing_while_off_and_keeps_the_plan_when_a
 
     config = settings(tmp_path, enable_write_support=False)
     async with running_app(config) as harness:
-        headers = await admin_session_headers(harness.client, "replacement-test-password")
+        headers = await admin_session_headers(
+            harness.client, "replacement-test-password"
+        )
         url = "/admin/api/energy/devices/main/dynamic-plan"
         with (
             patch.object(energy_api, "build_dry_run_plan", spy),
@@ -1385,7 +1396,9 @@ async def test_dynamic_plan_computes_nothing_while_off_and_keeps_the_plan_when_a
                 side_effect=AssertionError("Off must not read the planning inputs"),
             ),
         ):
-            off = await harness.client.get(url, headers=headers)  # no stored mode == Off
+            off = await harness.client.get(
+                url, headers=headers
+            )  # no stored mode == Off
         assert off.status_code == 200, off.text
         assert off.json()["status"] == "energy_manager_off"
         assert off.json()["slots"] == [] and calls == []

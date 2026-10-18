@@ -510,10 +510,10 @@ async def test_first_start_password_is_printed_to_the_console(
     async def no_listener(self, sockets=None) -> None:
         return None
 
-    monkeypatch.setattr(uvicorn.Server, "startup", no_listener)
+    # The banner is printed from serve() before uvicorn binds the socket, so stub only the base serve.
+    monkeypatch.setattr(uvicorn.Server, "serve", no_listener)
     server = GracefulServer(uvicorn.Config(app), None)
-    server.started = True
-    await server.startup()
+    await server.serve()
 
     printed = capsys.readouterr().out
     assert BOOTSTRAP_PASSWORD in printed and "FIRST START" in printed

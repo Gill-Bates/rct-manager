@@ -9,7 +9,6 @@
 import base64
 import json
 import logging
-import os
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -24,7 +23,7 @@ from app.dispatch.capabilities import CapabilityRecord
 from app.dispatch.models import DeviceLimits, DispatchRecord, DispatchRecordCorrupt
 from app.dispatch.soc_policy import SocTargetMode, SocTargetPolicy
 from app.energy.models import EnergyMode, ModeRecord
-from app.sqlite_safety import validated_sqlite_path
+from app.sqlite_safety import open_hardened_sqlite
 
 log = logging.getLogger(__name__)
 
@@ -148,22 +147,11 @@ class DispatchStore:
 
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:
-        self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        fd = os.open(self.path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+        # open_hardened_sqlite creates the parent 0o700, opens O_NOFOLLOW, tightens the mode to
+        # 0o600 and connects through the directory-validated path (TOCTOU guard, P2-2), then applies
+        # foreign_keys/busy_timeout; the dispatch store keeps its own fixed synchronous policy here.
+        db = open_hardened_sqlite(self.path)
         try:
-            if os.fstat(fd).st_mode & 0o077:
-                os.fchmod(fd, 0o600)
-        finally:
-            os.close(fd)
-        # The os.open above protects a descriptor, not the path sqlite3.connect() resolves a moment
-        # later (TOCTOU, P2-2): validate the containing directory chain and the file fail closed
-        # right before the open, so a path swap in a writable parent cannot redirect SQLite. The
-        # admin store shares this open pattern and should adopt the same helper.
-        db = sqlite3.connect(validated_sqlite_path(self.path), timeout=5)
-        try:
-            db.row_factory = sqlite3.Row
-            db.execute("PRAGMA foreign_keys = ON")
-            db.execute("PRAGMA busy_timeout = 5000")
             db.execute("PRAGMA synchronous = FULL")
             yield db
             db.commit()

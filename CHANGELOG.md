@@ -1,4 +1,19 @@
-## [1.2.3] - 2026-xx-xx
+## [1.2.3] - 2026-10-18
+
+### New
+
+- Spot-market prices and solar forecasts now follow the Energy Manager mode automatically; separate enable switches are no longer needed, and refreshes run only in Manual mode.
+
+### Fix
+
+- Slow sequential telemetry reads now retain their true age, so stale measurements cannot pass the dispatch safety check.
+- Re-addressing an inverter clears learned PV-string history, and hidden dashboard widgets keep their saved positions after reload.
+- Battery-health charts now update their colors immediately when the dashboard theme changes; verification sessions also expire reliably despite system-clock adjustments.
+
+### Security
+
+- SQLite stores reject unsafe database paths, update checks block cross-origin redirects and oversized responses, and API request bodies are size-limited.
+- Dispatch apply and restore sequences now complete safely if the requesting task is cancelled, avoiding partially applied inverter control.
 
 
 <details markdown="1">
