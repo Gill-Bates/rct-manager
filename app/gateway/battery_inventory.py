@@ -301,7 +301,11 @@ def _battery_module_report(
             RCT_MODULE_SN_SLOTS,
             RCT_MAX_MODULES_PER_TOWER,
         )
-    return report if include_complete else {k: v for k, v in report.items() if k != "_complete"}
+    return (
+        report
+        if include_complete
+        else {k: v for k, v in report.items() if k != "_complete"}
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -353,6 +357,45 @@ class MeasuredBatteryCapacity:
         if len(counts) == 2 and counts[0] == counts[1] and counts[0] in (4, 5, 6):
             return sum(counts) * RCT_RATED_USABLE_WH_PER_MODULE
         return None
+
+    def is_settling(self, device_id: str) -> bool:
+        """True while the module topology that decides the capacity can still change on its own.
+
+        Read-only: it inspects the stabilizer state without advancing the debounce. A tower is
+        settled once its trusted report is complete, no candidate waits for confirmation, and the
+        current raw read either matches it or is a mid-scan snapshot the stabilizer ignores.
+        Towers are walked in the same order and with the same early exits as
+        :meth:`verified_usable_capacity_wh`, so an unsupported but stable topology is settled.
+        """
+        per_gateway = (
+            getattr(self._runtime.gateway, _BATTERY_MODULE_STATE_ATTR, None) or {}
+        )
+        for prefix in _BATTERY_TOWER_PREFIXES:
+            raw = _raw_battery_module_report(
+                _battery_module_slot_states(self._runtime, device_id, prefix)
+            )
+            with _battery_module_lock:
+                state = per_gateway.get((device_id, prefix))
+                trusted = None if state is None else state["trusted"]
+                candidate = None if state is None else state["candidate"]
+            if trusted is None or not trusted["_complete"] or candidate is not None:
+                return True
+            if raw["_complete"] and _battery_report_signature(
+                raw
+            ) != _battery_report_signature(trusted):
+                return True
+            if not _battery_tower_present(
+                self._runtime, device_id, prefix, trusted["populated_module_slots"]
+            ):
+                if prefix == "battery":
+                    return False
+                continue
+            if (
+                trusted["module_count_status"] != "ok"
+                or trusted["module_count"] is None
+            ):
+                return False
+        return False
 
     def calibration_sample(
         self, device_id: str, measured_at: datetime

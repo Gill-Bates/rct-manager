@@ -1074,7 +1074,10 @@ def test_incomplete_or_invalid_module_inventory_has_no_planning_capacity() -> No
     gapped = _single_tower(6)
     gapped["battery_module_sn_2"] = ""
     assert _measured_capacity(_runtime(gapped, unanswered=_PLACEHOLDER_SILENT)) is None
-    assert _measured_capacity(_runtime(_single_tower(7), unanswered=_PLACEHOLDER_SILENT)) is None
+    assert (
+        _measured_capacity(_runtime(_single_tower(7), unanswered=_PLACEHOLDER_SILENT))
+        is None
+    )
     assert (
         _measured_capacity(_runtime(_single_tower(1), unanswered=_PLACEHOLDER_SILENT))
         is None
@@ -1120,6 +1123,39 @@ def test_incomplete_followup_scan_keeps_trusted_planning_capacity() -> None:
     assert _measured_capacity(runtime) == pytest.approx(10_368)
     del serials["battery_module_sn_5"]
     assert _measured_capacity(runtime) == pytest.approx(10_368)
+
+
+def test_startup_scan_settles_only_once_the_completed_topology_is_trusted() -> None:
+    # Startup race: the first capacity call sees a mid-scan snapshot, which becomes the initial
+    # trusted state, so the completed scan still needs its confirming read.
+    serials = _partial_slots("battery", 3)
+    runtime = _runtime(serials, unanswered=_PLACEHOLDER_SILENT)
+    capacity = MeasuredBatteryCapacity(runtime)
+    assert capacity.verified_usable_capacity_wh("dev") is None
+    assert capacity.is_settling("dev") is True
+    serials.update(_single_tower(6))
+    assert capacity.is_settling("dev") is True
+    assert capacity.verified_usable_capacity_wh("dev") is None  # candidate 1 of 2
+    # Asking again must not advance the debounce on its own.
+    assert capacity.is_settling("dev") is True
+    assert capacity.is_settling("dev") is True
+    assert capacity.verified_usable_capacity_wh("dev") == pytest.approx(10_368)
+    assert capacity.is_settling("dev") is False
+
+
+def test_stable_unsupported_topology_is_settled_without_capacity() -> None:
+    three_and_three = _runtime(
+        {**_slots("battery", 3), **_slots("battery_placeholder_0", 3)}
+    )
+    capacity = MeasuredBatteryCapacity(three_and_three)
+    assert capacity.verified_usable_capacity_wh("dev") is None
+    assert capacity.is_settling("dev") is False
+
+    gapped = _single_tower(6)
+    gapped["battery_module_sn_2"] = ""
+    anomaly = MeasuredBatteryCapacity(_runtime(gapped, unanswered=_PLACEHOLDER_SILENT))
+    assert anomaly.verified_usable_capacity_wh("dev") is None
+    assert anomaly.is_settling("dev") is False
 
 
 def test_fresh_cycles_and_ah_do_not_prove_a_completed_calibration() -> None:

@@ -150,6 +150,8 @@ def build_runtime_planning_service(
     settings = runtime.settings
     if runtime.energy_readings is None:
         raise RuntimeError("energy readings are not configured")
+    # Only the RCT module-inventory source knows a settling phase; it is not part of the port.
+    capacity_pending = getattr(runtime.battery_capacity, "is_settling", None)
     reserve, cap = effective_target_window(
         settings.dispatch_min_soc, settings.dispatch_max_soc
     )
@@ -172,6 +174,7 @@ def build_runtime_planning_service(
             usable_capacity_wh=None,
             max_age_seconds=settings.battery_max_age_seconds,
             capacity_source=runtime.battery_capacity,
+            capacity_pending=capacity_pending,
         ),
         horizon=timedelta(hours=settings.plan_horizon_hours),
         plan_ttl=timedelta(seconds=settings.plan_ttl_seconds),
@@ -181,6 +184,7 @@ def build_runtime_planning_service(
         consumption_max_age_seconds=settings.consumption_max_age_seconds,
         battery_max_age_seconds=settings.battery_max_age_seconds,
         device_ready=lambda device_id: _device_started(runtime, device_id),
+        capacity_pending=capacity_pending,
         # Without an Energy Manager there is no mode, which is the same as off.
         activity=(
             runtime.energy.activity

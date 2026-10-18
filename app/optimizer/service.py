@@ -31,7 +31,7 @@ import logging
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
-from typing import Protocol
+from typing import Literal, Protocol
 
 from app.clock import Clock
 from app.dispatch.battery_facts import (
@@ -146,8 +146,10 @@ class ReadingsBatteryStateProvider:
         usable_capacity_wh: float | None,
         max_age_seconds: float,
         capacity_source: VerifiedCapacityPort | None = None,
+        capacity_pending: Callable[[str], bool] | None = None,
     ) -> None:
         self._capacity_source = capacity_source
+        self._capacity_pending = capacity_pending
         self._readings = readings
         self._dispatch = dispatch
         self._clock = clock
@@ -173,7 +175,11 @@ class ReadingsBatteryStateProvider:
             )
         capacity_wh = facts.usable_capacity_wh
         if not (capacity_wh and capacity_wh > 0):
-            log.info(
+            # While the source settles the planner retries every few seconds and logs that state.
+            settling = self._capacity_pending is not None and self._capacity_pending(
+                device_id
+            )
+            (log.debug if settling else log.info)(
                 "No battery state: usable battery capacity unavailable: no expert override and no verified automatic source"
             )
             return None
@@ -244,6 +250,7 @@ class PlanningService:
         single_flight: SingleFlight | None = None,
         device_ready: Callable[[str], bool] | None = None,
         activity: EnergyActivity | None = None,
+        capacity_pending: Callable[[str], bool] | None = None,
     ) -> None:
         if horizon <= timedelta():
             raise ValueError("horizon must be a positive timedelta")
@@ -270,9 +277,13 @@ class PlanningService:
         # None means "always ready". False marks the startup race: the device is not connected yet,
         # so a missing input is pending, not a configuration or hardware-fact gap.
         self._device_ready = device_ready
+        # Asked only after the battery state came back None: True while the automatic capacity
+        # source still settles, so the retry is quick instead of one full recompute interval.
+        self._capacity_pending = capacity_pending
         # None means "always active"; with an activity, mode ``off`` suspends every computation.
         self._activity = activity
-        self._pending = False
+        # Why the last recompute was pending; kept per reason so each logs INFO once on entry.
+        self._pending_reason: Literal["device", "capacity"] | None = None
         # The service's OWN private wake event: never a shared forecast-refresh event. An in-process
         # caller may set() it to shorten the one-interval worst-case latency.
         self._wake = asyncio.Event()
@@ -320,13 +331,11 @@ class PlanningService:
             self._invalidate()
             return None
         now = self._clock.now()
-        was_pending = self._pending
-        self._pending = False
-        self._pending = self._device_ready is not None and not self._device_ready(
-            self._device_id
-        )
-        if self._pending:
-            (log.debug if was_pending else log.info)(
+        previous_reason = self._pending_reason
+        self._pending_reason = None
+        if self._device_ready is not None and not self._device_ready(self._device_id):
+            self._pending_reason = "device"
+            (log.debug if previous_reason == "device" else log.info)(
                 "Planning for device %s is pending: the device is not connected yet",
                 self._device_id,
             )
@@ -349,6 +358,18 @@ class PlanningService:
             self._consumption.forecast, now, forecast_horizon
         )
         battery = await asyncio.to_thread(self._battery.current, self._device_id)
+        if (
+            battery is None
+            and self._capacity_pending is not None
+            and await asyncio.to_thread(self._capacity_pending, self._device_id)
+        ):
+            self._pending_reason = "capacity"
+            (log.debug if previous_reason == "capacity" else log.info)(
+                "Planning for device %s is pending: battery module inventory/topology is still settling",
+                self._device_id,
+            )
+            self._invalidate()
+            return None
         # Ages are computed locally and only ever published together with a successful plan, so a
         # surviving old plan can never be paired with a newer failed recompute's data ages.
         ages = self._ages(now, prices, solar, consumption, battery)
@@ -570,7 +591,7 @@ class PlanningService:
                 # A start race is re-checked quickly so the first plan does not wait a full interval.
                 timeout = (
                     min(self._interval, _PENDING_RETRY_SECONDS)
-                    if self._pending
+                    if self._pending_reason is not None
                     else self._interval
                 )
                 try:

@@ -575,6 +575,70 @@ async def test_pending_loop_retries_faster_than_the_recompute_interval() -> None
                 await task
 
 
+async def test_settling_capacity_is_pending_and_keeps_device_diagnostics_apart(
+    caplog,
+) -> None:
+    clock = _live_clock()
+    now = clock.now()
+    ready = {"value": True}
+    service = _service(
+        clock,
+        _PricesSource(_prices(now)),
+        _SolarSource(_solar(now)),
+        _BatterySource(None),
+        device_ready=lambda _device_id: ready["value"],
+        capacity_pending=lambda _device_id: True,
+    )
+    with caplog.at_level("DEBUG", logger="app.optimizer.service"):
+        assert await service.recompute() is None
+        assert await service.recompute() is None
+        ready["value"] = False
+        assert await service.recompute() is None
+    levels = [
+        (record.levelname, "settling" in record.getMessage())
+        for record in caplog.records
+        if "is pending" in record.getMessage()
+    ]
+    # One INFO on entering each pending reason; repeats of the same reason drop to DEBUG.
+    assert levels == [("INFO", True), ("DEBUG", True), ("INFO", False)]
+    assert service.current_view() is None
+
+
+async def test_capacity_retry_is_quick_only_while_the_source_settles() -> None:
+    clock = _live_clock()
+    now = clock.now()
+    settling = {"value": True}
+    service = _service(
+        clock,
+        _PricesSource(_prices(now)),
+        _SolarSource(_solar(now)),
+        _BatterySource(None),
+        capacity_pending=lambda _device_id: settling["value"],
+        recompute_interval_seconds=3600.0,
+    )
+    waits: list[float] = []
+    real_wait_for = asyncio.wait_for
+
+    async def recording_wait_for(awaitable, timeout):
+        waits.append(timeout)
+        service.request_recompute()  # end the wait at once; only the requested timeout matters
+        return await real_wait_for(awaitable, timeout)
+
+    with patch("app.optimizer.service.asyncio.wait_for", recording_wait_for):
+        task = asyncio.create_task(service.run())
+        try:
+            await _wait_for(lambda: len(waits) >= 1)
+            assert waits[0] == 5.0
+            # Settled but still without capacity (e.g. an unsupported 3+3 topology): no endless
+            # quick polling, back to the normal interval.
+            settling["value"] = False
+            await _wait_for(lambda: waits[-1] == 3600.0)
+        finally:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+
 def test_missing_capacity_after_readiness_still_reports_not_configured(caplog) -> None:
     from app.dispatch.battery_facts import NoVerifiedCapacity
     from app.dispatch.models import DeviceLimits
@@ -598,6 +662,25 @@ def test_missing_capacity_after_readiness_still_reports_not_configured(caplog) -
         "usable battery capacity unavailable: no expert override and no verified automatic source"
         in caplog.text
     )
+
+    # While the source settles the planner retries every few seconds; this line must not flood INFO.
+    caplog.clear()
+    settling = ReadingsBatteryStateProvider(
+        readings=None,
+        dispatch=_Limits(),
+        clock=_live_clock(),
+        usable_capacity_wh=None,
+        max_age_seconds=300.0,
+        capacity_source=NoVerifiedCapacity(),
+        capacity_pending=lambda _device_id: True,
+    )
+    with caplog.at_level("DEBUG", logger="app.optimizer.service"):
+        assert settling.current(DEVICE) is None
+    assert [
+        record.levelname
+        for record in caplog.records
+        if "capacity unavailable" in record.getMessage()
+    ] == ["DEBUG"]
 
 
 # --- runtime consumption policy equals the Dry-Run policy (baseline / fallback, never a blocker) ---
@@ -754,11 +837,11 @@ async def test_raising_readiness_check_does_not_leave_pending_set() -> None:
         device_ready=ready,
     )
     assert await service.recompute() is None
-    assert service._pending is True
+    assert service._pending_reason == "device"
     state["raise"] = True
     with pytest.raises(RuntimeError):
         await service.recompute()
-    assert service._pending is False
+    assert service._pending_reason is None
 
 
 class _Modes:
@@ -819,7 +902,9 @@ async def test_planning_rests_without_a_stored_mode_and_follows_mode_changes() -
         await _settle()
         assert spy.calls == 0 and service.current_view() is None
 
-        modes.set(DEVICE, EnergyMode.MANUAL)  # Off -> Manual wakes the loop without a timeout
+        modes.set(
+            DEVICE, EnergyMode.MANUAL
+        )  # Off -> Manual wakes the loop without a timeout
         await _wait_for(lambda: service.current_view() is not None)
         assert spy.calls >= 1
         assert service.scheduler.current_plan() is not None
@@ -827,7 +912,10 @@ async def test_planning_rests_without_a_stored_mode_and_follows_mode_changes() -
         calls = spy.calls
         modes.set(DEVICE, EnergyMode.OFF)  # Manual -> Off invalidates the plan at once
         await _wait_for(lambda: service.current_view() is None)
-        assert service.scheduler.current_plan() is None and service.scheduler.active_slot(clock.now()) is None
+        assert (
+            service.scheduler.current_plan() is None
+            and service.scheduler.active_slot(clock.now()) is None
+        )
         service.request_recompute()
         await _settle()
         assert spy.calls == calls, "no optimizer call after the switch to Off"
@@ -842,7 +930,10 @@ async def test_planning_is_per_device_while_one_other_inverter_is_active() -> No
     modes = _Modes(second=EnergyMode.EXTERNAL)  # main is Off, second is External
     off_service, off_spy = _gated_service(clock, modes, "main")
     on_service, on_spy = _gated_service(clock, modes, "second")
-    tasks = [asyncio.create_task(off_service.run()), asyncio.create_task(on_service.run())]
+    tasks = [
+        asyncio.create_task(off_service.run()),
+        asyncio.create_task(on_service.run()),
+    ]
     try:
         await _wait_for(lambda: on_service.current_view() is not None)
         await _settle()

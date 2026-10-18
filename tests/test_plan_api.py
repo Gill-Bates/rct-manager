@@ -167,7 +167,7 @@ async def test_plan_endpoint_reports_absent_when_no_service_or_no_plan() -> None
 
 
 async def test_factory_starts_registered_planning_service_and_serves_its_plan(
-    tmp_path: Path
+    tmp_path: Path,
 ) -> None:
     settings = make_settings(
         hmac_secret="s" * 48,
@@ -188,7 +188,9 @@ async def test_factory_starts_registered_planning_service_and_serves_its_plan(
     async with running_app(settings) as harness:
         service = harness.app.state.planning_services["main"]
         # Off is the factory state and suspends planning; this test needs the active computation.
-        harness.runtime.energy._mode_states["main"] = ModeRecord("main", mode=EnergyMode.MANUAL)
+        harness.runtime.energy._mode_states["main"] = ModeRecord(
+            "main", mode=EnergyMode.MANUAL
+        )
         harness.runtime.energy.activity.notify()
         assert any(
             task.get_coro().__qualname__ == "PlanningService.run"
@@ -204,6 +206,11 @@ async def test_factory_starts_registered_planning_service_and_serves_its_plan(
             )
         )
         assert service._battery.current("main").usable_capacity_wh == 9000.0
+        # Both the planner (quick retry) and its battery provider (log level) follow the module
+        # inventory's settling state; a missing link brings back the 5-minute wait or INFO flooding.
+        settling = harness.runtime.battery_capacity.is_settling
+        assert service._capacity_pending == settling
+        assert service._battery._capacity_pending == settling
 
         # The factory's background PlanningService.run loop shares a per-device SingleFlight with this
         # on-demand recompute: a call issued while the loop's own recompute is still in flight is
