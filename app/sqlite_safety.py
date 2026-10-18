@@ -35,6 +35,23 @@ from pathlib import Path
 # owner replace it, which is what makes the symlink/rename swap possible.
 _UNSAFE_WRITE_BITS = stat.S_IWGRP | stat.S_IWOTH
 
+# The fail-closed SQLite path hardening (this module's directory/file trust checks AND the admin
+# store's _ensure_secure_parent) is OPT-IN. By default the path is accepted without ownership or
+# permission checks, so the app runs from a developer's group-writable working tree (umask 0002) or
+# a path under a non-root-owned parent such as /opt. Set RCT_SQLITE_STRICT_PATH=1 (or true/yes/on)
+# to re-enable the checks for a hardened deployment.
+_STRICT_PATH_ENV = "RCT_SQLITE_STRICT_PATH"
+
+
+def strict_path_enabled() -> bool:
+    """Whether the opt-in fail-closed path hardening should run (off unless explicitly enabled)."""
+    return os.environ.get(_STRICT_PATH_ENV, "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
 
 class UnsafeDatabasePath(Exception):
     """The directory or file a SQLite database would be opened from is not trustworthy.
@@ -66,13 +83,24 @@ def _ensure_trusted_directory(directory: Path) -> None:
         try:
             dir_stat = os.stat(current)
         except OSError as exc:
-            raise UnsafeDatabasePath(f"database directory {current} cannot be inspected: {exc}") from exc
+            raise UnsafeDatabasePath(
+                f"database directory {current} cannot be inspected: {exc}"
+            ) from exc
         if not stat.S_ISDIR(dir_stat.st_mode):
-            raise UnsafeDatabasePath(f"database path component {current} is not a directory")
+            raise UnsafeDatabasePath(
+                f"database path component {current} is not a directory"
+            )
         if not _is_owner_trusted(dir_stat):
-            raise UnsafeDatabasePath(f"database directory {current} is owned by an untrusted user")
-        if dir_stat.st_mode & _UNSAFE_WRITE_BITS and not dir_stat.st_mode & stat.S_ISVTX:
-            raise UnsafeDatabasePath(f"database directory {current} is group- or world-writable without the sticky bit")
+            raise UnsafeDatabasePath(
+                f"database directory {current} is owned by an untrusted user"
+            )
+        if (
+            dir_stat.st_mode & _UNSAFE_WRITE_BITS
+            and not dir_stat.st_mode & stat.S_ISVTX
+        ):
+            raise UnsafeDatabasePath(
+                f"database directory {current} is group- or world-writable without the sticky bit"
+            )
         parent = current.parent
         if parent == current:  # reached the filesystem root
             return
@@ -91,7 +119,9 @@ def _ensure_trusted_file(path: Path) -> None:
     except FileNotFoundError:
         return
     except OSError as exc:
-        raise UnsafeDatabasePath(f"database file {path} cannot be inspected: {exc}") from exc
+        raise UnsafeDatabasePath(
+            f"database file {path} cannot be inspected: {exc}"
+        ) from exc
     if not stat.S_ISREG(file_stat.st_mode):
         raise UnsafeDatabasePath(f"database file {path} is not a regular file")
     if not _is_owner_trusted(file_stat):
@@ -105,9 +135,15 @@ def validated_sqlite_path(path: Path) -> str:
 
     Call this immediately before opening so the directory-trust check and the SQLite open are as
     close together as possible. It creates nothing and performs no write; the caller stays
-    responsible for creating the parent directory with a tight mode first. Raises
-    ``UnsafeDatabasePath`` on any untrusted parent directory or non-regular existing file.
+    responsible for creating the parent directory with a tight mode first.
+
+    The directory-trust and file-trust checks are OPT-IN (see ``strict_path_enabled``): they run
+    only when ``RCT_SQLITE_STRICT_PATH`` is set. By default the path is returned unchecked, so a
+    group-writable working tree or an owner-foreign parent such as ``/opt`` does not block startup.
+    When strict mode is on, raises ``UnsafeDatabasePath`` on any untrusted parent directory or
+    non-regular existing file.
     """
-    _ensure_trusted_directory(path.parent)
-    _ensure_trusted_file(path)
+    if strict_path_enabled():
+        _ensure_trusted_directory(path.parent)
+        _ensure_trusted_file(path)
     return str(path)

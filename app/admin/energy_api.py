@@ -84,7 +84,12 @@ from app.errors import DeviceApiError, DeviceUnreachable
 from app.gateway.base import DeviceState
 from app.gateway.cache import CacheFreshness
 from app.gateway.rct_history import MIN_COMMISSIONING_DATE
-from app.limits import MAX_POWER_W, MAX_USABLE_CAPACITY_WH, TARGET_SOC_MAX_PERCENT, TARGET_SOC_MIN_PERCENT
+from app.limits import (
+    MAX_POWER_W,
+    MAX_USABLE_CAPACITY_WH,
+    TARGET_SOC_MAX_PERCENT,
+    TARGET_SOC_MIN_PERCENT,
+)
 from app.optimizer.adapters import (
     DryRunInputs,
     EnergyReadingsBatteryStateProvider,
@@ -122,6 +127,7 @@ from app.weather.geocoding import (
     GeocodingResult,
 )
 from app.weather.models import (
+    _FORECAST_REQUIRED_FIELDS,
     MAX_LOCATION_NAME_LENGTH,
     WeatherConfig,
     WeatherProvider,
@@ -1356,11 +1362,13 @@ def put_spot_market_config(
     admin: Annotated[dict | None, Depends(_require_admin_write)],
 ) -> SpotMarketConfigView:
     del admin
-    # Enablement is derived, not operator input: a saved spot-market configuration is on. Whether
-    # day-ahead prices are fetched follows the Energy Manager mode (manual fetches; off/external do
-    # not), enforced by the background refresh loop's activity gate, not by this flag.
+    # Enablement is derived, not an operator toggle: the GUI omits it, and a saved spot-market
+    # configuration is on. Whether day-ahead prices are fetched follows the Energy Manager mode
+    # (manual fetches; off/external do not), enforced by the background refresh loop's activity
+    # gate, not by this flag. An explicit value (older client, direct API) is still honored.
     data = body.model_dump()
-    data["enabled"] = True
+    if data.get("enabled") is None:
+        data["enabled"] = True
     try:
         config = SpotMarketConfig.model_validate(data)
     except ValueError as exc:
@@ -1396,8 +1404,14 @@ async def preview_spot_market(
 ) -> SpotMarketPreviewView:
     """Project yesterday/today/tomorrow exclusively from the rolling SQLite interval table."""
     del admin
+    # Enablement is derived, not an operator toggle (see put_spot_market_config): the GUI omits it,
+    # so treat the previewed configuration as on for identity comparison. An explicit value stays
+    # honored. Whether a preview is shown depends on whether a configuration was saved and is on.
+    data = body.model_dump()
+    if data.get("enabled") is None:
+        data["enabled"] = True
     try:
-        config = SpotMarketConfig.model_validate(body.model_dump())
+        config = SpotMarketConfig.model_validate(data)
     except ValueError as exc:
         raise HTTPException(422, "Invalid spot-market configuration") from exc
     store = _admin_store_or_503(request)
@@ -1448,7 +1462,10 @@ class WeatherConfigBody(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    enabled: StrictBool = False
+    # ``enabled`` is no longer an operator toggle: the GUI dropped the control and does not send it.
+    # When absent the server derives it from configuration completeness (a complete config is on);
+    # whether the forecast is fetched follows the Energy Manager mode. An explicit value is honored.
+    enabled: StrictBool | None = None
     provider: WeatherProvider = WeatherProvider.OPEN_METEO
     location_name: str | None = Field(default=None, max_length=MAX_LOCATION_NAME_LENGTH)
     location_region: str | None = Field(
@@ -1746,6 +1763,15 @@ async def _weather_body_with_timezone(
     provide or preserve one. Coordinates are the sole authority.
     """
     data = body.model_dump()
+    # ``enabled`` is no longer an operator toggle. When the client omits it (the GUI), the server
+    # derives it from completeness: a config carrying every forecast-required value is on, an
+    # incomplete one is stored off. Whether the forecast is actually fetched follows the Energy
+    # Manager mode (manual fetches; off/external do not). An explicit value is honored unchanged, so
+    # a direct API client sending ``enabled=True`` with missing fields still gets the 422.
+    if data.get("enabled") is None:
+        data["enabled"] = all(
+            data.get(name) is not None for name in _FORECAST_REQUIRED_FIELDS
+        )
     data["timezone"] = None
     if body.latitude is None or body.longitude is None:
         return data
@@ -1834,6 +1860,12 @@ async def preview_weather(
     del admin
     saved_config = getattr(request.app.state, "weather_config", None)
     body_data = body.model_dump()
+    # ``enabled`` is derived, not an operator toggle (see _weather_body_with_timezone): when the GUI
+    # omits it, a complete config is on and an incomplete one off. An explicit value is honored.
+    if body_data.get("enabled") is None:
+        body_data["enabled"] = all(
+            body_data.get(name) is not None for name in _FORECAST_REQUIRED_FIELDS
+        )
     # A preview reads only the saved configuration's DB snapshot. Reuse its stored timezone and
     # never call the timezone resolver or forecast provider on this request.
     body_data["timezone"] = saved_config.timezone if saved_config is not None else None

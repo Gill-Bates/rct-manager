@@ -2768,20 +2768,18 @@ try {
           /Plan is being prepared.*Please check back in a few minutes/s.test(waitText)
           && (await ep.locator('#energy-plan-result .material-icons').first().innerText()) === 'hourglass_empty'
           && !(await ep.getByText('Usable battery capacity').first().isVisible()), waitText);
+        // The readiness card fell away entirely ("entfällt ersatzlos"): every not-ok status now shows
+        // only the hourglass, including battery_state_unavailable. Polling still continues.
         planStatus = 'battery_state_unavailable';
         await Promise.all([ep.waitForResponse((r) => r.url().includes('/dynamic-plan')), ep.locator('#energy-plan-device').dispatchEvent('change')]);
-        // battery_state_unavailable is operator-actionable: the renderer shows the readiness card with
-        // the concrete capacity instruction at once (no hourglass wait state), matching renderDryRunPlan
-        // and tests/test_admin_ui.py. Polling continues in the background.
-        await ep.waitForFunction(() => /Check that the inverter is connected and reports its battery state and capacity/
-          .test(document.querySelector('#energy-plan-result').textContent));
+        await ep.waitForSelector('#energy-plan-result [role="status"] .material-icons');
         const batteryText = await ep.locator('#energy-plan-result').innerText();
-        check('a missing battery plan shows the capacity instruction at once, not a generic wait state',
-          /Check that the inverter is connected and reports its battery state and capacity/.test(batteryText)
-          && /Usable battery capacity: could not be verified/.test(batteryText)
-          && !/Plan is being prepared/.test(batteryText)
-          && (await ep.locator('#energy-plan-result [role="status"]').count()) === 0, batteryText);
-        check('the verified-capacity override hint stays Expert-only in Basic mode',
+        check('a missing battery plan now shows the hourglass, not a readiness card',
+          /Plan is being prepared.*Please check back in a few minutes/s.test(batteryText)
+          && !/Usable battery capacity/.test(batteryText)
+          && !/Check that the inverter is connected/.test(batteryText)
+          && (await ep.locator('#energy-plan-result [role="status"]').count()) === 1, batteryText);
+        check('no verified-capacity override hint survives in any mode',
           !(await ep.getByText('A verified capacity override can be entered in Advanced diagnostics.').first().isVisible()), batteryText);
         planStatus = 'spot_prices_unavailable';
         await Promise.all([ep.waitForResponse((r) => r.url().includes('/dynamic-plan')), ep.locator('#energy-plan-device').dispatchEvent('change')]);
@@ -2798,13 +2796,31 @@ try {
         before = planRequests;
         await ep.clock.runFor(60_000);
         check('polling stops on a device change and once the plan is ok', planRequests === before, String(planRequests - before));
+        // spot_disabled now also shows the hourglass (every not-ok status does); it is still not polled.
         planStatus = 'spot_disabled';
         await ep.locator('#energy-plan-device').dispatchEvent('change');
-        await ep.waitForFunction(() => /The spot market integration is disabled/.test(document.querySelector('#energy-plan-result').textContent));
+        await ep.waitForSelector('#energy-plan-result [role="status"] .material-icons');
         before = planRequests;
         await ep.clock.runFor(60_000);
-        check('a configuration state shows an action without a waiting state and is never polled',
-          (await waitingShown()) === 0 && planRequests === before);
+        check('spot_disabled shows the hourglass and is never polled',
+          (await waitingShown()) === 1 && planRequests === before
+          && !(await ep.getByText('Usable battery capacity').first().isVisible()));
+        // solar_not_configured: hourglass PLUS a Weather-setup badge pointing at the postal code / PV data.
+        planStatus = 'solar_not_configured';
+        await ep.locator('#energy-plan-device').dispatchEvent('change');
+        await ep.waitForSelector('#energy-plan-result .plan-setup-badge');
+        const solarText = await ep.locator('#energy-plan-result').innerText();
+        check('solar_not_configured shows the hourglass with a Weather-setup badge',
+          /Plan is being prepared/.test(solarText)
+          && /Weather setup required/.test(solarText)
+          && /postal code/.test(solarText)
+          && (await ep.locator('#energy-plan-result .badge').count()) >= 1, solarText);
+        planStatus = 'solar_forecast_unavailable';
+        await ep.locator('#energy-plan-device').dispatchEvent('change');
+        await ep.waitForSelector('#energy-plan-result [role="status"] .material-icons');
+        await ep.waitForFunction(() => !document.querySelector('#energy-plan-result .plan-setup-badge'));
+        check('a configured-but-not-fetched forecast shows a plain hourglass, no badge',
+          (await ep.locator('#energy-plan-result .plan-setup-badge').count()) === 0);
         planStatus = 'ok';
         await ep.locator('#energy-plan-device').dispatchEvent('change');
         await ep.waitForSelector('#energy-plan-schedule canvas');
@@ -2850,10 +2866,17 @@ try {
         await ep.waitForSelector('#spot-market-chart');
         await ep.waitForFunction(() => window.Chart.getChart(document.querySelector('#spot-market-chart')));
         check('spot market preview draws exactly one chart', (await chartsIn('#energy-pane-spot-market')) === 1);
+        // The 'Enabled' toggle fell away: enablement follows the Energy Manager mode, so no toggle.
+        check('the Spot Market form has no Enabled toggle',
+          (await ep.locator('#spot-market-fields [data-field="enabled"]').count()) === 0
+          && !(await ep.locator('#spot-market-fields').getByText(/^Enabled$/).first().isVisible().catch(() => false)));
         await ep.locator('#energy-tab-weather').click();
         await ep.waitForSelector('#weather-chart');
         await ep.waitForFunction(() => window.Chart.getChart(document.querySelector('#weather-chart')));
         check('weather preview draws exactly one chart', (await chartsIn('#energy-pane-weather')) === 1);
+        check('the Weather form has no Enable toggle',
+          (await ep.locator('#weather-fields [data-field="enabled"]').count()) === 0
+          && (await ep.locator('[data-field="enabled"]').count()) === 0);
         await ep.locator('#energy-tab-plan').click();
       }
 

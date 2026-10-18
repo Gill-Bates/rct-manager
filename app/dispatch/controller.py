@@ -424,10 +424,13 @@ class DispatchController:
                     raise _TelemetryStale
                 preflight_passed = True
                 # The SoC submit() already read is handed down: _apply() adds no device read, and
-                # the derivation of the device-level SoC target needs the measured value. Shielded
-                # so a cancelled caller cannot interrupt the multi-step write sequence mid-apply and
-                # leave the record in APPLYING with the hardware half-written (P2-1).
-                await self._shield_hardware_critical(self._apply(record, soc_percent=soc))
+                # the derivation of the device-level SoC target needs the measured value. The apply
+                # AND the success commit that moves the record out of APPLYING run in one shielded
+                # section, so a cancelled caller cannot interrupt the write sequence nor leave the
+                # record stuck in APPLYING with the hardware already written (P2-1).
+                await self._shield_hardware_critical(
+                    self._apply_and_commit(record, soc_percent=soc, mode=command.mode)
+                )
             except _TelemetryStale:
                 # A rejected first preflight made no hardware change; an apply-phase rejection
                 # still needs the saved snapshot restored.
@@ -445,9 +448,6 @@ class DispatchController:
                     # the apply error below is the one the caller needs to see.
                     log.exception("Restore after failed apply of device %s raised", device_id)
                 raise
-            record.state = _STATE_FOR_MODE[command.mode]
-            record.restore_required = False
-            await self._put(record)
             return self._status(record, replaced=replacing)
 
     def _active_mode_blocking(self, record: DispatchRecord) -> DispatchMode | None:
@@ -574,6 +574,19 @@ class DispatchController:
             )
         record.last_commanded = desired
         record.last_write_at = self._clock.now()
+
+    async def _apply_and_commit(self, record: DispatchRecord, *, soc_percent: float, mode: DispatchMode) -> None:
+        """Write the apply sequence and commit the controlling state as one shielded unit (P2-1).
+
+        Running the final state transition inside the shielded section is what makes the apply
+        atomic against a cancelled caller: once the hardware is written the record must reach its
+        controlling state and be persisted before the CancelledError may propagate, never left in
+        APPLYING with the device already under external control.
+        """
+        await self._apply(record, soc_percent=soc_percent)
+        record.state = _STATE_FOR_MODE[mode]
+        record.restore_required = False
+        await self._put(record)
 
     def _telemetry_stale(self, telemetry: ControlTelemetry) -> bool:
         """Whether a control-telemetry reading is older than the staleness policy allows.

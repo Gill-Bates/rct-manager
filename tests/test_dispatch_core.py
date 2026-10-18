@@ -1454,3 +1454,86 @@ def test_seed_default_fallback_gives_every_device_conservative_limits_only_when_
     seeded = _seed_limits(settings, {"slave1": DeviceLimits(4000, 6000)}, default_fallback=True)
     assert seeded["main"] == DeviceLimits(DEFAULT_DEVICE_POWER_LIMIT_W, DEFAULT_DEVICE_POWER_LIMIT_W)
     assert seeded["slave1"] == DeviceLimits(4000, 6000)
+
+
+async def test_cancelling_submit_mid_apply_completes_the_write_sequence(tmp_path: Path) -> None:
+    """P2-1: a caller cancelled during submit()'s hardware apply must not interrupt it mid-write.
+
+    The apply is shielded like tick(): the setpoint write below blocks until the test cancels the
+    awaiting task, and the shield must still drive the record to a controlling state with the full
+    plan confirmed before the CancelledError propagates — never leave it stuck in APPLYING with the
+    hardware half-written.
+    """
+    clock = ManualClock()
+
+    class _BlockingSetpointGateway(FakeDispatchGateway):
+        def __init__(self, clk: ManualClock) -> None:
+            super().__init__(clk)
+            self.setpoint_reached = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def apply_setpoint(self, device_id: str, setpoint: PowerSetpoint) -> WriteOutcome:
+            self.setpoint_reached.set()
+            await self.release.wait()
+            return await super().apply_setpoint(device_id, setpoint)
+
+    gateway = _BlockingSetpointGateway(clock)
+    dispatch = controller(tmp_path, clock, gateway)
+    task = asyncio.create_task(
+        dispatch.submit(
+            "main",
+            DispatchCommand(DispatchMode.CHARGE_FROM_GRID, 80, 2000, clock.now() + timedelta(hours=1)),
+        )
+    )
+    await asyncio.wait_for(gateway.setpoint_reached.wait(), 5)
+    # Cancel the awaiting caller while the final hardware write is in flight.
+    task.cancel()
+    await asyncio.sleep(0)  # let the cancellation take effect against the shield
+    gateway.release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    # The shielded apply ran to completion despite the cancellation: the record is in a controlling
+    # state, restore is no longer required, and the whole plan confirmed (no half-written APPLYING).
+    record = await dispatch._get("main")
+    assert record.state is DispatchState.CHARGING
+    assert record.restore_required is False
+    assert [step["status"] for step in record.plan] == ["confirmed"] * len(record.plan)
+
+
+async def test_cancelling_cancel_mid_restore_completes_the_restore(tmp_path: Path) -> None:
+    """P2-1: cancel() drives a restore that writes hardware; a cancelled caller must not interrupt
+    it mid-sequence and leave the record in RESTORING. The shield awaits the restore to a clean
+    IDLE before re-raising CancelledError."""
+    clock = ManualClock()
+
+    class _BlockingRestoreGateway(FakeDispatchGateway):
+        def __init__(self, clk: ManualClock) -> None:
+            super().__init__(clk)
+            self.restore_reached = asyncio.Event()
+            self.release = asyncio.Event()
+            self._blocked = False
+
+        async def restore(self, device_id: str, snapshot: DeviceControlSnapshot, step: int) -> WriteOutcome:
+            if not self._blocked:
+                self._blocked = True
+                self.restore_reached.set()
+                await self.release.wait()
+            return await super().restore(device_id, snapshot, step)
+
+    gateway = _BlockingRestoreGateway(clock)
+    dispatch = controller(tmp_path, clock, gateway)
+    await dispatch.submit(
+        "main",
+        DispatchCommand(DispatchMode.CHARGE_FROM_GRID, 80, 2000, clock.now() + timedelta(hours=1)),
+    )
+    task = asyncio.create_task(dispatch.cancel("main"))
+    await asyncio.wait_for(gateway.restore_reached.wait(), 5)
+    task.cancel()
+    await asyncio.sleep(0)
+    gateway.release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    record = await dispatch._get("main")
+    assert record.state is DispatchState.IDLE
+    assert record.restore_required is False
+    assert record.intent is None

@@ -108,3 +108,22 @@ def test_charge_derate_flag_false_behaves_like_before() -> None:
     desired = PowerSetpoint(PowerDirection.CHARGE, 2500)  # beyond the deadband
     # last_write_at None -> first write path is allowed, as for any other setpoint.
     assert should_write(desired, current, now=NOW, last_write_at=None, config=config)
+
+
+def test_charge_power_limit_rejects_a_tzinfo_without_a_utc_offset() -> None:
+    """P3-2 DRY: ChargePowerLimit must enforce the project's single awareness rule (app.clock), so a
+    datetime whose tzinfo is present but yields no UTC offset is rejected — the weaker tzinfo-not-None
+    check would have accepted it."""
+    from datetime import tzinfo
+
+    class _OffsetlessZone(tzinfo):
+        def utcoffset(self, dt):
+            return None  # deliberately no UTC offset despite a present tzinfo
+
+        def tzname(self, dt):
+            return "offsetless"
+
+    moment = datetime(2026, 1, 1, 12, 0, tzinfo=_OffsetlessZone())
+    assert moment.tzinfo is not None  # the weaker check would pass this
+    with pytest.raises(ValueError, match="timezone-aware"):
+        ChargePowerLimit(1000.0, moment, "test")

@@ -37,6 +37,7 @@ from app.security.pat import (
     generate_pat,
     pat_well_formed,
 )
+from app.sqlite_safety import strict_path_enabled
 
 log = logging.getLogger(__name__)
 _PASSWORDS = PasswordHasher()
@@ -265,8 +266,15 @@ class AdminStore:
         """
         parent = self.path.parent
         parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        # The trust checks below are opt-in (RCT_SQLITE_STRICT_PATH); the parent is still created
+        # with a tight 0o700 mode above, but a group/world-writable or owner-foreign parent is only
+        # rejected in strict mode so the app can run from a developer tree or a path under /opt.
+        if not strict_path_enabled():
+            return
         parent_st = os.stat(parent, follow_symlinks=False)
-        if not stat.S_ISDIR(parent_st.st_mode) or parent_st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        if not stat.S_ISDIR(parent_st.st_mode) or parent_st.st_mode & (
+            stat.S_IWGRP | stat.S_IWOTH
+        ):
             raise ValueError(
                 f"admin database parent {parent} must be a directory only its owner can write"
             )

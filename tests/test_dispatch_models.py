@@ -431,3 +431,17 @@ def test_snapshot_carrying_battery_power_raw_round_trips() -> None:
 def test_device_control_snapshot_rejects_non_finite_battery_power_raw() -> None:
     with pytest.raises(ValueError, match="battery_power_raw"):
         DeviceControlSnapshot(PowerSetpoint(), 0.5, 1, False, AWARE_NOW, battery_power_raw=float("nan"))
+
+
+def test_from_dict_rejects_a_string_last_commanded_watts() -> None:
+    """P3-3: last_commanded.watts is a safety-deciding persisted number; a stored string such as
+    "123" is corruption and must fail closed, not be coerced through a permissive float()."""
+    with pytest.raises(DispatchRecordCorrupt):
+        DispatchRecord.from_dict(
+            {
+                "device_id": "main",
+                "state": "idle",
+                "restore_required": False,
+                "last_commanded": {"direction": "charge", "watts": "123"},
+            }
+        )
