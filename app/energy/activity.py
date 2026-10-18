@@ -8,9 +8,10 @@
 
 An inverter whose mode is ``off`` (or that has no stored mode, which is ``off`` by default) is at
 rest: no battery action, no charging-plan computation and no Energy-Manager-initiated provider call
-for it. The shared forecast jobs (spot market, weather) are not tied to one device: they rest only
-while every configured inverter is off. The mode is the single source of truth; nothing here is
-persisted.
+for it. The shared forecast jobs (spot market, weather) are not tied to one device: they fetch only
+while at least one inverter is ``manual``. An ``external`` inverter is controlled by its own app
+over the API and does not need the GUI's spot/weather inputs, so it does not enable fetching. The
+mode is the single source of truth; nothing here is persisted.
 """
 
 import asyncio
@@ -40,6 +41,21 @@ class EnergyActivity:
             self.device_energy_active(device_id) for device_id in self._device_ids()
         )
 
+    def device_manual_active(self, device_id: str) -> bool:
+        return self._mode_of(device_id) is EnergyMode.MANUAL
+
+    def any_manual_active(self) -> bool:
+        """True only while at least one inverter is ``manual``.
+
+        The shared forecast jobs (spot market, weather) are the GUI/manager's own inputs: an
+        ``external`` inverter is driven by its own app over the API and does not need them, so only
+        ``manual`` enables fetching. This is narrower than :meth:`any_energy_active`, which also
+        counts ``external`` and gates per-device plan/optimizer work.
+        """
+        return any(
+            self.device_manual_active(device_id) for device_id in self._device_ids()
+        )
+
     def add_listener(self, listener: Callable[[], None]) -> None:
         """Call ``listener`` synchronously on every mode change (loop thread only)."""
         self._listeners.append(listener)
@@ -61,5 +77,15 @@ class EnergyActivity:
                 self._changed
             )  # captured before the check, so no change can slip through
             if self.any_energy_active():
+                return
+            await changed.wait()
+
+    async def wait_until_any_manual(self) -> None:
+        """Rest until at least one inverter is ``manual`` (the forecast jobs' activity gate)."""
+        while True:
+            changed = (
+                self._changed
+            )  # captured before the check, so no change can slip through
+            if self.any_manual_active():
                 return
             await changed.wait()

@@ -148,7 +148,8 @@ function spotMarketFields(config, zoneInfo) {
   const zoneOptions = (zoneInfo?.zones ?? []).map((zone) => [zone, zone]);
   const zoneHelp = 'Exchange price zone where the price is formed, e.g. DE-LU. This is not the fee region.';
   return [
-    { key: 'enabled', label: 'Enabled', type: 'toggle', value: config.enabled, help: 'Fetch day-ahead prices from this provider. Prices are input data only and never charge or discharge the battery on their own.' },
+    // No 'Enabled' toggle: whether day-ahead prices are fetched follows the Energy Manager mode
+    // (manual fetches; off/external do not). Prices are input data only and never command the battery.
     { key: 'provider', label: 'Provider', type: 'select', options: SPOT_MARKET_PROVIDERS, value: config.provider, help: 'The external day-ahead price source. Each provider has its own fixed, trusted endpoint; there is no editable URL.' },
     { key: 'bidding_zone', label: 'Bidding Zone / Market Region', type: 'select', options: zoneOptions, value: config.bidding_zone, help: zoneHelp },
   ];
@@ -159,8 +160,8 @@ function spotMarketFields(config, zoneInfo) {
 function spotMarketBody() {
   const container = $('spot-market-fields');
   const read = (key) => container.querySelector(`[data-field="${key}"]`);
+  // No 'enabled' field: the server derives whether prices are fetched from the Energy Manager mode.
   return {
-    enabled: read('enabled').checked,
     provider: read('provider').value,
     bidding_zone: read('bidding_zone').value.trim(),
     fee_region: { code: spotMarketFeeRegion.code, label: spotMarketFeeRegion.label },
@@ -203,12 +204,12 @@ async function initSpotMarket() {
     event.preventDefault();
     saveSpotMarket().catch((error) => toast(messageFrom(error), 'danger'));
   });
-  // A changed provider, bidding zone, or enabled toggle re-queries the day-ahead preview. The
-  // listener is delegated on the stable fields container, so it survives the control rebuild in
-  // renderSpotMarket without re-binding. Delegation also covers only the three operator-editable
-  // parameters; the read-only metadata rows carry no form control to emit a change.
+  // A changed provider or bidding zone re-queries the day-ahead preview. The listener is delegated
+  // on the stable fields container, so it survives the control rebuild in renderSpotMarket without
+  // re-binding. Delegation also covers only the operator-editable parameters; the read-only
+  // metadata rows carry no form control to emit a change.
   const fields = $('spot-market-fields');
-  const previewFields = new Set(['enabled', 'provider', 'bidding_zone']);
+  const previewFields = new Set(['provider', 'bidding_zone']);
   fields.addEventListener('change', (event) => {
     const field = event.target instanceof Element ? event.target.dataset.field : null;
     if (field && previewFields.has(field)) scheduleSpotMarketPreview();

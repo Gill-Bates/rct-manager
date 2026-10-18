@@ -75,17 +75,20 @@ class GracefulServer(uvicorn.Server):
             return await self._runtime.shutdown.run()
         finally:
             self._drained = True
-            self.should_exit = True  # now uvicorn may close the listener and run the lifespan exit
-
-    async def startup(self, sockets=None) -> None:
-        await super().startup(sockets=sockets)
-        app = self.config.app
-        password = getattr(getattr(app, "state", None), "first_start_password", None)
-        if password and self.started:  # after uvicorn's own log lines so the notice stays visible
-            print(first_start_banner(app.state.runtime.settings, password), flush=True)
+            self.should_exit = (
+                True  # now uvicorn may close the listener and run the lifespan exit
+            )
 
     async def serve(self, sockets=None) -> None:
         self._loop = asyncio.get_running_loop()
+        # Emit the one-time bootstrap password BEFORE super().serve() runs startup(), which binds
+        # the socket and can still fail. Printing it only after a successful "started" would lose
+        # it forever: the admin row and its hash are already committed, so a next start generates
+        # no new password. The plaintext is only printed here, never persisted.
+        app = self.config.app
+        password = getattr(getattr(app, "state", None), "first_start_password", None)
+        if password:
+            print(first_start_banner(app.state.runtime.settings, password), flush=True)
         if self._early_signal:
             log.info("Signal received before startup, starting shutdown")
             self._drain_requested = True
@@ -102,7 +105,9 @@ def _banner_host(settings: Settings) -> str:
     falls back to the bind address.
     """
     try:
-        bind_is_wildcard_or_loopback = ipaddress.ip_address(str(settings.bind_address)).is_loopback or (
+        bind_is_wildcard_or_loopback = ipaddress.ip_address(
+            str(settings.bind_address)
+        ).is_loopback or (
             ipaddress.ip_address(str(settings.bind_address)).is_unspecified
         )
         if _in_container() and bind_is_wildcard_or_loopback:
@@ -122,12 +127,19 @@ def first_start_banner(settings: Settings, password: str) -> str:
     """
     host = _banner_host(settings)
     rule = "=" * 61
-    return "\n".join((
-        "", rule, " FIRST START", " Admin user:         admin",
-        f" One-time password:  {password}",
-        " Please change this password after login.",
-        f" Open:               http://{host}:{settings.bind_port}/", rule, "",
-    ))
+    return "\n".join(
+        (
+            "",
+            rule,
+            " FIRST START",
+            " Admin user:         admin",
+            f" One-time password:  {password}",
+            " Please change this password after login.",
+            f" Open:               http://{host}:{settings.bind_port}/",
+            rule,
+            "",
+        )
+    )
 
 
 def warn_if_loopback_in_container(settings: Settings) -> None:
@@ -136,14 +148,16 @@ def warn_if_loopback_in_container(settings: Settings) -> None:
         log.warning(
             "Running in a container but BIND_ADDRESS=%s is a loopback address: published ports "
             "(docker -p / compose ports) cannot reach the service, while the container health check "
-            "may still pass. Set BIND_ADDRESS=0.0.0.0 (with the GUI option \"behind reverse proxy\") and make "
+            'may still pass. Set BIND_ADDRESS=0.0.0.0 (with the GUI option "behind reverse proxy") and make '
             "BIND_PORT=%s match the container port of the port mapping.",
             settings.bind_address,
             settings.bind_port,
         )
 
 
-def run_server(app: FastAPI, settings: Settings, sock: socket.socket | None = None) -> int:
+def run_server(
+    app: FastAPI, settings: Settings, sock: socket.socket | None = None
+) -> int:
     """``sock``, when given, is a pre-bound, listening socket uvicorn should serve on directly.
 
     Lets a caller (e.g. a test harness) reserve the port itself and hand the already-bound
@@ -171,6 +185,8 @@ def run_server(app: FastAPI, settings: Settings, sock: socket.socket | None = No
             _reexec()
         except OSError:
             # A non-zero exit lets the supervisor's restart policy start the service instead.
-            log.exception("Re-exec failed; exiting so the supervisor starts the service again")
+            log.exception(
+                "Re-exec failed; exiting so the supervisor starts the service again"
+            )
             return 1
     return 0

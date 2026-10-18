@@ -22,7 +22,7 @@ from datetime import UTC, date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 from app.admin.store import AdminStore
-from app.admin.store_threads import _inflight, drain_store_threads, store_thread
+from app.admin.store_threads import _inflight, drain_store_threads, store_thread  # noqa: F401 - re-exported for app_factory/tests that import them from here
 from app.clock import Clock, SystemClock
 from app.energy.activity import EnergyActivity
 from app.optimizer.models import SolarForecast
@@ -545,10 +545,11 @@ async def _run_loop(
 ) -> None:
     backoff = RetryBackoff()
     while True:
-        if activity is not None and not activity.any_energy_active():
-            # Every inverter is off: rest without any evaluation, retry or provider call until a mode
-            # change. A configuration save only sets ``event``, which the next evaluation still sees.
-            await activity.wait_until_any_active()
+        if activity is not None and not activity.any_manual_active():
+            # No inverter is in manual mode: rest without any evaluation, retry or provider call
+            # until a mode change. off and external do not fetch the shared spot/weather inputs; a
+            # configuration save only sets ``event``, which the next evaluation still sees.
+            await activity.wait_until_any_manual()
             backoff.reset()
             continue
         config = config_of()
@@ -587,7 +588,7 @@ async def run_spot_market_refresh_loop(
             backoff,
             lambda: spot_config_key(app.state.spotmarket_config) == key,
             getattr(app.state, "spotmarket_zone_cache", None),
-            activity.any_energy_active if activity is not None else None,
+            activity.any_manual_active if activity is not None else None,
         )
 
     await _run_loop(
@@ -620,7 +621,7 @@ async def run_solar_refresh_loop(
             clock.now(),
             backoff,
             lambda: solar_config_key(app.state.weather_config) == key,
-            activity.any_energy_active if activity is not None else None,
+            activity.any_manual_active if activity is not None else None,
         )
 
     await _run_loop(

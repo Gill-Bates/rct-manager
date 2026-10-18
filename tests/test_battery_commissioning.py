@@ -7,17 +7,21 @@
 """Commissioning date derived from the inverter energy loggers, persisted per inverter serial."""
 
 import asyncio
+import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+from app.admin import store_threads
 from app.admin.battery_commissioning import (
     BACKOFF_BASE,
     EMPTY_RETRY,
     BatteryCommissioningService,
 )
 from app.admin.store import AdminStore
+from app.admin.store_threads import drain_store_threads
 from app.errors import DeviceApiError
 from app.gateway.rct_history import (
     MONTH_ENERGY_LOG_METRIC,

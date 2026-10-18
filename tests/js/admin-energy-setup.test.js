@@ -902,25 +902,47 @@ test('pending plan uses an hourglass in Basic mode and retains readiness in Expe
   const h = harness();
   const result = h.context.element('div');
   result.id = 'energy-plan-result';
-  const pending = { status: 'spot_prices_unavailable', slots: [] };
-  h.context.renderDryRunPlan(pending);
-  const wait = result.children[0];
-  assert.equal(wait.getAttribute('role'), 'status');
-  assert.ok(flatten(wait).some((node) => node.textContent === 'hourglass_empty' && node.getAttribute('aria-hidden') === 'true' && node.className.includes('plan-loading-icon')));
-  assert.match(flatten(wait).map((node) => node.textContent).join(' '), /Plan is being prepared.*Please check back in a few minutes/s);
-  assert.equal(result.children[1].hidden, true, 'Basic mode hides the readiness list');
-  h.context.energyExpertMode = true;
-  h.context.renderDryRunPlan(pending);
-  assert.equal(result.children[1].hidden, false, 'Expert mode exposes the readiness list');
-  assert.ok(flatten(result.children[1]).some((node) => node.tagName === 'ul'));
+  // Every not-ok status now renders only the hourglass wait card: the readiness list fell away
+  // entirely (user: "entfällt ersatzlos"), in both Basic and Expert mode.
+  const assertHourglassOnly = (status) => {
+    const wait = result.children[0];
+    assert.equal(wait.getAttribute('role'), 'status');
+    assert.ok(flatten(wait).some((node) => node.textContent === 'hourglass_empty' && node.getAttribute('aria-hidden') === 'true' && node.className.includes('plan-loading-icon')));
+    assert.match(flatten(wait).map((node) => node.textContent).join(' '), /Plan is being prepared.*Please check back in a few minutes/s, status);
+    assert.equal(result.children.length, 1, `only the hourglass renders for ${status}`);
+    assert.ok(!flatten(result).some((node) => node.tagName === 'ul'), `no readiness list for ${status}`);
+  };
+  for (const status of ['spot_prices_unavailable', 'battery_state_unavailable', 'spot_disabled', 'solar_forecast_unavailable', 'insufficient_history']) {
+    h.context.energyExpertMode = false;
+    h.context.renderDryRunPlan({ status, slots: [] });
+    assertHourglassOnly(status);
+    h.context.energyExpertMode = true;
+    h.context.renderDryRunPlan({ status, slots: [] });
+    assertHourglassOnly(`${status} (expert)`);
+  }
   h.context.energyExpertMode = false;
-  h.context.renderDryRunPlan({ status: 'spot_disabled', slots: [] });
-  assert.match(flatten(result).map((node) => node.textContent).join(' '), /Enable it in the energy settings/);
-  assert.ok(!flatten(result).some((node) => node.textContent === 'Plan is being prepared'));
   h.cleanup();
 });
 
-test('battery_state_unavailable shows the operator hint at once in Basic mode and keeps polling', async () => {
+test('solar_not_configured adds a Weather-setup badge to the hourglass; other statuses do not', () => {
+  const h = harness();
+  const result = h.context.element('div');
+  result.id = 'energy-plan-result';
+  h.context.renderDryRunPlan({ status: 'solar_not_configured', slots: [] });
+  let text = flatten(result).map((node) => node.textContent).join(' ');
+  assert.match(text, /Plan is being prepared/, 'still the hourglass');
+  assert.match(text, /Weather setup required/, 'badge points at the Weather setup');
+  assert.match(text, /postal code/, 'badge names the postal code');
+  assert.ok(flatten(result).some((node) => (node.className || '').includes('badge')), 'the pointer is a badge, not a revived list');
+  // A generic waitable status keeps the plain hourglass with no badge.
+  h.context.renderDryRunPlan({ status: 'solar_forecast_unavailable', slots: [] });
+  text = flatten(result).map((node) => node.textContent).join(' ');
+  assert.match(text, /Plan is being prepared/);
+  assert.ok(!/Weather setup required/.test(text), 'no badge for a configured-but-not-fetched forecast');
+  h.cleanup();
+});
+
+test('a not-ok plan keeps polling in the background and stops when the Energy Manager is off', async () => {
   let mode = 'manual';
   let planCalls = 0;
   const h = harness({
@@ -940,9 +962,9 @@ test('battery_state_unavailable shows the operator hint at once in Basic mode an
     await h.context.refreshPlanDevices();
     await h.context.loadDryRunPlan();
     const texts = flatten(result).map((node) => node.textContent).join(' ');
-    assert.match(texts, /Check that the inverter is connected and reports its battery state and capacity/);
-    assert.ok(!/Plan is being prepared/.test(texts), 'not shown as a generic wait state');
-    assert.ok(!flatten(result).some((node) => node.getAttribute?.('role') === 'status'));
+    // battery_state_unavailable now shows the hourglass like every other not-ready status.
+    assert.match(texts, /Plan is being prepared/);
+    assert.ok(flatten(result).some((node) => node.getAttribute?.('role') === 'status'));
     await new Promise((resolve) => setTimeout(resolve, 60));
     assert.ok(planCalls >= 2, `still polled in the background (${planCalls} plan requests)`);
     mode = 'off';

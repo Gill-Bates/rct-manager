@@ -84,12 +84,7 @@ from app.errors import DeviceApiError, DeviceUnreachable
 from app.gateway.base import DeviceState
 from app.gateway.cache import CacheFreshness
 from app.gateway.rct_history import MIN_COMMISSIONING_DATE
-from app.limits import (
-    MAX_POWER_W,
-    MAX_USABLE_CAPACITY_WH,
-    TARGET_SOC_MAX_PERCENT,
-    TARGET_SOC_MIN_PERCENT,
-)  # noqa: E501
+from app.limits import MAX_POWER_W, MAX_USABLE_CAPACITY_WH, TARGET_SOC_MAX_PERCENT, TARGET_SOC_MIN_PERCENT
 from app.optimizer.adapters import (
     DryRunInputs,
     EnergyReadingsBatteryStateProvider,
@@ -709,7 +704,11 @@ class SpotMarketConfigBody(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    enabled: StrictBool
+    # ``enabled`` is no longer an operator toggle: the GUI dropped the control and does not send it.
+    # The server derives the stored value (a configured spot market is on), and whether prices are
+    # actually fetched follows the Energy Manager mode (manual fetches; off/external do not). The
+    # field stays accepted-but-ignored so an older client that still sends it is not rejected.
+    enabled: StrictBool | None = None
     provider: SpotMarketProvider
     bidding_zone: str = Field(max_length=32)
     fee_region: FeeRegionBody = Field(default_factory=FeeRegionBody)
@@ -1357,8 +1356,13 @@ def put_spot_market_config(
     admin: Annotated[dict | None, Depends(_require_admin_write)],
 ) -> SpotMarketConfigView:
     del admin
+    # Enablement is derived, not operator input: a saved spot-market configuration is on. Whether
+    # day-ahead prices are fetched follows the Energy Manager mode (manual fetches; off/external do
+    # not), enforced by the background refresh loop's activity gate, not by this flag.
+    data = body.model_dump()
+    data["enabled"] = True
     try:
-        config = SpotMarketConfig.model_validate(body.model_dump())
+        config = SpotMarketConfig.model_validate(data)
     except ValueError as exc:
         raise HTTPException(422, "Invalid spot-market configuration") from exc
     store = _admin_store_or_503(request)

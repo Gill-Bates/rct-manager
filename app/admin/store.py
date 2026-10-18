@@ -36,6 +36,7 @@ from app.security.pat import (
     generate_pat,
     pat_well_formed,
 )
+from app.sqlite_safety import validated_sqlite_path
 
 log = logging.getLogger(__name__)
 _PASSWORDS = PasswordHasher()
@@ -263,7 +264,10 @@ class AdminStore:
                 os.fchmod(fd, 0o600)  # tighten a database created with a looser umask
         finally:
             os.close(fd)
-        db = sqlite3.connect(self.path, timeout=5)
+        # sqlite3.connect reopens the path by name, so the O_NOFOLLOW fd above does not guard the
+        # actual open (TOCTOU). validated_sqlite_path checks the parent chain and the existing
+        # file fail-closed first, the same guard the dispatch store already applies.
+        db = sqlite3.connect(validated_sqlite_path(self.path), timeout=5)
         try:
             db.row_factory = sqlite3.Row
             db.execute("PRAGMA foreign_keys = ON")
@@ -326,8 +330,9 @@ class AdminStore:
         """Create any missing baseline table; reject one whose on-disk shape is not the current one.
 
         A fresh file gets every table created; a normal restart finds them already present with the
-        expected definition and does nothing; an incompatible old database fails clearly rather than
-        being migrated.
+        expected definition and does nothing. No general migration path exists; the first
+        battery-calibration schema is the sole supported compatibility migration (applied below),
+        and any other incompatible old table fails clearly rather than being migrated.
         """
         AdminStore._migrate_battery_calibration_history(db)
         for table, create in _SCHEMA.items():
@@ -366,11 +371,12 @@ class AdminStore:
                 )
             else:
                 db.execute("PRAGMA synchronous = NORMAL")
-            # The application is unreleased: there is no deployed database to migrate. Create the
-            # current baseline schema directly. A normal restart finds the tables already present
-            # with the expected definitions and does nothing; an incompatible old dev database (a table
-            # with a different shape) fails clearly instead of being silently upgraded, so the
-            # developer must delete it before start — there is no migration path.
+            # The application is unreleased. Create the current baseline schema directly. A normal
+            # restart finds the tables already present with the expected definitions and does
+            # nothing. No general migration path exists; the first battery-calibration schema is the
+            # sole supported compatibility migration, and any other incompatible old dev table (a
+            # different shape) fails clearly instead of being silently upgraded, so the developer
+            # must delete it before start.
             self._create_baseline_schema(db)
             db.execute("BEGIN IMMEDIATE")
             check = db.execute(

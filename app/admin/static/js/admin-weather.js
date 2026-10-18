@@ -91,7 +91,8 @@ function weatherControl(field, value) {
 
 function weatherFields(config) {
   return [
-    { key: 'enabled', label: 'Enable solar forecast', type: 'toggle', value: config.enabled },
+    // No 'Enable solar forecast' toggle: whether the forecast is fetched follows the Energy Manager
+    // mode (manual fetches; off/external do not). The forecast is input data only.
     { key: 'provider', label: 'Source', type: 'select', options: WEATHER_PROVIDERS, value: config.provider },
     { key: 'latitude', label: 'Latitude (°)', type: 'number', min: -90, max: 90, step: 'any', value: config.latitude },
     { key: 'longitude', label: 'Longitude (°)', type: 'number', min: -180, max: 180, step: 'any', value: config.longitude },
@@ -127,8 +128,8 @@ function weatherBody() {
   // The UI collects kWp; the domain stores Wp. Timezone is deliberately absent: the server
   // derives it from latitude/longitude for every preview and save.
   const kwp = num('pv_peak_power_kwp');
+  // No 'enabled' field: the server derives whether the forecast is fetched from the Energy Manager mode.
   return {
-    enabled: read('enabled').checked,
     provider: read('provider').value,
     location_name: weatherLocationName || null,
     location_region: weatherLocationRegion || null,
@@ -236,7 +237,6 @@ function renderWeather(config) {
   );
 
   siteContainer.replaceChildren(
-    weatherControl(byKey('enabled'), byKey('enabled').value),
     location.section,
     coordinates,
   );

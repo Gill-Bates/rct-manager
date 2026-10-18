@@ -1513,8 +1513,9 @@ def _lifespan(
             ):  # concurrent settings saves must not interleave teardown/rebuild
                 await _reconfigure_devices_unlocked()
 
-        # Serializes write-support transitions on the event loop. The generation is bumped on every switch
-        # flip, so enable_dispatch() can detect after its slow build that write support was turned off meanwhile.
+        # Serializes write-support transitions on the event loop. enable_dispatch() re-checks
+        # _write_support_live() after its slow build, so a switch to off during the build is seen
+        # and the half-built dispatch is dropped instead of going live.
         dispatch_transition_lock = asyncio.Lock()
 
         def _write_support_live() -> bool:

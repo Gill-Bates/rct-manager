@@ -278,7 +278,7 @@ def test_bootstrap_password_is_eight_chars_with_one_special() -> None:
 async def test_first_start_issues_no_token(tmp_path, capsys):
     settings = Settings(_env_file=None, hmac_secret="s" * 48, admin_db_path=tmp_path / "rct.db")
     app = create_app(settings)
-    assert capsys.readouterr().out == ""  # the banner is printed by the server after startup
+    assert capsys.readouterr().out == ""  # create_app stays silent; the server prints the banner
     banner = first_start_banner(app.state.runtime.settings, app.state.first_start_password)
     assert app.state.first_start_password and "token" not in banner.lower()
     assert app.state.first_start_password in banner  # the one-time password is now shown on the console
@@ -376,7 +376,7 @@ def test_first_start_banner_prints_the_one_time_password():
 
 
 @pytest.mark.asyncio
-async def test_server_prints_the_banner_after_startup_only_on_first_start(tmp_path, capsys):
+async def test_server_prints_the_banner_before_startup_only_on_first_start(tmp_path, capsys):
     import asyncio
     import socket
 
@@ -412,6 +412,37 @@ async def test_server_prints_the_banner_after_startup_only_on_first_start(tmp_pa
     second_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     second_sock.bind(("127.0.0.1", port))
     assert "FIRST START" not in await run_once(second_sock)
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_password_is_printed_even_when_uvicorn_startup_fails(tmp_path, capsys):
+    """P2-1: a failing first start (e.g. socket bind) must still emit the one-time password.
+
+    The admin row and its hash are committed by create_app before the server runs, so printing the
+    plaintext only after a successful startup would lose it forever. The banner is emitted at the
+    start of serve(), before super().serve() binds the socket.
+    """
+    import asyncio
+
+    import uvicorn
+
+    from app.api.server import GracefulServer
+
+    settings = Settings(_env_file=None, hmac_secret="s" * 48, admin_db_path=tmp_path / "rct.db")
+    app = create_app(settings)
+    password = app.state.first_start_password
+    assert password
+
+    async def failing_startup(*args, **kwargs):
+        raise OSError("simulated bind failure")
+
+    server = GracefulServer(uvicorn.Config(app, host="127.0.0.1", port=0, log_config=None), app.state.runtime)
+    server.install_signal_handlers = lambda: None
+    server.startup = failing_startup  # type: ignore[method-assign]
+    with pytest.raises(OSError, match="simulated bind failure"):
+        await server.serve()
+    out = capsys.readouterr().out
+    assert "FIRST START" in out and password in out
 
 
 @pytest.mark.asyncio
