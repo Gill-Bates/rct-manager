@@ -167,6 +167,22 @@
     });
   }
 
+  function syncTheme() {
+    if (!chart) return;
+    const c = colors();
+    chart.options.plugins.legend.labels.color = c.label;
+    for (const axis of Object.values(chart.options.scales)) {
+      axis.ticks.color = c.label;
+      axis.grid.color = c.grid;
+      if (axis.title) axis.title.color = c.label;
+    }
+    chart.data.datasets.forEach((dataset, index) => {
+      dataset.borderColor = c.series[index % c.series.length];
+      dataset.backgroundColor = dataset.borderColor;
+    });
+    chart.update('none');
+  }
+
   async function load(signal) {
     const devices = await window.RCTAdmin.api('energy/planning-devices', { signal, background: true });
     const list = Array.isArray(devices) ? devices.slice(0, MAX_DEVICES) : [];
@@ -231,5 +247,6 @@
 
   window.RCTDashboardBatteryHealth = Object.freeze({ sync, resize: () => chart?.resize() });
   setInterval(() => { if (!document.hidden && anyVisible()) void refresh(); }, REFRESH_MS);
+  document.addEventListener('rct-theme-change', syncTheme);
   sync();
 })();

@@ -350,6 +350,13 @@ test('remove then re-add of a placed widget reuses its position, no auto-placeme
   assert.ok(node, 'the widget is re-added at its saved cell');
 });
 
+test('a hidden placed widget retains its position through stored layout merge', () => {
+  const stored = { version: 1, widgets: [{ id: 'spot-price-curve', x: 6, y: 20, w: 6, h: 4, visible: false, placed: true }] };
+  const entry = mergeWithDefault(stored).find((widget) => widget.id === 'spot-price-curve');
+  assert.equal(entry.placed, true);
+  assert.deepEqual({ x: entry.x, y: entry.y }, { x: 6, y: 20 });
+});
+
 test('a second never-placed widget stacks below the first auto-placed one', () => {
   // The first free cell is recomputed after each add, so two opt-in charts do not collide.
   const h = toggleHarness(FACTORY_VISIBLE);

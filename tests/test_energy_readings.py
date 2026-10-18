@@ -40,7 +40,9 @@ def gateway(clock: ManualClock) -> tuple[RctGateway, MemoryCache]:
     return RctGateway(CATALOG, cache, clock, Allowlist({}, CATALOG)), cache
 
 
-def seed(cache: MemoryCache, clock: ManualClock, name: str, value, *, device_id: str = "main") -> None:
+def seed(
+    cache: MemoryCache, clock: ManualClock, name: str, value, *, device_id: str = "main"
+) -> None:
     cache.put(
         (device_id, name),
         value,
@@ -48,8 +50,6 @@ def seed(cache: MemoryCache, clock: ManualClock, name: str, value, *, device_id:
         received_monotonic=clock.monotonic(),
         origin="transaction",
     )
-
-
 
 
 def test_a_fresh_entry_is_returned_with_its_age_and_freshness() -> None:
@@ -93,8 +93,6 @@ def test_cached_reading_keeps_its_own_shape() -> None:
     assert rct.cached_reading("main", "battery_soc") == (0.5, CacheFreshness.FRESH)
 
 
-
-
 class CountingGateway:
     """A gateway that answers from a cache and records every device transaction it is asked for.
 
@@ -108,7 +106,13 @@ class CountingGateway:
         self._values: dict[tuple[str, str], tuple[object, float, CacheFreshness]] = {}
 
     def put(
-        self, name: str, value, *, age: float = 1.0, freshness=CacheFreshness.FRESH, device_id: str = "main"
+        self,
+        name: str,
+        value,
+        *,
+        age: float = 1.0,
+        freshness=CacheFreshness.FRESH,
+        device_id: str = "main",
     ) -> None:
         self._values[(device_id, name)] = (value, age, freshness)
 
@@ -121,7 +125,10 @@ class CountingGateway:
 
 
 def readings(
-    rct: CountingGateway, *, grid_import_positive: bool = True, battery_discharge_positive: bool = True
+    rct: CountingGateway,
+    *,
+    grid_import_positive: bool = True,
+    battery_discharge_positive: bool = True,
 ) -> RctEnergyReadings:
     registry = CapabilityRegistry(
         [
@@ -158,7 +165,9 @@ def test_the_soc_conversion_follows_the_catalog_unit_not_the_magnitude() -> None
     """
     rct = CountingGateway(ManualClock())
     rct.put("battery_soc", 0.008)
-    assert readings(rct).readings("main").battery_soc_percent.value == pytest.approx(0.8)
+    assert readings(rct).readings("main").battery_soc_percent.value == pytest.approx(
+        0.8
+    )
 
 
 def test_the_catalog_still_declares_battery_soc_as_a_ratio() -> None:
@@ -186,7 +195,9 @@ def test_the_pv_figure_is_the_sum_of_both_strings() -> None:
     rct.put("solar_b_power", 900.0, age=3.0)
     result = readings(rct).readings("main")
     assert result.pv_power_w.value == pytest.approx(2400.0)
-    assert result.pv_power_w.age_seconds == 3.0  # the older of the two says how much to trust it
+    assert (
+        result.pv_power_w.age_seconds == 3.0
+    )  # the older of the two says how much to trust it
     assert result.pv_power_w.stale is False
 
 
@@ -198,7 +209,9 @@ def test_one_missing_string_still_yields_a_sum_and_stays_fresh() -> None:
     assert result.pv_power_w.stale is False  # staleness covers present strings only
 
 
-def test_a_string_that_vanishes_after_being_seen_makes_the_partial_sum_stale_until_it_returns() -> None:
+def test_a_string_that_vanishes_after_being_seen_makes_the_partial_sum_stale_until_it_returns() -> (
+    None
+):
     rct = CountingGateway(ManualClock())
     rct.put("solar_a_power", 1500.0)
     rct.put("solar_b_power", 900.0)
@@ -222,7 +235,21 @@ def test_the_seen_string_state_is_kept_per_device() -> None:
     adapter.readings("slave1")
     del rct._values[("main", "solar_b_power")]
     assert adapter.readings("main").pv_power_w.stale is True  # seen on main, gone now
-    assert adapter.readings("slave1").pv_power_w.stale is False  # never had string B: stays fresh
+    assert (
+        adapter.readings("slave1").pv_power_w.stale is False
+    )  # never had string B: stays fresh
+
+
+def test_readdressed_device_forgets_seen_strings() -> None:
+    rct = CountingGateway(ManualClock())
+    rct.put("solar_a_power", 1500.0)
+    rct.put("solar_b_power", 900.0)
+    adapter = readings(rct)
+    adapter.readings("main")
+    del rct._values[("main", "solar_b_power")]
+    assert adapter.readings("main").pv_power_w.stale is True
+    adapter.reset_devices(["main"])
+    assert adapter.readings("main").pv_power_w.stale is False
 
 
 def test_a_grace_value_is_published_with_its_age_and_marked_stale() -> None:
@@ -243,7 +270,11 @@ def test_an_entirely_empty_cache_reads_as_five_absent_figures() -> None:
         result.house_load_w,
         result.battery_power_w,
     ):
-        assert reading.value is None and reading.age_seconds is None and reading.stale is True
+        assert (
+            reading.value is None
+            and reading.age_seconds is None
+            and reading.stale is True
+        )
 
 
 def test_an_unknown_device_and_a_non_numeric_value_do_not_raise() -> None:
@@ -295,14 +326,21 @@ def test_the_measured_at_axis_is_not_used_for_the_age() -> None:
 
 @pytest.mark.parametrize(
     ("raw", "discharge_positive", "expected"),
-    [(1500.0, True, 1500.0), (-1500.0, True, -1500.0), (1500.0, False, -1500.0), (-900.0, False, 900.0)],
+    [
+        (1500.0, True, 1500.0),
+        (-1500.0, True, -1500.0),
+        (1500.0, False, -1500.0),
+        (-900.0, False, 900.0),
+    ],
 )
 def test_the_battery_figure_is_discharge_positive_in_business_terms(
     raw: float, discharge_positive: bool, expected: float
 ) -> None:
     rct = CountingGateway(ManualClock())
     rct.put("battery_power", raw)
-    result = readings(rct, battery_discharge_positive=discharge_positive).readings("main")
+    result = readings(rct, battery_discharge_positive=discharge_positive).readings(
+        "main"
+    )
     assert result.battery_power_w.value == pytest.approx(expected)
     assert result.battery_power_w.stale is False
 
@@ -310,10 +348,17 @@ def test_the_battery_figure_is_discharge_positive_in_business_terms(
 def test_a_resting_battery_reads_as_zero() -> None:
     rct = CountingGateway(ManualClock())
     rct.put("battery_power", 0.0)
-    assert readings(rct, battery_discharge_positive=False).readings("main").battery_power_w.value == 0.0
+    assert (
+        readings(rct, battery_discharge_positive=False)
+        .readings("main")
+        .battery_power_w.value
+        == 0.0
+    )
 
 
-@pytest.mark.parametrize("bad", [True, float("inf"), float("-inf"), float("nan"), "0.5"])
+@pytest.mark.parametrize(
+    "bad", [True, float("inf"), float("-inf"), float("nan"), "0.5"]
+)
 def test_an_unusable_soc_cache_value_is_absent(bad: object) -> None:
     rct = CountingGateway(ManualClock())
     rct.put("battery_soc", bad)
@@ -322,19 +367,44 @@ def test_an_unusable_soc_cache_value_is_absent(bad: object) -> None:
 
 @pytest.mark.parametrize(
     ("discharge_positive", "raw", "expected"),
-    [(True, 5.0, 5.0), (True, -5.0, -5.0), (False, 5.0, -5.0), (False, -5.0, 5.0), (True, 0.0, 0.0), (False, 0.0, 0.0)],
+    [
+        (True, 5.0, 5.0),
+        (True, -5.0, -5.0),
+        (False, 5.0, -5.0),
+        (False, -5.0, 5.0),
+        (True, 0.0, 0.0),
+        (False, 0.0, 0.0),
+    ],
 )
-def test_battery_business_watts_is_discharge_positive(discharge_positive: bool, raw: float, expected: float) -> None:
-    from app.gateway.conventions import RctBatteryPowerConvention, battery_business_watts
+def test_battery_business_watts_is_discharge_positive(
+    discharge_positive: bool, raw: float, expected: float
+) -> None:
+    from app.gateway.conventions import (
+        RctBatteryPowerConvention,
+        battery_business_watts,
+    )
 
-    assert battery_business_watts(RctBatteryPowerConvention(discharge_positive), raw) == expected
+    assert (
+        battery_business_watts(RctBatteryPowerConvention(discharge_positive), raw)
+        == expected
+    )
 
 
 @pytest.mark.parametrize(
     ("value", "expected"),
-    [(1, 1.0), (2.5, 2.5), (True, None), (float("nan"), None), (float("inf"), None), ("1", None), (None, None)],
+    [
+        (1, 1.0),
+        (2.5, 2.5),
+        (True, None),
+        (float("nan"), None),
+        (float("inf"), None),
+        ("1", None),
+        (None, None),
+    ],
 )
-def test_finite_sample_value_accepts_only_finite_numbers(value: object, expected: float | None) -> None:
+def test_finite_sample_value_accepts_only_finite_numbers(
+    value: object, expected: float | None
+) -> None:
     from app.gateway.conventions import finite_sample_value
 
     assert finite_sample_value(value) == expected

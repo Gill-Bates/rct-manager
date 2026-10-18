@@ -1792,6 +1792,7 @@ class DashboardWidgetLayout(BaseModel):
     w: int = Field(ge=1, le=12)
     h: int = Field(ge=1, le=100)
     visible: bool = True
+    placed: bool | None = None
 
 
 class DashboardLayout(BaseModel):
@@ -1831,7 +1832,7 @@ def get_dashboard_layout(request: Request) -> dict:
 def put_dashboard_layout(body: DashboardLayout, request: Request) -> dict:
     require_admin(request, mutation=True)
     _validate_dashboard_layout(body)
-    layout = body.model_dump()
+    layout = body.model_dump(exclude_unset=True)
     _store(request).replace_dashboard_layout(layout)
     return {"layout": layout}
 

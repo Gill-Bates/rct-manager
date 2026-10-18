@@ -7,9 +7,12 @@
 """Model-layer safety invariants (fail-closed persistence, finite values, state consistency) and RCT sign conventions."""
 
 from datetime import UTC, datetime
+from types import SimpleNamespace
 
 import pytest
 
+from app.dispatch.capabilities import CapabilityRegistry
+from app.dispatch.controller import DispatchController
 from app.dispatch.models import (
     ControlTelemetry,
     DeviceControlSnapshot,
@@ -24,9 +27,36 @@ from app.dispatch.models import (
     PowerSetpoint,
     phase_for,
 )
+from app.gateway.base import MetricReading
 from app.gateway.conventions import RctBatteryPowerConvention, RctGridPowerConvention
+from app.gateway.rct_dispatch import RctDispatchGateway
+from tests.conftest import ManualClock
 
 AWARE_NOW = datetime(2026, 10, 6, 12, 0, tzinfo=UTC)
+
+
+@pytest.mark.asyncio
+async def test_sequential_control_reads_age_at_assembly_time() -> None:
+    clock = ManualClock()
+
+    class Gateway:
+        _clock = clock
+
+        async def read_system(self, _device_id, name):
+            reading = MetricReading(name, 0.5 if name == "battery_soc" else 100.0,
+                                    "ratio" if name == "battery_soc" else "W",
+                                    clock.now(), 0.0, "device", False)
+            clock.advance(6.0)
+            return reading
+
+    dispatch = RctDispatchGateway(Gateway(), capabilities=CapabilityRegistry(),
+                                  soc_target_policies=None)  # type: ignore[arg-type]
+    telemetry = await dispatch.read_control_telemetry("main")
+    assert telemetry.soc_age_seconds >= 18.0
+    controller = DispatchController.__new__(DispatchController)
+    controller._config = SimpleNamespace(soc_telemetry_max_age_seconds=15.0,
+                                         control_telemetry_max_age_seconds=5.0)
+    assert controller._telemetry_stale(telemetry)
 
 
 def _snapshot_dict(**overrides) -> dict:

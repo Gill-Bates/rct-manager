@@ -37,7 +37,9 @@ _BATTERY_POWER = "battery_power"
 
 
 class RctEnergyReadings:
-    def __init__(self, gateway: RctGateway, *, capabilities: CapabilityRegistry) -> None:
+    def __init__(
+        self, gateway: RctGateway, *, capabilities: CapabilityRegistry
+    ) -> None:
         self._rct = gateway
         # Read per call and per device: the convention differs between the devices of one process,
         # and a verification has to take effect live, without a restart. An empty registry answers
@@ -46,6 +48,13 @@ class RctEnergyReadings:
         # (device_id, string) pairs that have delivered a value at least once. In memory only: a
         # restart relearns it. Set.add is atomic, and readings() runs on the event loop anyway.
         self._seen_strings: set[tuple[str, str]] = set()
+
+    def reset_devices(self, device_ids: list[str]) -> None:
+        """Forget learned PV strings after a device is removed or re-addressed."""
+        reset_ids = set(device_ids)
+        self._seen_strings.difference_update(
+            pair for pair in self._seen_strings if pair[0] in reset_ids
+        )
 
     def readings(self, device_id: str) -> EnergyReadings:
         return EnergyReadings(
@@ -85,7 +94,9 @@ class RctEnergyReadings:
         if reading.value is None:
             return reading
         record = self._capabilities.record(device_id, CapabilityName.GRID_POWER_SIGN)
-        watts = RctGridPowerConvention(record.grid_import_positive).import_watts(reading.value)
+        watts = RctGridPowerConvention(record.grid_import_positive).import_watts(
+            reading.value
+        )
         return DeviceReading(watts, reading.age_seconds, reading.stale)
 
     def _battery(self, device_id: str) -> DeviceReading:
@@ -93,7 +104,9 @@ class RctEnergyReadings:
         if reading.value is None:
             return reading
         record = self._capabilities.record(device_id, CapabilityName.BATTERY_POWER_SIGN)
-        watts = battery_business_watts(RctBatteryPowerConvention(record.battery_discharge_positive), reading.value)
+        watts = battery_business_watts(
+            RctBatteryPowerConvention(record.battery_discharge_positive), reading.value
+        )
         return DeviceReading(watts, reading.age_seconds, reading.stale)
 
     def _pv(self, device_id: str) -> DeviceReading:
@@ -107,10 +120,14 @@ class RctEnergyReadings:
         # A string that never reported (single-string plant) does not count against freshness; one
         # that did report before and is gone now makes the partial sum stale.
         vanished = any(
-            part.value is None and (device_id, name) in self._seen_strings for name, part in parts
+            part.value is None and (device_id, name) in self._seen_strings
+            for name, part in parts
         )
         return DeviceReading(
             sum(part.value for part in present),
-            max((part.age_seconds for part in present if part.age_seconds is not None), default=None),
+            max(
+                (part.age_seconds for part in present if part.age_seconds is not None),
+                default=None,
+            ),
             vanished or any(part.stale for part in present),
         )

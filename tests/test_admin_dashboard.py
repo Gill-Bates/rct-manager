@@ -298,6 +298,29 @@ async def test_put_then_get_returns_the_stored_layout(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_hidden_placed_widget_round_trips(tmp_path):
+    async with _logged_in(tmp_path) as (client, csrf):
+        body = _layout(
+            {
+                "id": "spot-price-curve",
+                "x": 6,
+                "y": 20,
+                "w": 6,
+                "h": 4,
+                "visible": False,
+                "placed": True,
+            }
+        )
+        response = await client.put(
+            "/admin/api/dashboard-layout", headers={"X-CSRF-Token": csrf}, json=body
+        )
+        assert response.status_code == 200
+        assert (await client.get("/admin/api/dashboard-layout")).json() == {
+            "layout": body
+        }
+
+
+@pytest.mark.asyncio
 async def test_days_to_calibration_widget_is_in_the_allowlist(tmp_path):
     # The "x days to next calibration" tile is a real, addable widget: a layout that places it must
     # pass _validate_dashboard_layout, exactly like the other hero/KPI tiles.

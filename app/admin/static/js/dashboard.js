@@ -32,9 +32,9 @@
   const REVEAL_TIMEOUT_MS = 2500; // below the CSS failsafe (4s) so a slow load still reveals via JS
 
   let grid = null;
-  const widgetState = new Map(); // id -> { id, x, y, w, h, visible }
-  // ids whose x/y is a genuine user position (shown in the saved layout or moved/placed since),
-  // as opposed to a widget still carrying only its factory placeholder. Re-adding a placed widget
+  const widgetState = new Map(); // id -> { id, x, y, w, h, visible, placed? }
+  // ids whose x/y is a genuine position, including hidden widgets previously placed by the user.
+  // Re-adding a placed widget
   // reuses its position; a never-placed widget is auto-positioned into the first free cell instead.
   const placedIds = new Set();
   let savedLayout = null;
@@ -77,7 +77,8 @@
         Number.isInteger(saved.h) && saved.h >= 1 && saved.h <= 100 &&
         saved.x + saved.w <= 12 && saved.y + saved.h <= MAX_Y;
       if (!valid) return defaultEntry(def);
-      return { id: def.id, x: saved.x, y: saved.y, w: saved.w, h: saved.h, visible: saved.visible !== false };
+      return { id: def.id, x: saved.x, y: saved.y, w: saved.w, h: saved.h,
+        visible: saved.visible !== false, placed: saved.placed === true || (saved.placed === undefined && saved.visible !== false) };
     });
     // separateOverlaps returns null when the overlaps cannot be resolved within the vertical bound.
     // A broken saved layout must never leave the dashboard unusable, so fall back to the known-good
@@ -121,8 +122,9 @@
       const shown = [];
       for (const entry of layout) {
         widgetState.set(entry.id, { ...entry });
-        // A shown widget carries a real position; a hidden one carries only its factory placeholder.
-        if (entry.visible) placedIds.add(entry.id); else placedIds.delete(entry.id);
+        // Hidden widgets may also retain a position from an earlier placement.
+        if (entry.placed === true || (entry.placed === undefined && entry.visible)) placedIds.add(entry.id);
+        else placedIds.delete(entry.id);
         const el = widgetElement(entry.id);
         if (!el) continue;
         if (entry.visible) {
@@ -214,7 +216,7 @@
       const prev = widgetState.get(def.id);
       if (!node || !prev || prev.visible === false) continue;
       const h = fitRows.get(def.id) === node.h ? prev.h : node.h;
-      widgetState.set(def.id, { id: def.id, x: node.x, y: node.y, w: node.w, h, visible: true });
+      widgetState.set(def.id, { id: def.id, x: node.x, y: node.y, w: node.w, h, visible: true, placed: true });
     }
   }
 
@@ -223,7 +225,8 @@
     syncStateFromGrid();
     const widgets = DEFAULT_LAYOUT.map((def) => {
       const state = widgetState.get(def.id);
-      return { id: def.id, x: state.x, y: state.y, w: state.w, h: state.h, visible: state.visible };
+      return { id: def.id, x: state.x, y: state.y, w: state.w, h: state.h,
+        visible: state.visible, placed: placedIds.has(def.id) };
     });
     try {
       await api('dashboard-layout', { method: 'PUT', body: JSON.stringify({ version: 1, widgets }) });
@@ -244,7 +247,7 @@
       if (!id) continue;
       const prev = widgetState.get(id);
       const h = prev && fitRows.get(id) === item.h ? prev.h : item.h;
-      widgetState.set(id, { id, x: item.x, y: item.y, w: item.w, h, visible: true });
+      widgetState.set(id, { id, x: item.x, y: item.y, w: item.w, h, visible: true, placed: true });
       placedIds.add(id); // a user drag/resize is a genuine position
     }
   }

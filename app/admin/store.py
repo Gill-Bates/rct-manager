@@ -198,6 +198,10 @@ _SCHEMA: dict[str, str] = {
         "CREATE TABLE dashboard_layout_meta ("
         "id INTEGER PRIMARY KEY CHECK (id = 1), version INTEGER NOT NULL) STRICT;"
     ),
+    "dashboard_layout_placement": (
+        "CREATE TABLE dashboard_layout_placement ("
+        "widget_id TEXT PRIMARY KEY, placed INTEGER NOT NULL CHECK (placed IN (0, 1))) STRICT;"
+    ),
 }
 
 # Retention prunes several consumption tables by a non-PK-leading timestamp column. Only the two
@@ -1116,6 +1120,10 @@ class AdminStore:
             rows = db.execute(
                 "SELECT widget_id, x, y, w, h, visible FROM dashboard_layout ORDER BY position"
             ).fetchall()
+            placements = {
+                row["widget_id"]: bool(row["placed"])
+                for row in db.execute("SELECT widget_id, placed FROM dashboard_layout_placement")
+            }
         return {
             "version": meta["version"],
             "widgets": [
@@ -1126,6 +1134,7 @@ class AdminStore:
                     "w": row["w"],
                     "h": row["h"],
                     "visible": bool(row["visible"]),
+                    **({"placed": placements[row["widget_id"]]} if row["widget_id"] in placements else {}),
                 }
                 for row in rows
             ],
@@ -1142,6 +1151,7 @@ class AdminStore:
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             db.execute("DELETE FROM dashboard_layout")
+            db.execute("DELETE FROM dashboard_layout_placement")
             db.execute("DELETE FROM dashboard_layout_meta")
             db.execute(
                 "INSERT INTO dashboard_layout_meta (id, version) VALUES (1, ?)",
@@ -1163,12 +1173,17 @@ class AdminStore:
                     for position, widget in enumerate(widgets)
                 ],
             )
+            db.executemany(
+                "INSERT INTO dashboard_layout_placement (widget_id, placed) VALUES (?, ?)",
+                [(widget["id"], 1 if widget["placed"] else 0) for widget in widgets if "placed" in widget],
+            )
 
     def clear_dashboard_layout(self) -> None:
         """Remove the stored layout; a missing layout is not an error (idempotent reset-to-default)."""
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             db.execute("DELETE FROM dashboard_layout")
+            db.execute("DELETE FROM dashboard_layout_placement")
             db.execute("DELETE FROM dashboard_layout_meta")
 
     def prune_consumption_daily(self, cutoff_date: str) -> None:

@@ -100,9 +100,9 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 def _request(target: Target, path: str, data: bytes | None) -> bytes:
     # base_url is built by Endpoint.base_url and is always http or https.
-    request = urllib.request.Request(
+    request = urllib.request.Request(  # noqa: S310
         target.base_url + path, data=data, headers=target.headers
-    )  # noqa: S310
+    )
     if data is not None:
         request.add_header("Content-Type", "text/plain; charset=utf-8")
     context = None
@@ -259,9 +259,7 @@ class PushExporter:
             return
         try:
             ready = await asyncio.to_thread(lambda: self._provisioner.run(ensure=False))
-        except (
-            Exception
-        ) as exc:  # noqa: BLE001 - provisioning must never fail the export
+        except Exception as exc:  # noqa: BLE001 - provisioning must never fail the export
             self._provision_failures += 1
             interval = float(self._settings.metrics_export_interval_seconds)
             self._provision_retry_at = now + _backoff(

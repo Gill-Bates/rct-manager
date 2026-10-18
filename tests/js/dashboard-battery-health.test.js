@@ -21,6 +21,8 @@ function harness(views, { devices, visibleIds } = {}) {
   const configs = [];
   const paths = [];
   const state = { hidden: new Set() };
+  const listeners = new Map();
+  const theme = { label: '#111', grid: '#aaa', power: '#123', soc: '#456' };
   const hiddenFor = (id) => (visibleIds ? !visibleIds.includes(id) : state.hidden.has(id));
   // A minimal DOM node: textContent resets the children, container text is the concatenated child text.
   const fakeNode = () => ({
@@ -38,6 +40,7 @@ function harness(views, { devices, visibleIds } = {}) {
   const document = {
     body: { dataset: { page: 'dashboard' } },
     documentElement: {},
+    addEventListener: (name, listener) => listeners.set(name, listener),
     getElementById: element,
     createElement: fakeNode,
     querySelector: (selector) => {
@@ -46,9 +49,10 @@ function harness(views, { devices, visibleIds } = {}) {
     },
   };
   class FakeChart {
-    constructor(_canvas, config) { configs.push(config); this.destroyed = false; }
+    constructor(_canvas, config) { configs.push(config); this.data = config.data; this.options = config.options; this.destroyed = false; this.updates = []; state.chart = this; }
     destroy() { this.destroyed = true; }
     resize() { }
+    update(mode) { this.updates.push(mode); }
   }
   const list = devices || Object.keys(views).map((id) => ({ device_id: id, device_name: `Inv ${id}` }));
   const window = {
@@ -64,10 +68,11 @@ function harness(views, { devices, visibleIds } = {}) {
   };
   vm.runInNewContext(SOURCE, {
     document, window, AbortController, setInterval() { }, encodeURIComponent, Date, Number, Math, Array, Object,
-    getComputedStyle: () => ({ getPropertyValue: () => '' }),
+    getComputedStyle: () => ({ getPropertyValue: (name) => ({ '--bs-body-color': theme.label,
+      '--rct-line': theme.grid, '--rct-plan-power': theme.power, '--rct-plan-soc': theme.soc })[name] || '' }),
   });
   const pump = async () => { for (let i = 0; i < 8; i++) await new Promise((resolve) => setImmediate(resolve)); };
-  return { api: window.RCTDashboardBatteryHealth, element, configs, paths, state, pump };
+  return { api: window.RCTDashboardBatteryHealth, element, configs, paths, state, pump, listeners, theme };
 }
 
 const point = (at, cycles, wh, percent) => ({
@@ -110,6 +115,19 @@ test('the chart starts at the commissioning baseline and plots remaining percent
   assert.equal(h.element('battery-degradation-state').textContent, '');
   const lines = config.options.plugins.tooltip.callbacks.label({ dataset: series, raw: series.data[2] });
   assert.deepEqual(Array.from(lines).slice(0, 2), ['SN-A', 'Cycles: 128']);
+});
+
+test('live theme change recolors an existing chart', async () => {
+  const h = harness({ a: VIEW_A });
+  await h.pump();
+  h.theme.label = '#eee';
+  h.theme.grid = '#333';
+  h.theme.power = '#abc';
+  h.listeners.get('rct-theme-change')();
+  assert.equal(h.state.chart.options.plugins.legend.labels.color, '#eee');
+  assert.equal(h.state.chart.options.scales.x.grid.color, '#333');
+  assert.equal(h.state.chart.data.datasets[0].borderColor, '#abc');
+  assert.deepEqual(h.state.chart.updates, ['none']);
 });
 
 test('without a commissioning date the chart starts at the first measurement and says so', async () => {

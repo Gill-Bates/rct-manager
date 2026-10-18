@@ -73,7 +73,9 @@ class RctDispatchGateway:
         return RctGridPowerConvention(record.grid_import_positive)
 
     def _external_strategy_code(self, device_id: str) -> int | None:
-        return self._capabilities.record(device_id, CapabilityName.WRITE_PATH).soc_strategy_external_code
+        return self._capabilities.record(
+            device_id, CapabilityName.WRITE_PATH
+        ).soc_strategy_external_code
 
     @staticmethod
     def _number(value: object, name: str) -> float:
@@ -99,32 +101,41 @@ class RctDispatchGateway:
 
     async def read_control_telemetry(self, device_id: str) -> ControlTelemetry:
         soc = await self._rct.read_system(device_id, "battery_soc")
+        soc_received = self._rct._clock.monotonic()
         grid = await self._rct.read_system(device_id, "grid_power")
+        grid_received = self._rct._clock.monotonic()
         battery = await self._rct.read_system(device_id, "battery_power")
+        battery_received = self._rct._clock.monotonic()
         load = await self._rct.read_system(device_id, "household_load_power")
+        load_received = self._rct._clock.monotonic()
+        assembled_at = self._rct._clock.monotonic()
         return ControlTelemetry(
             soc_percent=self._soc_percent(soc),
-            soc_age_seconds=soc.age_seconds,
+            soc_age_seconds=soc.age_seconds + max(0.0, assembled_at - soc_received),
             soc_source=soc.source,
             grid_import_w=self._grid_convention(device_id).import_watts(
                 self._number(grid.value, grid.name)
             ),
-            grid_age_seconds=grid.age_seconds,
+            grid_age_seconds=grid.age_seconds + max(0.0, assembled_at - grid_received),
             grid_source=grid.source,
             battery_setpoint=self._battery_convention(device_id).setpoint(
                 self._number(battery.value, battery.name)
             ),
-            battery_age_seconds=battery.age_seconds,
+            battery_age_seconds=battery.age_seconds
+            + max(0.0, assembled_at - battery_received),
             battery_source=battery.source,
             household_load_w=self._number(load.value, load.name),
-            household_age_seconds=load.age_seconds,
+            household_age_seconds=load.age_seconds
+            + max(0.0, assembled_at - load_received),
         )
 
     async def read_snapshot(self, device_id: str) -> DeviceControlSnapshot:
         strategy = await self._rct.read_system(device_id, "power_mng_soc_strategy")
         target = await self._rct.read_system(device_id, "power_mng_soc_target_set")
         power = await self._rct.read_system(device_id, "power_mng_battery_power_extern")
-        grid_charge = await self._rct.read_system(device_id, "power_mng_use_grid_power_enable")
+        grid_charge = await self._rct.read_system(
+            device_id, "power_mng_use_grid_power_enable"
+        )
         if not isinstance(strategy.value, int) or isinstance(strategy.value, bool):
             raise DeviceApiError("protocol_error", name=strategy.name)
         if not isinstance(grid_charge.value, bool):
@@ -133,12 +144,16 @@ class RctDispatchGateway:
         # original register sign from it without re-projecting through the current convention (P2-02).
         battery_power_raw = self._number(power.value, power.name)
         return DeviceControlSnapshot(
-            battery_setpoint=self._battery_convention(device_id).setpoint(battery_power_raw),
+            battery_setpoint=self._battery_convention(device_id).setpoint(
+                battery_power_raw
+            ),
             soc_target_ratio=self._number(target.value, target.name),
             soc_strategy_code=strategy.value,
             grid_charge_enabled=grid_charge.value,
             read_at=strategy.measured_at,
-            all_fresh=all(r.source == "device" for r in (strategy, target, power, grid_charge)),
+            all_fresh=all(
+                r.source == "device" for r in (strategy, target, power, grid_charge)
+            ),
             battery_power_raw=battery_power_raw,
         )
 
@@ -165,14 +180,25 @@ class RctDispatchGateway:
         # The register's wire unit is attested WRITE_PATH evidence (V-17), not a fixed ratio: a
         # percent-attested device must receive e.g. 80, not 0.8. Reading it here closes the gap
         # where the verification attested a unit that the write then ignored.
-        unit = self._capabilities.record(device_id, CapabilityName.WRITE_PATH).soc_target_unit
+        unit = self._capabilities.record(
+            device_id, CapabilityName.WRITE_PATH
+        ).soc_target_unit
         try:
-            value = RctSocTargetConvention(policy.mode, policy.below_margin_percent).register_value(
-                dispatch_mode, stop_target_percent=stop_target_percent, soc_percent=soc_percent, unit=unit
+            value = RctSocTargetConvention(
+                policy.mode, policy.below_margin_percent
+            ).register_value(
+                dispatch_mode,
+                stop_target_percent=stop_target_percent,
+                soc_percent=soc_percent,
+                unit=unit,
             )
         except ValueError as exc:
-            raise DeviceApiError("protocol_error", name="power_mng_soc_target_set") from exc
-        return await self._rct.write_metric(device_id, "power_mng_soc_target_set", value, system=True)
+            raise DeviceApiError(
+                "protocol_error", name="power_mng_soc_target_set"
+            ) from exc
+        return await self._rct.write_metric(
+            device_id, "power_mng_soc_target_set", value, system=True
+        )
 
     async def apply_control_mode(self, device_id: str, *, external: bool):
         # Second, independent lock next to the controller's capability gate (defense in depth): a
@@ -180,7 +206,9 @@ class RctDispatchGateway:
         code = self._external_strategy_code(device_id)
         if not external or code is None:
             raise DeviceApiError("dispatch_unverified")
-        return await self._rct.write_metric(device_id, "power_mng_soc_strategy", code, system=True)
+        return await self._rct.write_metric(
+            device_id, "power_mng_soc_strategy", code, system=True
+        )
 
     async def apply_internal_strategy(self, device_id: str) -> None:
         name = "power_mng_soc_strategy"
@@ -188,13 +216,17 @@ class RctDispatchGateway:
         if not isinstance(current.value, int) or isinstance(current.value, bool):
             raise DeviceApiError("protocol_error", name=name)
         if current.value != self.INTERNAL_STRATEGY_CODE:
-            await self._rct.write_metric(device_id, name, self.INTERNAL_STRATEGY_CODE, system=True)
+            await self._rct.write_metric(
+                device_id, name, self.INTERNAL_STRATEGY_CODE, system=True
+            )
             confirmed = await self._rct.read_system(device_id, name)
             if confirmed.value != self.INTERNAL_STRATEGY_CODE:
                 raise DeviceApiError("write_outcome_unknown", name=name)
 
     async def apply_grid_charge(self, device_id: str, *, enabled: bool):
-        return await self._rct.write_metric(device_id, "power_mng_use_grid_power_enable", enabled, system=True)
+        return await self._rct.write_metric(
+            device_id, "power_mng_use_grid_power_enable", enabled, system=True
+        )
 
     async def restore(self, device_id: str, snapshot: DeviceControlSnapshot, step: int):
         if step == 0:
@@ -206,17 +238,28 @@ class RctDispatchGateway:
             if snapshot.battery_power_raw is None:
                 return await self.apply_setpoint(device_id, snapshot.battery_setpoint)
             return await self._rct.write_metric(
-                device_id, "power_mng_battery_power_extern", snapshot.battery_power_raw, system=True
+                device_id,
+                "power_mng_battery_power_extern",
+                snapshot.battery_power_raw,
+                system=True,
             )
         if step == 1:
-            return await self.apply_grid_charge(device_id, enabled=snapshot.grid_charge_enabled)
+            return await self.apply_grid_charge(
+                device_id, enabled=snapshot.grid_charge_enabled
+            )
         if step == 2:
             return await self._rct.write_metric(
-                device_id, "power_mng_soc_target_set", float(snapshot.soc_target_ratio), system=True
+                device_id,
+                "power_mng_soc_target_set",
+                float(snapshot.soc_target_ratio),
+                system=True,
             )
         if step == 3:
             return await self._rct.write_metric(
-                device_id, "power_mng_soc_strategy", snapshot.soc_strategy_code, system=True
+                device_id,
+                "power_mng_soc_strategy",
+                snapshot.soc_strategy_code,
+                system=True,
             )
         raise ValueError("invalid restore step")
 

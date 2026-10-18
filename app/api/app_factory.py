@@ -1306,33 +1306,29 @@ def _lifespan(
             # again, so a concurrent put_settings() publishing a newer one mid-reconfiguration
             # cannot mix values from two different device configurations.
             target = runtime.settings
-            reset_ids: set[str] = set()
+            old_ids = set(runtime.devices)
+            new_devices = {d.device_id: d for d in target.devices}
+            # Affected: removed outright, or re-addressed under the same device_id (host/port/
+            # network_id changed) — either way the old hardware's state must not carry forward.
+            removed = old_ids - set(new_devices)
+            readdressed = {
+                device_id
+                for device_id, old_entry in runtime.devices.items()
+                if device_id in new_devices
+                and (old_entry.host, old_entry.port, old_entry.network_id)
+                != (
+                    new_devices[device_id].host,
+                    new_devices[device_id].port,
+                    new_devices[device_id].network_id,
+                )
+            }
+            reset_ids = removed | readdressed
             if runtime.dispatch is not None:
-                old_ids = set(runtime.devices)
-                new_devices = {d.device_id: d for d in target.devices}
-                # Affected: removed outright, or re-addressed under the same device_id (host/port/
-                # network_id changed) — either way the record a running dispatch holds would no
-                # longer describe the physical device the gateway resolves that id to afterward.
-                removed = old_ids - set(new_devices)
-                readdressed = {
-                    device_id
-                    for device_id, old_entry in runtime.devices.items()
-                    if device_id in new_devices
-                    and (old_entry.host, old_entry.port, old_entry.network_id)
-                    != (
-                        new_devices[device_id].host,
-                        new_devices[device_id].port,
-                        new_devices[device_id].network_id,
-                    )
-                }
-                for device_id in removed | readdressed:
+                for device_id in reset_ids:
                     await runtime.dispatch.force_restore_or_raise(
                         device_id
                     )  # raises: abort, nothing torn down yet
-                # A removed id is reset like a re-addressed one: _normalize_devices hands a freed id
-                # (e.g. "main") to the next device added without an id, and that device must not
-                # inherit the removed hardware's capabilities, engineering mode or operating mode.
-                reset_ids = removed | readdressed
+            # A removed id can be reused by _normalize_devices; its learned state is reset too.
 
             selected_exposed = None
             if store is not None:
@@ -1395,7 +1391,7 @@ def _lifespan(
                 raise ReconfigurationBuildError(str(exc)) from exc
 
             try:
-                await _swap_graph(graph, target)
+                await _swap_graph(graph, target, reset_ids)
             except Exception:
                 # The old graph is already torn down, so what runs now is a partial one. Say so
                 # loudly and keep readiness red until the operator restarts or saves again.
@@ -1405,7 +1401,7 @@ def _lifespan(
                 )
                 raise
 
-        async def _swap_graph(graph: _DeviceGraph, target: Settings) -> None:
+        async def _swap_graph(graph: _DeviceGraph, target: Settings, reset_ids: set[str]) -> None:
             old_tasks = [
                 *connect_tasks,
                 *startup_tasks,
@@ -1465,6 +1461,7 @@ def _lifespan(
                 return  # shutdown began while tearing down: start nothing, the shutdown cleans up
 
             gateway.replace_devices(graph.bindings)
+            runtime.energy_readings.reset_devices(list(reset_ids))
 
             parts.adopt(graph)
             if parts.exporter is not None:

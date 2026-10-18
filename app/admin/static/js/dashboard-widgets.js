@@ -25,7 +25,7 @@
  * @property {'kpi'|'flow'|'chart'}  kind   Widget kind.
  * @property {{w:number, h:number}}  defaultSize   Default grid cells (w 1..12, h 1..100; x+w<=12).
  * @property {boolean} defaultVisible Whether it is in the factory default layout.
- * @property {number} [defaultX]     Factory x. REQUIRED for every one of today's ten widgets
+ * @property {number} [defaultX]     Factory x. Required for every current widget
  *                                   (visible AND hidden). Optional-until-placed applies ONLY to a
  *                                   future, not-yet-built catalog entry, which may omit it until built.
  * @property {number} [defaultY]     Factory y. Same rule as defaultX.
