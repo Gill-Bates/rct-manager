@@ -15,6 +15,7 @@ import math
 import os
 import secrets
 import sqlite3
+import stat
 import string
 import threading
 import time
@@ -36,7 +37,6 @@ from app.security.pat import (
     generate_pat,
     pat_well_formed,
 )
-from app.sqlite_safety import validated_sqlite_path
 
 log = logging.getLogger(__name__)
 _PASSWORDS = PasswordHasher()
@@ -255,19 +255,43 @@ class AdminStore:
             algorithm=hashes.SHA256(), length=32, salt=None, info=b"rct-admin-auth-v1"
         ).derive(secret.encode())
 
+    def _ensure_secure_parent(self) -> None:
+        """Reject fail-closed unless the database parent is a private, owner-writable directory.
+
+        The parent is created with 0o700 when absent. A parent that already exists and is group- or
+        world-writable, or is not a directory, lets another local principal replace the database
+        path after any check, so the open is refused instead. An existing database that is not a
+        regular file (a symlink, FIFO or directory) is refused too.
+        """
+        parent = self.path.parent
+        parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        parent_st = os.stat(parent, follow_symlinks=False)
+        if not stat.S_ISDIR(parent_st.st_mode) or parent_st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+            raise ValueError(
+                f"admin database parent {parent} must be a directory only its owner can write"
+            )
+        try:
+            file_st = os.stat(self.path, follow_symlinks=False)
+        except FileNotFoundError:
+            return  # created below under the validated parent
+        if not stat.S_ISREG(file_st.st_mode):
+            raise ValueError(f"admin database path {self.path} is not a regular file")
+
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:
-        self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        # Validate the (operator-configurable) parent before opening, fail-closed. O_NOFOLLOW only
+        # guards the descriptor below; sqlite3.connect reopens the path by name, so a path swap
+        # between the two is a TOCTOU window. A parent another local principal can write (group- or
+        # world-writable) is what makes that swap possible, so such a parent is rejected rather than
+        # trusted; an existing database that is not a regular file is rejected too.
+        self._ensure_secure_parent()
         fd = os.open(self.path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
         try:
             if os.fstat(fd).st_mode & 0o077:
                 os.fchmod(fd, 0o600)  # tighten a database created with a looser umask
         finally:
             os.close(fd)
-        # sqlite3.connect reopens the path by name, so the O_NOFOLLOW fd above does not guard the
-        # actual open (TOCTOU). validated_sqlite_path checks the parent chain and the existing
-        # file fail-closed first, the same guard the dispatch store already applies.
-        db = sqlite3.connect(validated_sqlite_path(self.path), timeout=5)
+        db = sqlite3.connect(self.path, timeout=5)
         try:
             db.row_factory = sqlite3.Row
             db.execute("PRAGMA foreign_keys = ON")

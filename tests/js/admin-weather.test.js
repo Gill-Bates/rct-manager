@@ -285,7 +285,9 @@ test('timezone is display-only and is never submitted', () => {
 test('Weather fields render without documentation help text', () => {
   const h = harness();
   renderForm(h, COMPLETE_CONFIG);
-  for (const key of ['enabled', 'provider', 'latitude', 'longitude', 'pv_peak_power_kwp', 'tilt_deg', 'azimuth_deg', 'performance_ratio']) {
+  // No 'enabled' toggle: enablement follows the Energy Manager mode, so it is not a form control.
+  assert.equal(h.context.weatherControlByField('enabled'), null, 'the Enable toggle fell away');
+  for (const key of ['provider', 'latitude', 'longitude', 'pv_peak_power_kwp', 'tilt_deg', 'azimuth_deg', 'performance_ratio']) {
     const control = h.context.weatherControlByField(key);
     assert.equal(control.getAttribute('aria-describedby'), null);
     assert.ok(!control.parentElement.children.some((node) => node.className.includes('form-text')));
@@ -395,11 +397,12 @@ test('the PV peak power field is kWp and the posted body converts to Wp', () => 
   const field = h.pvFieldsContainer.querySelector('[data-field="pv_peak_power_kwp"]');
   assert.ok(field, 'the kWp field exists');
   assert.equal(field.value, '10');  // 10000 Wp shown as 10 kWp
-  // weatherBody reads the kWp control and multiplies back to Wp.
-  h.fieldsContainer.querySelector('[data-field="enabled"]').checked = true;
+  // weatherBody reads the kWp control and multiplies back to Wp. There is no 'enabled' field: the
+  // body no longer carries it (the server derives enablement from the Energy Manager mode).
   field.value = '7.5';
   const body = h.context.weatherBody();
   assert.equal(body.pv_peak_power_wp, 7500);
+  assert.equal(Object.hasOwn(body, 'enabled'), false, 'the body no longer carries enabled');
 });
 
 test('new input shows a Searching state and drops the stale hit list immediately', async () => {
@@ -633,16 +636,17 @@ function saveHarness(apiImpl) {
   return { h, toasts };
 }
 
-test('enabling with incomplete fields shows inline per-field errors, not a raw generic toast', async () => {
-  // The backend rejects an enabled-but-incomplete config with the real pydantic 422 body: a single
-  // model-level completeness error naming the missing fields.
+test('a completeness 422 still maps onto inline per-field errors, not a raw generic toast', async () => {
+  // The 'Enable' toggle fell away: the GUI no longer sends `enabled` and the server derives it from
+  // completeness, so the GUI save path does not itself hit the completeness 422. The inline-error
+  // mapping stays as defensive handling for a completeness 422 from any client; this pins it by
+  // simulating that exact pydantic 422 body (a single model-level error naming the missing fields).
   const error = Object.assign(new Error('Value error, an enabled solar forecast requires azimuth_deg, latitude, longitude, pv_peak_power_wp, tilt_deg'), {
     status: 422,
     detail: [{ type: 'value_error', loc: [], msg: 'Value error, an enabled solar forecast requires azimuth_deg, latitude, longitude, pv_peak_power_wp, tilt_deg' }],
   });
   const { h, toasts } = saveHarness(async () => { throw error; });
-  renderForm(h); // enabled:false, every value field empty
-  h.fieldsContainer.querySelector('[data-field="enabled"]').checked = true;
+  renderForm(h); // every value field empty
 
   await h.context.saveWeather();
 

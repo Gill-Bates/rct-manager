@@ -977,13 +977,23 @@ function planWindowRow(label, from, until) {
   return row;
 }
 
-function planWaitState() {
+function planWaitState(weatherSetupRequired = false) {
   const loading = element('div', 'spot-market-loading plan-loading text-center');
   loading.setAttribute('role', 'status');
   const icon = element('span', 'material-icons text-secondary plan-loading-icon', 'hourglass_empty');
   icon.setAttribute('aria-hidden', 'true');
   loading.append(icon, element('h3', 'h5 mb-0', 'Plan is being prepared'),
     element('p', 'text-secondary mb-0', 'Please check back in a few minutes.'));
+  // The Energy Manager cannot start a plan until the Weather config carries a location (postal
+  // code / coordinates) and the PV plant data. A single badge points the operator at the Weather
+  // tab; it is additive to the hourglass, not a revived readiness list.
+  if (weatherSetupRequired) {
+    const badge = element('p', 'plan-setup-badge mb-0 mt-3');
+    const chip = element('span', 'badge rounded-pill text-bg-warning',
+      'Weather setup required: enter the postal code and PV system data on the Weather tab.');
+    badge.append(chip);
+    loading.append(badge);
+  }
   return loading;
 }
 
@@ -993,45 +1003,6 @@ const PLAN_RETRY_STATUSES = new Set([...PLAN_PENDING_STATUSES, 'battery_state_un
 function planStatusCard(title, message) {
   const card = element('section', 'mb-3');
   card.append(element('h3', 'h5 mb-2', title), element('p', 'mb-0', message));
-  return card;
-}
-
-// The backend resolves the inputs in this order and reports the first one that is missing, so
-// every item before the reported status is met and every item after it is not checked yet.
-// A row lists every status that blocks at it; the optional fifth entry is the state shown for a
-// status that needs an operator action instead of waiting.
-const PLAN_READINESS = [
-  [['battery_state_unavailable'], 'Usable battery capacity', 'available', 'could not be verified'],
-  [['spot_disabled', 'spot_prices_unavailable'], 'Spot prices', 'available', 'not available yet', { spot_disabled: 'disabled in settings' }],
-  [['solar_not_configured', 'solar_forecast_unavailable'], 'Solar forecast', 'available', 'not available yet', { solar_not_configured: 'not configured in settings' }],
-  [['insufficient_history'], 'Consumption model', 'ready', 'still learning'],
-];
-
-function planReadinessCard(status, title, message) {
-  const card = planStatusCard(title, message);
-  const blocked = PLAN_READINESS.findIndex((item) => item[0].includes(status));
-  if (blocked < 0) return card;
-  const list = element('ul', 'list-unstyled small mb-0 mt-3');
-  const add = (done, marker, label, state) => {
-    const item = element('li', done ? '' : 'text-secondary');
-    const glyph = element('span', 'me-2', done ? '✓' : '○');
-    glyph.setAttribute('aria-hidden', 'true');
-    item.append(element('span', 'fw-semibold me-2', marker), glyph, `${label}: ${state}`);
-    list.append(item);
-  };
-  add(true, 'Ready', 'Inverter', 'selected');
-  PLAN_READINESS.forEach(([, label, met, unmet, overrides], index) => {
-    const marker = index < blocked ? 'Ready' : index === blocked ? 'Pending' : 'Not checked';
-    const blockedState = (overrides && overrides[status]) || unmet;
-    add(index < blocked, marker, label, index < blocked ? met : index === blocked ? blockedState : 'not checked yet');
-  });
-  card.append(list);
-  if (status === 'battery_state_unavailable') {
-    const hint = element('p', 'small text-secondary mt-3 mb-0', 'A verified capacity override can be entered in Advanced diagnostics.');
-    hint.dataset.expertOnly = 'true';
-    hint.hidden = !(typeof energyExpertMode !== 'undefined' && energyExpertMode);
-    card.append(hint);
-  }
   return card;
 }
 
@@ -1427,26 +1398,11 @@ function renderDryRunPlan(plan) {
     return;
   }
   if (plan.status !== 'ok') {
-    const states = {
-      battery_state_unavailable: ['Plan not available yet', 'Battery data could not be verified automatically. Check that the inverter is connected and reports its battery state and capacity; the plan is re-checked on its own.'],
-      insufficient_history: ['Consumption model is learning', 'No consumption estimate is available yet. Consumption is recorded from the live inverter readings; until enough is stored, the plan uses a conservative baseline.'],
-      spot_disabled: ['Plan not available', 'The spot market integration is disabled. Enable it in the energy settings to plan with prices.'],
-      solar_not_configured: ['Plan not available', 'The solar forecast is not configured. Complete the solar settings to plan with a forecast.'],
-      spot_prices_unavailable: ['Plan not available yet', 'Spot prices could not be loaded yet. Refresh the plan when prices are available.'],
-      solar_forecast_unavailable: ['Plan not available yet', 'The solar forecast could not be loaded yet. Refresh the plan when it is available.'],
-    };
-    const [title, message] = states[plan.status] || ['Plan not available yet', 'The plan could not be calculated. Try refreshing.'];
-    const readiness = planReadinessCard(plan.status, title, message);
-    // Operator-actionable: the explanation shows at once; polling continues via PLAN_RETRY_STATUSES.
-    if (PLAN_RETRY_STATUSES.has(plan.status) && plan.status !== 'battery_state_unavailable') {
-      const detail = element('div', 'mt-3');
-      detail.dataset.expertOnly = 'true';
-      detail.hidden = !(typeof energyExpertMode !== 'undefined' && energyExpertMode);
-      detail.append(readiness);
-      host.replaceChildren(planWaitState(), detail);
-      return;
-    }
-    host.replaceChildren(readiness);
+    // Every not-ready status renders the same hourglass wait card: the plan re-checks itself in the
+    // background (PLAN_RETRY_STATUSES / PLAN_REFRESH_MS). The only variation is the setup badge for
+    // 'solar_not_configured', which means the Weather config is enabled but still missing the
+    // location (postal code -> coordinates) and the PV plant data the forecast needs.
+    host.replaceChildren(planWaitState(plan.status === 'solar_not_configured'));
     return;
   }
   const next = nextGridCharge(plan.slots || []);

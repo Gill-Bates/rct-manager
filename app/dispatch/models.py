@@ -12,6 +12,8 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Literal
 
+from app.clock import require_aware
+
 NOTE_MAX_LENGTH = 200
 
 
@@ -81,7 +83,9 @@ class StopReason(StrEnum):
     DEVICE_ERROR = "device_error"
     WRITE_NOT_ALLOWED = "write_not_allowed"
     STORE_UNAVAILABLE = "store_unavailable"
-    DEVICE_RECONFIGURED = "device_reconfigured"  # host/port changed or the device was removed
+    DEVICE_RECONFIGURED = (
+        "device_reconfigured"  # host/port changed or the device was removed
+    )
     SNAPSHOT_STALE = "snapshot_stale"  # D5: read_snapshot() returned all_fresh=False at dispatch start
 
 
@@ -139,7 +143,9 @@ class DeviceControlSnapshot:
     def __post_init__(self) -> None:
         if not math.isfinite(self.soc_target_ratio):
             raise ValueError("soc_target_ratio must be finite")
-        if self.battery_power_raw is not None and not math.isfinite(self.battery_power_raw):
+        if self.battery_power_raw is not None and not math.isfinite(
+            self.battery_power_raw
+        ):
             raise ValueError("battery_power_raw must be finite when present")
 
 
@@ -262,17 +268,25 @@ class DispatchConfig:
         # The operation-duration caps must be strictly positive: a zero or negative cap makes
         # submit() derive an effective deadline at or before "now", so it writes hardware and the
         # very next tick() immediately expires it (the TTL safety bound never actually holds).
-        for name in ("max_operation_duration_seconds", "max_operation_duration_engineering_seconds"):
+        for name in (
+            "max_operation_duration_seconds",
+            "max_operation_duration_engineering_seconds",
+        ):
             if getattr(self, name) <= 0:
                 raise ValueError(f"{name} must be positive")
         if self.min_soc < 0 or self.max_soc > 100 or self.min_soc >= self.max_soc:
             raise ValueError("min_soc must be smaller than max_soc, both within 0..100")
-        if self.max_operation_duration_engineering_seconds > self.max_operation_duration_seconds:
+        if (
+            self.max_operation_duration_engineering_seconds
+            > self.max_operation_duration_seconds
+        ):
             raise ValueError(
                 "max_operation_duration_engineering_seconds must not exceed max_operation_duration_seconds"
             )
         if self.power_write_deadband_w > self.grid_control_deadband_w:
-            raise ValueError("power_write_deadband_w must not exceed grid_control_deadband_w")
+            raise ValueError(
+                "power_write_deadband_w must not exceed grid_control_deadband_w"
+            )
 
 
 def strict_persisted_bool(value: object, field_name: str) -> bool:
@@ -288,8 +302,9 @@ def _strict_number(value: object, field_name: str, kind: type) -> int | float:
 
 
 def _tz_aware(value: datetime, field_name: str) -> datetime:
-    if value.tzinfo is None:
-        raise ValueError(f"{field_name} must be timezone-aware")
+    # Defer to the project's single awareness rule (app.clock): a tzinfo that actually yields a UTC
+    # offset, not merely a non-None tzinfo (P3-2 DRY). require_aware raises the same ValueError.
+    require_aware(value, field_name)
     return value
 
 
@@ -314,16 +329,23 @@ def _intent_from_dict(intent_data: dict) -> DispatchIntent:
         mode=DispatchMode(intent_data["mode"]),
         # A mode without a SoC goal (HOLD) persists target_soc_percent as null, and a record
         # written before the field could be null carries a number — both load; a string does not.
-        target_soc_percent=_optional_number(intent_data.get("target_soc_percent"), "target_soc_percent"),
+        target_soc_percent=_optional_number(
+            intent_data.get("target_soc_percent"), "target_soc_percent"
+        ),
         max_power_w=_strict_number(intent_data["max_power_w"], "max_power_w", float),
         max_power_w_requested=_strict_number(
             intent_data["max_power_w_requested"], "max_power_w_requested", float
         ),
-        valid_until=_tz_aware(datetime.fromisoformat(intent_data["valid_until"]), "intent.valid_until"),
-        valid_until_requested=_tz_aware(
-            datetime.fromisoformat(intent_data["valid_until_requested"]), "intent.valid_until_requested"
+        valid_until=_tz_aware(
+            datetime.fromisoformat(intent_data["valid_until"]), "intent.valid_until"
         ),
-        created_at=_tz_aware(datetime.fromisoformat(intent_data["created_at"]), "intent.created_at"),
+        valid_until_requested=_tz_aware(
+            datetime.fromisoformat(intent_data["valid_until_requested"]),
+            "intent.valid_until_requested",
+        ),
+        created_at=_tz_aware(
+            datetime.fromisoformat(intent_data["created_at"]), "intent.created_at"
+        ),
     )
 
 
@@ -331,18 +353,31 @@ def _snapshot_from_dict(snapshot_data: dict) -> DeviceControlSnapshot:
     setpoint = snapshot_data["battery_setpoint"]
     return DeviceControlSnapshot(
         battery_setpoint=PowerSetpoint(
-            PowerDirection(setpoint["direction"]), _strict_number(setpoint["watts"], "watts", float)
+            PowerDirection(setpoint["direction"]),
+            _strict_number(setpoint["watts"], "watts", float),
         ),
-        soc_target_ratio=_strict_number(snapshot_data["soc_target_ratio"], "soc_target_ratio", float),
-        soc_strategy_code=_strict_number(snapshot_data["soc_strategy_code"], "soc_strategy_code", int),
-        grid_charge_enabled=strict_persisted_bool(snapshot_data["grid_charge_enabled"], "grid_charge_enabled"),
-        read_at=_tz_aware(datetime.fromisoformat(snapshot_data["read_at"]), "snapshot.read_at"),
+        soc_target_ratio=_strict_number(
+            snapshot_data["soc_target_ratio"], "soc_target_ratio", float
+        ),
+        soc_strategy_code=_strict_number(
+            snapshot_data["soc_strategy_code"], "soc_strategy_code", int
+        ),
+        grid_charge_enabled=strict_persisted_bool(
+            snapshot_data["grid_charge_enabled"], "grid_charge_enabled"
+        ),
+        read_at=_tz_aware(
+            datetime.fromisoformat(snapshot_data["read_at"]), "snapshot.read_at"
+        ),
         # Fail-closed (D5): a snapshot with no freshness information on record is not assumed
         # fresh. The real adapter (app/gateway/rct_dispatch.py) can and does return False.
-        all_fresh=strict_persisted_bool(snapshot_data.get("all_fresh", False), "all_fresh"),
+        all_fresh=strict_persisted_bool(
+            snapshot_data.get("all_fresh", False), "all_fresh"
+        ),
         # Legacy snapshots (P2-02) carry no raw wire value: absent/null stays None and the restore
         # path falls back to the current convention; a present value must still be a real number.
-        battery_power_raw=_optional_number(snapshot_data.get("battery_power_raw"), "battery_power_raw"),
+        battery_power_raw=_optional_number(
+            snapshot_data.get("battery_power_raw"), "battery_power_raw"
+        ),
     )
 
 
@@ -373,19 +408,29 @@ def validate_record_invariants(record: "DispatchRecord") -> None:
             raise DispatchRecordCorrupt("state is idle but intent is present")
         if record.restore_required:
             raise DispatchRecordCorrupt("state is idle but restore_required is set")
-    # PRECHECK without an intent is legal: recover() builds and persists exactly that combination,
-    # so from_dict() must be able to round-trip it.
+    # PRECHECK without an intent is legal: it is the crash window a stored record can sit in, so
+    # from_dict() must round-trip it. recover() resolves exactly a snapshot-less PRECHECK by
+    # resetting it to IDLE and dropping the intent; it does not persist a new PRECHECK.
     elif record.state is not DispatchState.PRECHECK and record.intent is None:
-        raise DispatchRecordCorrupt(f"state is {record.state.value} but intent is missing")
-    if record.state in (DispatchState.RESTORING, DispatchState.FAULT_RESTORE_PENDING) and not record.restore_required:
-        raise DispatchRecordCorrupt(f"state is {record.state.value} but restore_required is not set")
+        raise DispatchRecordCorrupt(
+            f"state is {record.state.value} but intent is missing"
+        )
+    if (
+        record.state in (DispatchState.RESTORING, DispatchState.FAULT_RESTORE_PENDING)
+        and not record.restore_required
+    ):
+        raise DispatchRecordCorrupt(
+            f"state is {record.state.value} but restore_required is not set"
+        )
     # A state in which the state machine may already have written hardware must carry the snapshot
     # that the restore path reads back: without it, _restore_guarded() treats snapshot=None as
     # "nothing was written" and resets to IDLE without touching the device — a fail-open pretend
     # restore. PRECHECK+None is the one legitimate crash window (durable intent before the snapshot
     # read) and stays exempt; recover() resets exactly that case to IDLE.
     if record.state in _SNAPSHOT_REQUIRED and record.snapshot is None:
-        raise DispatchRecordCorrupt(f"state is {record.state.value} but snapshot is missing")
+        raise DispatchRecordCorrupt(
+            f"state is {record.state.value} but snapshot is missing"
+        )
 
 
 @dataclass(slots=True)
@@ -420,7 +465,9 @@ class DispatchRecord:
             for name in ("valid_until", "valid_until_requested", "created_at"):
                 data["intent"][name] = getattr(self.intent, name).isoformat()
         if self.snapshot is not None:
-            data["snapshot"]["battery_setpoint"]["direction"] = self.snapshot.battery_setpoint.direction.value
+            data["snapshot"]["battery_setpoint"][
+                "direction"
+            ] = self.snapshot.battery_setpoint.direction.value
             data["snapshot"]["read_at"] = self.snapshot.read_at.isoformat()
         return data
 
@@ -433,21 +480,44 @@ class DispatchRecord:
         if not isinstance(data, dict) or "device_id" not in data:
             raise DispatchRecordCorrupt("dispatch record is missing device_id")
         if "state" not in data or "restore_required" not in data:
-            raise DispatchRecordCorrupt("dispatch record is missing state or restore_required")
+            raise DispatchRecordCorrupt(
+                "dispatch record is missing state or restore_required"
+            )
         try:
             state = DispatchState(data["state"])
-            restore_required = strict_persisted_bool(data["restore_required"], "restore_required")
+            restore_required = strict_persisted_bool(
+                data["restore_required"], "restore_required"
+            )
             intent_data = data.get("intent")
             intent = _intent_from_dict(intent_data) if intent_data else None
             snapshot_data = data.get("snapshot")
             snapshot = _snapshot_from_dict(snapshot_data) if snapshot_data else None
             setpoint = data.get("last_commanded", {"direction": "none", "watts": 0.0})
-            last_commanded = PowerSetpoint(PowerDirection(setpoint["direction"]), float(setpoint["watts"]))
-            last_write_at = _tz_aware_or_none(data.get("last_write_at"), "last_write_at")
-            next_restore_at = _tz_aware_or_none(data.get("next_restore_at"), "next_restore_at")
-            stop_reason = StopReason(data["stop_reason"]) if data.get("stop_reason") else None
-            record_version = _strict_number(data.get("record_version", 0), "record_version", int)
-            restore_attempts = max(0, _strict_number(data.get("restore_attempts", 0), "restore_attempts", int))
+            # last_commanded.watts is a safety-deciding persisted number: a stored string like "123"
+            # is corruption, not a value to coerce (P3-3). _strict_number rejects it fail closed.
+            last_commanded = PowerSetpoint(
+                PowerDirection(setpoint["direction"]),
+                float(_strict_number(setpoint["watts"], "last_commanded.watts", float)),
+            )
+            last_write_at = _tz_aware_or_none(
+                data.get("last_write_at"), "last_write_at"
+            )
+            next_restore_at = _tz_aware_or_none(
+                data.get("next_restore_at"), "next_restore_at"
+            )
+            stop_reason = (
+                StopReason(data["stop_reason"]) if data.get("stop_reason") else None
+            )
+            record_version = _strict_number(
+                data.get("record_version", 0), "record_version", int
+            )
+            # A negative retry count cannot be produced by the state machine; silently repairing it
+            # with max(0, ...) would accept a corrupt row. Reject it fail closed instead (P3-3).
+            restore_attempts = _strict_number(
+                data.get("restore_attempts", 0), "restore_attempts", int
+            )
+            if restore_attempts < 0:
+                raise ValueError("restore_attempts must not be negative")
         except (KeyError, TypeError, ValueError) as exc:
             raise DispatchRecordCorrupt(f"dispatch record is malformed: {exc}") from exc
         record = cls(
@@ -500,4 +570,3 @@ class DispatchStatus:
     stop_reason: StopReason | None = None
     fault_code: str | None = None
     replaced: bool = False
-

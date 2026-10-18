@@ -264,3 +264,64 @@ async def test_derivation_service_starts_only_when_enabled(
         async with running_app(settings):
             pass
     assert bool(created) is enabled
+
+
+# --- P2-2: commissioning store writes are cancellation-safe store threads ----------------------
+
+
+class _BlockingStore:
+    """A store whose commissioning read blocks until released, so cancellation can hit mid-write."""
+
+    def __init__(self) -> None:
+        self.started = threading.Event()
+        self.release = threading.Event()
+        self.finished: list[str] = []
+
+    def attach_inverter_serial(self, device_id: str, serial: str) -> None:
+        return None
+
+    def get_inverter_commissioning(self, serial: str):
+        self.started.set()
+        self.release.wait(5)
+        self.finished.append(serial)
+        return {
+            "source": "logger_derived"
+        }  # already known: no derivation needed afterwards
+
+
+async def test_commissioning_store_write_is_tracked_and_awaited_on_cancellation() -> (
+    None
+):
+    """A BatteryCommissioningService store access must run through the neutral, shutdown-safe
+    store-thread mechanism (not a bare asyncio.to_thread): a cancelled cycle leaves the worker
+    thread tracked in the shared registry so drain_store_threads waits for it before the DB closes.
+    """
+    store = _BlockingStore()
+    clock = SimpleNamespace(now=lambda: NOW)
+    service = BatteryCommissioningService(
+        SimpleNamespace(),
+        store,
+        clock,
+        lambda: ["main"],
+        lambda _d: "SN-A",
+        lambda _d: True,
+    )
+
+    task = asyncio.create_task(service.run_due_once())
+    while not store.started.is_set():
+        await asyncio.sleep(0.01)
+    # The blocking store read is in flight: it must be registered in the shared store-thread set.
+    assert any(not f.done() for f in store_threads._inflight)
+
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+    assert (
+        not store.finished
+    )  # cancelling the cycle left the worker thread still running
+
+    drain = asyncio.create_task(drain_store_threads(timeout=5))
+    await asyncio.sleep(0.05)
+    assert not drain.done()  # shutdown waits instead of closing the DB under the thread
+    store.release.set()
+    await drain
+    assert store.finished == ["SN-A"]

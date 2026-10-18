@@ -212,13 +212,15 @@ test('the tiles read n/a when no price figure is available', () => {
   }
 });
 
-test('spotMarketFields leaves currency and source unit in the preview context only', () => {
+test('spotMarketFields has no Enabled toggle and keeps currency/source unit in the preview context only', () => {
   const h = harness();
   const fields = h.context.spotMarketFields(
     { enabled: true, provider: 'energy_charts', bidding_zone: 'DE-LU', currency: 'EUR', price_unit: 'EUR/MWh' },
     { zones: ['DE-LU'] },
   );
-  assert.deepEqual(Array.from(fields, (field) => field.key), ['enabled', 'provider', 'bidding_zone']);
+  // The 'Enabled' toggle fell away (entfällt ersatzlos); enablement follows the Energy Manager mode.
+  assert.deepEqual(Array.from(fields, (field) => field.key), ['provider', 'bidding_zone']);
+  assert.ok(!fields.some((field) => field.key === 'enabled'), 'no enabled toggle');
 });
 
 test('saving Spot Market configuration locks its fields until the request completes', async () => {
@@ -226,8 +228,8 @@ test('saving Spot Market configuration locks its fields until the request comple
   const fields = h.context.element('div', '');
   fields.id = 'spot-market-fields';
   const provider = h.context.element('select', '');
-  const enabled = h.context.element('input', '');
-  fields.append(provider, enabled);
+  const biddingZone = h.context.element('select', '');
+  fields.append(provider, biddingZone);
   const save = h.context.element('button', '');
   save.id = 'spot-market-save';
   const state = h.context.element('span', '');
@@ -240,12 +242,12 @@ test('saving Spot Market configuration locks its fields until the request comple
 
   const saving = h.context.saveSpotMarket();
   assert.equal(provider.disabled, true);
-  assert.equal(enabled.disabled, true);
+  assert.equal(biddingZone.disabled, true);
   assert.equal(save.disabled, true);
   resolveRequest({});
   await saving;
   assert.equal(provider.disabled, false);
-  assert.equal(enabled.disabled, false);
+  assert.equal(biddingZone.disabled, false);
   assert.equal(save.disabled, false);
 });
 

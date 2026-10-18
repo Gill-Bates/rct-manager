@@ -19,7 +19,6 @@ from app.api.models_vendor import (
 from app.api.problems import ErrorCode, problem_responses
 from app.api.runtime import Runtime, RuntimeDep
 from app.errors import DeviceApiError
-from app.protocol.values import DEFAULT_WIDTHS
 from app.security.dependencies import require_vendor
 
 NOTE = "Vendor specific (RCT); not part of the vendor-neutral contract."
@@ -44,7 +43,10 @@ def _vendor(runtime: Runtime):
 
 
 @router.get(
-    "/objects", summary="Registry objects (vendor specific)", description=NOTE, responses=problem_responses(*_ERRORS)
+    "/objects",
+    summary="Registry objects (vendor specific)",
+    description=NOTE,
+    responses=problem_responses(*_ERRORS),
 )
 async def objects(runtime: RuntimeDep) -> list[VendorObjectDescriptor]:
     return [
@@ -52,7 +54,10 @@ async def objects(runtime: RuntimeDep) -> list[VendorObjectDescriptor]:
             name=e.name,
             object_id=f"0x{e.object_id:08X}",
             protocol_data_type=e.data_type,
-            effective_byte_width=e.expected_payload or DEFAULT_WIDTHS[e.data_type],
+            # expected_payload is None by contract for a variable-width string (registry.py); keep
+            # that None instead of defaulting it, which both loses the "variable width" information
+            # and would KeyError for a data_type absent from DEFAULT_WIDTHS (P3-1).
+            effective_byte_width=e.expected_payload,
             idempotent_write=e.idempotent_write,
         )
         for e in _vendor(runtime).objects()
@@ -66,7 +71,9 @@ async def objects(runtime: RuntimeDep) -> list[VendorObjectDescriptor]:
     responses=problem_responses(*_ERRORS),
 )
 async def transports(runtime: RuntimeDep) -> list[VendorTransportDescriptor]:
-    return [VendorTransportDescriptor(**asdict(t)) for t in _vendor(runtime).transports()]
+    return [
+        VendorTransportDescriptor(**asdict(t)) for t in _vendor(runtime).transports()
+    ]
 
 
 @router.get(

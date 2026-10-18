@@ -11,9 +11,10 @@ import contextlib
 import logging
 import math
 import uuid
-from collections.abc import AsyncIterator, Iterable
+from collections.abc import AsyncIterator, Awaitable, Iterable
 from dataclasses import replace
 from datetime import datetime, timedelta
+from typing import TypeVar
 
 from app.clock import Clock
 from app.dispatch.base import BatteryDispatchGateway
@@ -48,6 +49,8 @@ from app.dispatch.strategy import calculate_setpoint, effective_charge_limit_w, 
 from app.errors import DeviceApiError
 
 log = logging.getLogger(__name__)
+
+_T = TypeVar("_T")
 
 # Automatic restore retries back off exponentially so a persistently failing device is not hammered.
 _RESTORE_BACKOFF_BASE_SECONDS = 1.0
@@ -154,6 +157,27 @@ class DispatchController:
 
     def _lock(self, device_id: str) -> asyncio.Lock:
         return self._locks.setdefault(device_id, asyncio.Lock())
+
+    async def _shield_hardware_critical(self, coro: Awaitable[_T]) -> _T:
+        """Run a hardware apply/restore section so a cancelled caller cannot interrupt it mid-write.
+
+        Same idiom ``run()`` uses to protect ``tick()`` (C1): the work runs as a shielded task, and
+        if the awaiting caller is cancelled the task is still awaited to completion before the
+        ``CancelledError`` propagates, so the record never stays in APPLYING/RESTORING with the
+        hardware left partially externally controlled. The ``except Exception`` restore paths do not
+        catch ``CancelledError`` under Python 3.13, which is why the shield is needed here and not
+        only in ``run()``. The caller holds the per-device lock across this call; the task does not
+        re-acquire it.
+        """
+        task = asyncio.ensure_future(coro)
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            # The caller was cancelled: let the shielded apply/restore finish first, then re-raise.
+            # The task's own result/exception is irrelevant once the caller is being cancelled.
+            with contextlib.suppress(Exception):
+                await task
+            raise
 
     async def _get(self, device_id: str) -> DispatchRecord:
         try:
@@ -400,8 +424,10 @@ class DispatchController:
                     raise _TelemetryStale
                 preflight_passed = True
                 # The SoC submit() already read is handed down: _apply() adds no device read, and
-                # the derivation of the device-level SoC target needs the measured value.
-                await self._apply(record, soc_percent=soc)
+                # the derivation of the device-level SoC target needs the measured value. Shielded
+                # so a cancelled caller cannot interrupt the multi-step write sequence mid-apply and
+                # leave the record in APPLYING with the hardware half-written (P2-1).
+                await self._shield_hardware_critical(self._apply(record, soc_percent=soc))
             except _TelemetryStale:
                 # A rejected first preflight made no hardware change; an apply-phase rejection
                 # still needs the saved snapshot restored.
@@ -665,6 +691,16 @@ class DispatchController:
             return self._status(record)
 
     async def _restore(
+        self, record: DispatchRecord, reason: StopReason, fault_code: str | None = None
+    ) -> None:
+        # Restore writes hardware, so a cancelled caller (cancel(), submit()'s error paths,
+        # force_restore_or_raise, switch_to_internal) must not interrupt it mid-sequence and leave
+        # the record in RESTORING with the battery partially externally controlled (P2-1). Shield it
+        # with the same idiom run() uses for tick(); re-shielding when already inside a shielded
+        # tick() is harmless.
+        await self._shield_hardware_critical(self._restore_critical(record, reason, fault_code))
+
+    async def _restore_critical(
         self, record: DispatchRecord, reason: StopReason, fault_code: str | None = None
     ) -> None:
         # The barrier spans the whole sequence, failures included, so a caller write queued before

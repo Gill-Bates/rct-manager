@@ -432,3 +432,31 @@ def test_structured_device_entry_strips_ipv6_brackets_like_the_text_parser() -> 
     assert entry.host == "2001:db8::1"
     settings = Settings(devices="a=[2001:db8::1]:8899")
     assert settings.devices[0].host == "2001:db8::1"
+
+
+def test_host_check_normalizes_surrounding_but_rejects_internal_whitespace() -> None:
+    """P3-1: strip_ipv6_brackets() deliberately trims surrounding whitespace (the forwarded-header
+    parser depends on it), so the host validator accepts " example.org " and canonicalizes it,
+    while internal whitespace stays a rejected value — and the error message no longer claims that
+    surrounding whitespace is rejected.
+    """
+    from app.config import DeviceEntry
+
+    entry = DeviceEntry(device_id="a", host="  example.org  ", port=8899)
+    assert entry.host == "example.org"
+
+    with pytest.raises(ValidationError, match="internal whitespace"):
+        DeviceEntry(device_id="a", host="exa mple.org", port=8899)
+
+
+def test_strip_ipv6_brackets_contract_matches_its_behavior() -> None:
+    """P3-1/CheckComments: the shared helper's documented contract (trim surrounding whitespace and
+    the IPv6 bracket wrapper, leave internal whitespace to the caller) matches what it does.
+    """
+    from app.hostnames import strip_ipv6_brackets
+
+    assert strip_ipv6_brackets("  [2001:db8::1]  ") == "2001:db8::1"
+    assert strip_ipv6_brackets("  example.org  ") == "example.org"
+    assert (
+        strip_ipv6_brackets("a b") == "a b"
+    )  # internal whitespace is left for the caller
