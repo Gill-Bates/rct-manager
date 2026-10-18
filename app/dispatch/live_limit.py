@@ -50,8 +50,8 @@ class ChargePowerLimit:
             raise ValueError("charge power limit value_w must be finite")
         if self.value_w <= 0:
             raise ValueError("charge power limit value_w must be positive")
-        # The project's single awareness rule: a tzinfo that actually yields a UTC offset, not
-        # just a non-None tzinfo (P3-2 DRY). require_aware raises ValueError, the established contract.
+        # The project's single awareness rule: a tzinfo that actually yields a UTC offset, not just
+        # a non-None tzinfo (P3-2 DRY). require_aware raises ValueError, the established contract.
         require_aware(self.measured_at, "charge power limit measured_at")
         if not self.source:
             raise ValueError("charge power limit source must not be empty")

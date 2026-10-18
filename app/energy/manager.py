@@ -7,9 +7,12 @@
 """The Energy Manager service (design 2.3): one place where a business action becomes a dispatch
 command, and one place that decides whether a device accepts such a command at all.
 
-It talks to the dispatch layer only through ``BatteryDispatchPort`` and it never imports the vendor
-gateway package: the register names it needs for the write allowlist are injected as
-``required_writes``, so the service stays vendor-neutral and unit-testable without an RCT adapter.
+It issues operational dispatch commands to the dispatch layer only through ``BatteryDispatchPort``,
+but it also holds a concrete ``DispatchStore`` into which it persists mode state directly
+(``put_energy_state``); so the port carries the live commands while the store carries the persisted
+mode. It never imports the vendor gateway package: the register names it needs for the write
+allowlist are injected as ``required_writes``, so the service stays vendor-neutral and
+unit-testable without an RCT adapter.
 
 Both callers of stage 1 — the HTTP routers and, later, the tariff engine — enter here, so every
 guarantee below holds for both.
@@ -322,15 +325,40 @@ class EnergyManager:
             if command.action is EnergyAction.AUTO:
                 status = await self._handback(device_id)
             else:
-                status = await self._port.submit(
-                    device_id, self._dispatch_command(device_id, command)
-                )
+                status = await self._submit(device_id, command)
             log.info(
                 "Energy command accepted: device=%s action=%s target=%s state=%s actor=%s",
                 device_id, command.action.value, command.target_soc_percent, status.state.value,
                 _actor_name(actor),
             )  # fmt: skip
             return await self._project(device_id, status)
+
+    async def _submit(self, device_id: str, command: EnergyCommand) -> DispatchStatus:
+        """Submit a non-AUTO command, normalizing the dispatch capability gate's refusal.
+
+        ``DispatchController.submit()`` raises ``dispatch_unverified`` when the hardware is not yet
+        verified. That is the same "expected, non-fatal" case ``action_availability()`` already
+        reports as ``HARDWARE_NOT_VERIFIED`` and that ``plan_handoff``'s comment calls a quiet
+        refusal, so it is translated here into the business refusal ``energy_action_unavailable``
+        rather than surfaced as an unexpected dispatch error with a stacktrace. Doing it centrally
+        means the internal dispatch code need not also be known by the handoff. Every other
+        ``DispatchRejected`` keeps propagating unchanged.
+        """
+        assert self._port is not None
+        try:
+            return await self._port.submit(
+                device_id, self._dispatch_command(device_id, command)
+            )
+        except DispatchRejected as exc:
+            if exc.code != "dispatch_unverified":
+                raise
+            log.info(
+                "Energy command refused: hardware for device %s is not verified",
+                device_id,
+            )
+            raise EnergyRejected(
+                "energy_action_unavailable", device_id=device_id
+            ) from exc
 
     def _authorize(self, device_id: str, actor: str | None) -> None:
         """The mode decides which surface may command: the admin session in ``manual``, the public
@@ -447,6 +475,48 @@ class EnergyManager:
             raise EnergyRejected("dispatch_restore_required", device_id=device_id)
         return status
 
+    async def _commit_and_publish(self, device_id: str, record: ModeRecord) -> None:
+        """Persist ``record`` and publish it into ``_mode_states`` as one cancellation-safe step.
+
+        ``asyncio.to_thread`` cannot stop the worker it started: cancelling the awaiter leaves the
+        ``put_energy_state`` thread running, so the DB commit can still land after the calling task
+        was cancelled. Awaiting the write directly would then skip the in-memory publish and leave
+        ``_mode_states`` reporting the old mode while the DB holds the new one — a desync that
+        matters because the mode drives authorization and ``EnergyActivity``.
+
+        So the write is ``shield``-ed and always awaited to completion even under outer
+        cancellation, and the in-memory publish is bound to the commit's outcome: a committed row
+        is published before any ``CancelledError`` is re-raised, so persisted state and runtime
+        state cannot diverge. A store error is raised to the caller (it owns the write-approval
+        compensation) and nothing is published. This is implemented inline here rather than in a
+        shared helper on purpose, to avoid colliding with the concurrent dispatch work; a neutral
+        cancellation-safe store-thread helper should later be shared across services.
+        """
+        assert self._store is not None
+        commit = asyncio.ensure_future(
+            asyncio.to_thread(self._store.put_energy_state, record)
+        )
+        cancelled: asyncio.CancelledError | None = None
+        while True:
+            try:
+                await asyncio.shield(commit)
+                break
+            except asyncio.CancelledError as exc:
+                if commit.cancelled():
+                    # The shielded task itself was not what got cancelled unless the loop is tearing
+                    # down; treat it as a genuine commit cancellation and stop waiting.
+                    raise
+                # Outer cancellation: the worker is still running and cannot be stopped, so keep
+                # waiting for the commit to finish before deciding anything. Remember the first
+                # cancellation and re-raise it only after the committed state is published.
+                cancelled = cancelled or exc
+        # ``commit`` completed: a store error propagates (no publish); otherwise publish, then honor
+        # a deferred cancellation so the caller still unwinds.
+        commit.result()
+        self._mode_states[device_id] = record
+        if cancelled is not None:
+            raise cancelled
+
     async def set_mode(
         self, device_id: str, mode: EnergyMode, *, actor: str | None
     ) -> EnergyDeviceStatus:
@@ -535,7 +605,9 @@ class EnergyManager:
             if record == current:
                 return  # selecting the same mode twice is idempotent: no approval, no commit, no new timestamp
             try:
-                await asyncio.to_thread(self._store.put_energy_state, record)
+                # Commit and in-memory publish are one cancellation-safe step: an outer cancel
+                # cannot leave the DB holding the new mode while _mode_states still reports the old.
+                await self._commit_and_publish(device_id, record)
             except Exception:
                 if missing:
                     # Remove only what this call added. The revoker runs the removal under the same
@@ -552,7 +624,6 @@ class EnergyManager:
                             ",".join(missing), device_id,
                         )  # fmt: skip
                 raise
-        self._mode_states[device_id] = record
         log.warning(
             "Energy Manager mode set: device=%s mode=%s added_writes=%s actor=%s",
             device_id, mode.value, ",".join(missing) or "-", record.changed_by,
@@ -613,7 +684,10 @@ class EnergyManager:
                     changed_at=self._clock.now(),
                     changed_by=_actor_name(actor),
                 )
-                await asyncio.to_thread(self._store.put_energy_state, record)
+                # Hardware was already handed back to Internal above; commit the OFF state and
+                # publish it as one cancellation-safe step so an outer cancel cannot leave the
+                # device running its Internal strategy while runtime still reports manual/external.
+                await self._commit_and_publish(device_id, record)
             except Exception:
                 if added:
                     if self._revoke_writes is not None:
@@ -625,7 +699,6 @@ class EnergyManager:
                             device_id,
                         )
                 raise
-        self._mode_states[device_id] = record
         log.info(
             "Energy Manager switched off: device=%s (write approvals left untouched)",
             device_id,
@@ -755,9 +828,21 @@ class EnergyManager:
         )
 
     async def _blocking_reason(self, device_id: str) -> ActionReason | None:
-        """The reason that blocks every action of this device, ``None`` when none does."""
+        """The global non-AUTO preflight, shared by ``command()`` and ``action_availability()``.
+
+        It names the single rule "may a non-AUTO energy action run now?" once, so the availability a
+        status publishes cannot drift from the refusal ``command()`` would raise. ``MODE_OFF`` blocks
+        every action including AUTO; ``WRITE_NOT_PERMITTED`` blocks only the non-AUTO actions, which
+        ``action_availability()`` enforces by exempting AUTO from that one reason.
+
+        The global write-support switch is part of this preflight: ``command()`` rejects a non-AUTO
+        action with ``energy_write_support_required`` when it is off, so an action must not be
+        published as available while it is off either.
+        """
         if self.mode(device_id) is EnergyMode.OFF or self._port is None:
             return ActionReason.MODE_OFF
+        if not self._write_support_enabled():
+            return ActionReason.WRITE_NOT_PERMITTED
         if await self._missing_write_names():
             return ActionReason.WRITE_NOT_PERMITTED
         return None

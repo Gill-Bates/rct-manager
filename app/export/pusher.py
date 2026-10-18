@@ -11,7 +11,6 @@ import base64
 import json
 import logging
 import ssl
-import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -61,17 +60,35 @@ class Target:
             raise ValueError("export is disabled")
         if settings.db_type is DbType.INFLUXDB_V2:
             query = urlencode(
-                {"org": settings.influxdb_organization, "bucket": settings.influxdb_bucket, "precision": "ns"},
+                {
+                    "org": settings.influxdb_organization,
+                    "bucket": settings.influxdb_bucket,
+                    "precision": "ns",
+                },
                 quote_via=quote,
             )
-            token = settings.influxdb_token.get_secret_value() if settings.influxdb_token else ""
-            return cls(endpoint.base_url, f"/api/v2/write?{query}", {"Authorization": f"Token {token}"},
-                       settings.influxdb_verify_tls)
+            token = (
+                settings.influxdb_token.get_secret_value()
+                if settings.influxdb_token
+                else ""
+            )
+            return cls(
+                endpoint.base_url,
+                f"/api/v2/write?{query}",
+                {"Authorization": f"Token {token}"},
+                settings.influxdb_verify_tls,
+            )
         headers: dict[str, str] = {}
         if settings.questdb_username and settings.questdb_password:
             raw = f"{settings.questdb_username}:{settings.questdb_password.get_secret_value()}".encode()
             headers["Authorization"] = "Basic " + base64.b64encode(raw).decode()
-        return cls(endpoint.base_url, "/write", headers, settings.questdb_verify_tls, exec_path="/exec")
+        return cls(
+            endpoint.base_url,
+            "/write",
+            headers,
+            settings.questdb_verify_tls,
+            exec_path="/exec",
+        )
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -83,7 +100,9 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 def _request(target: Target, path: str, data: bytes | None) -> bytes:
     # base_url is built by Endpoint.base_url and is always http or https.
-    request = urllib.request.Request(target.base_url + path, data=data, headers=target.headers)  # noqa: S310
+    request = urllib.request.Request(
+        target.base_url + path, data=data, headers=target.headers
+    )  # noqa: S310
     if data is not None:
         request.add_header("Content-Type", "text/plain; charset=utf-8")
     context = None
@@ -92,18 +111,27 @@ def _request(target: Target, path: str, data: bytes | None) -> bytes:
         context.check_hostname = False
         context.verify_mode = ssl.CERT_NONE
     try:
-        opener = urllib.request.build_opener(_NoRedirect, urllib.request.HTTPSHandler(context=context))
+        opener = urllib.request.build_opener(
+            _NoRedirect, urllib.request.HTTPSHandler(context=context)
+        )
         with opener.open(request, timeout=HTTP_TIMEOUT_SECONDS) as response:
             return response.read(_RESPONSE_LIMIT)
     except urllib.error.HTTPError as exc:
         detail = exc.read(_BODY_LIMIT).decode("utf-8", "replace").strip()
         if exc.code in (401, 403):
-            raise PushError(f"authentication failed (HTTP {exc.code})", retryable=False) from None
+            raise PushError(
+                f"authentication failed (HTTP {exc.code})", retryable=False
+            ) from None
         # 4xx other than throttling means the batch itself is bad; resending would not help
-        raise PushError(f"HTTP {exc.code}: {detail}", retryable=exc.code in (408, 429) or exc.code >= 500) from None
+        raise PushError(
+            f"HTTP {exc.code}: {detail}",
+            retryable=exc.code in (408, 429) or exc.code >= 500,
+        ) from None
     except (urllib.error.URLError, TimeoutError, OSError, ssl.SSLError) as exc:
         reason = getattr(exc, "reason", exc)
-        raise PushError(f"connection failed: {type(reason).__name__}: {reason}") from None
+        raise PushError(
+            f"connection failed: {type(reason).__name__}: {reason}"
+        ) from None
 
 
 def write(target: Target, body: str) -> None:
@@ -122,7 +150,13 @@ def questdb_exec(target: Target, sql: str) -> dict:
 
 
 class PushExporter:
-    def __init__(self, settings: Settings, exporter: MetricsExporter, stats: ServiceCounters, clock: Clock) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        exporter: MetricsExporter,
+        stats: ServiceCounters,
+        clock: Clock,
+    ) -> None:
         self._settings = settings
         self._exporter = exporter
         self._stats = stats
@@ -138,15 +172,21 @@ class PushExporter:
         if settings.db_type is DbType.QUESTDB:
             target = self._target
             self._provisioner = QuestDbProvisioner(
-                lambda sql: questdb_exec(target, sql), settings.questdb_measurement_name,
-                settings.questdb_downsampling.value, settings.questdb_raw_retention_days,
+                lambda sql: questdb_exec(target, sql),
+                settings.questdb_measurement_name,
+                settings.questdb_downsampling.value,
+                settings.questdb_raw_retention_days,
                 settings.questdb_retention_days,
             )
 
     @property
     def measurement(self) -> str:
         s = self._settings
-        return s.influxdb_measurement_name if s.db_type is DbType.INFLUXDB_V2 else s.questdb_measurement_name
+        return (
+            s.influxdb_measurement_name
+            if s.db_type is DbType.INFLUXDB_V2
+            else s.questdb_measurement_name
+        )
 
     def _push_lines(self, lines: list[str]) -> None:
         """Blocking I/O only; runs in a worker thread with already built, immutable lines."""
@@ -162,7 +202,11 @@ class PushExporter:
         try:
             # collect() reads loop-owned state (queues, budget, counters), so it stays on the loop.
             samples = list(self._exporter.collect())
-            lines = build_lines(samples, self.measurement, time.time_ns())
+            # Wall-clock from the injected Clock (UTC epoch), so export data shares the runtime's
+            # notion of time and a test clock drives the on-wire timestamp. build_lines() wants
+            # integer epoch nanoseconds; Clock.now() is seconds, so convert.
+            timestamp_ns = round(self._clock.now().timestamp() * 1_000_000_000)
+            lines = build_lines(samples, self.measurement, timestamp_ns)
             await asyncio.to_thread(self._push_lines, lines)
         except PushError as exc:
             self._record_failure(str(exc))
@@ -173,16 +217,23 @@ class PushExporter:
             self._record_failure("unexpected error")
         else:
             if self._failures:
-                log.info("Metrics export recovered after %d failed attempt(s)", self._failures)
+                log.info(
+                    "Metrics export recovered after %d failed attempt(s)",
+                    self._failures,
+                )
             self._failures = 0
-            self._stats.export_success += 1
             # Only a cycle that actually sent at least one line counts as a successful *export*: an
-            # empty build_lines() (no samples, or all non-finite) makes no write() call, so marking
-            # it as a last-success would let the TSDB status show "healthy / recently exported" when
-            # not a byte reached the database.
+            # empty build_lines() (no samples, or all non-finite) makes no write() call, so counting
+            # it — or marking a last-success — would let the TSDB status show "healthy / recently
+            # exported" when not a byte reached the database. Both the success counter and the
+            # last-success timestamp are guarded on the same condition.
             if lines:
-                self._stats.export_last_success_unix = time.time()
-            await self._provision(frozenset(name for name, _, _ in samples) | {k for _, t, _ in samples for k in t})
+                self._stats.export_success += 1
+                self._stats.export_last_success_unix = self._clock.now().timestamp()
+            await self._provision(
+                frozenset(name for name, _, _ in samples)
+                | {k for _, t, _ in samples for k in t}
+            )
             return interval
         return _backoff(interval, self._failures)
 
@@ -208,12 +259,20 @@ class PushExporter:
             return
         try:
             ready = await asyncio.to_thread(lambda: self._provisioner.run(ensure=False))
-        except Exception as exc:  # noqa: BLE001 - provisioning must never fail the export
+        except (
+            Exception
+        ) as exc:  # noqa: BLE001 - provisioning must never fail the export
             self._provision_failures += 1
             interval = float(self._settings.metrics_export_interval_seconds)
-            self._provision_retry_at = now + _backoff(interval, self._provision_failures)
+            self._provision_retry_at = now + _backoff(
+                interval, self._provision_failures
+            )
             if self._provision_failures & (self._provision_failures - 1) == 0:
-                log.warning("QuestDB provisioning failed (attempt %d): %s", self._provision_failures, exc)
+                log.warning(
+                    "QuestDB provisioning failed (attempt %d): %s",
+                    self._provision_failures,
+                    exc,
+                )
             return
         self._provision_failures = 0
         # Re-check the rollup health on a steady cadence regardless of the result: a ``ready`` view
@@ -227,11 +286,16 @@ class PushExporter:
         self._stats.export_failures += 1
         # First failure and then every power of two: visible without flooding the log.
         if self._failures & (self._failures - 1) == 0:
-            log.warning("Metrics export failed (attempt %d): %s", self._failures, message)
+            log.warning(
+                "Metrics export failed (attempt %d): %s", self._failures, message
+            )
 
     async def run(self) -> None:
-        log.info("Metrics export to %s enabled, every %ds", self._settings.db_type.value,
-                 self._settings.metrics_export_interval_seconds)
+        log.info(
+            "Metrics export to %s enabled, every %ds",
+            self._settings.db_type.value,
+            self._settings.metrics_export_interval_seconds,
+        )
         while True:
             delay = await self.cycle()
             await self._clock.sleep(delay)

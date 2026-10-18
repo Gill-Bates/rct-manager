@@ -9,6 +9,7 @@
 import json
 import math
 import threading
+from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
@@ -30,7 +31,14 @@ class _Server:
         class Handler(BaseHTTPRequestHandler):
             def _answer(self, body: bytes = b"", status: int | None = None) -> None:
                 length = int(self.headers.get("Content-Length") or 0)
-                outer.requests.append((self.command, self.path, dict(self.headers), self.rfile.read(length).decode()))
+                outer.requests.append(
+                    (
+                        self.command,
+                        self.path,
+                        dict(self.headers),
+                        self.rfile.read(length).decode(),
+                    )
+                )
                 self.send_response(status or outer.status)
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
@@ -60,6 +68,9 @@ class _Metrics:
 
 
 class _Clock:
+    def now(self) -> datetime:
+        return datetime(2026, 1, 1, tzinfo=UTC)
+
     def monotonic(self) -> float:
         return 0.0
 
@@ -76,20 +87,69 @@ def server():
 
 def _exporter(**kwargs) -> tuple[PushExporter, ServiceCounters]:
     stats = ServiceCounters(export_enabled=True)
-    return PushExporter(Settings(_env_file=None, **BASE, **kwargs), _Metrics(), stats, _Clock()), stats
+    return (
+        PushExporter(
+            Settings(_env_file=None, **BASE, **kwargs), _Metrics(), stats, _Clock()
+        ),
+        stats,
+    )
 
 
-INFLUX = {"db_type": "influxdb_v2", "influxdb_token": "tok", "influxdb_organization": "my org", "influxdb_bucket": "b"}
+INFLUX = {
+    "db_type": "influxdb_v2",
+    "influxdb_token": "tok",
+    "influxdb_organization": "my org",
+    "influxdb_bucket": "b",
+}
 
 
 async def test_influxdb_write_success(server) -> None:
     exporter, stats = _exporter(**INFLUX, influxdb_hostname=server.url)
     assert await exporter.cycle() == 30
     method, path, headers, body = server.requests[0]
-    assert method == "POST" and path.startswith("/api/v2/write?org=my%20org&bucket=b&precision=ns")
+    assert method == "POST" and path.startswith(
+        "/api/v2/write?org=my%20org&bucket=b&precision=ns"
+    )
     assert headers["Authorization"] == "Token tok"
     assert body.startswith("rct,device=main rct_grid_power=12.5 ")
-    assert (stats.export_success, stats.export_failures) == (1, 0) and stats.export_last_success_unix
+    assert (stats.export_success, stats.export_failures) == (
+        1,
+        0,
+    ) and stats.export_last_success_unix
+
+
+async def test_the_injected_clock_drives_the_wire_timestamp_and_last_success(
+    server,
+) -> None:
+    """P3: the exporter must take wall-clock time from the injected Clock, not time.time*(), so a
+    test clock drives both the on-wire datapoint timestamp and export_last_success_unix.
+    """
+
+    class FixedClock:
+        moment = datetime(2026, 3, 4, 5, 6, 7, tzinfo=UTC)
+
+        def now(self) -> datetime:
+            return self.moment
+
+        def monotonic(self) -> float:
+            return 0.0
+
+        async def sleep(self, seconds: float) -> None:
+            return None
+
+    clock = FixedClock()
+    expected_ns = round(clock.moment.timestamp() * 1_000_000_000)
+    stats = ServiceCounters(export_enabled=True)
+    exporter = PushExporter(
+        Settings(_env_file=None, **BASE, **INFLUX, influxdb_hostname=server.url),
+        _Metrics(),
+        stats,
+        clock,
+    )
+    assert await exporter.cycle() == 30
+    _, _, _, body = server.requests[0]
+    assert body.rstrip("\n").endswith(f" {expected_ns}")
+    assert stats.export_last_success_unix == clock.moment.timestamp()
 
 
 async def test_auth_failure_backs_off_without_raising(server) -> None:
@@ -101,7 +161,9 @@ async def test_auth_failure_backs_off_without_raising(server) -> None:
     assert first == second == MAX_BACKOFF_SECONDS
 
 
-@pytest.mark.parametrize(("status", "expected_delay"), [(400, MAX_BACKOFF_SECONDS), (429, 60)])
+@pytest.mark.parametrize(
+    ("status", "expected_delay"), [(400, MAX_BACKOFF_SECONDS), (429, 60)]
+)
 async def test_http_failure_retry_delay(server, status, expected_delay) -> None:
     server.status = status
     exporter, stats = _exporter(**INFLUX, influxdb_hostname=server.url)
@@ -120,13 +182,20 @@ async def test_server_down_does_not_crash() -> None:
 
 async def test_questdb_basic_auth_and_provisioning(server) -> None:
     exporter, stats = _exporter(
-        db_type="questdb", questdb_hostname=server.url, questdb_username="u", questdb_password="p",
+        db_type="questdb",
+        questdb_hostname=server.url,
+        questdb_username="u",
+        questdb_password="p",
         questdb_retention_days=0,
     )
     assert await exporter.cycle() == 30
     posts = [r for r in server.requests if r[0] == "POST"]
     assert posts[0][1] == "/write" and posts[0][2]["Authorization"].startswith("Basic ")
-    assert any("CREATE+TABLE" in r[1] or "CREATE%20TABLE" in r[1] for r in server.requests if r[0] == "GET")
+    assert any(
+        "CREATE+TABLE" in r[1] or "CREATE%20TABLE" in r[1]
+        for r in server.requests
+        if r[0] == "GET"
+    )
     assert stats.export_success == 1
 
 
@@ -164,6 +233,9 @@ async def test_rollup_health_is_rechecked_after_the_recheck_window(server) -> No
         def __init__(self) -> None:
             self.t = 0.0
 
+        def now(self) -> datetime:
+            return datetime(2026, 1, 1, tzinfo=UTC)
+
         def monotonic(self) -> float:
             return self.t
 
@@ -175,7 +247,12 @@ async def test_rollup_health_is_rechecked_after_the_recheck_window(server) -> No
     clock = AdvancingClock()
     stats = ServiceCounters(export_enabled=True)
     exporter = PushExporter(
-        Settings(_env_file=None, **BASE, db_type="questdb", questdb_hostname=server.url), _Metrics(), stats, clock
+        Settings(
+            _env_file=None, **BASE, db_type="questdb", questdb_hostname=server.url
+        ),
+        _Metrics(),
+        stats,
+        clock,
     )
     runs = []
     exporter._provisioner.run = lambda *, ensure=True: runs.append(clock.t) or True
@@ -187,10 +264,11 @@ async def test_rollup_health_is_rechecked_after_the_recheck_window(server) -> No
     assert len(runs) == 2
 
 
-async def test_an_empty_export_does_not_advance_the_last_success_timestamp() -> None:
-    """P2: build_lines() can legitimately return [] (no samples, or all non-finite). A cycle that
-    wrote nothing must not update export_last_success_unix — otherwise the TSDB status shows a
-    recent successful export when not a byte reached the database.
+async def test_an_empty_export_counts_as_neither_a_success_nor_a_last_success() -> None:
+    """build_lines() can legitimately return [] (no samples, or all non-finite). A cycle that wrote
+    nothing must advance neither export_success nor export_last_success_unix — otherwise the TSDB
+    status shows a recent successful export when not a byte reached the database. Both the counter
+    and the timestamp are guarded on the same "at least one line sent" condition.
     """
 
     class _NoSamples:
@@ -199,11 +277,19 @@ async def test_an_empty_export_does_not_advance_the_last_success_timestamp() -> 
 
     stats = ServiceCounters(export_enabled=True)
     exporter = PushExporter(
-        Settings(_env_file=None, **BASE, **INFLUX, influxdb_hostname="http://127.0.0.1:0"), _NoSamples(), stats, _Clock()
+        Settings(
+            _env_file=None, **BASE, **INFLUX, influxdb_hostname="http://127.0.0.1:0"
+        ),
+        _NoSamples(),
+        stats,
+        _Clock(),
     )
-    assert await exporter.cycle() == 30
-    assert stats.export_success == 1  # the cycle itself ran without error
-    assert stats.export_last_success_unix is None  # but nothing was written
+    assert await exporter.cycle() == 30  # the cycle itself ran without error
+    assert (
+        stats.export_success == 0
+    )  # nothing was written, so no successful export is counted
+    assert stats.export_failures == 0  # and it is not a failure either
+    assert stats.export_last_success_unix is None
 
 
 async def test_collect_runs_on_the_event_loop_thread(server) -> None:
@@ -250,12 +336,18 @@ def test_groups_fields_by_tag_set_and_writes_floats() -> None:
 def test_wire_timestamp_is_the_supplied_utc_epoch_ns_at_declared_precision() -> None:
     """FR-7: the metric timestamp on the wire is the caller-supplied epoch-ns integer (never
     server-assigned), and the InfluxDB v2 write path declares ``precision=ns`` so that integer is
-    read as nanoseconds. ``pusher.cycle`` supplies ``time.time_ns()`` (UTC epoch, TZ-independent)."""
+    read as nanoseconds. ``pusher.cycle`` supplies the injected ``Clock.now()`` epoch (UTC,
+    TZ-independent) converted to nanoseconds.
+    """
     stamp = 1234567890123456789  # full-width epoch nanoseconds
     lines = build_lines([("rct_grid_power", {"device": "main"}, 5.0)], "rct", stamp)
     assert lines and all(line.endswith(f" {stamp}") for line in lines)
 
-    target = Target.from_settings(Settings(_env_file=None, **BASE, **INFLUX, influxdb_hostname="http://127.0.0.1:8086"))
+    target = Target.from_settings(
+        Settings(
+            _env_file=None, **BASE, **INFLUX, influxdb_hostname="http://127.0.0.1:8086"
+        )
+    )
     assert "precision=ns" in target.write_path
 
 

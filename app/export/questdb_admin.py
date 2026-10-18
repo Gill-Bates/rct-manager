@@ -21,7 +21,13 @@ log = logging.getLogger(__name__)
 _NOT_REFRESHED_WARN_AFTER = 8
 
 STATE_TABLE = "_rct_export_state"
-_TTL_UNIT_HOURS = {"HOUR": 1, "DAY": 24, "WEEK": 24 * 7, "MONTH": 24 * 30, "YEAR": 24 * 365}
+_TTL_UNIT_HOURS = {
+    "HOUR": 1,
+    "DAY": 24,
+    "WEEK": 24 * 7,
+    "MONTH": 24 * 30,
+    "YEAR": 24 * 365,
+}
 _COUNTER_SUFFIXES = ("_total", "_sum", "_count")
 
 
@@ -48,8 +54,12 @@ def literal(value: str) -> str:
     return "'" + str(value).replace("'", "''") + "'"
 
 
-def effective_raw_days(downsampling: str, raw_days: int | None, total_days: int) -> int | None:
-    """Days of raw data; manual uses its explicit TTL, while off uses the total TTL."""
+def effective_raw_days(
+    downsampling: str, raw_days: int | None, total_days: int
+) -> int | None:
+    """Days of raw data: manual uses its explicit TTL; off (no preset) returns None here, and the
+    total TTL is applied downstream in ``QuestDbProvisioner.run()`` rather than by this function.
+    """
     if downsampling == "manual":
         if raw_days is None:
             raise ValueError("manual downsampling requires raw retention days")
@@ -66,7 +76,9 @@ def effective_raw_days(downsampling: str, raw_days: int | None, total_days: int)
         log.warning(
             "QuestDB raw retention of %d day(s) exceeds total retention of %d day(s); "
             "clamping raw retention to %d day(s)",
-            raw_days, total_days, total_days,
+            raw_days,
+            total_days,
+            total_days,
         )
     return min(days, total_days)
 
@@ -87,7 +99,9 @@ def schema_signature(columns: dict[str, str]) -> str:
     once the raw TTL is shortened).
     """
     dims, values = _split_columns(columns)
-    digest = hashlib.sha256(("|".join(dims) + "::" + "|".join(values)).encode()).hexdigest()
+    digest = hashlib.sha256(
+        ("|".join(dims) + "::" + "|".join(values)).encode()
+    ).hexdigest()
     return digest[:10]
 
 
@@ -120,7 +134,9 @@ def rollup_ddl(table: str, preset: Preset, columns: dict[str, str], view: str) -
             projections.append(f"last({ident(name)}) AS {ident(name + '_last')}")
         else:
             for aggregate in ("avg", "min", "max", "last"):
-                projections.append(f"{aggregate}({ident(name)}) AS {ident(f'{name}_{aggregate}')}")
+                projections.append(
+                    f"{aggregate}({ident(name)}) AS {ident(f'{name}_{aggregate}')}"
+                )
     select_list = ",\n        ".join(projections)
     return (
         f"CREATE MATERIALIZED VIEW IF NOT EXISTS {ident(view)} "
@@ -145,7 +161,14 @@ def ttl_days(value: object, unit: object) -> int | None:
 
 
 class QuestDbProvisioner:
-    def __init__(self, execute: Execute, table: str, downsampling: str, raw_days: int | None, total_days: int) -> None:
+    def __init__(
+        self,
+        execute: Execute,
+        table: str,
+        downsampling: str,
+        raw_days: int | None,
+        total_days: int,
+    ) -> None:
         self._exec = execute
         self.table = table
         self.downsampling = downsampling
@@ -167,9 +190,12 @@ class QuestDbProvisioner:
             if self.downsampling == "manual":
                 return self._apply_ttl(self.table, self.raw_days or 0, view=False)
             return self._apply_ttl(self.table, self.total_days, view=False)
-        rows = self._exec(
-            f"SELECT \"column\", type FROM table_columns({literal(self.table)});"
-        ).get("dataset") or []
+        rows = (
+            self._exec(
+                f'SELECT "column", type FROM table_columns({literal(self.table)});'
+            ).get("dataset")
+            or []
+        )
         columns = {str(name): str(kind).upper() for name, kind in rows}
         if not any(kind == "DOUBLE" for kind in columns.values()):
             log.info("QuestDB rollup waits for the first data in '%s'", self.table)
@@ -194,10 +220,14 @@ class QuestDbProvisioner:
         if attempts >= _NOT_REFRESHED_WARN_AFTER and attempts & (attempts - 1) == 0:
             log.warning(
                 "QuestDB rollup view '%s' is still not refreshed after %d attempts; raw TTL is unchanged",
-                view, attempts,
+                view,
+                attempts,
             )
         else:
-            log.debug("QuestDB rollup view '%s' is not refreshed yet; raw TTL is unchanged", view)
+            log.debug(
+                "QuestDB rollup view '%s' is not refreshed yet; raw TTL is unchanged",
+                view,
+            )
 
     def _warn_about_superseded_rollups(self, current: str) -> None:
         """Report earlier service-created rollup views of this table that a schema change replaced.
@@ -210,11 +240,18 @@ class QuestDbProvisioner:
         left in place for an administrator to remove once a verified retention/overlap window has
         passed and no aggregate held only there is still needed.
         """
-        rows = self._exec(
-            f"SELECT view_name FROM materialized_views() WHERE base_table_name = {literal(self.table)};"
-        ).get("dataset") or []
+        rows = (
+            self._exec(
+                f"SELECT view_name FROM materialized_views() WHERE base_table_name = {literal(self.table)};"
+            ).get("dataset")
+            or []
+        )
         prefix = f"{self.table}_rollup_"
-        superseded = {str(name) for (name, *_) in rows if str(name).startswith(prefix) and str(name) != current}
+        superseded = {
+            str(name)
+            for (name, *_) in rows
+            if str(name).startswith(prefix) and str(name) != current
+        }
         # Provisioning reruns every recheck cycle over an unchanged schema, so warn once per view
         # name for the process; a name only seen later (another schema change) still warns fresh.
         self._warned_superseded &= superseded  # forget names an admin has since dropped
@@ -230,32 +267,44 @@ class QuestDbProvisioner:
                 self._warned_superseded.add(name)
 
     def _view_current(self, view: str) -> bool:
-        rows = self._exec(
-            "SELECT view_name, base_table_name, view_status, refresh_base_table_txn, base_table_txn "
-            f"FROM materialized_views() WHERE view_name = {literal(view)};"
-        ).get("dataset") or []
+        rows = (
+            self._exec(
+                "SELECT view_name, base_table_name, view_status, refresh_base_table_txn, base_table_txn "
+                f"FROM materialized_views() WHERE view_name = {literal(view)};"
+            ).get("dataset")
+            or []
+        )
         if not rows:
             return False
         _, base, status, refreshed, latest = rows[0][:5]
         return (
-            str(base) == self.table and str(status).lower() == "valid"
-            and isinstance(refreshed, int) and isinstance(latest, int) and refreshed >= latest
+            str(base) == self.table
+            and str(status).lower() == "valid"
+            and isinstance(refreshed, int)
+            and isinstance(latest, int)
+            and refreshed >= latest
         )
 
     def _recorded_days(self, name: str) -> int | None:
-        rows = self._exec(
-            f"SELECT ttl_days FROM {ident(STATE_TABLE)} WHERE measurement = {literal(self.table)} "
-            f"AND object = {literal(name)} LATEST ON timestamp PARTITION BY object;"
-        ).get("dataset") or []
+        rows = (
+            self._exec(
+                f"SELECT ttl_days FROM {ident(STATE_TABLE)} WHERE measurement = {literal(self.table)} "
+                f"AND object = {literal(name)} LATEST ON timestamp PARTITION BY object;"
+            ).get("dataset")
+            or []
+        )
         return int(rows[0][0]) if rows and rows[0][0] is not None else None
 
     def _apply_ttl(self, name: str, days: int, *, view: bool) -> bool:
         """Set the TTL on an object without one, or on one this service set earlier; never override."""
         if days <= 0:
             return True  # unlimited: an existing TTL is never dropped
-        rows = self._exec(f"SELECT ttlValue, ttlUnit FROM tables() WHERE table_name = {literal(name)};").get(
-            "dataset"
-        ) or []
+        rows = (
+            self._exec(
+                f"SELECT ttlValue, ttlUnit FROM tables() WHERE table_name = {literal(name)};"
+            ).get("dataset")
+            or []
+        )
         if not rows:
             log.warning("QuestDB object '%s' not found; retention is not applied", name)
             return False
@@ -270,14 +319,19 @@ class QuestDbProvisioner:
             # later, which is strictly safer than adopting a genuinely foreign TTL that happens to
             # match the desired value and then shortening it against the administrator's decision.
             if recorded is None:
-                log.warning("QuestDB object '%s' already has an unowned TTL; keeping it", name)
+                log.warning(
+                    "QuestDB object '%s' already has an unowned TTL; keeping it", name
+                )
                 return True
             # An unknown TTL unit makes existing None: without this it would fall through to ALTER
             # and overwrite a TTL whose real length the service cannot even read.
             if existing is None or existing != recorded:
                 log.warning(
                     "QuestDB object '%s' keeps its administrator TTL of %s %s instead of %d day(s)",
-                    name, value, unit, days,
+                    name,
+                    value,
+                    unit,
+                    days,
                 )
                 return True
             if existing == days:
@@ -293,9 +347,12 @@ class QuestDbProvisioner:
         the object, so a reconcile writes the value that is actually in effect, not a stale target.
         """
         if days is None:
-            rows = self._exec(
-                f"SELECT ttlValue, ttlUnit FROM tables() WHERE table_name = {literal(name)};"
-            ).get("dataset") or []
+            rows = (
+                self._exec(
+                    f"SELECT ttlValue, ttlUnit FROM tables() WHERE table_name = {literal(name)};"
+                ).get("dataset")
+                or []
+            )
             days = ttl_days(rows[0][0], rows[0][1]) if rows else None
             if days is None:
                 return

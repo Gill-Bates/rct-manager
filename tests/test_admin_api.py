@@ -422,8 +422,6 @@ async def test_bootstrap_password_is_printed_even_when_uvicorn_startup_fails(tmp
     plaintext only after a successful startup would lose it forever. The banner is emitted at the
     start of serve(), before super().serve() binds the socket.
     """
-    import asyncio
-
     import uvicorn
 
     from app.api.server import GracefulServer

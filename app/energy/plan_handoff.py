@@ -20,7 +20,9 @@ but issues no ``command()`` call at all. This work does not enable automatic har
 Idempotence: the handoff keeps a per-device record of the last-offered intent (mode, target SoC,
 slot start/end) and offers a command only on a change of the effective desired action for the
 current slot. A missing slot or any action other than explicit grid charging is an ``AUTO``
-handback, so a command cannot outlive its plan slot. On restart it holds no in-memory state and
+handback, so a command is withdrawn on the next handoff tick that detects the slot ended or
+changed — it is not bounded to the slot end directly (the slot end is never passed to the
+``EnergyCommand``; the command carries its own server TTL). On restart it holds no in-memory state and
 reads the live dispatch status first, offering only when the device is not already running the
 desired intent, so a restart cannot double-apply. On late data / recompute an unchanged intent is
 a no-op.
@@ -128,7 +130,9 @@ class PlanDispatchHandoff:
         handback. With automatic dispatch OFF the intended command is logged but never sent. With
         dedup, an unchanged intent is a no-op.
         """
-        executor_action = ExecutorAction.AUTO if slot is None else _EXECUTOR_ACTION_FOR[slot.action]
+        executor_action = (
+            ExecutorAction.AUTO if slot is None else _EXECUTOR_ACTION_FOR[slot.action]
+        )
         is_handback = executor_action is ExecutorAction.AUTO
 
         intent = _Intent(
@@ -157,21 +161,32 @@ class PlanDispatchHandoff:
             return False
 
         if self._last_offered.get(device_id) == intent:
-            log.debug("Handoff: intent unchanged for device %s, no command issued", device_id)
+            log.debug(
+                "Handoff: intent unchanged for device %s, no command issued", device_id
+            )
             return False
 
-        if device_id not in self._last_offered and await self._already_running(device_id, intent):
+        if device_id not in self._last_offered and await self._already_running(
+            device_id, intent
+        ):
             # Restart: the device is already running this slot's intent; record it and do not
             # re-apply, so a restart cannot double-command.
             self._last_offered[device_id] = intent
-            log.info("Handoff: device %s already running the slot intent on restart; no command", device_id)
+            log.info(
+                "Handoff: device %s already running the slot intent on restart; no command",
+                device_id,
+            )
             return False
 
         try:
             await self._manager.command(device_id, command, actor=_HANDOFF_ACTOR)
         except EnergyRejected as exc:
             if exc.code in _EXPECTED_REFUSALS:
-                log.warning("Handoff command refused (expected): code=%s device=%s", exc.code, device_id)
+                log.warning(
+                    "Handoff command refused (expected): code=%s device=%s",
+                    exc.code,
+                    device_id,
+                )
                 return False
             raise
         self._last_offered[device_id] = intent
@@ -190,7 +205,11 @@ class PlanDispatchHandoff:
         try:
             status = await self._manager.status(device_id)
         except Exception:
-            log.warning("Handoff restart check: status for device %s could not be read", device_id, exc_info=True)
+            log.warning(
+                "Handoff restart check: status for device %s could not be read",
+                device_id,
+                exc_info=True,
+            )
             return False
         running = status.action
         if intent.action is ExecutorAction.AUTO:

@@ -17,8 +17,8 @@ directory the path resolves through can.
 returns the path only when the resolution is trustworthy:
 
 * every directory from the database's parent up to the filesystem root must be owned by this
-  process' user (or root) and must not be group- or world-writable, so no other principal can
-  rename or replace a component of the path, and
+  process' user (or root) and must not be group- or world-writable without the sticky bit, so no
+  other principal can rename or replace a component of the path, and
 * if the database file already exists it must be a regular file (not a symlink, FIFO, device, or
   directory) owned by this process' user (or root) and not group- or world-writable.
 
@@ -32,17 +32,15 @@ import stat
 from pathlib import Path
 
 # Group- and world-writable bits: a path component carrying either lets a principal other than the
-# owner replace it, which is what makes the symlink/rename swap possible. On a directory the
-# sticky bit (S_ISVTX) negates this: with it set, only a component's owner may rename or remove
-# it, so a shared-writable sticky directory such as /tmp is not swap-exploitable.
+# owner replace it, which is what makes the symlink/rename swap possible.
 _UNSAFE_WRITE_BITS = stat.S_IWGRP | stat.S_IWOTH
 
 
 class UnsafeDatabasePath(Exception):
     """The directory or file a SQLite database would be opened from is not trustworthy.
 
-    Raised fail closed before ``sqlite3.connect``: an owner-foreign or group/world-writable parent,
-    or a database path that is not a regular file, must stop the open rather than be worked around.
+    Raised fail closed before ``sqlite3.connect``: an owner-foreign or shared-writable parent, or a
+    database path that is not a regular file, must stop the open rather than be worked around.
     """
 
 
@@ -58,9 +56,10 @@ def _is_owner_trusted(file_stat: os.stat_result) -> bool:
 def _ensure_trusted_directory(directory: Path) -> None:
     """Fail closed unless every directory from ``directory`` up to the root is a trusted directory.
 
-    A single group- or world-writable or owner-foreign component anywhere on the path is enough for
-    another principal to swap the final file in, so the whole chain is checked, not only the
-    immediate parent.
+    A single owner-foreign component, or a group/world-writable one without the sticky bit, anywhere
+    on the path is enough for another principal to swap the final file in, so the whole chain is
+    checked, not only the immediate parent. The sticky bit (S_ISVTX) makes a shared-writable
+    directory safe: only a component's owner may then rename or remove it, as on ``/tmp``.
     """
     current = directory.resolve()
     while True:

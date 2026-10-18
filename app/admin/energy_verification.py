@@ -723,9 +723,7 @@ async def _run_hold_test(
                 restored = (
                     not status.restore_required and status.state is DispatchState.IDLE
                 )
-            except (
-                Exception
-            ):  # noqa: BLE001 - status is read-only; fail safe to the pending wording
+            except Exception:
                 log.exception(
                     "Verification probe restore status unreadable: device=%s", device_id
                 )

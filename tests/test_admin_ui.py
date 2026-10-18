@@ -2720,14 +2720,13 @@ const plan = JSON.parse(fs.readFileSync(planPath, 'utf8'));
 context.renderDryRunPlan(plan);
 const rows = technical.find('tbody').flatMap((body) => body.children.map((row) => row.children.map((cell) => cell.textContent)));
 const waitingNode = host.children.find((node) => node.className.includes('plan-loading'));
-const expertDetails = host.children.find((node) => node.dataset.expertOnly === 'true');
+const badgeNode = waitingNode && [waitingNode, ...waitingNode.find('p'), ...waitingNode.find('span')].find((node) => (node.className || '').includes('plan-setup-badge') || (node.className || '').includes('badge'));
 const waiting = waitingNode && {
   role: waitingNode.attributes.role,
   text: waitingNode.textContent,
   icon: waitingNode.children[0]?.textContent,
   iconHidden: waitingNode.children[0]?.attributes['aria-hidden'] === 'true',
-  checklistHidden: expertDetails?.hidden,
-  checklistText: expertDetails?.textContent,
+  setupBadge: badgeNode ? badgeNode.textContent : null,
 };
 console.log(JSON.stringify({ labels: context.labels, rows, spinners: host.count('spinner-border'), waiting, series: context.planChartSeries(plan.slots), items: schedule.find('td').slice(0, 4).map((td) => td.textContent), text: `${host.textContent} ${schedule.textContent} ${technical.textContent}` }));
 """
@@ -2914,61 +2913,47 @@ def test_dry_run_plan_renderer_shows_policy_flags_assumptions_and_limiting_reaso
 def test_dry_run_plan_renderer_shows_pending_wait_state_and_keeps_readiness_for_experts(
     tmp_path,
 ):
-    pending = {"status": "spot_prices_unavailable", "slots": []}
-    basic = _render_plan(tmp_path, pending)["waiting"]
-    assert (
-        basic["role"] == "status"
-        and basic["icon"] == "hourglass_empty"
-        and basic["iconHidden"]
-    )
-    assert (
-        "Plan is being prepared" in basic["text"]
-        and "Please check back in a few minutes." in basic["text"]
-    )
-    assert basic["checklistHidden"] is True
-    expert = _render_plan(tmp_path, pending, expert=True)["waiting"]
-    assert (
-        expert["checklistHidden"] is False
-        and "Spot prices: not available yet" in expert["checklistText"]
-    )
-
-    battery_out = _render_plan(
-        tmp_path, {"status": "battery_state_unavailable", "slots": []}
-    )
-    assert battery_out.get("waiting") is None and battery_out["spinners"] == 0
-    assert (
-        "Check that the inverter is connected and reports its battery state and capacity"
-        in battery_out["text"]
-    )
-    assert "Plan is being prepared" not in battery_out["text"]
-    assert "Usable battery capacity: could not be verified" in battery_out["text"]
-
-    waiting = _render_plan(tmp_path, {"status": "insufficient_history", "slots": []})[
-        "waiting"
-    ]
-    assert "Plan is being prepared" in waiting["text"]
-    assert "conservative baseline" in waiting["checklistText"]
+    # Every not-ready status now renders only the hourglass wait card: the readiness list fell away
+    # entirely ("entfällt ersatzlos"), in both Basic and Expert mode. No readiness/status-list text.
+    for status in (
+        "spot_prices_unavailable",
+        "battery_state_unavailable",
+        "insufficient_history",
+        "solar_forecast_unavailable",
+    ):
+        for expert in (False, True):
+            out = _render_plan(tmp_path, {"status": status, "slots": []}, expert=expert)
+            waiting = out["waiting"]
+            assert waiting is not None, (status, expert)
+            assert waiting["role"] == "status"
+            assert waiting["icon"] == "hourglass_empty" and waiting["iconHidden"]
+            assert "Plan is being prepared" in waiting["text"]
+            assert "Please check back in a few minutes." in waiting["text"]
+            # None of the removed readiness wording survives in any mode.
+            assert "Usable battery capacity" not in out["text"]
+            assert "not checked yet" not in out["text"]
+            assert "verified capacity override" not in out["text"]
+            # A generic waitable status carries no Weather-setup badge.
+            assert waiting["setupBadge"] is None, (status, expert)
 
 
-def test_dry_run_plan_renderer_tells_disabled_inputs_from_pending_ones(tmp_path):
-    spot_out = _render_plan(tmp_path, {"status": "spot_disabled", "slots": []})
-    spot = spot_out["text"]
-    assert (
-        spot_out["spinners"] == 0 and "Please wait" not in spot
-    )  # waiting cannot fix a disabled input
-    assert "The spot market integration is disabled." in spot
-    assert (
-        "Spot prices: disabled in settings" in spot
-        and "Solar forecast: not checked yet" in spot
+def test_dry_run_plan_renderer_badges_only_the_weather_setup_case(tmp_path):
+    # 'solar_not_configured' means the Weather config is enabled but still missing the location
+    # (postal code -> coordinates) and the PV plant data: the hourglass carries a setup badge.
+    out = _render_plan(tmp_path, {"status": "solar_not_configured", "slots": []})
+    waiting = out["waiting"]
+    assert waiting is not None and "Plan is being prepared" in waiting["text"]
+    assert waiting["setupBadge"] and "Weather setup required" in waiting["setupBadge"]
+    assert "postal code" in waiting["setupBadge"]
+    # No revived readiness/status list alongside the badge.
+    assert "not checked yet" not in out["text"]
+    assert "Usable battery capacity" not in out["text"]
+
+    # A configured-but-not-fetched forecast is a plain hourglass, no badge.
+    other = _render_plan(
+        tmp_path, {"status": "solar_forecast_unavailable", "slots": []}
     )
-    solar = _render_plan(tmp_path, {"status": "solar_not_configured", "slots": []})[
-        "text"
-    ]
-    assert "The solar forecast is not configured." in solar
-    assert (
-        "Spot prices: available" in solar
-        and "Solar forecast: not configured in settings" in solar
-    )
+    assert other["waiting"]["setupBadge"] is None
 
 
 def test_every_forecast_basis_is_handled_by_the_plan_confidence_renderer():
