@@ -27,7 +27,12 @@ from datetime import datetime
 from enum import StrEnum
 from typing import ClassVar, Literal
 
-from app.dispatch.models import NOTE_MAX_LENGTH, DispatchMode, check_printable_ascii, strict_persisted_bool
+from app.dispatch.models import (
+    NOTE_MAX_LENGTH,
+    DispatchMode,
+    check_printable_ascii,
+    strict_persisted_bool,
+)
 
 # Single source for the capability value bounds. The admin input model (app.admin.dispatch_api)
 # imports these so its 422 Field() limits and this dataclass invariant (H6) cannot drift apart.
@@ -82,11 +87,17 @@ TRUTHY_FLAGS = frozenset({"write_frame_layout_verified", "apply_sequence_verifie
 NON_BLANK_FIELDS = frozenset({"note"})
 
 
-def missing_verified_evidence(name: CapabilityName, record: "CapabilityRecord") -> list[str]:
+def missing_verified_evidence(
+    name: CapabilityName, record: "CapabilityRecord"
+) -> list[str]:
     missing = []
     for field_name in REQUIRED_FOR_VERIFIED[name]:
         value = getattr(record, field_name)
-        blank = field_name in NON_BLANK_FIELDS and isinstance(value, str) and not value.strip()
+        blank = (
+            field_name in NON_BLANK_FIELDS
+            and isinstance(value, str)
+            and not value.strip()
+        )
         if value is None or blank or (field_name in TRUTHY_FLAGS and not value):
             missing.append(field_name)
     return missing
@@ -108,7 +119,9 @@ class CapabilityRecord:
     battery_discharge_positive: bool = True  # BATTERY_POWER_SIGN (V-07/V-08)
     grid_import_positive: bool = True  # GRID_POWER_SIGN (V-04/V-05)
     # WRITE_PATH: the partial conditions of the hardware verification plan.
-    soc_strategy_external_code: int | None = None  # V-06; always settable, required for verified
+    soc_strategy_external_code: int | None = (
+        None  # V-06; always settable, required for verified
+    )
     enum_byte_width: int | None = None  # V-02, 1..4
     bool_byte_width: int | None = None  # V-03, 1..4
     write_frame_layout_verified: bool = False  # V-01
@@ -141,13 +154,18 @@ class CapabilityRecord:
             raise ValueError("soc_strategy_external_code must be within 0..255")
         for width_name in ("enum_byte_width", "bool_byte_width"):
             width = getattr(self, width_name)
-            if width is not None and not REGISTER_BYTE_WIDTH_MIN <= width <= REGISTER_BYTE_WIDTH_MAX:
+            if (
+                width is not None
+                and not REGISTER_BYTE_WIDTH_MIN <= width <= REGISTER_BYTE_WIDTH_MAX
+            ):
                 raise ValueError(f"{width_name} must be within 1..4")
         if self.refresh_interval_seconds is not None and (
             not math.isfinite(self.refresh_interval_seconds)
             or not 0.0 <= self.refresh_interval_seconds <= REFRESH_INTERVAL_SECONDS_MAX
         ):
-            raise ValueError("refresh_interval_seconds must be finite and within 0..86400")
+            raise ValueError(
+                "refresh_interval_seconds must be finite and within 0..86400"
+            )
         # Enforces the hard (non-note, non-unit) part of REQUIRED_FOR_VERIFIED at the dataclass
         # boundary too (H6): a directly constructed/copied record, or
         # a future caller that bypasses the admin API, must not be able to carry a VERIFIED
@@ -162,9 +180,16 @@ class CapabilityRecord:
                 or not self.write_frame_layout_verified
                 or not self.apply_sequence_verified
             ):
-                raise ValueError("WRITE_PATH cannot be verified without write-path evidence")
-            if self.name is CapabilityName.EXPORT_LIMIT and self.export_limit_zero_blocks_export is None:
-                raise ValueError("EXPORT_LIMIT cannot be verified without export_limit_zero_blocks_export")
+                raise ValueError(
+                    "WRITE_PATH cannot be verified without write-path evidence"
+                )
+            if (
+                self.name is CapabilityName.EXPORT_LIMIT
+                and self.export_limit_zero_blocks_export is None
+            ):
+                raise ValueError(
+                    "EXPORT_LIMIT cannot be verified without export_limit_zero_blocks_export"
+                )
 
     @property
     def is_verified(self) -> bool:
@@ -185,7 +210,9 @@ class CapabilityRecord:
         }
         data["name"] = self.name.value
         data["status"] = self.status.value
-        data["verified_at"] = self.verified_at.isoformat() if self.verified_at is not None else None
+        data["verified_at"] = (
+            self.verified_at.isoformat() if self.verified_at is not None else None
+        )
         return data
 
     # Evidence keys that must be PRESENT in a persisted VERIFIED record, mirroring the admin API's
@@ -207,32 +234,66 @@ class CapabilityRecord:
         name = CapabilityName(data["name"])
         status = CapabilityStatus(data["status"])
         if status is CapabilityStatus.VERIFIED:
-            missing = [key for key in cls._EXPLICIT_EVIDENCE.get(name, ()) if key not in data]
+            # A NON_BLANK field (note) counts as evidence only when present AND non-blank: a
+            # persisted "note": null or "" is no evidence and must be rejected, matching the
+            # WRITE_PATH REQUIRED_FOR_VERIFIED contract (P3-4). Other explicit-evidence keys need
+            # only be present; their value validity is enforced in __post_init__.
+            missing = [
+                key
+                for key in cls._EXPLICIT_EVIDENCE.get(name, ())
+                if _evidence_absent(data, key)
+            ]
             if missing:
                 raise ValueError(f"verified capability missing evidence: {missing}")
         return cls(
             device_id=data["device_id"],
             name=name,
             status=status,
-            battery_discharge_positive=_strict_bool(data, "battery_discharge_positive", True),
+            battery_discharge_positive=_strict_bool(
+                data, "battery_discharge_positive", True
+            ),
             grid_import_positive=_strict_bool(data, "grid_import_positive", True),
-            soc_strategy_external_code=_strict_optional_int(data.get("soc_strategy_external_code")),
+            soc_strategy_external_code=_strict_optional_int(
+                data.get("soc_strategy_external_code")
+            ),
             enum_byte_width=_strict_optional_int(data.get("enum_byte_width")),
             bool_byte_width=_strict_optional_int(data.get("bool_byte_width")),
-            write_frame_layout_verified=_strict_bool(data, "write_frame_layout_verified", False),
-            apply_sequence_verified=_strict_bool(data, "apply_sequence_verified", False),
+            write_frame_layout_verified=_strict_bool(
+                data, "write_frame_layout_verified", False
+            ),
+            apply_sequence_verified=_strict_bool(
+                data, "apply_sequence_verified", False
+            ),
             sequence_order_relevant=_optional_bool(data.get("sequence_order_relevant")),
             soc_target_unit=data.get("soc_target_unit", "ratio"),
-            export_limit_zero_blocks_export=_optional_bool(data.get("export_limit_zero_blocks_export")),
+            export_limit_zero_blocks_export=_optional_bool(
+                data.get("export_limit_zero_blocks_export")
+            ),
             export_limit_unit=data.get("export_limit_unit", "watt"),
             volatile=_optional_bool(data.get("volatile")),
-            refresh_interval_seconds=_optional_float(data.get("refresh_interval_seconds")),
+            refresh_interval_seconds=_optional_float(
+                data.get("refresh_interval_seconds")
+            ),
             verified_device_model=data.get("verified_device_model"),
             verified_firmware=data.get("verified_firmware"),
             verified_at=datetime.fromisoformat(verified_at) if verified_at else None,
             verified_by=data.get("verified_by"),
             note=data.get("note"),
         )
+
+
+def _evidence_absent(data: dict, key: str) -> bool:
+    """Whether a persisted VERIFIED evidence key counts as missing.
+
+    A key in ``NON_BLANK_FIELDS`` (note) is missing when absent, null, or blank after stripping;
+    any other evidence key is missing only when absent, because its value is validated elsewhere.
+    """
+    if key not in data:
+        return True
+    if key in NON_BLANK_FIELDS:
+        value = data[key]
+        return value is None or (isinstance(value, str) and not value.strip())
+    return False
 
 
 def _strict_bool(data: dict, key: str, default: bool) -> bool:
@@ -274,7 +335,9 @@ def _optional_bool(value: object) -> bool | None:
     return value
 
 
-def required_for(mode: DispatchMode, *, limit_export: bool) -> frozenset[CapabilityName]:
+def required_for(
+    mode: DispatchMode, *, limit_export: bool
+) -> frozenset[CapabilityName]:
     """The capabilities ``mode`` cannot run without.
 
     ``limit_export`` is ``DispatchConfig.limit_export_during_discharge``: writing the export limit
@@ -298,7 +361,9 @@ def required_for(mode: DispatchMode, *, limit_export: bool) -> frozenset[Capabil
         # sign there would turn a handback into a charge or discharge. The 0 W hold write itself is
         # sign-free. No new CapabilityName is introduced for HOLD.
         return frozenset({CapabilityName.WRITE_PATH, CapabilityName.BATTERY_POWER_SIGN})
-    return frozenset()  # EXPORT_TO_GRID is refused before the gate (409 dispatch_mode_unavailable)
+    return (
+        frozenset()
+    )  # EXPORT_TO_GRID is refused before the gate (409 dispatch_mode_unavailable)
 
 
 class CapabilityRegistry:
@@ -339,14 +404,17 @@ class CapabilityRegistry:
         return tuple(
             name
             for name in CapabilityName
-            if name in required and self.record(device_id, name).status is not CapabilityStatus.VERIFIED
+            if name in required
+            and self.record(device_id, name).status is not CapabilityStatus.VERIFIED
         )
 
 
 @dataclass(frozen=True, slots=True)
 class GateDecision:
     allowed: bool
-    engineering_mode: bool  # "active": this release came about THROUGH the per-device switch
+    engineering_mode: (
+        bool  # "active": this release came about THROUGH the per-device switch
+    )
     unverified: tuple[CapabilityName, ...]
     reject_detail: str | None = None  # only set when allowed is False
 
@@ -380,7 +448,10 @@ def evaluate_gate(
     # Engineering mode: WRITE_PATH is unverified by definition, so the strategy code may be
     # missing. Without it no external-control write can be formed at all, so the gate refuses here
     # instead of letting the adapter fail after the intent was already persisted (D-08).
-    if registry.record(device_id, CapabilityName.WRITE_PATH).soc_strategy_external_code is None:
+    if (
+        registry.record(device_id, CapabilityName.WRITE_PATH).soc_strategy_external_code
+        is None
+    ):
         return GateDecision(
             allowed=False,
             engineering_mode=False,

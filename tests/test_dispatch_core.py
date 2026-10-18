@@ -34,6 +34,7 @@ from app.dispatch.models import (
     DispatchIntent,
     DispatchMode,
     DispatchRecord,
+    DispatchRecordCorrupt,
     DispatchState,
     PowerDirection,
     PowerSetpoint,
@@ -1177,11 +1178,15 @@ async def test_restore_retry_info_exposes_attempts_and_next_retry(tmp_path: Path
     assert attempts == 1 and next_at == clock.now() + timedelta(seconds=1)
 
 
-def test_a_negative_stored_restore_attempts_counter_is_clamped() -> None:
+def test_a_negative_stored_restore_attempts_counter_is_rejected() -> None:
+    """P3-3: a negative retry count cannot be produced by the state machine, so from_dict() must
+    fail closed (DispatchRecordCorrupt) rather than silently repair it with max(0, ...). An absent
+    counter is still a legitimate pre-field record and defaults to 0."""
     record = DispatchRecord("main")
     data = record.to_dict()
     data["restore_attempts"] = -5
-    assert DispatchRecord.from_dict(data).restore_attempts == 0
+    with pytest.raises(DispatchRecordCorrupt):
+        DispatchRecord.from_dict(data)
     del data["restore_attempts"]  # records written before the counter existed
     assert DispatchRecord.from_dict(data).restore_attempts == 0
 

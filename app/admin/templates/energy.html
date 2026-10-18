@@ -68,13 +68,6 @@ start hidden to avoid a first-paint flash. #}
                                 <span class="small text-secondary" id="energy-plan-confidence" hidden></span>
                             </span>
                         </div>
-                        {# Compact but unambiguous: the visible text states the read-only nature and
-                        that no inverter commands are sent; the fuller safety meaning is carried for
-                        assistive technology via aria-describedby, without a large paragraph. #}
-                        <p class="text-secondary small mb-0 mt-1" id="energy-plan-readonly-note"
-                            aria-describedby="energy-plan-readonly-detail">Read-only preview · No inverter commands</p>
-                        <span id="energy-plan-readonly-detail" class="visually-hidden">The charging plan is a
-                            preview only and never sends commands to the inverter.</span>
                     </div>
                     <div class="energy-plan-head-controls" role="group" aria-label="Charging plan controls">
                         <div class="energy-plan-device-field">

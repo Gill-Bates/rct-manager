@@ -7,9 +7,10 @@
 """Fail-closed SQLite path validation (P2-2): the shared helper both encrypted stores open through.
 
 The admin and dispatch stores resolve the database by path in ``sqlite3.connect``, so a writable
-parent directory is a TOCTOU swap vector. ``validated_sqlite_path`` must refuse an untrusted parent
-or a non-regular database file before the open, and accept a private directory with a
-not-yet-created file.
+parent directory is a TOCTOU swap vector. The hardening is opt-in via ``RCT_SQLITE_STRICT_PATH``
+(so the app still starts from a developer tree or an owner-foreign parent such as ``/opt``); when it
+is on, ``validated_sqlite_path`` must refuse an untrusted parent or a non-regular database file
+before the open, and accept a private directory with a not-yet-created file.
 """
 
 import os
@@ -18,10 +19,34 @@ from pathlib import Path
 
 import pytest
 
-from app.sqlite_safety import UnsafeDatabasePath, validated_sqlite_path
+from app.sqlite_safety import UnsafeDatabasePath, strict_path_enabled, validated_sqlite_path
 
 
-def test_a_private_directory_with_a_missing_file_is_accepted(tmp_path: Path) -> None:
+@pytest.fixture
+def strict(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("RCT_SQLITE_STRICT_PATH", "1")
+    assert strict_path_enabled()
+
+
+def test_strict_mode_is_off_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Default is pass-through: the hardening only runs when explicitly enabled."""
+    monkeypatch.delenv("RCT_SQLITE_STRICT_PATH", raising=False)
+    assert strict_path_enabled() is False
+
+
+def test_without_strict_mode_an_unsafe_parent_is_returned_unchecked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Off by default: even a world-writable parent is returned unchecked so startup is not blocked."""
+    monkeypatch.delenv("RCT_SQLITE_STRICT_PATH", raising=False)
+    db_dir = tmp_path / "shared"
+    db_dir.mkdir()
+    os.chmod(db_dir, 0o777)  # noqa: S103 - deliberately unsafe; must still pass when strict mode is off
+    db_path = db_dir / "dispatch.db"
+    assert validated_sqlite_path(db_path) == str(db_path)
+
+
+def test_a_private_directory_with_a_missing_file_is_accepted(tmp_path: Path, strict: None) -> None:
     """A tight, owner-owned directory and a database file that does not exist yet is the normal
     first-start case: connect() creates the file under the validated directory."""
     db_dir = tmp_path / "state"
@@ -30,7 +55,7 @@ def test_a_private_directory_with_a_missing_file_is_accepted(tmp_path: Path) -> 
     assert validated_sqlite_path(db_path) == str(db_path)
 
 
-def test_an_existing_regular_private_file_is_accepted(tmp_path: Path) -> None:
+def test_an_existing_regular_private_file_is_accepted(tmp_path: Path, strict: None) -> None:
     db_dir = tmp_path / "state"
     db_dir.mkdir(mode=0o700)
     db_path = db_dir / "dispatch.db"
@@ -39,7 +64,7 @@ def test_an_existing_regular_private_file_is_accepted(tmp_path: Path) -> None:
     assert validated_sqlite_path(db_path) == str(db_path)
 
 
-def test_a_world_writable_parent_without_the_sticky_bit_is_refused(tmp_path: Path) -> None:
+def test_a_world_writable_parent_without_the_sticky_bit_is_refused(tmp_path: Path, strict: None) -> None:
     """The core TOCTOU guard: a parent any principal can write to (and that is not sticky) lets the
     final component be swapped between the check and sqlite3.connect, so the open must fail closed."""
     db_dir = tmp_path / "shared"
@@ -50,7 +75,7 @@ def test_a_world_writable_parent_without_the_sticky_bit_is_refused(tmp_path: Pat
         validated_sqlite_path(db_dir / "dispatch.db")
 
 
-def test_a_world_writable_parent_with_the_sticky_bit_is_accepted(tmp_path: Path) -> None:
+def test_a_world_writable_parent_with_the_sticky_bit_is_accepted(tmp_path: Path, strict: None) -> None:
     """A sticky shared-writable directory (as /tmp) is safe: only a component's owner may rename or
     remove it, so the swap the guard defends against cannot happen."""
     db_dir = tmp_path / "sticky"
@@ -60,7 +85,7 @@ def test_a_world_writable_parent_with_the_sticky_bit_is_accepted(tmp_path: Path)
     assert validated_sqlite_path(db_path) == str(db_path)
 
 
-def test_a_symlinked_database_file_is_refused(tmp_path: Path) -> None:
+def test_a_symlinked_database_file_is_refused(tmp_path: Path, strict: None) -> None:
     """The database path must be a regular file; a symlink (the classic redirect) fails closed even
     when its target is otherwise fine."""
     db_dir = tmp_path / "state"
@@ -73,7 +98,7 @@ def test_a_symlinked_database_file_is_refused(tmp_path: Path) -> None:
         validated_sqlite_path(link)
 
 
-def test_a_group_or_world_writable_database_file_is_refused(tmp_path: Path) -> None:
+def test_a_group_or_world_writable_database_file_is_refused(tmp_path: Path, strict: None) -> None:
     db_dir = tmp_path / "state"
     db_dir.mkdir(mode=0o700)
     db_path = db_dir / "dispatch.db"

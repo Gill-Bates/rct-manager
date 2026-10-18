@@ -2705,21 +2705,17 @@ try {
           return Math.round(label.left - input.right);
         });
         check('plan Expert mode label keeps a gap to its switch', switchGap >= 6, `${switchGap}px`);
-        check('plan header says Read-only preview, never Disabled',
-          /Read-only preview/.test(await ep.locator('.energy-plan-head-title').innerText())
-          && !/Disabled/.test(await ep.locator('.energy-plan-head-title').innerText()));
+        check('plan header omits the removed read-only disclaimer',
+          !/Read-only preview|No inverter commands/.test(await ep.locator('.energy-plan-head-title').innerText())
+          && (await ep.locator('#energy-plan-readonly-note, #energy-plan-readonly-detail').count()) === 0);
+        check('plan header is never labelled Disabled',
+          !/Disabled/.test(await ep.locator('.energy-plan-head-title').innerText()));
         check('plan header has no Energy Manager mode badge',
           (await ep.locator('#energy-plan-manager-state').count()) === 0
           && !/Manual control|External control/.test(await ep.locator('.energy-plan-head-title').innerText()));
         check('the removed "Preliminary plan" note does not exist',
           (await ep.locator('#energy-plan-confidence-note').count()) === 0
           && !/Preliminary plan|limited consumption history/i.test(await ep.locator('#energy-plan-card').innerText()));
-        // The compact header must still state that no inverter commands are sent (visible), and the
-        // full safety meaning must be reachable through the accessible description.
-        check('plan header states no inverter commands and carries an accessible safety description',
-          /No inverter commands/.test(await ep.locator('#energy-plan-readonly-note').innerText())
-          && (await ep.locator('#energy-plan-readonly-note').getAttribute('aria-describedby')) === 'energy-plan-readonly-detail'
-          && /never sends commands to the inverter/.test(await ep.locator('#energy-plan-readonly-detail').innerText()));
         // Real backend contract value (adaptive_history + normal) must render as the normal-confidence chip.
         check('plan header shows Normal confidence from the real forecast contract value',
           (await ep.locator('#energy-plan-confidence').innerText()).trim() === 'Normal confidence');

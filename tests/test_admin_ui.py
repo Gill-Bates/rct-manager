@@ -2657,8 +2657,11 @@ def test_energy_page_wires_the_read_only_dry_run_plan_preview():
     # The header carries no Energy Manager mode badge; it was removed on purpose.
     assert 'id="energy-plan-manager-state"' not in plan_pane + js
     assert "planStatusCard('Energy Manager is off'" not in js
-    # The plan is a read-only preview whose execution may be off; it is never labelled "Disabled".
-    assert "Read-only preview" in plan_pane and "Preview only" not in plan_pane
+    # The GUI removes the read-only disclaimer entirely; the plan remains a preview feature.
+    assert 'id="energy-plan-readonly-note"' not in plan_pane
+    assert 'id="energy-plan-readonly-detail"' not in plan_pane
+    assert "Read-only preview" not in plan_pane and "No inverter commands" not in plan_pane
+    assert "Preview only" not in plan_pane
     assert "Preliminary plan" not in js
     assert "energy-plan-confidence-note" not in plan_pane + js
     assert (

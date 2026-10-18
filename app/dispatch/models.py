@@ -511,12 +511,13 @@ class DispatchRecord:
             record_version = _strict_number(
                 data.get("record_version", 0), "record_version", int
             )
-            restore_attempts = max(
-                0,
-                _strict_number(
-                    data.get("restore_attempts", 0), "restore_attempts", int
-                ),
+            # A negative retry count cannot be produced by the state machine; silently repairing
+            # it with max(0, ...) would accept a corrupt row. Reject it fail closed instead (P3-3).
+            restore_attempts = _strict_number(
+                data.get("restore_attempts", 0), "restore_attempts", int
             )
+            if restore_attempts < 0:
+                raise ValueError("restore_attempts must not be negative")
         except (KeyError, TypeError, ValueError) as exc:
             raise DispatchRecordCorrupt(f"dispatch record is malformed: {exc}") from exc
         record = cls(
