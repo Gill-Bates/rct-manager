@@ -12,7 +12,7 @@
 
 ### Security
 
-- SQLite stores reject unsafe database paths, update checks block cross-origin redirects and oversized responses, and API request bodies are size-limited.
+- Optional strict SQLite path checks reject unsafe database paths when enabled; update checks block cross-origin redirects and oversized responses, and API request bodies are size-limited.
 - Dispatch apply and restore sequences now complete safely if the requesting task is cancelled, avoiding partially applied inverter control.
 
 

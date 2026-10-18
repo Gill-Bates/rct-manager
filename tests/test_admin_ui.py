@@ -2675,7 +2675,7 @@ def test_energy_page_wires_the_read_only_dry_run_plan_preview():
         and "element('summary'" in js
     )
     assert "History coverage" in js and "Live recording" not in js
-    assert "Locally measured" in js and "Recovered from inverter history" in js
+    assert "From live inverter readings" in js and "From inverter daily history" in js
     assert "will feed later" not in html
     # Axis unit titles are sized like the legend and the legend entries are real buttons per series.
     assert (

@@ -1746,8 +1746,8 @@ let consumptionGeneration = 0;
 
 // Bar colours per source; unavailable days stay empty instead of being drawn as zero.
 const CONSUMPTION_SOURCES = {
-  local_measured: { label: 'Locally measured', color: '--consumption-measured' },
-  inverter_history: { label: 'Recovered from inverter history', color: '--consumption-history' },
+  local_measured: { label: 'From live inverter readings', color: '--consumption-measured' },
+  inverter_history: { label: 'From inverter daily history', color: '--consumption-history' },
 };
 
 function consumptionChartColors() {
