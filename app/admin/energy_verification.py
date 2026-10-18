@@ -788,9 +788,7 @@ async def _run_hold_test(
             if code_set_here:
                 try:
                     await dispatch.set_capabilities(device_id, [write_record])
-                except (
-                    Exception
-                ):  # noqa: BLE001 - logged; the hand-back retry re-reads the live state
+                except Exception:  # noqa: BLE001 - logged; hand-back retry re-reads live state
                     log.warning(
                         "Could not reset the candidate strategy code: device=%s",
                         device_id,

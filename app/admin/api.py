@@ -1792,7 +1792,7 @@ class DashboardWidgetLayout(BaseModel):
     w: int = Field(ge=1, le=12)
     h: int = Field(ge=1, le=100)
     visible: bool = True
-    placed: bool | None = None
+    placed: bool = False
 
 
 class DashboardLayout(BaseModel):

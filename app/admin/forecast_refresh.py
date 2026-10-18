@@ -22,7 +22,11 @@ from datetime import UTC, date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 from app.admin.store import AdminStore
-from app.admin.store_threads import _inflight, drain_store_threads, store_thread  # noqa: F401 - re-exported for app_factory/tests that import them from here
+from app.admin.store_threads import (  # noqa: F401 - re-exported for app_factory/tests that import them from here
+    _inflight,
+    drain_store_threads,
+    store_thread,
+)
 from app.clock import Clock, SystemClock
 from app.energy.activity import EnergyActivity
 from app.optimizer.models import SolarForecast

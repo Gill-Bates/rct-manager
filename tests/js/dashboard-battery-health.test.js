@@ -40,7 +40,6 @@ function harness(views, { devices, visibleIds } = {}) {
   const document = {
     body: { dataset: { page: 'dashboard' } },
     documentElement: {},
-    addEventListener: (name, listener) => listeners.set(name, listener),
     getElementById: element,
     createElement: fakeNode,
     querySelector: (selector) => {
@@ -56,6 +55,7 @@ function harness(views, { devices, visibleIds } = {}) {
   }
   const list = devices || Object.keys(views).map((id) => ({ device_id: id, device_name: `Inv ${id}` }));
   const window = {
+    addEventListener: (name, listener) => listeners.set(name, listener),
     RCTAdmin: {
       api: async (url) => {
         paths.push(url);
@@ -68,8 +68,12 @@ function harness(views, { devices, visibleIds } = {}) {
   };
   vm.runInNewContext(SOURCE, {
     document, window, AbortController, setInterval() { }, encodeURIComponent, Date, Number, Math, Array, Object,
-    getComputedStyle: () => ({ getPropertyValue: (name) => ({ '--bs-body-color': theme.label,
-      '--rct-line': theme.grid, '--rct-plan-power': theme.power, '--rct-plan-soc': theme.soc })[name] || '' }),
+    getComputedStyle: () => ({
+      getPropertyValue: (name) => ({
+        '--bs-body-color': theme.label,
+        '--rct-line': theme.grid, '--rct-plan-power': theme.power, '--rct-plan-soc': theme.soc
+      })[name] || ''
+    }),
   });
   const pump = async () => { for (let i = 0; i < 8; i++) await new Promise((resolve) => setImmediate(resolve)); };
   return { api: window.RCTDashboardBatteryHealth, element, configs, paths, state, pump, listeners, theme };
@@ -83,8 +87,10 @@ const point = (at, cycles, wh, percent) => ({
 const VIEW_A = {
   inverter_serial: 'SN-A', battery_bms_sn: 'B1', battery_replaced: false,
   commissioning: { commissioned_at: '2021-05-01T00:00:00Z', source: 'logger_derived', determined_at: '2026-10-16T00:00:00Z' },
-  baseline: { date: '2021-05-01T00:00:00Z', battery_cycles: 0, rated_usable_capacity_wh: 10368,
-    current_usable_capacity_wh: 10368, remaining_capacity_percent: 100, source: 'logger_derived' },
+  baseline: {
+    date: '2021-05-01T00:00:00Z', battery_cycles: 0, rated_usable_capacity_wh: 10368,
+    current_usable_capacity_wh: 10368, remaining_capacity_percent: 100, source: 'logger_derived'
+  },
   baseline_unavailable_reason: null,
   points: [point('2026-01-10T12:00:00Z', 100, 9000, 86.81), point('2026-10-16T12:00:00Z', 128, 8538.35, 82.35)],
 };

@@ -67,16 +67,22 @@ async def _settled_state(h, device_id: str, timeout: float = 5.0) -> DeviceState
 
 async def test_adding_a_device_takes_effect_without_a_restart(tmp_path):
     settings = make_settings(
-        hmac_secret="s" * 48, admin_db_path=tmp_path / "rct.db",
+        hmac_secret="s" * 48,
+        admin_db_path=tmp_path / "rct.db",
         devices=[DeviceEntry(device_id="main", host=HOST, port=PORT)],
     )
     async with _prepare_real_store(settings) as store, running_app(settings) as h:
         HEADERS = await admin_session_headers(h.client, "a much stronger password")
-        h.app.state.security.tokens = TokenStore(auth_required=settings.auth_required, admin_store=store)
-        current = (await h.client.get("/admin/api/settings", headers=HEADERS)).json()["settings"]["devices"]
+        h.app.state.security.tokens = TokenStore(
+            auth_required=settings.auth_required, admin_store=store
+        )
+        current = (await h.client.get("/admin/api/settings", headers=HEADERS)).json()[
+            "settings"
+        ]["devices"]
 
         response = await h.client.put(
-            "/admin/api/settings", headers=HEADERS,
+            "/admin/api/settings",
+            headers=HEADERS,
             json={"devices": [*current, {"host": NEW_HOST, "port": NEW_PORT}]},
         )
         assert response.status_code == 200, response.text
@@ -93,9 +99,12 @@ async def test_adding_a_device_takes_effect_without_a_restart(tmp_path):
         assert state in (DeviceState.OK, DeviceState.DEGRADED)
 
 
-async def test_removing_a_device_takes_effect_without_a_restart_and_closes_its_connection(tmp_path):
+async def test_removing_a_device_takes_effect_without_a_restart_and_closes_its_connection(
+    tmp_path,
+):
     settings = make_settings(
-        hmac_secret="s" * 48, admin_db_path=tmp_path / "rct.db",
+        hmac_secret="s" * 48,
+        admin_db_path=tmp_path / "rct.db",
         devices=[
             DeviceEntry(device_id="main", host=HOST, port=PORT),
             DeviceEntry(device_id="extra", host=NEW_HOST, port=NEW_PORT),
@@ -103,12 +112,18 @@ async def test_removing_a_device_takes_effect_without_a_restart_and_closes_its_c
     )
     async with _prepare_real_store(settings) as store, running_app(settings) as h:
         HEADERS = await admin_session_headers(h.client, "a much stronger password")
-        h.app.state.security.tokens = TokenStore(auth_required=settings.auth_required, admin_store=store)
+        h.app.state.security.tokens = TokenStore(
+            auth_required=settings.auth_required, admin_store=store
+        )
         removed_endpoint = h.runtime.gateway._devices["extra"].endpoint
-        current = (await h.client.get("/admin/api/settings", headers=HEADERS)).json()["settings"]["devices"]
+        current = (await h.client.get("/admin/api/settings", headers=HEADERS)).json()[
+            "settings"
+        ]["devices"]
         kept = [d for d in current if d["device_id"] != "extra"]
 
-        response = await h.client.put("/admin/api/settings", headers=HEADERS, json={"devices": kept})
+        response = await h.client.put(
+            "/admin/api/settings", headers=HEADERS, json={"devices": kept}
+        )
         assert response.status_code == 200, response.text
         assert "restart_required" not in response.json()
 
@@ -118,23 +133,71 @@ async def test_removing_a_device_takes_effect_without_a_restart_and_closes_its_c
             h.runtime.gateway.device_status("extra")
 
 
+async def test_readdressed_device_relearns_available_pv_strings(tmp_path):
+    settings = make_settings(
+        hmac_secret="s" * 48,
+        admin_db_path=tmp_path / "rct.db",
+        devices=[DeviceEntry(device_id="main", host=HOST, port=PORT)],
+    )
+    async with _prepare_real_store(settings) as store, running_app(settings) as h:
+        headers = await admin_session_headers(h.client, "a much stronger password")
+        h.app.state.security.tokens = TokenStore(
+            auth_required=settings.auth_required, admin_store=store
+        )
+        cache = h.runtime.gateway._cache
+        clock = h.runtime.clock
+
+        def sample(name: str, value: float) -> None:
+            cache.put(
+                ("main", name),
+                value,
+                measured_at=clock.now(),
+                received_monotonic=clock.monotonic(),
+                origin="transaction",
+            )
+
+        sample("solar_a_power", 1500.0)
+        sample("solar_b_power", 900.0)
+        assert h.runtime.energy_readings.readings("main").pv_power_w.stale is False
+        current = (await h.client.get("/admin/api/settings", headers=headers)).json()[
+            "settings"
+        ]["devices"]
+        response = await h.client.put(
+            "/admin/api/settings",
+            headers=headers,
+            json={"devices": [{**current[0], "host": NEW_HOST, "port": NEW_PORT}]},
+        )
+        assert response.status_code == 200, response.text
+        sample("solar_a_power", 1200.0)
+        pv = h.runtime.energy_readings.readings("main").pv_power_w
+        assert pv.value == 1200.0
+        assert pv.stale is False
+
+
 async def test_repeated_add_remove_cycle_does_not_leak_tasks_or_connections(tmp_path):
     """Two full add-then-remove cycles must leave the task count and open-connection count exactly
-    where a single steady-state device leaves them — the concrete leak check the feature requires."""
+    where a single steady-state device leaves them — the concrete leak check the feature requires.
+    """
     settings = make_settings(
-        hmac_secret="s" * 48, admin_db_path=tmp_path / "rct.db",
+        hmac_secret="s" * 48,
+        admin_db_path=tmp_path / "rct.db",
         devices=[DeviceEntry(device_id="main", host=HOST, port=PORT)],
     )
     async with _prepare_real_store(settings) as store, running_app(settings) as h:
         HEADERS = await admin_session_headers(h.client, "a much stronger password")
-        h.app.state.security.tokens = TokenStore(auth_required=settings.auth_required, admin_store=store)
+        h.app.state.security.tokens = TokenStore(
+            auth_required=settings.auth_required, admin_store=store
+        )
         baseline_tasks = len(h.runtime.tasks)
         baseline_open = h.net.open_now
 
         async def cycle() -> None:
-            current = (await h.client.get("/admin/api/settings", headers=HEADERS)).json()["settings"]["devices"]
+            current = (
+                await h.client.get("/admin/api/settings", headers=HEADERS)
+            ).json()["settings"]["devices"]
             added = await h.client.put(
-                "/admin/api/settings", headers=HEADERS,
+                "/admin/api/settings",
+                headers=HEADERS,
                 json={"devices": [*current, {"host": NEW_HOST, "port": NEW_PORT}]},
             )
             assert added.status_code == 200, added.text
@@ -143,13 +206,23 @@ async def test_repeated_add_remove_cycle_does_not_leak_tasks_or_connections(tmp_
             await _settled_state(h, new_id)
 
             kept = [d for d in devices if d["device_id"] != new_id]
-            removed = await h.client.put("/admin/api/settings", headers=HEADERS, json={"devices": kept})
+            removed = await h.client.put(
+                "/admin/api/settings", headers=HEADERS, json={"devices": kept}
+            )
             assert removed.status_code == 200, removed.text
 
         await cycle()
-        assert len(h.runtime.tasks) == baseline_tasks, "task count grew after one add/remove cycle"
-        assert h.net.open_now == baseline_open, "open connection count grew after one add/remove cycle"
+        assert (
+            len(h.runtime.tasks) == baseline_tasks
+        ), "task count grew after one add/remove cycle"
+        assert (
+            h.net.open_now == baseline_open
+        ), "open connection count grew after one add/remove cycle"
 
         await cycle()
-        assert len(h.runtime.tasks) == baseline_tasks, "task count grew after a second add/remove cycle"
-        assert h.net.open_now == baseline_open, "open connection count grew after a second add/remove cycle"
+        assert (
+            len(h.runtime.tasks) == baseline_tasks
+        ), "task count grew after a second add/remove cycle"
+        assert (
+            h.net.open_now == baseline_open
+        ), "open connection count grew after a second add/remove cycle"

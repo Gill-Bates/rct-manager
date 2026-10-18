@@ -248,8 +248,7 @@ def _plan_identity_resets(
     Pure reads: nothing is mutated here, so the plan for the whole set is computed before any single
     device is touched. Evidence and the operating mode were given for the OLD physical device, so a
     device_id freed or re-addressed by this reconfiguration must not carry them onto whatever device
-    now answers at that id. ``reset_ids`` is only populated when dispatch is live, so an empty set
-    (dispatch disabled) plans nothing.
+    now answers at that id. When dispatch is disabled, this plans nothing.
     """
     if runtime.dispatch is None:
         return []

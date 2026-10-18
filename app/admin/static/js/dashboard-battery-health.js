@@ -247,6 +247,6 @@
 
   window.RCTDashboardBatteryHealth = Object.freeze({ sync, resize: () => chart?.resize() });
   setInterval(() => { if (!document.hidden && anyVisible()) void refresh(); }, REFRESH_MS);
-  document.addEventListener('rct-theme-change', syncTheme);
+  window.addEventListener('rct-theme-change', syncTheme);
   sync();
 })();

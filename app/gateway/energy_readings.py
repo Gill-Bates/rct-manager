@@ -52,9 +52,9 @@ class RctEnergyReadings:
     def reset_devices(self, device_ids: list[str]) -> None:
         """Forget learned PV strings after a device is removed or re-addressed."""
         reset_ids = set(device_ids)
-        self._seen_strings.difference_update(
-            pair for pair in self._seen_strings if pair[0] in reset_ids
-        )
+        self._seen_strings = {
+            pair for pair in self._seen_strings if pair[0] not in reset_ids
+        }
 
     def readings(self, device_id: str) -> EnergyReadings:
         return EnergyReadings(
