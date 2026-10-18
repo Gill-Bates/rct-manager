@@ -200,7 +200,7 @@
     try {
       const query = new URLSearchParams();
       for (const part of parts) query.append('include', part);
-      const data = await window.RCTAdmin.api(`energy/dashboard-forecast?${query}`, { signal: controller.signal });
+      const data = await window.RCTAdmin.api(`energy/dashboard-forecast?${query}`, { signal: controller.signal, background: true });
       if (generation === thisGeneration && ids.some(visible)) {
         render(data);
         // Retry only the parts the server actually reported as still spooling up. Each projection
@@ -213,6 +213,10 @@
       }
     } catch (error) {
       if (generation !== thisGeneration) return;
+      if (error?.rateLimited) { // keep what is drawn and retry once the rate-limit cooldown ended
+        setTimeout(() => { if (!document.hidden && ids.some(visible)) void refresh(); }, window.RCTAdmin.pollDelay(5000));
+        return;
+      }
       const message = window.RCTAdmin.messageFrom(error);
       for (const id of ids.filter(visible)) {
         if (chartIds.includes(id)) { destroy(id); node(`${id}-state`).textContent = message; }
@@ -225,6 +229,7 @@
 
   function sync() {
     window.RCTDashboardChargingSchedule?.sync();
+    window.RCTDashboardBatteryHealth?.sync();
     for (const id of chartIds) if (!visible(id)) destroy(id);
     if (controller && requestedParts().join(',') !== selection) {
       controller.abort(); controller = null; generation++;
@@ -235,8 +240,8 @@
 
   window.RCTDashboardForecast = Object.freeze({
     sync, chartLibrary: ensureChartLibrary,
-    resize: () => { charts.forEach((chart) => chart.resize()); window.RCTDashboardChargingSchedule?.resize(); },
+    resize: () => { charts.forEach((chart) => chart.resize()); window.RCTDashboardChargingSchedule?.resize(); window.RCTDashboardBatteryHealth?.resize(); },
   });
-  setInterval(() => { if (ids.some(visible)) void refresh(); }, 5 * 60 * 1000);
+  setInterval(() => { if (!document.hidden && ids.some(visible)) void refresh(); }, 5 * 60 * 1000);
   sync();
 })();

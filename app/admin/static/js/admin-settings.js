@@ -12,6 +12,7 @@
   const settingFields = [
     { key: 'docs_public', label: 'API documentation', help: 'Serve the public API documentation at /docs.', group: 'Access', type: 'toggle' },
     { key: 'auth_required', label: 'Authentication required', help: 'Protects REST API requests with a bearer token. Does not affect this admin panel, which always requires login.', group: 'Access', type: 'toggle' },
+    { key: 'session_max_days', label: 'GUI session (days)', help: '0 = unlimited', group: 'Session', type: 'number', min: 0, max: 7 },
     { key: 'enable_metrics_endpoint', label: 'Enable Metrics Endpoint', help: 'Serve the metrics at the Prometheus endpoint (/metrics).', group: 'Prometheus', type: 'toggle' },
     { key: 'metrics_require_token', label: 'Require token for metrics', help: 'Require a read token to scrape /metrics, except for trusted scrape peers.', group: 'Prometheus', type: 'toggle', requires: 'enable_metrics_endpoint' },
     { key: 'metrics_trusted_sources', label: 'Trusted scrape peers', help: 'IP addresses or CIDR networks, comma separated. These peers bypass the metrics token requirement.', group: 'Prometheus', type: 'list', requires: 'enable_metrics_endpoint' },

@@ -458,6 +458,43 @@ def test_sufficient_local_data_produces_a_dry_run_plan() -> None:
     assert result.forecast_confidence == "normal"
 
 
+def test_dry_run_result_carries_the_battery_snapshot_the_plan_was_built_from() -> None:
+    calls: list[int] = []
+
+    class CountingBattery(_BatteryProvider):
+        def current(self):
+            calls.append(1)
+            return super().current()
+
+    expected = _provider().current()
+    result = build_dry_run_plan(
+        now=NOW,
+        battery_provider=CountingBattery(),
+        consumption_provider=_ConsumptionProvider(well_covered=50, coverage=1.0, coverage_hours=36.0),
+        inputs=DryRunInputs(prices=_prices(36.0), solar=_solar(36.0), spot_enabled=True, solar_configurable=True),
+        baseline_household_load_w=620.0,
+    )
+    assert result.status is PlanStatus.OK
+    assert result.battery_state == expected
+    assert len(calls) == 1  # one read per build: the preview never queries the battery again
+
+
+def test_unverified_battery_yields_no_battery_snapshot() -> None:
+    class Missing:
+        def current(self):
+            raise BatteryCapacityUnavailable("no verified capacity")
+
+    result = build_dry_run_plan(
+        now=NOW,
+        battery_provider=Missing(),
+        consumption_provider=_ConsumptionProvider(well_covered=50, coverage=1.0),
+        inputs=DryRunInputs(prices=_prices(36.0), solar=_solar(36.0), spot_enabled=True, solar_configurable=True),
+        baseline_household_load_w=620.0,
+    )
+    assert result.status is PlanStatus.BATTERY_STATE_UNAVAILABLE
+    assert result.battery_state is None
+
+
 # --- P2-1/P2-2/P3-1 through the REAL HistoricalConsumptionForecaster (not the fake provider) ----
 
 from app.optimizer.consumption import HistoricalConsumptionForecaster, HistoryBucket

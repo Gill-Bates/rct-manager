@@ -123,11 +123,21 @@
     return exportRequiredKeys(type).every(exportFieldFilled) && exportPairsReady(type);
   }
 
-  // The fields currently shown for the active backend; mirrors the filter in renderExportSettings.
+  // Single visibility rule for rendering, dirty detection and the payload. Hidden fields keep their
+  // unsaved draft (re-showing restores it) but are neither compared nor sent, so a field the user
+  // cannot see can never leave Apply enabled with nothing to resolve it. While the export is off
+  // only the switch itself counts, because applying a disabled export sends nothing else.
+  function exportFieldVisible(field, type) {
+    if (field.key !== 'metrics_export_enabled' && !settingsDraft.metrics_export_enabled) return false;
+    if ((field.backend && field.backend !== type) || (field.any && !type)) return false;
+    if (field.key === 'questdb_raw_retention_days' && settingsDraft.questdb_downsampling !== 'manual') return false;
+    if (field.key === 'questdb_retention_days' && settingsDraft.questdb_downsampling === 'manual') return false;
+    return true;
+  }
+
+  // The fields currently shown for the active backend.
   function exportPayloadKeys(type) {
-    return exportFields
-      .filter((field) => exportFieldKnown(field) && !((field.backend && field.backend !== type) || (field.any && !type)))
-      .map((field) => field.key);
+    return exportFields.filter((field) => exportFieldKnown(field) && exportFieldVisible(field, type)).map((field) => field.key);
   }
 
   function labelOf(key) { return exportFields.find((field) => field.key === key)?.label || key; }
@@ -257,12 +267,6 @@
   function renderExportSettings(host) {
     const rerender = () => preserveFocus(render);
     const knownField = (key) => exportFields.find((field) => field.key === key && exportFieldKnown(field));
-    const fieldVisible = (field, type) => {
-      if ((field.backend && field.backend !== type) || (field.any && !type)) return false;
-      if (field.key === 'questdb_raw_retention_days' && settingsDraft.questdb_downsampling !== 'manual') return false;
-      if (field.key === 'questdb_retention_days' && settingsDraft.questdb_downsampling === 'manual') return false;
-      return true;
-    };
     const card = (name, title, nodes, extraClass = '') => {
       const section = element('section', `card export-card export-card-${name} ${extraClass}`.trim());
       const body = element('div', 'card-body');
@@ -271,7 +275,7 @@
       return section;
     };
     const groupCard = (group, title, type) => card(group.toLowerCase(), title,
-      exportFields.filter((field) => exportGroup(field.key) === group && exportFieldKnown(field) && fieldVisible(field, type))
+      exportFields.filter((field) => exportGroup(field.key) === group && exportFieldKnown(field) && exportFieldVisible(field, type))
         .map((field) => exportControl(field, rerender)));
     // The live log stream is tied to the console node currently on screen. Each render replaces that
     // node, so the previous node's subscription is torn down first; when the console is not shown

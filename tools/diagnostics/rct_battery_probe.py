@@ -68,7 +68,10 @@ CAPACITY_NAMES = (
 TOWER1_CHARACTERIZATION = ("battery_soc", "battery_voltage")
 TOWER2_CHARACTERIZATION = ("battery_placeholder_0_soc", "battery_placeholder_0_voltage")
 ENERGY_NAMES = ("battery_stored_energy", "battery_used_energy")  # characterization only
-IDENTITY_NAMES = ("android_description", "svnversion")  # model / firmware; no serial number
+IDENTITY_NAMES = (
+    "android_description",
+    "svnversion",
+)  # model / firmware; no serial number
 READ_COMMANDS = frozenset({Command.READ})
 INVASIVE_COMMANDS = frozenset({Command.READ, Command.READ_PERIODICALLY})
 CONFIRM_INVASIVE = "--i-understand-this-registers-periodic-reads"
@@ -114,7 +117,14 @@ class Probe:
         return time.monotonic() - self.start
 
     def log_event(self, kind: str, **data: Any) -> None:
-        self.events.append({"t_s": round(self.t(), 3), "kind": kind, "epoch": self.endpoint.connection_epoch, **data})
+        self.events.append(
+            {
+                "t_s": round(self.t(), 3),
+                "kind": kind,
+                "epoch": self.endpoint.connection_epoch,
+                **data,
+            }
+        )
 
 
 class _EventHandler(logging.Handler):
@@ -126,7 +136,9 @@ class _EventHandler(logging.Handler):
 
     def emit(self, record: logging.LogRecord) -> None:
         text = record.getMessage()
-        if not text.startswith(("Connection to", "Initial connection", "Endpoint ", "Bootloader")):
+        if not text.startswith(
+            ("Connection to", "Initial connection", "Endpoint ", "Bootloader")
+        ):
             return
         match = _DROP_RE.search(text)
         self._probe.log_event(
@@ -142,7 +154,9 @@ def install_command_guard(endpoint: Any, allowed: frozenset[Command]) -> None:
 
     async def guarded(request: TransactionRequest, **kwargs: Any):
         if request.frame.command not in allowed:
-            raise RuntimeError(f"command guard: refused command 0x{int(request.frame.command):02x}")
+            raise RuntimeError(
+                f"command guard: refused command 0x{int(request.frame.command):02x}"
+            )
         return await original(request, **kwargs)
 
     endpoint.execute = guarded
@@ -162,22 +176,35 @@ async def timed_read(probe: Probe, name: str, phase: str) -> dict:
     """One normal READ (uncached, budget-exempt) with timing, epoch and reconnect bookkeeping."""
     entry = probe.catalog.object_entry(name)
     epoch_before = probe.endpoint.connection_epoch
-    drops_before = sum(1 for e in probe.events if e["kind"] == "connection_dropped_no_response")
+    drops_before = sum(
+        1 for e in probe.events if e["kind"] == "connection_dropped_no_response"
+    )
     started_abs = probe.t()
     started = time.monotonic()
     status, code, value, unit, stamp = "success", "", None, entry.unit, None
     try:
         reading = await probe.gateway.read_system(probe.device_id, name)
-        value, unit, stamp = reading.value, reading.unit, reading.measured_at.isoformat()
+        value, unit, stamp = (
+            reading.value,
+            reading.unit,
+            reading.measured_at.isoformat(),
+        )
     except Exception as exc:  # noqa: BLE001  # every failure is data here
         status, code = _status_for(exc)
     duration = time.monotonic() - started
     epoch_after = probe.endpoint.connection_epoch
     if epoch_after != epoch_before or epoch_after not in probe.epoch_first_seen:
         probe.epoch_first_seen.setdefault(epoch_after, started_abs)
-    dropped = sum(1 for e in probe.events if e["kind"] == "connection_dropped_no_response") > drops_before
+    dropped = (
+        sum(1 for e in probe.events if e["kind"] == "connection_dropped_no_response")
+        > drops_before
+    )
     raw = value
-    if isinstance(value, int | float) and not isinstance(value, bool) and entry.scale != 1.0:
+    if (
+        isinstance(value, int | float)
+        and not isinstance(value, bool)
+        and entry.scale != 1.0
+    ):
         raw = value / entry.scale
     row = {
         "phase": phase,
@@ -192,7 +219,9 @@ async def timed_read(probe: Probe, name: str, phase: str) -> dict:
         "duration_s": round(duration, 3),
         "t_since_start_s": round(started_abs, 3),
         "t_since_connect_s": round(started_abs - probe.connect_at, 3),
-        "t_since_epoch_s": round(started_abs - probe.epoch_first_seen.get(epoch_after, started_abs), 3),
+        "t_since_epoch_s": round(
+            started_abs - probe.epoch_first_seen.get(epoch_after, started_abs), 3
+        ),
         "epoch_before": epoch_before,
         "epoch_after": epoch_after,
         "reconnect_triggered": dropped,
@@ -215,13 +244,17 @@ async def periodic_registration_probe(probe: Probe, name: str, phase: str) -> di
     """
     entry = probe.catalog.object_entry(name)
     epoch_before = probe.endpoint.connection_epoch
-    drops_before = sum(1 for e in probe.events if e["kind"] == "connection_dropped_no_response")
+    drops_before = sum(
+        1 for e in probe.events if e["kind"] == "connection_dropped_no_response"
+    )
     started_abs = probe.t()
     started = time.monotonic()
     probe.endpoint.register_periodic(probe.device_key, entry.object_id)
     request = TransactionRequest(
         probe.device_key,
-        make_frame(probe.device_key.network_id, Command.READ_PERIODICALLY, entry.object_id),
+        make_frame(
+            probe.device_key.network_id, Command.READ_PERIODICALLY, entry.object_id
+        ),
         TransactionOrigin.SYSTEM_READ,
         "read",
         SystemClock().now(),
@@ -237,7 +270,10 @@ async def periodic_registration_probe(probe: Probe, name: str, phase: str) -> di
         status, code = _status_for(exc)
     finally:
         probe.endpoint.unregister_periodic(probe.device_key, entry.object_id)
-    dropped = sum(1 for e in probe.events if e["kind"] == "connection_dropped_no_response") > drops_before
+    dropped = (
+        sum(1 for e in probe.events if e["kind"] == "connection_dropped_no_response")
+        > drops_before
+    )
     row = {
         "phase": phase,
         "metric": name,
@@ -274,7 +310,9 @@ def topology(probe: Probe, passes: int) -> dict:
         populated = raw["populated_module_slots"]
         towers[key] = {
             "prefix": prefix,
-            "present": _battery_tower_present(runtime, probe.device_id, prefix, populated),
+            "present": _battery_tower_present(
+                runtime, probe.device_id, prefix, populated
+            ),
             "slot_states": states,
             "populated_module_slots": populated,  # slot indices only; serial numbers are not printed
             "module_count": raw["module_count"],
@@ -285,7 +323,9 @@ def topology(probe: Probe, passes: int) -> dict:
 
 
 def periodic_set_status(probe: Probe, exposed: list[str] | None) -> dict:
-    settings = Settings(_env_file=None, hmac_secret=secrets.token_urlsafe(32), devices=[])
+    settings = Settings(
+        _env_file=None, hmac_secret=secrets.token_urlsafe(32), devices=[]
+    )
     names = _effective_periodic_names(settings, probe.catalog, exposed)
     return {
         "basis": "repository defaults" if exposed is None else "--exposed-names",
@@ -299,25 +339,42 @@ def periodic_set_status(probe: Probe, exposed: list[str] | None) -> dict:
 def classify(soc_reads: list[dict], periodic: list[dict], invasive: bool) -> dict:
     normal = [r for r in soc_reads if r.get("command") != "READ_PERIODICALLY"]
     bad = [r for r in normal if r["status"] != "success"]
-    base = {"normal_reads": len(normal), "normal_failures": len(bad), "invasive": invasive}
+    base = {
+        "normal_reads": len(normal),
+        "normal_failures": len(bad),
+        "invasive": invasive,
+    }
     if not normal and not periodic:
         label, why = "undecided", "no battery_soc_target read was made"
     elif normal and len(bad) == len(normal):
         label, why = "C" if invasive else "read_unstable", "every normal READ failed"
     elif bad and all(r["t_since_connect_s"] < 45 for r in bad):
-        label, why = "B" if invasive else "read_unstable_early", "normal READs failed only early after connect"
+        label, why = (
+            "B" if invasive else "read_unstable_early"
+        ), "normal READs failed only early after connect"
     elif bad:
-        label, why = "undecided" if invasive else "read_unstable_mixed", "normal READs failed at mixed times"
+        label, why = (
+            "undecided" if invasive else "read_unstable_mixed"
+        ), "normal READs failed at mixed times"
     elif not invasive:
-        label, why = "read_ok", "every normal READ succeeded; periodic behaviour is not tested in this mode"
+        label, why = (
+            "read_ok",
+            "every normal READ succeeded; periodic behaviour is not tested in this mode",
+        )
     else:
         per_bad = [r for r in periodic if r["status"] != "success"]
         if per_bad:
-            label, why = "A", "normal READs succeeded while the periodic registration failed"
+            label, why = (
+                "A",
+                "normal READs succeeded while the periodic registration failed",
+            )
         elif periodic:
             label, why = "D", "no problem reproduced in this run"
         else:
-            label, why = "D?", "normal READs succeeded; no periodic registration was made"
+            label, why = (
+                "D?",
+                "normal READs succeeded; no periodic registration was made",
+            )
         base.update(periodic_probes=len(periodic), periodic_failures=len(per_bad))
     legend = (
         "Hint from one run, not a decision. Cases A-D need the periodic comparison (invasive mode only)."
@@ -344,7 +401,9 @@ async def run(args: argparse.Namespace) -> dict:
     clock = SystemClock()
     gateway, catalog, parts, _coordinator = _build(settings, clock, None)
     endpoint, serializer = parts.endpoints[0], parts.serializers[0]
-    install_command_guard(endpoint, INVASIVE_COMMANDS if args.invasive_periodic_test else READ_COMMANDS)
+    install_command_guard(
+        endpoint, INVASIVE_COMMANDS if args.invasive_periodic_test else READ_COMMANDS
+    )
     key = parts.device_endpoints[0][0].key
     probe = Probe(gateway, catalog, endpoint, entry.device_id, key)
     logger = logging.getLogger("app.transport.endpoint")
@@ -367,19 +426,31 @@ async def run(args: argparse.Namespace) -> dict:
         for index, offset in enumerate(offsets):
             await asyncio.sleep(max(0.0, probe.connect_at + offset - probe.t()))
             if index == 0 and args.invasive_periodic_first:
-                row = await periodic_registration_probe(probe, SOC_TARGET, f"soc_T+{offset:g}_periodic")
+                row = await periodic_registration_probe(
+                    probe, SOC_TARGET, f"soc_T+{offset:g}_periodic"
+                )
                 periodic_rows.append(row)
                 soc_reads.append(row)
             else:
-                soc_reads.append(await timed_read(probe, SOC_TARGET, f"soc_T+{offset:g}"))
+                soc_reads.append(
+                    await timed_read(probe, SOC_TARGET, f"soc_T+{offset:g}")
+                )
             if not args.skip_household:
-                household.append(await timed_read(probe, HOUSEHOLD, f"household_T+{offset:g}"))
-        capacity = {name: await timed_read(probe, name, "capacity") for name in CAPACITY_NAMES}
+                household.append(
+                    await timed_read(probe, HOUSEHOLD, f"household_T+{offset:g}")
+                )
+        capacity = {
+            name: await timed_read(probe, name, "capacity") for name in CAPACITY_NAMES
+        }
         passes = 0
         towers: dict = {}
         if not args.skip_topology:
-            for _ in range(6):  # an unanswered slot needs three failed passes; a second tower starts one pass later
-                sent = await gateway.read_module_inventory(entry.device_id, _MODULE_INVENTORY_NAMES)
+            for _ in range(
+                6
+            ):  # an unanswered slot needs three failed passes; a second tower starts one pass later
+                sent = await gateway.read_module_inventory(
+                    entry.device_id, _MODULE_INVENTORY_NAMES
+                )
                 passes += 1
                 probe.log_event("inventory_pass", reads_sent=sent)
                 if not sent:
@@ -390,11 +461,17 @@ async def run(args: argparse.Namespace) -> dict:
             characterization[name] = await timed_read(probe, name, "characterization")
         if towers.get("tower_2", {}).get("present"):
             for name in TOWER2_CHARACTERIZATION:
-                characterization[name] = await timed_read(probe, name, "characterization")
+                characterization[name] = await timed_read(
+                    probe, name, "characterization"
+                )
         if args.with_energy:
             for name in ENERGY_NAMES:
-                characterization[name] = await timed_read(probe, name, "characterization")
-        identity = {name: await timed_read(probe, name, "identity") for name in IDENTITY_NAMES}
+                characterization[name] = await timed_read(
+                    probe, name, "characterization"
+                )
+        identity = {
+            name: await timed_read(probe, name, "identity") for name in IDENTITY_NAMES
+        }
         if args.invasive_periodic_test:
             for name in (SOC_TARGET, *(() if args.skip_household else (HOUSEHOLD,))):
                 row = await periodic_registration_probe(probe, name, f"periodic_{name}")
@@ -409,7 +486,9 @@ async def run(args: argparse.Namespace) -> dict:
             if args.invasive_periodic_test
             else "No periodic registration was made (default mode)."
         )
-        for row in identity.values():  # device identity: text values only, no serial number
+        for (
+            row
+        ) in identity.values():  # device identity: text values only, no serial number
             row.pop("raw_value", None)
         result = {
             "device": {
@@ -428,7 +507,9 @@ async def run(args: argparse.Namespace) -> dict:
             "household_load_power_reads": household,
             "periodic_status": periodic,
             "connection_events": probe.events,
-            "classification_hint": classify(soc_reads, periodic_rows, args.invasive_periodic_test),
+            "classification_hint": classify(
+                soc_reads, periodic_rows, args.invasive_periodic_test
+            ),
             "all_reads": probe.reads,
         }
         return result
@@ -441,7 +522,11 @@ async def run(args: argparse.Namespace) -> dict:
 def _mode_label(args: argparse.Namespace) -> str:
     if not args.invasive_periodic_test:
         return "read-only"
-    return "INVASIVE periodic-first" if args.invasive_periodic_first else "INVASIVE read-first"
+    return (
+        "INVASIVE periodic-first"
+        if args.invasive_periodic_first
+        else "INVASIVE read-first"
+    )
 
 
 def render_text(result: dict) -> str:
@@ -453,14 +538,21 @@ def render_text(result: dict) -> str:
     out.append(f"Mode: {dev['mode']}")
     if result["classification_hint"]["invasive"]:
         out.append(INVASIVE_BANNER)
-    out.append("\nTopology (derived from module serial slots, not from numeric battery values):")
+    out.append(
+        "\nTopology (derived from module serial slots, not from numeric battery values):"
+    )
     for key, tower in result["topology"].items():
         out.append(
             f"  {key}: present={tower['present']} modules={tower['module_count']} "
             f"({tower['module_count_status']}) populated_slots={tower['populated_module_slots']}"
         )
-    out.append("\nCapacity candidates / side-by-side (no interpretation, nothing is released as capacity):")
-    for name, row in {**result["capacity_candidates"], **result["characterization_only"]}.items():
+    out.append(
+        "\nCapacity candidates / side-by-side (no interpretation, nothing is released as capacity):"
+    )
+    for name, row in {
+        **result["capacity_candidates"],
+        **result["characterization_only"],
+    }.items():
         out.append(
             f"  {name:<36} {row['object_id']} {row['status']:<14} value={row['value']} {row['unit']} ({row['duration_s']}s)"
         )
@@ -486,7 +578,9 @@ def render_text(result: dict) -> str:
         )
     out.append("\nConnection events:")
     for ev in result["connection_events"]:
-        out.append(f"  {ev['t_s']:8.1f}s epoch={ev['epoch']} {ev['kind']} {ev.get('object_id') or ''}")
+        out.append(
+            f"  {ev['t_s']:8.1f}s epoch={ev['epoch']} {ev['kind']} {ev.get('object_id') or ''}"
+        )
     hint = result["classification_hint"]
     out.append(f"\nHint: {hint['hint']} - {hint['reason']}\n{hint['legend']}")
     return "\n".join(out)
@@ -494,7 +588,11 @@ def render_text(result: dict) -> str:
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    p.add_argument("--device", required=True, help="id=host:port[@network_id] (same syntax as DEVICES)")
+    p.add_argument(
+        "--device",
+        required=True,
+        help="id=host:port[@network_id] (same syntax as DEVICES)",
+    )
     p.add_argument(
         "--confirm-app-stopped",
         action="store_true",
@@ -525,7 +623,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         action="store_true",
         help="acknowledge that the invasive test changes the device's subscription state",
     )
-    p.add_argument("--with-energy", action="store_true", help="also read battery_stored_energy/used_energy")
+    p.add_argument(
+        "--with-energy",
+        action="store_true",
+        help="also read battery_stored_energy/used_energy",
+    )
     p.add_argument("--skip-topology", action="store_true")
     p.add_argument("--skip-household", action="store_true")
     p.add_argument(
@@ -538,11 +640,15 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument("--csv-out", type=Path)
     args = p.parse_args(argv)
     if not args.confirm_app_stopped:
-        p.error("--confirm-app-stopped is required (only one connection per device is allowed)")
+        p.error(
+            "--confirm-app-stopped is required (only one connection per device is allowed)"
+        )
     if args.invasive_periodic_first and not args.invasive_periodic_test:
         p.error("--invasive-periodic-first requires --invasive-periodic-test")
     if args.invasive_periodic_test and not args.confirm_invasive:
-        p.error(f"--invasive-periodic-test registers READ_PERIODICALLY on the device; add {CONFIRM_INVASIVE}")
+        p.error(
+            f"--invasive-periodic-test registers READ_PERIODICALLY on the device; add {CONFIRM_INVASIVE}"
+        )
     return args
 
 
@@ -551,10 +657,16 @@ def main(argv: list[str] | None = None) -> int:
     result = asyncio.run(run(args))
     print(render_text(result))
     if args.json_out:
-        args.json_out.write_text(json.dumps(result, indent=2, default=str), encoding="utf-8")
+        args.json_out.write_text(
+            json.dumps(result, indent=2, default=str), encoding="utf-8"
+        )
     if args.csv_out:
         with args.csv_out.open("w", newline="", encoding="utf-8") as fh:
-            writer = csv.DictWriter(fh, fieldnames=[*CSV_FIELDS, "t_since_epoch_s", "command"], extrasaction="ignore")
+            writer = csv.DictWriter(
+                fh,
+                fieldnames=[*CSV_FIELDS, "t_since_epoch_s", "command"],
+                extrasaction="ignore",
+            )
             writer.writeheader()
             writer.writerows(result["all_reads"])
     return 0

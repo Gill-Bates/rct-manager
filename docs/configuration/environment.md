@@ -5,43 +5,41 @@ settings saved through the GUI are persisted in `data/rct.db`. `HMAC_SECRET`
 always stays outside the database. Timeouts, retries, cache, limits and intervals
 remain fixed in code.
 
-A set variable that is an internal setting but not one of these operator names is
-logged once at start (never its value). Completely unknown variables are
-ignored.
+A set variable that is an internal setting but not one of these names is logged once at start
+(never its value); unknown variables are ignored.
 
-| Variable | Default | Meaning |
-| --- | --- | --- |
-| `HMAC_SECRET` | generated locally | Stable secret, at least 32 characters (`openssl rand -base64 32`); provide before Docker startup. The old name `ADMIN_SECRET` still works but logs a deprecation warning |
-| `ADMIN_DB_PATH` | `<project>/data/rct.db` | Location of the encrypted admin database |
-| `DISPATCH_DB_PATH` | `<project>/data/rct-dispatch.db` | Location of the encrypted, crash-durable dispatch state database |
-| `DISPATCH_MAX_CHARGE_POWER_W` | unset | Verified maximum grid-charge power; required for dispatch |
-| `DISPATCH_MAX_DISCHARGE_POWER_W` | unset | Verified maximum load-following discharge power; required for dispatch |
-| `DISPATCH_USABLE_BATTERY_CAPACITY_WH` | unset | Legacy seed only: initial per-device usable capacity (Wh) where no capacity is stored. It is treated as a persisted Expert override, not an automatically verified battery fact. No verified automatic Wh source is connected yet; without a stored capacity the Dry-Run plan reports `battery_state_unavailable` |
-| `BIND_ADDRESS` | `127.0.0.1` | Listen address |
-| `BIND_PORT` | `8000` | Listen port, 1024 to 65535 |
-| `ALLOW_NON_LOOPBACK_BIND` | `false` | Explicit consent for a non-loopback listener; does not provide TLS or secure cookies. Compose sets it while publishing only on host loopback |
-| `DOCS_PUBLIC` | `false` | `true`: serve `/docs` and `/openapi.json` without a token; `false`: both return 404 on every bind address |
-| `LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING` or `ERROR` |
-| `TRUSTED_PROXIES` | empty | Networks (CIDR, comma separated, at most 32) of reverse proxies whose forwarding header is trusted |
-| `FORWARDED_HEADER` | empty | Single-address header set by the proxy, for example `X-Forwarded-For`; requires `TRUSTED_PROXIES`. `Forwarded` (RFC 7239) is rejected |
-| `ENABLE_METRICS_ENDPOINT` | `true` | `false`: `GET /metrics` answers 404 |
-| `DB_TYPE` and `INFLUXDB_*` / `QUESTDB_*` | unset | Optional push export, see [Push export](export.md) |
-| `METRICS_EXPORT_ENABLED` | `true` | `false` pauses the push export without losing its connection settings |
-| `METRICS_EXPORT_INTERVAL_SECONDS` | `30` | Export interval in seconds, 5 to 3600 |
+| Variable                                                                        | Default                          | Meaning                                                                                                                                                                                                                                                                                                                                                                                                         |
+| ------------------------------------------------------------------------------- | -------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `HMAC_SECRET`                                                                   | generated locally                | Stable secret, at least 32 characters (`openssl rand -base64 32`); provide before Docker startup. The old name `ADMIN_SECRET` still works but logs a deprecation warning                                                                                                                                                                                                                                        |
+| `ADMIN_DB_PATH`                                                                 | `<project>/data/rct.db`          | Location of the encrypted admin database                                                                                                                                                                                                                                                                                                                                                                        |
+| `DISPATCH_DB_PATH`                                                              | `<project>/data/rct-dispatch.db` | Location of the encrypted, crash-durable dispatch state database                                                                                                                                                                                                                                                                                                                                                |
+| `DISPATCH_MAX_CHARGE_POWER_W`                                                   | unset                            | Verified maximum grid-charge power; seeds a device without stored limits. Without it (and without a stored value) dispatch uses a conservative 3 kW fallback until limits are stored in Expert mode                                                                                                                                                                                                             |
+| `DISPATCH_MAX_DISCHARGE_POWER_W`                                                | unset                            | Verified maximum load-following discharge power; same seeding and 3 kW fallback as above                                                                                                                                                                                                                                                                                                                        |
+| `DISPATCH_USABLE_BATTERY_CAPACITY_WH`                                           | unset                            | Legacy seed only: initial per-device usable capacity (Wh) where no capacity is stored. It is treated as a persisted Expert override, not an automatically verified battery fact. Without an override the capacity is derived from the battery module count and the BMS Ah readings (see [Charging Plan](../energy/charging-plan.md#usable-battery-capacity)); when neither is available the Dry-Run plan reports `battery_state_unavailable` |
+| `BIND_ADDRESS`                                                                  | `127.0.0.1`                      | Listen address                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `BIND_PORT`                                                                     | `8000`                           | Listen port, 1024 to 65535                                                                                                                                                                                                                                                                                                                                                                                      |
+| `ALLOW_NON_LOOPBACK_BIND`                                                       | `false`                          | Explicit consent for a non-loopback listener; does not provide TLS or secure cookies. Compose sets it while publishing only on host loopback                                                                                                                                                                                                                                                                    |
+| `DOCS_PUBLIC`                                                                   | `false`                          | `true`: serve `/docs` and `/openapi.json` without a token; `false`: both return 404 on every bind address                                                                                                                                                                                                                                                                                                       |
+| `LOG_LEVEL`                                                                     | `INFO`                           | `DEBUG`, `INFO`, `WARNING` or `ERROR`                                                                                                                                                                                                                                                                                                                                                                           |
+| `TRUSTED_PROXIES`                                                               | empty                            | Networks (CIDR, comma separated, at most 32) of reverse proxies whose forwarding header is trusted                                                                                                                                                                                                                                                                                                              |
+| `FORWARDED_HEADER`                                                              | empty                            | Single-address header set by the proxy, for example `X-Forwarded-For`; requires `TRUSTED_PROXIES`. `Forwarded` (RFC 7239) is rejected                                                                                                                                                                                                                                                                           |
+| `RATE_LIMIT_REQUESTS` / `RATE_LIMIT_WINDOW_SECONDS`                             | `60` / `60`                      | Request budget per token and source address for the API and for personal access tokens on `/admin/api`                                                                                                                                                                                                                                                                                                          |
+| `ADMIN_SESSION_RATE_LIMIT_REQUESTS` / `ADMIN_SESSION_RATE_LIMIT_WINDOW_SECONDS` | `600` / `60`                     | Separate request budget per source address and browser login session for the admin GUI, which polls continuously and may be open in several tabs. Login attempts and failed authentications keep their own strict limits                                                                                                                                                                                        |
+| `ENABLE_METRICS_ENDPOINT`                                                       | `true`                           | `false`: `GET /metrics` answers 404                                                                                                                                                                                                                                                                                                                                                                             |
+| `DB_TYPE` and `INFLUXDB_*` / `QUESTDB_*`                                        | unset                            | Optional push export, see [Push export](export.md)                                                                                                                                                                                                                                                                                                                                                              |
+| `METRICS_EXPORT_ENABLED`                                                        | `true`                           | `false` pauses the push export without losing its connection settings                                                                                                                                                                                                                                                                                                                                           |
+| `METRICS_EXPORT_INTERVAL_SECONDS`                                               | `30`                             | Export interval in seconds, 5 to 3600                                                                                                                                                                                                                                                                                                                                                                           |
 
-The dispatch values are deliberately not guessed. The strategy code and both sign conventions used
-to live as the three environment variables `DISPATCH_SOC_STRATEGY_EXTERNAL_CODE`,
-`DISPATCH_BATTERY_DISCHARGE_POSITIVE` and `DISPATCH_GRID_IMPORT_POSITIVE`; **this is a
-non-backward-compatible configuration change**: all three are now fields of a persisted,
-per-device capability record, set through the admin dispatch API after hardware verification, not
-through the environment. A set value for any of the three is ignored with a `WARNING` naming the
-variable (never its value). See [Operation](../operation.md#battery-dispatch-capabilities) for the
-capability workflow and the engineering-mode escape hatch.
-The dispatch database must be backed up together with `HMAC_SECRET`, just like `data/rct.db`.
+**Breaking change:** `DISPATCH_SOC_STRATEGY_EXTERNAL_CODE`, `DISPATCH_BATTERY_DISCHARGE_POSITIVE`
+and `DISPATCH_GRID_IMPORT_POSITIVE` are no longer environment variables. They are fields of a
+persisted per-device capability record, set through the admin dispatch API after hardware
+verification. A set value is ignored with a `WARNING` naming the variable (never its value). See
+[Battery Control](../energy/battery-control.md#capability-gates-and-evidence). Back up the dispatch database together
+with `HMAC_SECRET`, like `data/rct.db`.
 
 ## GUI-only settings
 
-Authentication, API tokens, devices, write support and reverse-proxy mode are set in the admin GUI. The variables `AUTH_REQUIRED`, `API_TOKENS`, `API_TOKENS_FILE`, `BEHIND_REVERSE_PROXY` and `ENABLE_WRITE_SUPPORT` are ignored with a startup warning; `DEVICES` is ignored with an `INFO` note.
+Authentication, API tokens, devices, write support and reverse-proxy mode are set in the admin GUI. `AUTH_REQUIRED`, `API_TOKENS`, `API_TOKENS_FILE`, `BEHIND_REVERSE_PROXY` and `ENABLE_WRITE_SUPPORT` are ignored with a startup warning; `DEVICES` with an `INFO` note.
 
 ## Validate a configuration
 
@@ -49,5 +47,19 @@ Authentication, API tokens, devices, write support and reverse-proxy mode are se
 python -m app validate
 ```
 
-The command checks the settings, the object registry and the write allowlist
-and exits with a non-zero status on an invalid configuration.
+Checks settings, object registry and write allowlist; exits non-zero on an invalid configuration.
+
+## Admin database and secret
+
+`HMAC_SECRET` is a stable random secret of at least 32 characters (`openssl rand -base64 32`; the
+deprecated name `ADMIN_SECRET` is still read). A local start generates it and appends it to
+`settings.env` when absent; Docker requires it up front (read-only root file system). Keep it in
+`settings.env`, never in version control.
+
+The database stores settings and credentials with Fernet authenticated encryption (AES with
+HMAC-SHA256). Passwords use a salted hash; PAT secrets are shown once and only their digests are
+kept. The GUI never displays the secret. `ADMIN_DB_PATH` overrides the location (default
+`<project>/data/rct.db`). Backup, restore and WAL details: [Operation](../operation.md#backup-and-restore).
+
+The first start prints the generated `admin` password, see
+[Authentication](authentication.md#administration-login).

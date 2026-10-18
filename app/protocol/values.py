@@ -6,11 +6,12 @@
 
 """Conversion between payload bytes and scalar values (MSBF, two's complement, IEEE 754)."""
 
+import math
 import struct
 from collections.abc import Mapping
 
-from app.errors import DecodeLengthMismatch
-from app.protocol.types import DataType
+from app.errors import DecodeLengthMismatch, ProtocolError
+from app.protocol.types import NON_WRITABLE_DATA_TYPES, DataType
 
 type ScalarValue = bool | int | float | str
 
@@ -33,6 +34,23 @@ DEFAULT_WIDTHS: Mapping[DataType, int | None] = {
 _SIGNED = frozenset({DataType.INT8, DataType.INT16, DataType.INT32})
 
 
+def integer_bounds(data_type: DataType) -> tuple[int, int] | None:
+    """Return the range of a scalar integer wire type, or None for other types."""
+    if data_type not in _SIGNED and data_type not in {
+        DataType.UINT8,
+        DataType.UINT16,
+        DataType.UINT32,
+        DataType.ENUM,
+    }:
+        return None
+    width = DEFAULT_WIDTHS[data_type]
+    assert width is not None
+    bits = 8 * width
+    if data_type in _SIGNED:
+        return -(1 << (bits - 1)), (1 << (bits - 1)) - 1
+    return 0, (1 << bits) - 1
+
+
 def decode_string(payload: bytes, encoding: str = "utf-8") -> tuple[str, int]:
     """Decode up to the first NUL; return the text and the number of replacement characters."""
     text = payload.split(b"\x00", 1)[0].decode(encoding, errors="replace")
@@ -40,7 +58,11 @@ def decode_string(payload: bytes, encoding: str = "utf-8") -> tuple[str, int]:
 
 
 def decode_value(
-    data_type: DataType, payload: bytes, *, byte_width: int | None = None, encoding: str = "utf-8"
+    data_type: DataType,
+    payload: bytes,
+    *,
+    byte_width: int | None = None,
+    encoding: str = "utf-8",
 ) -> ScalarValue:
     """Decode a payload; a length differing from the expected width raises DecodeLengthMismatch."""
     if data_type is DataType.STRUCT:
@@ -60,7 +82,10 @@ def decode_value(
     if data_type is DataType.FLOAT:
         if width != 4:
             raise ValueError("t_float is single precision (4 bytes)")
-        return struct.unpack(">f", payload)[0]
+        value = struct.unpack(">f", payload)[0]
+        if not math.isfinite(value):
+            raise ProtocolError("invalid_float")
+        return value
     raw = int.from_bytes(payload, "big", signed=data_type in _SIGNED)
     if data_type is DataType.BOOL:
         return raw != 0
@@ -68,10 +93,14 @@ def decode_value(
 
 
 def encode_value(
-    data_type: DataType, value: ScalarValue, *, byte_width: int | None = None, encoding: str = "utf-8"
+    data_type: DataType,
+    value: ScalarValue,
+    *,
+    byte_width: int | None = None,
+    encoding: str = "utf-8",
 ) -> bytes:
     """Encode a scalar; raises ValueError for a foreign type and OverflowError outside the range."""
-    if data_type in (DataType.STRUCT, DataType.TIMESERIES, DataType.EVENT_TABLE):
+    if data_type in NON_WRITABLE_DATA_TYPES:
         raise ValueError(f"{data_type.value} is not writable")
     if data_type is DataType.STRING:
         if not isinstance(value, str):
@@ -89,7 +118,13 @@ def encode_value(
             raise ValueError("t_float is single precision (4 bytes)")
         if isinstance(value, bool) or not isinstance(value, int | float):
             raise ValueError("t_float requires a numeric value")
-        return struct.pack(">f", float(value))
+        try:
+            number = float(value)
+        except OverflowError as exc:
+            raise ValueError("t_float requires a finite value") from exc
+        if not math.isfinite(number):
+            raise ValueError("t_float requires a finite value")
+        return struct.pack(">f", number)
     # Exact types only: a conversion would write a different value than the caller named.
     if data_type is DataType.BOOL:
         if type(value) is not bool:

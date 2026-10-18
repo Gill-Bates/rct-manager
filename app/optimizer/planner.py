@@ -61,7 +61,9 @@ _ENERGY_EPSILON_WH = 1.0
 # inverter's battery-power register; the object catalog does not say whether that is measured at
 # the battery terminals or on the AC side, so this stays an unverified assumption.
 POWER_REFERENCE = "power_mng_battery_power_extern is interpreted provisionally as battery-side (unverified)"
-PREFERRED_RANGE_STATUS = "unverified; a soft preference of the gentle policy, not a hard planning constraint"
+PREFERRED_RANGE_STATUS = (
+    "unverified; a soft preference of the gentle policy, not a hard planning constraint"
+)
 BATTERY_INTERNAL_LOSSES = "not modelled: terminal energy equals stored energy, usable capacity is in terminal Wh"
 
 
@@ -75,7 +77,9 @@ def planning_start(now: datetime) -> datetime:
     coverage checks anchor on the exact same instant the planner will actually start from, and the
     two cannot drift.
     """
-    aligned = now - timedelta(minutes=now.minute % 15, seconds=now.second, microseconds=now.microsecond)
+    aligned = now - timedelta(
+        minutes=now.minute % 15, seconds=now.second, microseconds=now.microsecond
+    )
     return aligned if aligned == now else aligned + SLOT
 
 
@@ -106,7 +110,10 @@ class PlanParameters:
     def __post_init__(self) -> None:
         for name in ("reserve_soc_percent", "max_soc_percent"):
             value = getattr(self, name)
-            if not math.isfinite(value) or not TARGET_SOC_MIN_PERCENT <= value <= TARGET_SOC_MAX_PERCENT:
+            if (
+                not math.isfinite(value)
+                or not TARGET_SOC_MIN_PERCENT <= value <= TARGET_SOC_MAX_PERCENT
+            ):
                 raise ValueError(f"{name} must be within the product SoC window")
         if self.reserve_soc_percent >= self.max_soc_percent:
             raise ValueError("reserve_soc_percent must be below max_soc_percent")
@@ -118,17 +125,32 @@ class PlanParameters:
             raise ValueError("target_soc_percent and target_time must be set together")
         if self.target_soc_percent is not None:
             target = self.target_soc_percent
-            if not math.isfinite(target) or not TARGET_SOC_MIN_PERCENT <= target <= TARGET_SOC_MAX_PERCENT:
-                raise ValueError("target_soc_percent must be within the product SoC window")
+            if (
+                not math.isfinite(target)
+                or not TARGET_SOC_MIN_PERCENT <= target <= TARGET_SOC_MAX_PERCENT
+            ):
+                raise ValueError(
+                    "target_soc_percent must be within the product SoC window"
+                )
             require_aware(self.target_time, "target_time")
         low, high = self.preferred_charge_power_min_w, self.preferred_charge_power_max_w
         if (low is None) != (high is None):
-            raise ValueError("the preferred charge power range needs both a minimum and a maximum")
-        invalid = low is not None and high is not None and (
-            not (math.isfinite(low) and math.isfinite(high)) or low <= 0 or high < low
+            raise ValueError(
+                "the preferred charge power range needs both a minimum and a maximum"
+            )
+        invalid = (
+            low is not None
+            and high is not None
+            and (
+                not (math.isfinite(low) and math.isfinite(high))
+                or low <= 0
+                or high < low
+            )
         )
         if invalid:
-            raise ValueError("the preferred charge power range must be finite with 0 < min <= max")
+            raise ValueError(
+                "the preferred charge power range must be finite with 0 < min <= max"
+            )
 
 
 @dataclass(slots=True)
@@ -137,13 +159,17 @@ class _Slot:
     end: datetime
     consumption_wh: float = 0.0
     solar_wh: float = 0.0
-    price: float | None = None  # relative ranking only (day-ahead, not full household price)
+    price: float | None = (
+        None  # relative ranking only (day-ahead, not full household price)
+    )
     charge_wh: float = 0.0  # commanded grid-charge energy the plan places here
     action: EnergyAction = EnergyAction.IDLE
     reason: str = ""
     for_reserve: bool = False  # charge placed to cover a reserve deficit
     for_target: bool = False  # charge placed to reach the target SoC
-    floor_extra_wh: float = 0.0  # commanded energy beyond the need, from the preferred minimum
+    floor_extra_wh: float = (
+        0.0  # commanded energy beyond the need, from the preferred minimum
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -229,7 +255,9 @@ class DynamicChargeOptimizer:
             max_discharge_wh=limits.max_discharge_wh,
         )
 
-    def _soc_entering(self, slots: list["_Slot"], index: int, start_wh: float, limits: "_Limits") -> float:
+    def _soc_entering(
+        self, slots: list["_Slot"], index: int, start_wh: float, limits: "_Limits"
+    ) -> float:
         """SoC entering ``slots[index]`` after walking every earlier slot through :meth:`_step_slot`."""
         soc_wh = start_wh
         for position in range(index):
@@ -247,16 +275,22 @@ class DynamicChargeOptimizer:
         now = planning_input.now
         battery = planning_input.battery
         slots = self._build_grid(now, planning_input.horizon)
-        self._fill_forecasts(slots, planning_input.consumption_forecast, planning_input.solar_forecast)
+        self._fill_forecasts(
+            slots, planning_input.consumption_forecast, planning_input.solar_forecast
+        )
         self._fill_prices(slots, planning_input)
         capacity_wh = battery.usable_capacity_wh
         limits = self._limits(battery)
-        start_wh = min(limits.max_wh, max(0.0, battery.soc_percent / 100.0 * capacity_wh))
+        start_wh = min(
+            limits.max_wh, max(0.0, battery.soc_percent / 100.0 * capacity_wh)
+        )
         envelope = self._envelope(battery)
         outcome = self._plan_charging(slots, start_wh, limits, envelope, capacity_wh)
         self._label(slots)
         plan_slots = self._merge(slots, battery, capacity_wh)
-        return self._build_plan(planning_input, slots, plan_slots, outcome, envelope, limits, start_wh)
+        return self._build_plan(
+            planning_input, slots, plan_slots, outcome, envelope, limits, start_wh
+        )
 
     def _limits(self, battery: BatteryState) -> _Limits:
         """The shared trajectory limits; the charge ceiling is the permitted (hard) power."""
@@ -266,13 +300,17 @@ class DynamicChargeOptimizer:
             max_wh=self._params.max_soc_percent / 100.0 * capacity_wh,
             max_charge_wh=battery.permitted_charge_power_w * _SLOT_HOURS,
             max_discharge_wh=battery.max_discharge_power_w * _SLOT_HOURS,
-            min_command_wh=(self._envelope(battery).preferred_min_w or 0.0) * _SLOT_HOURS,
+            min_command_wh=(self._envelope(battery).preferred_min_w or 0.0)
+            * _SLOT_HOURS,
         )
 
     def _envelope(self, battery: BatteryState) -> ChargePowerEnvelope:
         """Permitted power (hard) and the confirmed preferred range clamped into it."""
         permitted = battery.permitted_charge_power_w
-        low, high = self._params.preferred_charge_power_min_w, self._params.preferred_charge_power_max_w
+        low, high = (
+            self._params.preferred_charge_power_min_w,
+            self._params.preferred_charge_power_max_w,
+        )
         if low is not None and high is not None:
             high = min(high, permitted)
             low = min(low, high)
@@ -286,11 +324,15 @@ class DynamicChargeOptimizer:
         )
 
     @staticmethod
-    def forecast_series(planning_input: PlanningInput) -> tuple[SlotSeries, SlotSeries, SlotSeries]:
+    def forecast_series(
+        planning_input: PlanningInput,
+    ) -> tuple[SlotSeries, SlotSeries, SlotSeries]:
         """Per-slot prices, solar and consumption exactly as the planner sees them (for replanning)."""
         planner = DynamicChargeOptimizer()
         slots = planner._build_grid(planning_input.now, planning_input.horizon)
-        planner._fill_forecasts(slots, planning_input.consumption_forecast, planning_input.solar_forecast)
+        planner._fill_forecasts(
+            slots, planning_input.consumption_forecast, planning_input.solar_forecast
+        )
         planner._fill_prices(slots, planning_input)
         return (
             tuple((slot.start, slot.price) for slot in slots),
@@ -307,18 +349,25 @@ class DynamicChargeOptimizer:
         charged with a full quarter-hour of energy (constant :data:`_SLOT_HOURS`), producing a plan
         the battery cannot physically reach, so the already-elapsed remainder is dropped instead. The
         boundary is :func:`planning_start`, shared with the adapter's coverage anchoring.
+
+        The horizon upper bound is END-bounded, the canonical rule shared with
+        :func:`app.optimizer.align.build_grid`: only full 15-minute slots whose ``end`` does not
+        exceed ``now + horizon`` are emitted, so the last slot never overruns the requested horizon
+        and the two :class:`EnergyOptimizer` implementations are substitutable at the horizon edge.
         """
         first = planning_start(now)
         slots: list[_Slot] = []
         start = first
         horizon_end = now + horizon
-        while start < horizon_end:
+        while start + SLOT <= horizon_end:
             slots.append(_Slot(start=start, end=start + SLOT))
             start += SLOT
         return slots
 
     @staticmethod
-    def _overlap_energy(slot: _Slot, start: datetime, end: datetime, energy_wh: float) -> float:
+    def _overlap_energy(
+        slot: _Slot, start: datetime, end: datetime, energy_wh: float
+    ) -> float:
         """The share of a forecast interval's energy that falls inside ``slot`` (time-proportional)."""
         lo = max(slot.start, start)
         hi = min(slot.end, end)
@@ -334,11 +383,15 @@ class DynamicChargeOptimizer:
     ) -> None:
         for slot in slots:
             slot.consumption_wh = sum(
-                self._overlap_energy(slot, interval.start, interval.end, interval.energy_wh)
+                self._overlap_energy(
+                    slot, interval.start, interval.end, interval.energy_wh
+                )
                 for interval in consumption.intervals
             )
             slot.solar_wh = sum(
-                self._overlap_energy(slot, interval.start, interval.end, interval.energy_wh)
+                self._overlap_energy(
+                    slot, interval.start, interval.end, interval.energy_wh
+                )
                 for interval in solar.intervals
             )
 
@@ -356,7 +409,12 @@ class DynamicChargeOptimizer:
             slot.price = price
 
     def _plan_charging(
-        self, slots: list[_Slot], start_wh: float, limits: _Limits, envelope: ChargePowerEnvelope, capacity_wh: float
+        self,
+        slots: list[_Slot],
+        start_wh: float,
+        limits: _Limits,
+        envelope: ChargePowerEnvelope,
+        capacity_wh: float,
     ) -> _Outcome:
         """Run the strictly ordered placement phases and record what stayed unmet.
 
@@ -371,7 +429,11 @@ class DynamicChargeOptimizer:
         hard_cap = limits.max_charge_wh
         # The preferred range is unverified and soft: it caps the first attempt only, and no minimum
         # power is invented from it (a partial-power slot is allowed).
-        pref_cap = hard_cap if envelope.preferred_max_w is None else envelope.preferred_max_w * _SLOT_HOURS
+        pref_cap = (
+            hard_cap
+            if envelope.preferred_max_w is None
+            else envelope.preferred_max_w * _SLOT_HOURS
+        )
         can_raise = hard_cap > pref_cap + _ENERGY_EPSILON_WH
 
         self._cover_reserve(slots, start_wh, limits, pref_cap)
@@ -386,9 +448,13 @@ class DynamicChargeOptimizer:
                 )
 
         if params.target_soc_percent is not None and params.target_time is not None:
-            self._plan_target(slots, start_wh, limits, capacity_wh, pref_cap, can_raise, outcome)
+            self._plan_target(
+                slots, start_wh, limits, capacity_wh, pref_cap, can_raise, outcome
+            )
             self._prune_redundant_reserve_charge(slots, start_wh, limits, capacity_wh)
-        self._smooth_charge(slots, start_wh, limits, pref_cap if can_raise else hard_cap, capacity_wh)
+        self._smooth_charge(
+            slots, start_wh, limits, pref_cap if can_raise else hard_cap, capacity_wh
+        )
 
         deficits = self._simulate_deficits(slots, start_wh, limits)
         outcome.reserve_shortfall_wh = sum(needed for _, needed in deficits)
@@ -399,7 +465,9 @@ class DynamicChargeOptimizer:
                     f"{outcome.reserve_shortfall_wh:.0f} Wh of forecast demand cannot be covered above the reserve",
                 )
             )
-        extra_wh = sum(slot.floor_extra_wh for slot in slots if slot.charge_wh > _ENERGY_EPSILON_WH)
+        extra_wh = sum(
+            slot.floor_extra_wh for slot in slots if slot.charge_wh > _ENERGY_EPSILON_WH
+        )
         if extra_wh > _ENERGY_EPSILON_WH:
             outcome.reasons.append(
                 LimitingReason(
@@ -435,12 +503,24 @@ class DynamicChargeOptimizer:
                 )
             )
         target_wh = params.target_soc_percent / 100.0 * capacity_wh
-        shortfall = self._cover_target(slots, start_wh, limits, pref_cap, index, target_wh)
+        shortfall = self._cover_target(
+            slots, start_wh, limits, pref_cap, index, target_wh
+        )
         raised = False
-        if shortfall > _ENERGY_EPSILON_WH and params.policy is PlanPolicy.MEET_DEADLINE and can_raise:
-            before = any(slot.charge_wh > pref_cap + _ENERGY_EPSILON_WH for slot in slots)
-            shortfall = self._cover_target(slots, start_wh, limits, limits.max_charge_wh, index, target_wh)
-            raised = not before and any(slot.charge_wh > pref_cap + _ENERGY_EPSILON_WH for slot in slots)
+        if (
+            shortfall > _ENERGY_EPSILON_WH
+            and params.policy is PlanPolicy.MEET_DEADLINE
+            and can_raise
+        ):
+            before = any(
+                slot.charge_wh > pref_cap + _ENERGY_EPSILON_WH for slot in slots
+            )
+            shortfall = self._cover_target(
+                slots, start_wh, limits, limits.max_charge_wh, index, target_wh
+            )
+            raised = not before and any(
+                slot.charge_wh > pref_cap + _ENERGY_EPSILON_WH for slot in slots
+            )
         if raised:
             outcome.reasons.append(
                 LimitingReason(
@@ -452,7 +532,10 @@ class DynamicChargeOptimizer:
         if shortfall <= _ENERGY_EPSILON_WH:
             return
         if target_wh > limits.max_wh + _ENERGY_EPSILON_WH:
-            code, detail = LimitingReasonCode.TARGET_ABOVE_MAX_SOC, "target SoC is above the maximum SoC"
+            code, detail = (
+                LimitingReasonCode.TARGET_ABOVE_MAX_SOC,
+                "target SoC is above the maximum SoC",
+            )
         elif params.policy is PlanPolicy.GENTLE and can_raise:
             code = LimitingReasonCode.TARGET_UNREACHABLE_IN_PREFERRED_RANGE
             detail = "target not reachable inside the preferred power range; policy meet_deadline may raise power"
@@ -472,11 +555,16 @@ class DynamicChargeOptimizer:
         """
         params = self._params
         assert params.target_soc_percent is not None and params.target_time is not None
-        index = max((i for i, slot in enumerate(slots) if slot.end <= params.target_time), default=-1)
+        index = max(
+            (i for i, slot in enumerate(slots) if slot.end <= params.target_time),
+            default=-1,
+        )
         target_wh = params.target_soc_percent / 100.0 * capacity_wh
 
         def state() -> tuple[float, float]:
-            shortfall = max(0.0, target_wh - self._soc_entering(slots, index + 1, start_wh, limits))
+            shortfall = max(
+                0.0, target_wh - self._soc_entering(slots, index + 1, start_wh, limits)
+            )
             return self._deficit_total(slots, start_wh, limits), shortfall
 
         candidates = [
@@ -489,11 +577,19 @@ class DynamicChargeOptimizer:
             previous = slots[i].charge_wh
             slots[i].charge_wh = 0.0
             new_deficit, new_shortfall = state()
-            if new_deficit > deficit + _ENERGY_EPSILON_WH or new_shortfall > shortfall + _ENERGY_EPSILON_WH:
+            if (
+                new_deficit > deficit + _ENERGY_EPSILON_WH
+                or new_shortfall > shortfall + _ENERGY_EPSILON_WH
+            ):
                 slots[i].charge_wh = previous
 
     def _smooth_charge(
-        self, slots: list[_Slot], start_wh: float, limits: _Limits, bound_wh: float, capacity_wh: float
+        self,
+        slots: list[_Slot],
+        start_wh: float,
+        limits: _Limits,
+        bound_wh: float,
+        capacity_wh: float,
     ) -> None:
         """Fold a charge slot into its later neighbour to save a power change, when that is harmless.
 
@@ -507,11 +603,21 @@ class DynamicChargeOptimizer:
         index = -1
         target_wh = 0.0
         if params.target_soc_percent is not None and params.target_time is not None:
-            index = max((i for i, slot in enumerate(slots) if slot.end <= params.target_time), default=-1)
+            index = max(
+                (i for i, slot in enumerate(slots) if slot.end <= params.target_time),
+                default=-1,
+            )
             target_wh = params.target_soc_percent / 100.0 * capacity_wh
 
         def state() -> tuple[float, float, float]:
-            shortfall = max(0.0, target_wh - self._soc_entering(slots, index + 1, start_wh, limits)) if index >= 0 else 0.0
+            shortfall = (
+                max(
+                    0.0,
+                    target_wh - self._soc_entering(slots, index + 1, start_wh, limits),
+                )
+                if index >= 0
+                else 0.0
+            )
             final = self._soc_entering(slots, len(slots), start_wh, limits)
             return self._deficit_total(slots, start_wh, limits), shortfall, final
 
@@ -520,15 +626,26 @@ class DynamicChargeOptimizer:
             changed = False
             for i in range(len(slots) - 1):
                 early, late = slots[i], slots[i + 1]
-                if early.charge_wh <= _ENERGY_EPSILON_WH or late.charge_wh <= _ENERGY_EPSILON_WH:
+                if (
+                    early.charge_wh <= _ENERGY_EPSILON_WH
+                    or late.charge_wh <= _ENERGY_EPSILON_WH
+                ):
                     continue
                 if abs(early.charge_wh - late.charge_wh) <= _ENERGY_EPSILON_WH:
                     continue
                 merged = early.charge_wh + late.charge_wh
-                if merged > min(limits.max_charge_wh, max(bound_wh, late.charge_wh)) + 1e-9:
+                if (
+                    merged
+                    > min(limits.max_charge_wh, max(bound_wh, late.charge_wh)) + 1e-9
+                ):
                     continue
                 deficit, shortfall, final = state()
-                before = (early.charge_wh, late.charge_wh, early.for_reserve, early.for_target)
+                before = (
+                    early.charge_wh,
+                    late.charge_wh,
+                    early.for_reserve,
+                    early.for_target,
+                )
                 early.charge_wh, late.charge_wh = 0.0, merged
                 new_deficit, new_shortfall, new_final = state()
                 ok = (
@@ -544,7 +661,9 @@ class DynamicChargeOptimizer:
                 else:
                     early.charge_wh, late.charge_wh = before[0], before[1]
 
-    def _add_power_reasons(self, envelope: ChargePowerEnvelope, outcome: _Outcome) -> None:
+    def _add_power_reasons(
+        self, envelope: ChargePowerEnvelope, outcome: _Outcome
+    ) -> None:
         """Surface the power-limit facts the plan relied on, so none of them stays implicit."""
         params = self._params
         if not envelope.live_limit_available:
@@ -569,7 +688,10 @@ class DynamicChargeOptimizer:
                     "no confirmed preferred charge power range; the whole permitted range is used",
                 )
             )
-        elif envelope.preferred_max_w is not None and envelope.preferred_max_w < params.preferred_charge_power_max_w:
+        elif (
+            envelope.preferred_max_w is not None
+            and envelope.preferred_max_w < params.preferred_charge_power_max_w
+        ):
             outcome.reasons.append(
                 LimitingReason(
                     LimitingReasonCode.PREFERRED_RANGE_CLAMPED,
@@ -577,7 +699,9 @@ class DynamicChargeOptimizer:
                 )
             )
 
-    def _cover_reserve(self, slots: list[_Slot], start_wh: float, limits: _Limits, cap_wh: float) -> None:
+    def _cover_reserve(
+        self, slots: list[_Slot], start_wh: float, limits: _Limits, cap_wh: float
+    ) -> None:
         """Place needed grid-charge energy into the latest permitted slots before each deficit.
 
         First simulate the no-grid-charge SoC trajectory (PV surplus charges, deficit discharges but
@@ -596,7 +720,9 @@ class DynamicChargeOptimizer:
                 return
             progressed = False
             for deficit_index, needed_wh in deficits:
-                placed = self._place_charge(slots, deficit_index, needed_wh, start_wh, limits, cap_wh=cap_wh)
+                placed = self._place_charge(
+                    slots, deficit_index, needed_wh, start_wh, limits, cap_wh=cap_wh
+                )
                 progressed = progressed or placed > _ENERGY_EPSILON_WH
             if not progressed:
                 return
@@ -622,21 +748,35 @@ class DynamicChargeOptimizer:
         baseline = self._deficit_total(slots, start_wh, limits)
 
         def reserve_kept() -> bool:
-            return self._deficit_total(slots, start_wh, limits) <= baseline + _ENERGY_EPSILON_WH
+            return (
+                self._deficit_total(slots, start_wh, limits)
+                <= baseline + _ENERGY_EPSILON_WH
+            )
 
         for _ in range(len(slots) + 1):
             shortfall = target_wh - target_soc()
             if shortfall <= _ENERGY_EPSILON_WH:
                 return 0.0
             placed = self._place_charge(
-                slots, index, shortfall, start_wh, limits, cap_wh=cap_wh, objective=target_soc, guard=reserve_kept
+                slots,
+                index,
+                shortfall,
+                start_wh,
+                limits,
+                cap_wh=cap_wh,
+                objective=target_soc,
+                guard=reserve_kept,
             )
             if placed <= _ENERGY_EPSILON_WH:
                 break
         return max(0.0, target_wh - target_soc())
 
-    def _deficit_total(self, slots: list[_Slot], start_wh: float, limits: _Limits) -> float:
-        return sum(needed for _, needed in self._simulate_deficits(slots, start_wh, limits))
+    def _deficit_total(
+        self, slots: list[_Slot], start_wh: float, limits: _Limits
+    ) -> float:
+        return sum(
+            needed for _, needed in self._simulate_deficits(slots, start_wh, limits)
+        )
 
     def _simulate_deficits(
         self, slots: list[_Slot], start_wh: float, limits: _Limits
@@ -729,7 +869,9 @@ class DynamicChargeOptimizer:
             # commanded charge would reach. The marginal benefit of commanding charge is strictly
             # SoC(command) - SoC(AUTO), never a re-derived formula.
             auto_after = self._soc_with_command(slot, soc_before, 0.0, limits)
-            current_after = self._soc_with_command(slot, soc_before, slot.charge_wh, limits)
+            current_after = self._soc_with_command(
+                slot, soc_before, slot.charge_wh, limits
+            )
             max_after = self._soc_with_command(slot, soc_before, cap_wh, limits)
             current_marginal = max(0.0, current_after - auto_after)
             available_marginal = max(0.0, (max_after - auto_after) - current_marginal)
@@ -752,7 +894,9 @@ class DynamicChargeOptimizer:
                 before = objective()
                 slot.charge_wh = command
                 realized = objective() - before
-                if realized <= _ENERGY_EPSILON_WH or (guard is not None and not guard()):
+                if realized <= _ENERGY_EPSILON_WH or (
+                    guard is not None and not guard()
+                ):
                     slot.charge_wh = previous
                     continue
                 slot.for_target = True
@@ -770,7 +914,9 @@ class DynamicChargeOptimizer:
         """Place every later eligible slot before any earlier one."""
         return sorted(candidates, reverse=True)
 
-    def _soc_with_command(self, slot: _Slot, soc_before: float, command_wh: float, limits: _Limits) -> float:
+    def _soc_with_command(
+        self, slot: _Slot, soc_before: float, command_wh: float, limits: _Limits
+    ) -> float:
         """SoC after ``slot`` when the plan commands ``command_wh`` of grid charge (0 == AUTO/IDLE).
 
         A single call into the authoritative :meth:`_step_soc`, so AUTO and commanded trajectories
@@ -862,7 +1008,9 @@ class DynamicChargeOptimizer:
                 slot.action = EnergyAction.IDLE
                 slot.reason = "battery reserve covers demand"
 
-    def _merge(self, slots: list[_Slot], battery: BatteryState, capacity_wh: float) -> list[EnergyPlanSlot]:
+    def _merge(
+        self, slots: list[_Slot], battery: BatteryState, capacity_wh: float
+    ) -> list[EnergyPlanSlot]:
         """Collapse adjacent slots with the same action/reason/target and emit plan slots.
 
         A CHARGE run carries the target SoC the plan reaches by the end of the run and the charge
@@ -882,7 +1030,9 @@ class DynamicChargeOptimizer:
         efficiency = self._params.charge_efficiency.value
         merged: list[EnergyPlanSlot] = []
         index = 0
-        running_wh = min(limits.max_wh, max(0.0, battery.soc_percent / 100.0 * capacity_wh))
+        running_wh = min(
+            limits.max_wh, max(0.0, battery.soc_percent / 100.0 * capacity_wh)
+        )
         while index < len(slots):
             run_start = index
             action = slots[index].action
@@ -971,7 +1121,17 @@ class DynamicChargeOptimizer:
         now = planning_input.now
         capacity_wh = planning_input.battery.usable_capacity_wh
         params = self._params
-        trajectory = [(now, start_wh / capacity_wh * 100.0)]
+        initial_soc_percent = start_wh / capacity_wh * 100.0
+        # Seed the trajectory with the SoC at ``now`` and keep it flat until the first slot actually
+        # begins: planning starts at the next full quarter hour, so with an off-grid ``now`` there is
+        # a gap [now, first_slot.start) in which nothing is dispatched. Without a point at the first
+        # slot's start, replan.expected_soc_percent would interpolate a spurious partial SoC change
+        # inside that gap. The extra (first_slot.start, initial_soc) point holds it flat. When ``now``
+        # already sits on the first slot's start the two points coincide, so no duplicate/zero-length
+        # segment is created.
+        trajectory = [(now, initial_soc_percent)]
+        if slots and slots[0].start > now:
+            trajectory.append((slots[0].start, initial_soc_percent))
         planned: list[PlannedCharge] = []
         soc_wh = start_wh
         for slot in slots:
@@ -979,13 +1139,23 @@ class DynamicChargeOptimizer:
             soc_wh = self._step_slot(soc_wh, slot, limits)
             trajectory.append((slot.end, soc_wh / capacity_wh * 100.0))
             if slot.charge_wh > _ENERGY_EPSILON_WH:
-                planned.append(PlannedCharge(slot.start, slot.end, max(0.0, soc_wh - before_wh)))
+                planned.append(
+                    PlannedCharge(slot.start, slot.end, max(0.0, soc_wh - before_wh))
+                )
         charge_slots = [slot for slot in plan_slots if slot.energy is not None]
         totals = PlanEnergy(
-            commanded_charge_energy_wh=sum(slot.energy.commanded_charge_energy_wh for slot in charge_slots),
-            battery_terminal_energy_wh=sum(slot.energy.battery_terminal_energy_wh for slot in charge_slots),
-            stored_energy_delta_wh=sum(slot.energy.stored_energy_delta_wh for slot in charge_slots),
-            grid_charge_energy_wh=sum(slot.energy.grid_charge_energy_wh for slot in charge_slots),
+            commanded_charge_energy_wh=sum(
+                slot.energy.commanded_charge_energy_wh for slot in charge_slots
+            ),
+            battery_terminal_energy_wh=sum(
+                slot.energy.battery_terminal_energy_wh for slot in charge_slots
+            ),
+            stored_energy_delta_wh=sum(
+                slot.energy.stored_energy_delta_wh for slot in charge_slots
+            ),
+            grid_charge_energy_wh=sum(
+                slot.energy.grid_charge_energy_wh for slot in charge_slots
+            ),
         )
         live = envelope.live_charge_limit_w
         assumptions = PlanAssumptions(
@@ -1036,4 +1206,6 @@ class DynamicChargeOptimizer:
         )
 
     def _clamp_target(self, percent: float) -> float:
-        return min(self._params.max_soc_percent, max(self._params.reserve_soc_percent, percent))
+        return min(
+            self._params.max_soc_percent, max(self._params.reserve_soc_percent, percent)
+        )

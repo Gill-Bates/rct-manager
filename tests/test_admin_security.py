@@ -33,7 +33,9 @@ def _restore_root_log_level():
 
 
 def _settings(tmp_path, **extra):
-    return Settings(_env_file=None, hmac_secret="s" * 48, admin_db_path=tmp_path / "rct.db", **extra)
+    return Settings(
+        _env_file=None, hmac_secret="s" * 48, admin_db_path=tmp_path / "rct.db", **extra
+    )
 
 
 def _client(app):
@@ -50,20 +52,30 @@ def _client(app):
 async def _login(client, password, csrf=None, **headers):
     if csrf is None:
         csrf = (await client.get("/admin/api/session")).json()["csrf_token"]
-    return await client.post("/admin/api/login", headers={"X-CSRF-Token": csrf, **headers},
-                             json={"username": "admin", "password": password})
+    return await client.post(
+        "/admin/api/login",
+        headers={"X-CSRF-Token": csrf, **headers},
+        json={"username": "admin", "password": password},
+    )
 
 
 @asynccontextmanager
 async def _ready(app, password):
-    """Log in, change the initial password and yield a client with a usable session."""
+    """Log in, change the initial password, accept the disclaimer and yield a usable session."""
     async with _client(app) as client:
         login = await _login(client, password)
-        changed = await client.post("/admin/api/change-password",
-                                    headers={"X-CSRF-Token": login.json()["csrf_token"]},
-                                    json={"current_password": password, "new_password": PASSWORD2})
+        changed = await client.post(
+            "/admin/api/change-password",
+            headers={"X-CSRF-Token": login.json()["csrf_token"]},
+            json={"current_password": password, "new_password": PASSWORD2},
+        )
         assert changed.status_code == 200
-        yield client, changed.json()["csrf_token"]
+        csrf = changed.json()["csrf_token"]
+        accepted = await client.post(
+            "/admin/api/accept-disclaimer", headers={"X-CSRF-Token": csrf}
+        )
+        assert accepted.status_code == 200
+        yield client, csrf
 
 
 @pytest.fixture
@@ -83,12 +95,24 @@ async def test_forced_password_change_is_enforced_by_the_server(booted):
         assert login.json()["must_change_password"] is True
         assert (await client.get("/admin/api/settings")).status_code == 403
         assert (await client.get("/admin/api/tokens")).status_code == 403
-        assert (await client.put("/admin/api/settings", headers={"X-CSRF-Token": csrf},
-                                 json={"docs_public": True})).status_code == 403
-        assert (await client.post("/admin/api/tokens", headers={"X-CSRF-Token": csrf},
-                                  json={"name": "x", "role": "read"})).status_code == 403
+        assert (
+            await client.put(
+                "/admin/api/settings",
+                headers={"X-CSRF-Token": csrf},
+                json={"docs_public": True},
+            )
+        ).status_code == 403
+        assert (
+            await client.post(
+                "/admin/api/tokens",
+                headers={"X-CSRF-Token": csrf},
+                json={"name": "x", "role": "read"},
+            )
+        ).status_code == 403
         page = await client.get("/ui/dashboard")
-        assert page.status_code == 303 and page.headers["location"] == "/change-password"
+        assert (
+            page.status_code == 303 and page.headers["location"] == "/change-password"
+        )
 
 
 @pytest.mark.asyncio
@@ -97,11 +121,18 @@ async def test_sessions_rotate_and_old_ones_die(booted):
     async with _client(app) as client:
         first = await _login(client, password)
         old_cookie = client.cookies["rct_admin_session"]
-        changed = await client.post("/admin/api/change-password",
-                                    headers={"X-CSRF-Token": first.json()["csrf_token"]},
-                                    json={"current_password": password, "new_password": PASSWORD2})
+        changed = await client.post(
+            "/admin/api/change-password",
+            headers={"X-CSRF-Token": first.json()["csrf_token"]},
+            json={"current_password": password, "new_password": PASSWORD2},
+        )
         assert changed.status_code == 200
         assert client.cookies["rct_admin_session"] != old_cookie
+        accepted = await client.post(
+            "/admin/api/accept-disclaimer",
+            headers={"X-CSRF-Token": changed.json()["csrf_token"]},
+        )
+        assert accepted.status_code == 200
         assert (await client.get("/admin/api/settings")).status_code == 200
         async with _client(app) as stale:
             stale.cookies.set("rct_admin_session", old_cookie)
@@ -112,7 +143,9 @@ async def test_sessions_rotate_and_old_ones_die(booted):
             assert (await _login(other, PASSWORD2)).status_code == 200
         csrf = changed.json()["csrf_token"]
         live_cookie = client.cookies["rct_admin_session"]
-        assert (await client.post("/admin/api/logout", headers={"X-CSRF-Token": csrf})).status_code == 200
+        assert (
+            await client.post("/admin/api/logout", headers={"X-CSRF-Token": csrf})
+        ).status_code == 200
         async with _client(app) as stale:
             stale.cookies.set("rct_admin_session", live_cookie)
             assert (await stale.get("/admin/api/settings")).status_code == 401
@@ -124,16 +157,32 @@ async def test_csrf_and_origin_are_enforced(booted):
     async with _ready(app, password) as (client, csrf):
         body = {"docs_public": True}
         assert (await client.put("/admin/api/settings", json=body)).status_code == 403
-        assert (await client.put("/admin/api/settings", headers={"X-CSRF-Token": "wrong"}, json=body)).status_code == 403
+        assert (
+            await client.put(
+                "/admin/api/settings", headers={"X-CSRF-Token": "wrong"}, json=body
+            )
+        ).status_code == 403
         evil = {"X-CSRF-Token": csrf, "Origin": "http://evil.example"}
-        assert (await client.put("/admin/api/settings", headers=evil, json=body)).status_code == 403
+        assert (
+            await client.put("/admin/api/settings", headers=evil, json=body)
+        ).status_code == 403
         # Models a crafted request with no Origin and a hostile Referer (empty Origin overrides
         # the client default so the Referer branch is exercised).
-        referer = {"X-CSRF-Token": csrf, "Origin": "", "Referer": "http://evil.example/page"}
-        assert (await client.put("/admin/api/settings", headers=referer, json=body)).status_code == 403
+        referer = {
+            "X-CSRF-Token": csrf,
+            "Origin": "",
+            "Referer": "http://evil.example/page",
+        }
+        assert (
+            await client.put("/admin/api/settings", headers=referer, json=body)
+        ).status_code == 403
         good = {"X-CSRF-Token": csrf, "Origin": "http://testserver"}
-        assert (await client.put("/admin/api/settings", headers=good, json=body)).status_code == 200
-        assert (await client.delete("/admin/api/tokens/nope", headers=evil)).status_code == 403
+        assert (
+            await client.put("/admin/api/settings", headers=good, json=body)
+        ).status_code == 200
+        assert (
+            await client.delete("/admin/api/tokens/nope", headers=evil)
+        ).status_code == 403
 
 
 @pytest.mark.asyncio
@@ -142,28 +191,36 @@ async def test_login_and_password_change_guesses_are_throttled(booted):
     async with _client(app) as client:
         codes = [(await _login(client, "wrong-password")).status_code for _ in range(8)]
         assert codes[:5] == [401] * 5 and codes[-1] == 429
-        assert (await _login(client, password)).status_code == 429  # even the right one is blocked
+        assert (
+            await _login(client, password)
+        ).status_code == 429  # even the right one is blocked
     fresh = create_app(_settings(booted[0].admin_db_path.parent))
     async with _client(fresh) as client:
         login = await _login(client, password)
         csrf = login.json()["csrf_token"]
         codes = []
         for _ in range(8):
-            r = await client.post("/admin/api/change-password", headers={"X-CSRF-Token": csrf},
-                                  json={"current_password": "wrong-password", "new_password": PASSWORD2})
+            r = await client.post(
+                "/admin/api/change-password",
+                headers={"X-CSRF-Token": csrf},
+                json={"current_password": "wrong-password", "new_password": PASSWORD2},
+            )
             codes.append(r.status_code)
         assert codes[:5] == [401] * 5 and codes[-1] == 429
 
 
 @pytest.mark.asyncio
 async def test_pat_mutations_are_rate_limited(tmp_path):
-    app = create_app(_settings(tmp_path, rate_limit_requests=6))
+    app = create_app(_settings(tmp_path, admin_session_rate_limit_requests=6))
     password = app.state.first_start_password
     async with _ready(app, password) as (client, csrf):
         codes = []
         for _ in range(10):
-            r = await client.post("/admin/api/tokens", headers={"X-CSRF-Token": csrf},
-                                  json={"name": "t", "role": "read"})
+            r = await client.post(
+                "/admin/api/tokens",
+                headers={"X-CSRF-Token": csrf},
+                json={"name": "t", "role": "read"},
+            )
             codes.append(r.status_code)
         assert 429 in codes
 
@@ -176,21 +233,40 @@ async def test_token_expiry_revocation_and_restart(tmp_path):
     async with _ready(app, password) as (client, csrf):
         h = {"X-CSRF-Token": csrf}
         past = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
-        assert (await client.post("/admin/api/tokens", headers=h,
-                                  json={"name": "p", "role": "read", "expires_at": past})).status_code == 400
-        naive = (datetime.now(UTC) + timedelta(hours=1)).replace(tzinfo=None).isoformat()
-        kept = await client.post("/admin/api/tokens", headers=h,
-                                 json={"name": "naive", "role": "read", "expires_at": naive})
+        assert (
+            await client.post(
+                "/admin/api/tokens",
+                headers=h,
+                json={"name": "p", "role": "read", "expires_at": past},
+            )
+        ).status_code == 400
+        naive = (
+            (datetime.now(UTC) + timedelta(hours=1)).replace(tzinfo=None).isoformat()
+        )
+        kept = await client.post(
+            "/admin/api/tokens",
+            headers=h,
+            json={"name": "naive", "role": "read", "expires_at": naive},
+        )
         assert kept.status_code == 201
-        gone = await client.post("/admin/api/tokens", headers=h, json={"name": "gone", "role": "read"})
-        assert (await client.delete("/admin/api/tokens/" + gone.json()["id"], headers=h)).status_code == 200
+        gone = await client.post(
+            "/admin/api/tokens", headers=h, json={"name": "gone", "role": "read"}
+        )
+        assert (
+            await client.delete("/admin/api/tokens/" + gone.json()["id"], headers=h)
+        ).status_code == 200
     store = AdminStore(settings.admin_db_path, "s" * 48)
     try:
         assert store.authenticate_token(kept.json()["token"]) is not None
         assert store.authenticate_token(gone.json()["token"]) is None
         restarted = create_app(settings)
-        assert restarted.state.admin_store.authenticate_token(kept.json()["token"]) is not None
-        assert restarted.state.admin_store.authenticate_token(gone.json()["token"]) is None
+        assert (
+            restarted.state.admin_store.authenticate_token(kept.json()["token"])
+            is not None
+        )
+        assert (
+            restarted.state.admin_store.authenticate_token(gone.json()["token"]) is None
+        )
         ids = {t["id"] for t in store.list_tokens()}
         assert kept.json()["id"] in ids and gone.json()["id"] not in ids
     finally:
@@ -200,7 +276,9 @@ async def test_token_expiry_revocation_and_restart(tmp_path):
 def test_expired_token_is_rejected(tmp_path):
     store = AdminStore(tmp_path / "rct.db", "x" * 48)
     store.initialize()
-    record, token = store.create_token("short", "read", datetime.now(UTC) + timedelta(seconds=1))
+    record, token = store.create_token(
+        "short", "read", datetime.now(UTC) + timedelta(seconds=1)
+    )
     assert store.authenticate_token(token) is not None
     import time
 
@@ -268,7 +346,7 @@ def test_expired_sessions_are_purged(tmp_path, monkeypatch):
     store.initialize()
     store.new_session()
     real = time_module.time()
-    monkeypatch.setattr("app.admin.store.time.time", lambda: real + 13 * 3600)
+    monkeypatch.setattr("app.admin.store.time.time", lambda: real + 8 * 86400)
     store.new_session()
     assert len(_rows(store.path, "sessions")) == 1
 
@@ -312,7 +390,9 @@ def test_hmac_secret_bootstrap_permissions(tmp_path, monkeypatch, caplog):
         _ensure_hmac_secret(link)
 
 
-def test_existing_secret_file_behind_a_symlink_fails_closed_without_touching_the_target(tmp_path, monkeypatch):
+def test_existing_secret_file_behind_a_symlink_fails_closed_without_touching_the_target(
+    tmp_path, monkeypatch
+):
     """P2-1 (corrected contract): a symlink standing in for the secret file is now rejected with a
     ConfigError instead of being read path-based and warned about. The secret guards the admin and
     dispatch stores, so an existing file that is not a regular file opened under O_NOFOLLOW must
@@ -330,12 +410,15 @@ def test_existing_secret_file_behind_a_symlink_fails_closed_without_touching_the
     link.symlink_to(target)
     with pytest.raises(ConfigError):
         _ensure_hmac_secret(link)
-    assert stat.S_IMODE(target.stat().st_mode) == 0o644  # untouched: the open() refused to follow the link
+    assert (
+        stat.S_IMODE(target.stat().st_mode) == 0o644
+    )  # untouched: the open() refused to follow the link
 
 
 def test_existing_secret_file_that_is_not_regular_fails_closed(tmp_path, monkeypatch):
     """P2-1: a non-regular secret file (here a FIFO) is rejected rather than read, so the secret is
-    never sourced from something whose content a reader could control or that blocks the open."""
+    never sourced from something whose content a reader could control or that blocks the open.
+    """
     from app.__main__ import _ensure_hmac_secret
     from app.errors import ConfigError
 
@@ -347,7 +430,9 @@ def test_existing_secret_file_that_is_not_regular_fails_closed(tmp_path, monkeyp
         _ensure_hmac_secret(fifo)
 
 
-def test_too_open_secret_file_that_cannot_be_hardened_fails_closed(tmp_path, monkeypatch):
+def test_too_open_secret_file_that_cannot_be_hardened_fails_closed(
+    tmp_path, monkeypatch
+):
     """P2-1: if a genuinely too-open secret file cannot be hardened to 0600, the start fails closed
     rather than warning and continuing with the secret still exposed."""
     from app.__main__ import _ensure_hmac_secret
@@ -372,19 +457,37 @@ async def test_settings_apply_in_place_and_never_report_a_pending_restart(booted
     _, app, password = booted
     async with _ready(app, password) as (client, csrf):
         h = {"X-CSRF-Token": csrf}
-        assert "restart_required" not in (await client.get("/admin/api/settings")).json()
-        live = await client.put("/admin/api/settings", headers=h, json={"docs_public": True})
-        assert "restart_required" not in live.json() and "docs_public" in live.json()["live"]
+        assert (
+            "restart_required" not in (await client.get("/admin/api/settings")).json()
+        )
+        live = await client.put(
+            "/admin/api/settings", headers=h, json={"docs_public": True}
+        )
+        assert (
+            "restart_required" not in live.json()
+            and "docs_public" in live.json()["live"]
+        )
         assert app.state.runtime.settings.docs_public is True
-        level = await client.put("/admin/api/settings", headers=h, json={"log_level": "DEBUG"})
-        assert "restart_required" not in level.json() and level.json()["applying"] is False
+        level = await client.put(
+            "/admin/api/settings", headers=h, json={"log_level": "DEBUG"}
+        )
+        assert (
+            "restart_required" not in level.json() and level.json()["applying"] is False
+        )
         assert app.state.runtime.settings.log_level == "DEBUG"
         assert logging.getLogger().level == logging.DEBUG
         again = (await client.get("/admin/api/settings")).json()
-        assert "restart_required" not in again and again["settings"]["log_level"] == "DEBUG"
-        bad = await client.put("/admin/api/settings", headers=h, json={"bind_port": 70000})
+        assert (
+            "restart_required" not in again
+            and again["settings"]["log_level"] == "DEBUG"
+        )
+        bad = await client.put(
+            "/admin/api/settings", headers=h, json={"bind_port": 70000}
+        )
         assert bad.status_code == 400
-        assert (await client.get("/admin/api/settings")).json()["settings"]["bind_port"] != 70000
+        assert (await client.get("/admin/api/settings")).json()["settings"][
+            "bind_port"
+        ] != 70000
 
 
 @pytest.mark.asyncio
@@ -394,10 +497,18 @@ async def test_concurrent_autosaves_of_different_fields_are_kept(booted):
         h = {"X-CSRF-Token": csrf}
         import asyncio
 
-        results = await asyncio.gather(*(
-            client.put("/admin/api/settings", headers=h, json=body) for body in (
-                {"docs_public": True}, {"log_level": "DEBUG"}, {"enable_metrics_endpoint": False},
-                {"behind_reverse_proxy": False}, {"auth_required": True})))
+        results = await asyncio.gather(
+            *(
+                client.put("/admin/api/settings", headers=h, json=body)
+                for body in (
+                    {"docs_public": True},
+                    {"log_level": "DEBUG"},
+                    {"enable_metrics_endpoint": False},
+                    {"behind_reverse_proxy": False},
+                    {"auth_required": True},
+                )
+            )
+        )
         assert [r.status_code for r in results] == [200] * 5
         view = (await client.get("/admin/api/settings")).json()["settings"]
         assert view["docs_public"] is True and view["log_level"] == "DEBUG"
@@ -417,28 +528,50 @@ async def test_parameter_selection_limits_and_live_application(tmp_path):
         view = (await client.get("/admin/api/parameters")).json()
         assert "restart_required" not in view
         numeric = [p["name"] for p in view["available"] if p["exportable"]]
-        too_many = await client.put("/admin/api/parameters", headers=h,
-                                    json={"exposed_names": numeric[:65], "write_names": []})
+        too_many = await client.put(
+            "/admin/api/parameters",
+            headers=h,
+            json={"exposed_names": numeric[:65], "write_names": []},
+        )
         assert too_many.status_code == 422
-        exactly = await client.put("/admin/api/parameters", headers=h,
-                                   json={"exposed_names": numeric[:64], "write_names": []})
+        exactly = await client.put(
+            "/admin/api/parameters",
+            headers=h,
+            json={"exposed_names": numeric[:64], "write_names": []},
+        )
         assert exactly.status_code == 200 and "restart_required" not in exactly.json()
-        dup = await client.put("/admin/api/parameters", headers=h,
-                               json={"exposed_names": [numeric[0], numeric[0]], "write_names": []})
+        dup = await client.put(
+            "/admin/api/parameters",
+            headers=h,
+            json={"exposed_names": [numeric[0], numeric[0]], "write_names": []},
+        )
         assert dup.status_code == 400
-        unknown = await client.put("/admin/api/parameters", headers=h,
-                                   json={"exposed_names": ["nope"], "write_names": []})
+        unknown = await client.put(
+            "/admin/api/parameters",
+            headers=h,
+            json={"exposed_names": ["nope"], "write_names": []},
+        )
         assert unknown.status_code == 400
         writable = [p["name"] for p in view["available"] if p["writable"]]
-        denied = await client.put("/admin/api/parameters", headers=h,
-                                  json={"exposed_names": [], "write_names": ["not_writable_metric"]})
+        denied = await client.put(
+            "/admin/api/parameters",
+            headers=h,
+            json={"exposed_names": [], "write_names": ["not_writable_metric"]},
+        )
         assert denied.status_code == 400
         if writable:
-            ok = await client.put("/admin/api/parameters", headers=h,
-                                  json={"exposed_names": [], "write_names": writable[:1]})
+            ok = await client.put(
+                "/admin/api/parameters",
+                headers=h,
+                json={"exposed_names": [], "write_names": writable[:1]},
+            )
             assert ok.status_code == 200
             assert app.state.admin_store.get("write_names") == writable[:1]
-        empty = await client.put("/admin/api/parameters", headers=h, json={"exposed_names": [], "write_names": []})
+        empty = await client.put(
+            "/admin/api/parameters",
+            headers=h,
+            json={"exposed_names": [], "write_names": []},
+        )
         assert empty.json()["exposed_names"] == []
     restarted = create_app(settings)
     assert restarted.state.runtime.exporter._exposed == []
@@ -446,7 +579,9 @@ async def test_parameter_selection_limits_and_live_application(tmp_path):
     assert restarted.state.admin_store.get("write_names") == []
     async with _client(restarted) as client:
         assert (await _login(client, PASSWORD2)).status_code == 200
-        assert "restart_required" not in (await client.get("/admin/api/parameters")).json()
+        assert (
+            "restart_required" not in (await client.get("/admin/api/parameters")).json()
+        )
 
 
 def test_concurrent_store_writes_do_not_lose_updates(tmp_path):
@@ -463,7 +598,12 @@ def test_concurrent_store_writes_do_not_lose_updates(tmp_path):
         except BaseException as exc:  # noqa: BLE001
             errors.append(exc)
 
-    changes = [{"docs_public": True}, {"log_level": "DEBUG"}, {"enable_metrics_endpoint": False}, {"bind_port": 9000}]
+    changes = [
+        {"docs_public": True},
+        {"log_level": "DEBUG"},
+        {"enable_metrics_endpoint": False},
+        {"bind_port": 9000},
+    ]
     threads = [threading.Thread(target=work, args=(c,)) for c in changes]
     [t.start() for t in threads]
     [t.join() for t in threads]
@@ -493,7 +633,9 @@ def test_concurrent_token_creation_respects_the_cap(tmp_path):
     assert len(store.list_tokens()) == 32
 
 
-def test_legacy_admin_secret_is_used_with_deprecation_warning(tmp_path, monkeypatch, caplog):
+def test_legacy_admin_secret_is_used_with_deprecation_warning(
+    tmp_path, monkeypatch, caplog
+):
     from app.__main__ import _ensure_hmac_secret
     from app.config import load_settings
 
@@ -501,7 +643,9 @@ def test_legacy_admin_secret_is_used_with_deprecation_warning(tmp_path, monkeypa
     env.write_text("ADMIN_SECRET=" + "o" * 44 + "\n")
     env.chmod(0o600)
     _ensure_hmac_secret(env)
-    assert env.read_text() == "ADMIN_SECRET=" + "o" * 44 + "\n"  # no new key next to the old one
+    assert (
+        env.read_text() == "ADMIN_SECRET=" + "o" * 44 + "\n"
+    )  # no new key next to the old one
     with caplog.at_level("WARNING", logger="app.config"):
         settings = load_settings(env)
     assert settings.hmac_secret.get_secret_value() == "o" * 44
@@ -510,7 +654,9 @@ def test_legacy_admin_secret_is_used_with_deprecation_warning(tmp_path, monkeypa
 
 
 def _wait_idle(store):
-    store._touch_pool.submit(lambda: None).result(timeout=5)  # the pool has one worker: earlier writes are done
+    store._touch_pool.submit(lambda: None).result(
+        timeout=5
+    )  # the pool has one worker: earlier writes are done
 
 
 def test_last_used_is_recorded_throttled_and_never_for_invalid_tokens(tmp_path):
@@ -529,8 +675,12 @@ def test_last_used_is_recorded_throttled_and_never_for_invalid_tokens(tmp_path):
     assert datetime.fromisoformat(first).tzinfo is not None
     assert store.authenticate_token(token) is not None
     _wait_idle(store)
-    assert store.list_tokens()[0]["last_used_at"] == first  # throttled: no second write within the interval
-    fresh = AdminStore(tmp_path / "rct.db", "k" * 44)  # a restart keeps the throttle through the stored value
+    assert (
+        store.list_tokens()[0]["last_used_at"] == first
+    )  # throttled: no second write within the interval
+    fresh = AdminStore(
+        tmp_path / "rct.db", "k" * 44
+    )  # a restart keeps the throttle through the stored value
     assert fresh.authenticate_token(token) is not None
     _wait_idle(fresh)
     assert fresh.list_tokens()[0]["last_used_at"] == first
@@ -541,7 +691,10 @@ def test_record_without_last_used_field_lists_as_never(tmp_path):
     store.initialize()
     record, _token = store.create_token("old", "read", None)
     with store.connect() as db:  # an old record never had the field
-        db.execute("UPDATE pats SET encrypted=? WHERE id=?", (store._encode(record["id"], record), record["id"]))
+        db.execute(
+            "UPDATE pats SET encrypted=? WHERE id=?",
+            (store._encode(record["id"], record), record["id"]),
+        )
     assert store.list_tokens()[0]["last_used_at"] is None
 
 
@@ -549,7 +702,9 @@ def test_last_used_write_failure_never_breaks_authentication(tmp_path, monkeypat
     store = AdminStore(tmp_path / "rct.db", "k" * 44)
     store.initialize()
     _record, token = store.create_token("probe", "read", None)
-    monkeypatch.setattr(store, "_touch_pool", None)  # scheduling raises AttributeError internally
+    monkeypatch.setattr(
+        store, "_touch_pool", None
+    )  # scheduling raises AttributeError internally
     assert store.authenticate_token(token) is not None
 
 
@@ -590,5 +745,154 @@ def test_wal_mode_permissions_close_and_parallel_writes(tmp_path):
     assert not errors
     store.close()
     store.close()  # idempotent
-    assert not path.with_name(path.name + "-wal").exists() or path.with_name(path.name + "-wal").stat().st_size == 0
+    assert (
+        not path.with_name(path.name + "-wal").exists()
+        or path.with_name(path.name + "-wal").stat().st_size == 0
+    )
     assert not path.with_name(path.name + "-shm").exists()
+
+
+# --- Mandatory usage-disclaimer persistence (store level) --------------------------------------
+
+_UTC_STAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+
+
+def test_new_admin_has_no_disclaimer_acceptance(tmp_path):
+    store = AdminStore(tmp_path / "rct.db", "s" * 48)
+    store.initialize()
+    assert store.disclaimer_accepted_at() is None
+    assert store.disclaimer_required() is True
+
+
+def test_password_change_leaves_the_disclaimer_still_required(tmp_path):
+    store = AdminStore(tmp_path / "rct.db", "s" * 48)
+    password = store.initialize()
+    assert store.change_password(password, PASSWORD2) is True
+    assert store.password_change_pending() is False
+    assert store.disclaimer_required() is True
+
+
+def test_accepting_persists_a_server_generated_utc_timestamp(tmp_path):
+    store = AdminStore(tmp_path / "rct.db", "s" * 48)
+    store.initialize()
+    stamp = store.accept_disclaimer()
+    assert _UTC_STAMP.match(stamp)
+    assert store.disclaimer_accepted_at() == stamp
+    assert store.disclaimer_required() is False
+
+
+def test_accepting_is_idempotent_and_keeps_the_first_timestamp(tmp_path):
+    store = AdminStore(tmp_path / "rct.db", "s" * 48)
+    store.initialize()
+    first = store.accept_disclaimer()
+    assert (
+        store.accept_disclaimer() == first
+    )  # a second accept never overwrites or resets
+    assert store.disclaimer_accepted_at() == first
+
+
+def test_a_later_password_change_keeps_the_acceptance(tmp_path):
+    store = AdminStore(tmp_path / "rct.db", "s" * 48)
+    password = store.initialize()
+    assert store.change_password(password, PASSWORD2) is True
+    stamp = store.accept_disclaimer()
+    assert store.change_password(PASSWORD2, PASSWORD2 + "!") is True
+    assert (
+        store.disclaimer_accepted_at() == stamp
+    )  # a normal change must not drop consent
+    assert store.disclaimer_required() is False
+
+
+def test_acceptance_survives_a_store_restart(tmp_path):
+    path = tmp_path / "rct.db"
+    store = AdminStore(path, "s" * 48)
+    store.initialize()
+    stamp = store.accept_disclaimer()
+    store.close()
+    restarted = AdminStore(path, "s" * 48)
+    restarted.initialize()
+    assert restarted.disclaimer_accepted_at() == stamp
+    assert restarted.disclaimer_required() is False
+    restarted.close()
+
+
+def test_record_without_the_field_is_treated_as_not_accepted(tmp_path):
+    store = AdminStore(tmp_path / "rct.db", "s" * 48)
+    store.initialize()
+    store.accept_disclaimer()
+    # Simulate an older record whose decoded dict never had the field.
+    with store.connect() as db:
+        row = db.execute(
+            "SELECT encrypted FROM admin_user WHERE username='admin'"
+        ).fetchone()
+        record = store._decode("admin", row["encrypted"])
+        record.pop("disclaimer_accepted_at", None)
+        db.execute(
+            "UPDATE admin_user SET encrypted=? WHERE username='admin'",
+            (store._encode("admin", record),),
+        )
+    assert store.disclaimer_accepted_at() is None
+    assert store.disclaimer_required() is True
+
+
+def test_session_exposes_the_disclaimer_state(tmp_path):
+    store = AdminStore(tmp_path / "rct.db", "s" * 48)
+    password = store.initialize()
+    assert store.change_password(password, PASSWORD2) is True
+    token, _csrf = store.new_session()
+    state = store.session(token)
+    assert state["must_change_password"] is False
+    assert state["disclaimer_required"] is True
+    assert state["disclaimer_accepted_at"] is None
+    stamp = store.accept_disclaimer()
+    state = store.session(token)
+    assert state["disclaimer_required"] is False
+    assert state["disclaimer_accepted_at"] == stamp
+    store.close()
+
+
+@pytest.mark.asyncio
+async def test_gui_polling_of_several_tabs_stays_below_the_admin_session_budget(
+    tmp_path,
+):
+    app = create_app(_settings(tmp_path, rate_limit_requests=5))
+    password = app.state.first_start_password
+    async with _ready(app, password) as (client, _csrf):
+        # Three tabs at the real poll rhythm: 20 + 3 x 20 + 3 x 2 requests in one minute.
+        codes = [
+            (await client.get("/admin/api/devices")).status_code for _ in range(86)
+        ]
+        assert 429 not in codes
+        # The strict API budget is untouched by this traffic, and a flood still ends in 429.
+        flood = [
+            (await client.get("/admin/api/devices")).status_code for _ in range(700)
+        ]
+        assert 429 in flood
+        limited = await client.get("/admin/api/devices")
+        assert limited.status_code == 429
+        assert int(limited.headers["retry-after"]) >= 1
+        assert limited.headers["content-type"].startswith("application/problem+json")
+
+
+@pytest.mark.asyncio
+async def test_pat_budget_stays_strict_while_gui_session_has_its_own(tmp_path):
+    app = create_app(_settings(tmp_path, rate_limit_requests=6, auth_fail_limit=100))
+    password = app.state.first_start_password
+    async with _ready(app, password) as (client, csrf):
+        created = await client.post(
+            "/admin/api/tokens",
+            headers={"X-CSRF-Token": csrf},
+            json={"name": "p", "role": "read"},
+        )
+        token = created.json()["token"]
+        async with _client(app) as api_client:  # no cookie: a programmatic caller
+            auth = {"Authorization": f"Bearer {token}"}
+            pat_codes = [
+                (await api_client.get("/admin/api/devices", headers=auth)).status_code
+                for _ in range(10)
+            ]
+        assert pat_codes[:6] == [200] * 6 and pat_codes[-1] == 429
+        gui_codes = [
+            (await client.get("/admin/api/devices")).status_code for _ in range(30)
+        ]
+        assert 429 not in gui_codes

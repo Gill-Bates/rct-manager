@@ -191,8 +191,9 @@ async def _logged_in(tmp_path) -> AsyncIterator[httpx.AsyncClient]:
         csrf = (await client.get("/admin/api/session")).json()["csrf_token"]
         login = await client.post("/admin/api/login", headers={"X-CSRF-Token": csrf},
                                   json={"username": "admin", "password": password})
-        await client.post("/admin/api/change-password", headers={"X-CSRF-Token": login.json()["csrf_token"]},
-                          json={"current_password": password, "new_password": "a much stronger password"})
+        changed = await client.post("/admin/api/change-password", headers={"X-CSRF-Token": login.json()["csrf_token"]},
+                                    json={"current_password": password, "new_password": "a much stronger password"})
+        await client.post("/admin/api/accept-disclaimer", headers={"X-CSRF-Token": changed.json()["csrf_token"]})
         yield client
 
 
@@ -593,7 +594,10 @@ def test_export_group_is_withheld_as_a_group_and_revalidated_at_send_time():
 def test_tsdb_form_has_a_button_only_apply_bar_and_only_the_master_switch_autosaves():
     js = _admin_js()
     html = (TEMPLATES / "tsdb.html").read_text(encoding="utf-8")
-    assert 'id="export-actions"' in html and "align-items-end" in html
+    # Apply changes sits below the settings grid, left-aligned, like the other save actions
+    # that follow their form content.
+    assert 'id="export-actions"' in html and "align-items-start" in html
+    assert html.index('id="export-actions"') > html.index('id="settings-sections"')
     # The shared bar is parameterised, not overridden: TSDB asks for the button alone.
     assert "buildApplyBar('export', {" in js
     builder = js[js.index("function buildApplyBar("):js.index("function buildGroupBody(")]
@@ -1043,6 +1047,9 @@ async def test_about_requires_session_and_renders_project_details(tmp_path, monk
             json={"current_password": password, "new_password": "a much stronger password"},
         )
         assert changed.status_code == 200
+        accepted = await client.post("/admin/api/accept-disclaimer",
+                                     headers={"X-CSRF-Token": changed.json()["csrf_token"]})
+        assert accepted.status_code == 200
 
         response = await client.get("/ui/about")
         assert response.status_code == 200
@@ -1076,7 +1083,7 @@ def test_dashboard_grid_has_the_gridstack_structure_and_stable_widget_ids():
     # The business-data DOM ids the polling code reads/writes stay intact inside the wrappers.
     for inner_id in ("device-count", "connected-count", "metric-count", "pv-power", "house-power",
                      "grid-power", "battery-soc", "days-to-calibration", "tsdb-status-icon",
-                     "tsdb-status-label", "tsdb-status-time", "devices-list"):
+                     "tsdb-status-label", "devices-list"):
         assert f'id="{inner_id}"' in html
 
 
@@ -1103,8 +1110,8 @@ def test_dashboard_template_positions_equal_the_factory_default_layout():
             r'<div class="grid-stack-item( d-none)?" gs-id="([\w-]+)"\s+gs-x="(\d+)" gs-y="(\d+)" gs-w="(\d+)" gs-h="(\d+)"',
             html):
         template[m[2]] = (*map(int, m.group(3, 4, 5, 6)), not m[1])
-    # Sixteen widgets after the two Open-Meteo solar tiles were added next to the spot-market ones. The charging-schedule widget is the 16th.
-    assert template == default and len(default) == 16
+    # Twenty-two widgets: the sixteen up to the charging schedule plus five battery-health tiles and the degradation chart.
+    assert template == default and len(default) == 22
     # Off-by-default (visible:false) but still addable through the "Add widget" library.
     assert not default["days-to-calibration"][4]
     # Factory default: one row of six 2-column tiles, the inverter overview directly below it.
@@ -1150,7 +1157,7 @@ def test_dashboard_js_reuses_the_shared_api_helper_and_does_not_touch_polling():
     # Tiles are moved by mouse drag on the header strip; the old Move/Resize context menu is gone.
     assert "handle: '.dashboard-widget-header'" in js
     assert "Move up" not in js and "dashboard-layout-menu" not in js
-    assert "window.RCTAdmin = Object.freeze({ api, toast, messageFrom, element, confirmAction });" in admin_js
+    assert "window.RCTAdmin = Object.freeze({ api, toast, messageFrom, element, confirmAction, pollDelay });" in admin_js
     assert "startDashboardLayout()" in admin_js and "rct:dashboard-ready" in js
     assert "initDashboardPolling()" in admin_js
     # dashboard.js never reimplements the polling helpers it must leave alone.
@@ -1186,9 +1193,10 @@ def test_energy_mode_is_a_three_state_radio_group_with_mode_dependent_controls()
     # Keyboard: arrows move the focus only, a selection needs Space/Enter/click; aria-disabled keeps focus.
     assert "ArrowRight: 1" in js and "'Home'" in js and "aria-disabled" in js and "aria-checked" in js
     # Controls are enabled in Manual only; External shows the info line and disabled controls.
-    assert "const enabled = operable && item.available && !busy && device.connected;" in js
+    assert "const enabled = operable && item.available && !busy && device.connected && device.mode !== 'off';" in js
     assert "This inverter is controlled by an external app through the API (PAT required)." in js
     assert "external: 'controlled by an external app'" in js and "mode_off:" in js
+    assert "device.mode === 'off' ? 'mode_off'" in js
     assert "Manual control is off for this inverter" not in js
     assert "readyState.kind === 'setup' || !readyState.text" in js
     assert "Measurements are" not in js and "'Live data unavailable.'" in js
@@ -1206,16 +1214,17 @@ def test_energy_mode_is_a_three_state_radio_group_with_mode_dependent_controls()
 def test_energy_controls_are_locked_while_the_inverter_is_not_connected():
     js = _admin_js()
     setup = (ADMIN_DIR / "static/js/admin-energy-setup.js").read_text(encoding="utf-8")
-    # Header and strategy summary show n/a instead of the internal device id.
+    # The header shows n/a instead of the internal device id; the strategy summary shows the configured host.
     assert "nameNode.textContent = device.connected ? device.device_name : NOT_AVAILABLE;" in js
-    assert "energyPanels.get(device.device_id)?.isConnected() ? device.device_name : NOT_AVAILABLE" in setup
+    assert "energyPanels.get(device.device_id)?.isConnected() ? device.device_name : device.host" in setup
     # Mode buttons get the disabled attribute plus a visible hint, and every handler is guarded.
     assert "button.disabled = !device.connected;" in js and "modeOffline.hidden = device.connected;" in js
     assert "!device.connected || (wanted === device.mode" in js
-    assert "if (device.connected) send({ action: 'hold' });" in js
-    assert "if (!selected || !device.connected) return;" in js
+    assert "const actionsLocked = () => !device.connected || device.mode === 'off';" in js
+    assert "if (!actionsLocked()) send({ action: 'hold' });" in js
+    assert "if (!selected || actionsLocked()) return;" in js
     charge = js[js.index("for (const action of ['charge', 'discharge']) {\n      buttons[action].addEventListener"):]
-    assert "if (!device.connected) return;" in charge[:200]
+    assert "if (actionsLocked()) return;" in charge[:200]
 
 
 def test_destructive_actions_use_the_themed_confirm_modal_not_native_confirm():
@@ -1371,6 +1380,26 @@ def test_tsdb_tile_shows_n_a_without_an_export_value_and_keeps_the_reason_second
     assert "Not configured" in tile and "label.title" in tile
     # A real state of the running export stays a value.
     assert "'Sending'" in tile and "'Failing'" in tile
+
+
+def test_flow_icons_are_neutral_grey_unless_their_unit_is_active():
+    css = (ADMIN_DIR / "static/css/admin.css").read_text(encoding="utf-8")
+    js = _admin_js()
+    # Inactive icons use one hue-free grey token per theme; active ones take the line colour.
+    for theme, grey in (("", "#6b7280"), ('[data-bs-theme="dark"] ', "#9ca3af")):
+        assert re.search(rf"{re.escape(theme)}\.flow-node,\s*{re.escape(theme)}\.flow-badge\s*{{\s*--flow-idle-color:\s*{grey};", css), theme
+    assert re.search(r"\.flow-node-icon\s*{[^}]*fill:\s*var\(--flow-idle-color\)", css)
+    assert re.search(r"\.flow-badge-icon\s*{[^}]*color:\s*var\(--flow-idle-color\)", css)
+    assert re.search(r"\.flow-node\.is-active \.flow-node-icon\s*{\s*fill:\s*var\(--flow-color\)", css)
+    assert re.search(r"\.flow-badge\.is-active \.flow-badge-icon\s*{\s*color:\s*var\(--flow-color\)", css)
+    # Nodes and legend entries share the line colour kinds, in light and dark.
+    for kind in ("flow-pv", "flow-import", "flow-charge"):
+        assert f".flow-node.{kind}" in css and f".flow-badge.{kind}" in css, kind
+        assert f'[data-bs-theme="dark"] .flow-node.{kind}' in css, kind
+    assert "@media (forced-colors: active)" in css[css.index(".flow-node-icon {"):]
+    # One activity function drives lines, node icons and legend icons.
+    assert "function energyFlowActivity(" in js and js.count("energyFlowActivity(") == 2
+    assert "setActive(nodes[key].group, activity[key])" in js and "setActive(badgeNodes[key].node, activity[unit])" in js
 
 
 def test_all_status_badges_share_one_component_with_fixed_tones():
@@ -1656,7 +1685,7 @@ def test_weather_preview_renders_disabled_connected_and_unavailable_states():
 def test_energy_page_wires_the_read_only_dry_run_plan_preview():
     html = (TEMPLATES / "energy.html").read_text(encoding="utf-8")
     js = (ADMIN_DIR / "static/js/admin-energy-setup.js").read_text(encoding="utf-8")
-    for element_id in ("energy-plan-device", "energy-plan-load", "energy-plan-result"):
+    for element_id in ("energy-plan-device", "energy-plan-result"):
         assert f'id="{element_id}"' in html and f"$('{element_id}')" in js
     assert "/dynamic-plan`" in js
     # The device list and the battery data do not go through the dispatch-sensitive status route.
@@ -1675,22 +1704,52 @@ def test_energy_page_wires_the_read_only_dry_run_plan_preview():
     plan_pane = html[html.index('id="energy-pane-plan"'):html.index('id="energy-pane-spot-market"')]
     assert 'id="energy-plan-card"' in plan_pane
     assert "method:" not in js[js.index("async function loadDryRunPlan"):js.index("function initDryRunPlan")]
+    # Full-width result area: no permanent 7/5 split, the optional consumption history sits below.
+    assert "col-xl-7" not in plan_pane and "col-xl-5" not in plan_pane
+    assert plan_pane.index('id="energy-plan-result"') < plan_pane.index('id="energy-plan-schedule"') < plan_pane.index('id="energy-consumption-section"')
+    assert 'id="energy-consumption-section"' in plan_pane and "hidden>" in plan_pane[plan_pane.index('id="energy-consumption-section"'):][:200]
+    # Plan-specific KPI grid; the shared two-column Spot Market grid and its tiles stay untouched.
+    css = (ADMIN_DIR / "static/css/admin.css").read_text(encoding="utf-8")
+    assert "energy-plan-highlights" in js and "spot-market-highlights-row" not in js + css
+    assert "repeat(3, minmax(0, 1fr))" in css[css.index(".energy-plan-highlights {"):]
+    # The static header reads as a card: a plain title (no "Preview" qualifier badge, the plan either
+    # has data or says it has none) and the inverter select + Expert switch as one labelled controls block.
+    assert 'id="energy-plan-qualifier"' not in plan_pane and ">Preview<" not in plan_pane
+    # The header carries no Energy Manager mode badge; it was removed on purpose.
+    assert 'id="energy-plan-manager-state"' not in plan_pane + js
+    assert "planStatusCard('Energy Manager is off'" not in js
+    # The plan is a read-only preview whose execution may be off; it is never labelled "Disabled".
+    assert "Read-only preview" in plan_pane and "Preview only" not in plan_pane
+    assert "Preliminary plan" not in js
+    assert "energy-plan-confidence-note" not in plan_pane + js
+    assert 'id="energy-plan-confidence"' in plan_pane and "'Energy Manager off'" not in js
+    assert "function syncPlanSelection" in js
+    assert "const planEligible = (device) => device.mode === 'manual';" in js
+    assert "Show all intervals" in js and "element('details'" in js and "element('summary'" in js
+    assert "History coverage" in js and "Live recording" not in js
+    assert "Locally measured" in js and "Recovered from inverter history" in js
+    assert "will feed later" not in html
+    # Axis unit titles are sized like the legend and the legend entries are real buttons per series.
+    assert "chartAxisTitle('kW'" in js and "chartAxisTitle('%'" in js and "chartAxisTitle('kWh'" in js
+    assert "energy-consumption-legend-item" in js and "setDatasetVisibility(index" in js
+    assert 'role="group"' in plan_pane and 'aria-label="Charging plan controls"' in plan_pane
 
 
 _PLAN_RENDER_DRIVER = r"""
 const fs = require('node:fs');
 const vm = require('node:vm');
-const [jsPath, planPath] = process.argv.slice(2);
+const [jsPath, planPath, expertMode] = process.argv.slice(2);
 const src = fs.readFileSync(jsPath, 'utf8');
 const block = src.slice(src.indexOf('const PLAN_STATUS_LABELS'), src.indexOf('let planDevices'));
 class Node {
-  constructor(tag) { this.tag = tag; this.children = []; this.className = ''; this.text = ''; this.dataset = {}; }
+  constructor(tag) { this.tag = tag; this.children = []; this.className = ''; this.text = ''; this.dataset = {}; this.attributes = {}; this.hidden = false; }
   set textContent(value) { this.text = String(value); this.children = []; }
   get textContent() { return this.text + this.children.map((child) => child.textContent).join(' '); }
   append(...items) { for (const item of items) this.children.push(typeof item === 'string' ? Object.assign(new Node('#text'), { text: item }) : item); }
   replaceChildren(...items) { this.children = []; this.append(...items); }
   get firstChild() { return this.children[0]; }
-  setAttribute() {}
+  setAttribute(name, value) { this.attributes[name] = String(value); }
+  removeAttribute(name) { delete this.attributes[name]; }
   addEventListener() {}
   count(cls) { return (this.className.split(' ').includes(cls) ? 1 : 0) + this.children.reduce((n, child) => n + (child.count ? child.count(cls) : 0), 0); }
   find(tag) { return [...(this.tag === tag ? [this] : []), ...this.children.flatMap((child) => child.find ? child.find(tag) : [])]; }
@@ -1701,16 +1760,28 @@ const schedule = new Node('div');
 const context = vm.createContext({
   NOT_AVAILABLE: 'n/a', formatPower: (w) => `${w} W`, $: (id) => ({ 'energy-plan-technical': technical, 'energy-plan-schedule': schedule })[id] || host,
   element: (tag, className, value) => { const node = new Node(tag); node.className = className || ''; if (value !== undefined) node.text = String(value); return node; },
+  planDevices: [],
+  energyExpertMode: expertMode === 'true',
 });
 vm.runInContext(`${block}; this.renderDryRunPlan = renderDryRunPlan; this.labels = PLAN_ACTION_LABELS; this.planChartSeries = planChartSeries;`, context);
 const plan = JSON.parse(fs.readFileSync(planPath, 'utf8'));
 context.renderDryRunPlan(plan);
 const rows = technical.find('tbody').flatMap((body) => body.children.map((row) => row.children.map((cell) => cell.textContent)));
-console.log(JSON.stringify({ labels: context.labels, rows, spinners: host.count('spinner-border'), series: context.planChartSeries(plan.slots), items: schedule.find('li').map((li) => li.textContent), text: `${host.textContent} ${schedule.textContent} ${technical.textContent}` }));
+const waitingNode = host.children.find((node) => node.className.includes('plan-loading'));
+const expertDetails = host.children.find((node) => node.dataset.expertOnly === 'true');
+const waiting = waitingNode && {
+  role: waitingNode.attributes.role,
+  text: waitingNode.textContent,
+  icon: waitingNode.children[0]?.textContent,
+  iconHidden: waitingNode.children[0]?.attributes['aria-hidden'] === 'true',
+  checklistHidden: expertDetails?.hidden,
+  checklistText: expertDetails?.textContent,
+};
+console.log(JSON.stringify({ labels: context.labels, rows, spinners: host.count('spinner-border'), waiting, series: context.planChartSeries(plan.slots), items: schedule.find('td').slice(0, 4).map((td) => td.textContent), text: `${host.textContent} ${schedule.textContent} ${technical.textContent}` }));
 """
 
 
-def _render_plan(tmp_path, plan: dict) -> dict:
+def _render_plan(tmp_path, plan: dict, *, expert: bool = False) -> dict:
     node = shutil.which("node")
     if node is None:
         pytest.skip("node is not installed")
@@ -1718,7 +1789,7 @@ def _render_plan(tmp_path, plan: dict) -> dict:
     driver.write_text(_PLAN_RENDER_DRIVER, encoding="utf-8")
     plan_file.write_text(json.dumps(plan), encoding="utf-8")
     js = ADMIN_DIR / "static/js/admin-energy-setup.js"
-    done = subprocess.run([node, str(driver), str(js), str(plan_file)], check=False, capture_output=True, text=True, timeout=30)
+    done = subprocess.run([node, str(driver), str(js), str(plan_file), str(expert).lower()], check=False, capture_output=True, text=True, timeout=30)
     assert done.returncode == 0, done.stderr
     return json.loads(done.stdout)
 
@@ -1738,7 +1809,7 @@ def test_dry_run_plan_renderer_shows_idle_and_null_slots_with_horizon_and_window
     }
     out = _render_plan(tmp_path, plan)
     assert len(out["rows"]) == 3  # forecast window rows; the schedule is a chart, not a table
-    assert len(out["items"]) == 1 and "3000 W" in out["items"][0] and "target SoC 80 %" in out["items"][0]
+    assert out["items"][1:3] == ["3000 W", "80 %"]  # first row of the charge-window table
     assert [point["y"] for point in out["series"]["power"]] == [3.0, 3.0, None, 0, 0]  # idle reads 0; the overlapping duplicate slot breaks the line
     assert "Horizon: 24 h" in out["text"] and "Forecast inputs" in out["text"]
     assert out["rows"][2][1] == "n/a"  # spot prices window is unknown
@@ -1780,21 +1851,24 @@ def test_dry_run_plan_renderer_shows_policy_flags_assumptions_and_limiting_reaso
     assert "No (0.5 kWh of demand not covered)" in violated and "Reachable under the currently known limits" in violated
 
 
-def test_dry_run_plan_renderer_shows_one_readiness_checklist_without_a_basic_call_to_action(tmp_path):
-    text = _render_plan(tmp_path, {"status": "spot_prices_unavailable", "slots": []})["text"]
-    for expected in (
-        "Usable battery capacity: available", "Spot prices: not available yet",
-        "Solar forecast: not checked yet", "Consumption model: not checked yet",
-        # Each row carries an explicit text marker, so state is legible without colour or glyph.
-        "Ready", "Pending", "Not checked",
-    ):
-        assert expected in text, expected
+def test_dry_run_plan_renderer_shows_pending_wait_state_and_keeps_readiness_for_experts(tmp_path):
+    pending = {"status": "spot_prices_unavailable", "slots": []}
+    basic = _render_plan(tmp_path, pending)["waiting"]
+    assert basic["role"] == "status" and basic["icon"] == "hourglass_empty" and basic["iconHidden"]
+    assert "Plan is being prepared" in basic["text"] and "Please check back in a few minutes." in basic["text"]
+    assert basic["checklistHidden"] is True
+    expert = _render_plan(tmp_path, pending, expert=True)["waiting"]
+    assert expert["checklistHidden"] is False and "Spot prices: not available yet" in expert["checklistText"]
+
     battery_out = _render_plan(tmp_path, {"status": "battery_state_unavailable", "slots": []})
-    battery = battery_out["text"]
-    assert battery_out["spinners"] == 1 and "Please wait" in battery  # a pending input shows a spinner
-    assert "Battery data could not be verified automatically." in battery  # detail kept for Expert mode
-    assert "Usable battery capacity: could not be verified" in battery and "Show details" not in battery
-    assert "Pending" in battery  # the blocking battery row reads Pending, never an error
+    assert battery_out.get("waiting") is None and battery_out["spinners"] == 0
+    assert "Check that the inverter is connected and reports its battery state and capacity" in battery_out["text"]
+    assert "Plan is being prepared" not in battery_out["text"]
+    assert "Usable battery capacity: could not be verified" in battery_out["text"]
+
+    waiting = _render_plan(tmp_path, {"status": "insufficient_history", "slots": []})["waiting"]
+    assert "Plan is being prepared" in waiting["text"]
+    assert "conservative baseline" in waiting["checklistText"]
 
 
 def test_dry_run_plan_renderer_tells_disabled_inputs_from_pending_ones(tmp_path):
@@ -1806,6 +1880,16 @@ def test_dry_run_plan_renderer_tells_disabled_inputs_from_pending_ones(tmp_path)
     solar = _render_plan(tmp_path, {"status": "solar_not_configured", "slots": []})["text"]
     assert "The solar forecast is not configured." in solar
     assert "Spot prices: available" in solar and "Solar forecast: not configured in settings" in solar
+
+
+def test_every_forecast_basis_is_handled_by_the_plan_confidence_renderer():
+    from app.optimizer.models import ForecastBasis
+
+    js = (ADMIN_DIR / "static/js/admin-energy-setup.js").read_text(encoding="utf-8")
+    body = js[js.index("function renderPlanConfidence"):js.index("function renderDryRunPlan")]
+    block = js[js.index("const PLAN_CONFIDENCE_BASES"):js.index("function renderPlanConfidence")] + body
+    for basis in ForecastBasis:
+        assert basis.value in block, f"forecast basis {basis.value} has no confidence presentation"
 
 
 def test_every_planner_action_has_a_plan_label(tmp_path):
@@ -1835,3 +1919,86 @@ def test_dry_run_schedule_chart_series_keep_uneven_slots_and_gaps_on_a_time_axis
     assert [point["y"] for point in power] == [2.0, 2.0, None, 0, 0]  # a gap breaks the line, idle reads 0
     assert [point["y"] for point in soc] == [70.0, 70.0, None, None, None]
     assert power[4]["x"] - power[3]["x"] == 13 * 3600 * 1000  # the long slot keeps its true length
+
+
+# --- Mandatory usage-disclaimer UI (markup, navigation gate, client contract) -------------------
+
+@contextlib.asynccontextmanager
+async def _changed_not_accepted(tmp_path) -> AsyncIterator[httpx.AsyncClient]:
+    """Like _logged_in, but stops after the password change WITHOUT accepting the disclaimer."""
+    app = create_app(Settings(_env_file=None, hmac_secret="s" * 48, admin_db_path=tmp_path / "rct.db"))
+    password = app.state.first_start_password
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver",
+                          headers={"Origin": "http://testserver"}) as client,
+    ):
+        csrf = (await client.get("/admin/api/session")).json()["csrf_token"]
+        login = await client.post("/admin/api/login", headers={"X-CSRF-Token": csrf},
+                                  json={"username": "admin", "password": password})
+        changed = await client.post("/admin/api/change-password",
+                                    headers={"X-CSRF-Token": login.json()["csrf_token"]},
+                                    json={"current_password": password, "new_password": "a much stronger password"})
+        assert changed.json()["disclaimer_required"] is True
+        yield client
+
+
+@pytest.mark.asyncio
+async def test_other_ui_pages_cannot_bypass_a_pending_disclaimer(tmp_path):
+    async with _changed_not_accepted(tmp_path) as client:
+        # The dashboard renders (that is where the modal lives)...
+        assert (await client.get("/ui/dashboard")).status_code == 200
+        # ...every other page funnels back to the dashboard instead of serving its content.
+        for page in ("settings", "energy", "inverters", "tokens", "tsdb", "prometheus"):
+            response = await client.get(f"/ui/{page}", follow_redirects=False)
+            assert response.status_code == 303, page
+            assert response.headers["location"] == "/ui/dashboard", page
+
+
+def test_disclaimer_modal_markup_is_mandatory_and_not_dismissable():
+    base = (TEMPLATES / "base.html").read_text(encoding="utf-8")
+    start = base.index('id="disclaimer-modal"')
+    # The modal element and its dialog/content/body/footer block.
+    block = base[base.rindex("<div", 0, start):]
+    block = block[: block.index("{% endif %}")]
+    # Static backdrop and no keyboard dismiss (mirrors reconnect-modal).
+    assert 'data-bs-backdrop="static"' in block
+    assert 'data-bs-keyboard="false"' in block
+    # No dismiss affordance at all: no close button, no cancel, no backdrop/escape dismiss hook.
+    assert "data-bs-dismiss" not in block
+    assert "btn-close" not in block
+    assert "Cancel" not in block and "Abbrechen" not in block
+    # A single explicit accept control carries the consent.
+    assert 'id="disclaimer-accept"' in block
+    # Source line wrapping must not matter: compare the whitespace-normalised markup.
+    assert "I have read the notice and accept" in " ".join(block.split())
+    # Accessible dialog semantics and a hidden error region for save failures.
+    assert 'aria-labelledby="disclaimer-title"' in block
+    assert 'id="disclaimer-error"' in block and 'role="alert"' in block
+
+
+def test_disclaimer_client_accepts_and_handles_errors():
+    js = _admin_js()
+    assert "initDisclaimerGate" in js
+    # Posts to the dedicated endpoint through the shared, CSRF-injecting api() helper.
+    assert "accept-disclaimer" in js
+    # Opens from server-delivered state only.
+    assert "disclaimer_required" in js
+    # Disables the button against a double-click.
+    assert "accept.disabled = true" in js
+    # On failure the modal stays open and the error is shown; the button is re-enabled.
+    assert "disclaimer-error" in js
+    assert "accept.disabled = false" in js
+
+
+def test_theme_toggle_is_a_three_state_button_naming_state_and_action():
+    base = (TEMPLATES / "base.html").read_text(encoding="utf-8")
+    button = base[base.index('id="theme-toggle"'):]
+    button = button[:button.index("</button>")]
+    assert 'aria-label="Theme: Auto (system). Click to switch to Light"' in button
+    assert "brightness_auto" in button and "aria-pressed" not in button
+    assert base.index("js/theme.js") < base.index("css/admin.css")  # applied before first paint
+    js = _admin_js()
+    for glyph in ("brightness_auto", "light_mode", "dark_mode"):
+        assert glyph in js
+    assert "'rct-theme-change'" in js and "setAttribute('aria-pressed'" not in js[js.index("function syncThemeToggle"):js.index("function initShell")]

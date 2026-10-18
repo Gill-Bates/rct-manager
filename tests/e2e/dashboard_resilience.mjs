@@ -46,6 +46,9 @@ await page.fill('#new-password', NEW_PASSWORD);
 await page.fill('#confirm-password', NEW_PASSWORD);
 await page.click('#change-password-form button[type=submit]');
 await page.waitForURL('**/ui/dashboard');
+// The one-time usage notice locks the admin API until accepted.
+await page.locator('#disclaimer-accept').waitFor({ state: 'visible', timeout: 10000 });
+await Promise.all([page.waitForNavigation(), page.click('#disclaimer-accept')]);
 
 // The shape of the dashboard: everything a collapse would remove, plus the grid's vertical position.
 const inventory = () => page.evaluate(() => ({

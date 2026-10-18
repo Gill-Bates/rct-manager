@@ -7,15 +7,18 @@
 """Tests for the default-OFF plan dispatch handoff: mapping, dedup, locked execution, restart."""
 
 import asyncio
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 
+from app.energy import manager as manager_module
 from app.energy.errors import EnergyRejected
 from app.energy.models import EnergyAction as ExecutorAction
 from app.energy.models import EnergyCommand, EnergyState
-from app.energy.plan_handoff import _HANDOFF_ACTOR, PlanDispatchHandoff
+from app.energy.plan_handoff import _EXPECTED_REFUSALS, _HANDOFF_ACTOR, PlanDispatchHandoff
 from app.optimizer.models import EnergyAction, EnergyPlanSlot
 
 DEVICE = "main"
@@ -211,3 +214,10 @@ async def test_unexpected_refusal_propagates() -> None:
 
     with pytest.raises(EnergyRejected):
         await handoff.offer(DEVICE, _slot(EnergyAction.CHARGE, target=90.0, power=3000.0))
+
+
+def test_every_expected_refusal_is_a_code_the_manager_raises() -> None:
+    # Guards against a renamed manager code silently turning an expected refusal into a crash.
+    source = Path(manager_module.__file__).read_text(encoding="utf-8")
+    raised = set(re.findall(r'EnergyRejected\(\s*"([a-z_]+)"', source))
+    assert _EXPECTED_REFUSALS <= raised

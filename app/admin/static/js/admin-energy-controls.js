@@ -11,12 +11,8 @@
   const ENERGY_ACTION_LABELS = {
     charge: 'Charge battery', discharge: 'Discharge battery', hold: 'Keep battery idle',
   };
-  const ENERGY_STATE_LABELS = {
-    automatic: 'Idle', starting: 'Starting', charging: 'Charging', discharging: 'Discharging',
-    holding: 'Holding', stopping: 'Stopping', fault: 'Fault',
-  };
   const ENERGY_REASON_LABELS = {
-    mode_off: 'the inverter is switched off', external: 'controlled by an external app',
+    mode_off: 'Energy Manager is off. Select Manual to use battery actions.', external: 'controlled by an external app',
     write_not_permitted: 'write access was revoked',
     limits_missing: 'power limits are not configured', hardware_not_verified: 'hardware is not verified',
     restore_required: 'the inverter must be handed back first',
@@ -43,12 +39,15 @@
   const ENERGY_REQUIRED_CAPABILITIES = ['write_path_convention', 'battery_power_sign_convention', 'grid_power_sign_convention'];
   const ENERGY_POLICY_MODES = [['business_target', 'Business target'], ['below_current_soc', 'Below current SoC']];
   const ENERGY_POLL_MS = 3000;
+  const ENERGY_POLL_BACKOFF_MS = 30000; // write support off (503) is a steady state: poll rarely
   const ENERGY_POLL_TIMEOUT_MS = 8000;
   const ENERGY_IDLE_WATTS = 20; // below this a flow counts as standing still
   const SVG_NS = 'http://www.w3.org/2000/svg';
   const energyPanels = new Map();
   const energyHardwareStrategies = new Map();
   let energyPolling = false;
+  let energyPollDelay = ENERGY_POLL_MS;
+  let energyPollTimer = null;
   // Logical clock ordering poll requests against finished panel actions, so a poll requested before
   // an action completed never overwrites its result.
   let energyClock = 0;
@@ -78,16 +77,26 @@
     return abs >= 1000 ? `${(abs / 1000).toFixed(2)} kW` : `${Math.round(abs)} W`;
   }
 
-  // Operate and Setup show power in kW; the backend keeps transmitting/storing watts. Rounding
-  // boundary is pinned (design §11): < 10000 W -> two decimals (e.g. "0.90 kW"), >= 10000 W -> one.
-  function formatPowerKw(watts) {
-    if (!Number.isFinite(watts)) return NOT_AVAILABLE;
-    const abs = Math.abs(watts);
-    return `${(abs / 1000).toFixed(abs < 10000 ? 2 : 1)} kW`;
-  }
-
   function formatPercent(value) {
     return Number.isFinite(value) ? `${Math.round(value)} %` : NOT_AVAILABLE;
+  }
+
+  const FLOW_KINDS = ['flow-pv', 'flow-export', 'flow-discharge', 'flow-import', 'flow-charge'];
+
+  // The single definition of "active" for the flow graphic: node icon, legend icon and line all
+  // follow it. Each unit is a colour kind (see .flow-line.flow-* in admin.css) or null = inactive/unknown.
+  function energyFlowActivity(readings) {
+    const idle = ENERGY_IDLE_WATTS;
+    const pv = readingValue(readings.pv_power_w);
+    const grid = readingValue(readings.grid_power_w);
+    const battery = readingValue(readings.battery_power_w);
+    const house = readingValue(readings.house_load_w);
+    return {
+      pv: pv !== null && pv >= idle ? 'flow-pv' : null,
+      grid: grid === null || Math.abs(grid) < idle ? null : grid > 0 ? 'flow-import' : 'flow-export',
+      battery: battery === null || Math.abs(battery) < idle ? null : battery > 0 ? 'flow-discharge' : 'flow-charge',
+      house: house !== null && house >= idle ? (grid !== null && grid >= idle ? 'flow-import' : 'flow-pv') : null,
+    };
   }
 
   function energyFlowGraphic({ lite = false } = {}) {
@@ -109,11 +118,13 @@
       lines[key] = { group, dots, arrow, forwardX, forwardY, reverseX, reverseY, angle };
     }
     const nodes = {};
+    // Single private-use codepoints, not ligature names: SVG text-anchor measures the unshaped
+    // string in WebKit and would shift a multi-letter ligature off its circle.
     const nodeDefs = [
-      ['pv', 210, 78, 'wb_sunny', 'PV', 'top'],
-      ['grid', 56, 190, 'factory', 'Grid', 'bottom'],
-      ['house', 210, 190, 'home', 'House', 'bottom'],
-      ['battery', 364, 190, 'battery_charging_full', 'Battery', 'bottom'],
+      ['pv', 210, 78, '\ue430', 'PV', 'top'],
+      ['grid', 56, 190, '\uebbc', 'Grid', 'bottom'],
+      ['house', 210, 190, '\ue88a', 'House', 'bottom'],
+      ['battery', 364, 190, '\ue1a3', 'Battery', 'bottom'],
     ];
     for (const [key, cx, cy, icon, label, place] of nodeDefs.filter(([key]) => !lite || key !== 'pv')) {
       const group = svgEl('g', { class: 'flow-node' });
@@ -181,6 +192,12 @@
       line.arrow.setAttribute('transform', `translate(${x} ${y}) rotate(${line.angle + (reverse ? 180 : 0)})`);
     }
 
+    // Active units show their colour kind; inactive ones fall back to the neutral grey in admin.css.
+    function setActive(node, kind) {
+      setClass(node, 'is-active', Boolean(kind));
+      for (const k of FLOW_KINDS) setClass(node, k, k === kind);
+    }
+
     function setNode(key, text, stale, labelSuffix = '') {
       const node = nodes[key];
       node.value.textContent = text;
@@ -198,7 +215,8 @@
 
       // Same value and threshold as the node labels below; a stale reading is only dimmed, never
       // dropped, so the animation cannot disagree with a "Charging" or "Import" label.
-      if (!lite) setLine('pv', pv, 'flow-pv', 'flow-pv');
+      const activity = energyFlowActivity(r);
+      if (!lite) setLine('pv', activity.pv ? pv : 0, 'flow-pv', 'flow-pv');
       setLine('grid', grid, 'flow-import', 'flow-export');
       setLine('battery', battery, 'flow-discharge', 'flow-charge');
 
@@ -209,8 +227,12 @@
       setNode('house', formatPower(house), !!r.house_load_w.stale);
       setNode('battery', formatPower(battery), !!r.battery_power_w.stale,
         soc === null ? '' : formatPercent(soc));
+      for (const key of Object.keys(nodes)) setActive(nodes[key].group, activity[key]);
       const idle = ENERGY_IDLE_WATTS;
       if (!lite) {
+        for (const [key, unit] of [['generation', 'pv'], ['consumption', 'house'], ['grid', 'grid'], ['battery', 'battery']]) {
+          setActive(badgeNodes[key].node, activity[unit]);
+        }
         setBadge('generation', pv === null ? null : pv >= idle ? ['Generating', true] : ['No generation', false], !!r.pv_power_w.stale, !!r.pv_power_w.expired);
         setBadge('consumption', grid === null ? null : grid < idle ? ['Independent', true] : ['Grid supplied', false], !!r.grid_power_w.stale, !!r.grid_power_w.expired);
         setBadge('grid', grid === null ? null : grid <= -idle ? ['Feed-in', true] : grid < idle ? ['Idle', true] : ['Import', false], !!r.grid_power_w.stale, !!r.grid_power_w.expired);
@@ -302,38 +324,6 @@
     const recorded = device.mode === 'off' && device.mode_recorded === true;
     const fresh = Boolean(strategy) && strategy.stale === false && Number.isInteger(strategy.code);
     return { recorded, observed: recorded && fresh && strategy.code === 4, mismatch: recorded && fresh && strategy.code !== 4 };
-  }
-
-  // Current mode line + one plain sentence (design §10). While running, a non-stale battery reading
-  // adds the measured rate in kW; a stale reading omits the rate rather than show a stale number.
-  function energyModeSentence(device) {
-    const target = device.target_soc_percent;
-    const hasTarget = target !== null && target !== undefined;
-    const reading = device.readings.battery_power_w;
-    const live = liveValue(reading); // null when absent or stale
-    const rate = live !== null && Math.abs(live) >= ENERGY_IDLE_WATTS ? ` ${formatPowerKw(live)}` : '';
-    switch (device.state) {
-      case 'automatic':
-        return { mode: 'Idle', sentence: 'No Energy Manager command is active; the inverter uses its own settings.' };
-      case 'charging':
-        return {
-          mode: hasTarget ? `Charging to ${Math.round(target)} %` : 'Charging',
-          sentence: `Charging${hasTarget ? ` to ${Math.round(target)} %` : ''}.${rate ? ` Charging at${rate}.` : ''}`
-        };
-      case 'discharging':
-        return {
-          mode: hasTarget ? `Discharging to ${Math.round(target)} %` : 'Discharging',
-          sentence: `Discharging${hasTarget ? ` to ${Math.round(target)} %` : ''}.${rate ? ` Discharging at${rate}.` : ''}`
-        };
-      case 'holding':
-        return { mode: 'Keeping battery idle', sentence: 'Keeping battery idle.' };
-      case 'starting':
-        return { mode: 'Starting', sentence: 'Starting…' };
-      case 'stopping':
-        return { mode: 'Stopping', sentence: 'Stopping…' };
-      default:
-        return { mode: ENERGY_STATE_LABELS[device.state] || device.state, sentence: '' };
-    }
   }
 
   // A failed live poll is actionable; the normal cache age is intentionally not shown here.
@@ -461,14 +451,10 @@
     statusText.append(statusMain, statusDetail);
     statusBox.append(statusIcon, statusText);
 
-    // One plain-language block: current mode + a single human sentence (design §10).
     const modeBox = element('div', 'energy-mode');
-    const modeLine = element('div', 'small text-secondary');
-    const modeSentence = element('div', 'fw-semibold');
-    const socLine = element('div', 'small text-secondary energy-soc');
     const freshness = element('p', 'small text-secondary energy-freshness mb-0');
     freshness.hidden = true;
-    modeBox.append(modeLine, modeSentence, socLine, freshness);
+    modeBox.append(freshness);
 
     const actions = element('div', 'energy-actions');
     const buttons = {};
@@ -577,17 +563,19 @@
       });
     }
 
-    buttons.hold.addEventListener('click', () => { if (device.connected) send({ action: 'hold' }); });
+    // Off is operational rest: a disabled button already blocks the click, this guards synthetic events.
+    const actionsLocked = () => !device.connected || device.mode === 'off';
+    buttons.hold.addEventListener('click', () => { if (!actionsLocked()) send({ action: 'hold' }); });
     for (const action of ['charge', 'discharge']) {
       buttons[action].addEventListener('click', () => {
-        if (!device.connected) return;
+        if (actionsLocked()) return;
         selected = selected === action ? null : action;
         render();
       });
     }
     range.addEventListener('input', () => { if (selected) touched[selected] = true; renderTarget(); });
     confirm.addEventListener('click', () => {
-      if (!selected || !device.connected) return;
+      if (!selected || actionsLocked()) return;
       send({ action: selected, target_soc_percent: Number(range.value) });
     });
 
@@ -712,21 +700,14 @@
       statusDetail.textContent = readyState.detail || '';
       statusDetail.hidden = !readyState.detail;
 
-      // Mode + one plain sentence; the whole block is hidden until manual control is ready.
-      // In External the controls stay visible but disabled, so the state is readable.
       const operable = readyState.ready;
       const external = readyState.kind === 'external';
-      modeBox.hidden = !(operable || external);
+      modeBox.hidden = true;
       if (operable || external) {
-        const mode = energyModeSentence(device);
-        modeLine.textContent = `Manager status: ${mode.mode}`;
-        modeSentence.textContent = mode.sentence;
-        const soc = readingValue(device.readings.battery_soc_percent);
-        socLine.textContent = soc === null ? '' : `Battery ${formatPercent(soc)}`;
-        socLine.hidden = soc === null;
         const note = energyFreshnessNote(lastPollFailed);
         freshness.textContent = note;
         freshness.hidden = !note;
+        modeBox.hidden = !note;
       }
 
       // Actions + target are usable only once ready.
@@ -736,9 +717,10 @@
       if (!liteBox.hidden) liteFlow.update(device.readings);
       for (const action of ['charge', 'hold', 'discharge']) {
         const item = energyAvailability(device, action);
-        const enabled = operable && item.available && !busy && device.connected;
+        const enabled = operable && item.available && !busy && device.connected && device.mode !== 'off';
         buttons[action].disabled = !enabled;
-        const reason = external ? 'external' : item.reason;
+        setClass(buttons[action], 'is-inactive', !enabled);
+        const reason = device.mode === 'off' ? 'mode_off' : external ? 'external' : item.reason;
         buttons[action].title = enabled ? '' : (ENERGY_REASON_LABELS[reason] || '');
         setClass(buttons[action], 'is-selected', selected === action);
         buttons[action].setAttribute('aria-pressed', action === 'charge' || action === 'discharge' ? String(selected === action) : 'false');

@@ -1,24 +1,24 @@
 # Endpoints
 
-| Method | Path | Token | Purpose |
-| --- | --- | --- | --- |
-| GET | `/health` | no | Liveness; 503 once the shutdown has begun |
-| GET | `/metrics` | yes by default | Prometheus text format, never touches a device |
-| GET | `/docs`, `/openapi.json` | no | Swagger UI and OpenAPI document; only with documentation enabled (`DOCS_PUBLIC`, GUI **Settings**), otherwise 404 |
-| GET | `/api/v1/readiness` | yes | Readiness per device |
-| GET | `/api/v1/metrics` | yes | Metric list from the object registry |
-| GET | `/api/v1/devices` | yes | Configured devices |
-| GET | `/api/v1/devices/{device_id}/metrics` | yes | Several metrics, partial success |
-| GET | `/api/v1/devices/{device_id}/metrics/{metric_name}` | yes | One metric |
-| PUT | `/api/v1/devices/{device_id}/metrics/{metric_name}` | read/write | Write a metric (write access required) |
-| POST | `/api/v1/devices/{device_id}/actions/{action_name}` | read/write | Trigger an action variable (write access required) |
-| POST | `/api/v1/devices/{device_id}/battery/dispatch` | read/write | Start or atomically replace grid charging or load-following discharge |
-| GET | `/api/v1/devices/{device_id}/battery/dispatch` | read/write | Read the current dispatch and restore state |
-| DELETE | `/api/v1/devices/{device_id}/battery/dispatch` | read/write | Stop dispatch and restore the previous inverter settings |
-| GET | `/api/v1/devices/{device_id}/energy` | read/write | Energy Manager state, readings, target window and action availability |
-| POST | `/api/v1/devices/{device_id}/energy/command` | read/write | One business action: charge, discharge, hold, auto |
-| GET | `/api/v1/devices/{device_id}/plan` | yes | Current read-only charging plan; `available=false` when none is valid |
-| GET | `/api/v1/vendor/rct/objects`, `/transports`, `/devices/{device_id}/slaves` | read/write | RCT diagnostics |
+| Method | Path                                                                       | Token          | Purpose                                                                                                           |
+| ------ | -------------------------------------------------------------------------- | -------------- | ----------------------------------------------------------------------------------------------------------------- |
+| GET    | `/health`                                                                  | no             | Liveness; 503 once the shutdown has begun                                                                         |
+| GET    | `/metrics`                                                                 | yes by default | Prometheus text format, never touches a device                                                                    |
+| GET    | `/docs`, `/openapi.json`                                                   | no             | Swagger UI and OpenAPI document; only with documentation enabled (`DOCS_PUBLIC`, GUI **Settings**), otherwise 404 |
+| GET    | `/api/v1/readiness`                                                        | yes            | Readiness per device                                                                                              |
+| GET    | `/api/v1/metrics`                                                          | yes            | Metric list from the object registry                                                                              |
+| GET    | `/api/v1/devices`                                                          | yes            | Configured devices                                                                                                |
+| GET    | `/api/v1/devices/{device_id}/metrics`                                      | yes            | Several metrics, partial success                                                                                  |
+| GET    | `/api/v1/devices/{device_id}/metrics/{metric_name}`                        | yes            | One metric                                                                                                        |
+| PUT    | `/api/v1/devices/{device_id}/metrics/{metric_name}`                        | read/write     | Write a metric (write access required)                                                                            |
+| POST   | `/api/v1/devices/{device_id}/actions/{action_name}`                        | read/write     | Trigger an action variable (write access required)                                                                |
+| POST   | `/api/v1/devices/{device_id}/battery/dispatch`                             | read/write     | Start or atomically replace grid charging or load-following discharge                                             |
+| GET    | `/api/v1/devices/{device_id}/battery/dispatch`                             | read/write     | Read the current dispatch and restore state                                                                       |
+| DELETE | `/api/v1/devices/{device_id}/battery/dispatch`                             | read/write     | Stop dispatch and restore the previous inverter settings                                                          |
+| GET    | `/api/v1/devices/{device_id}/energy`                                       | read/write     | Energy Manager state, readings, target window and action availability                                             |
+| POST   | `/api/v1/devices/{device_id}/energy/command`                               | read/write     | One business action: charge, discharge, hold, auto                                                                |
+| GET    | `/api/v1/devices/{device_id}/plan`                                         | yes            | Current read-only charging plan; `available=false` when none is valid                                             |
+| GET    | `/api/v1/vendor/rct/objects`, `/transports`, `/devices/{device_id}/slaves` | read/write     | RCT diagnostics                                                                                                   |
 
 `/metrics` (Prometheus) and `/api/v1/metrics` (metric list) are different on
 purpose.
@@ -36,13 +36,13 @@ a plan carries two optional, stable enum fields that tell a consumer how far the
 input can be trusted. Both are absent when the plan has no such information, and new values
 would be additive.
 
-| Field | Value | Meaning |
-| --- | --- | --- |
-| `forecast_basis` | `bootstrap_baseline` | No usable consumption history; a configured flat baseline load |
-| | `history_fallback` | Thin history; a median of the stored history |
-| | `adaptive_history` | Sufficient history; the adaptive profile |
-| `forecast_confidence` | `low` | Baseline or fallback forecast (`bootstrap_baseline`, `history_fallback`) |
-| | `normal` | Sufficient, well-covered history (`adaptive_history`) |
+| Field                 | Value                | Meaning                                                                  |
+| --------------------- | -------------------- | ------------------------------------------------------------------------ |
+| `forecast_basis`      | `bootstrap_baseline` | No usable consumption history; a configured flat baseline load           |
+|                       | `history_fallback`   | Thin history; a median of the stored history                             |
+|                       | `adaptive_history`   | Sufficient history; the adaptive profile                                 |
+| `forecast_confidence` | `low`                | Baseline or fallback forecast (`bootstrap_baseline`, `history_fallback`) |
+|                       | `normal`             | Sufficient, well-covered history (`adaptive_history`)                    |
 
 ```json
 {"available": true, "forecast_basis": "history_fallback", "forecast_confidence": "low", "...": "..."}
@@ -98,7 +98,7 @@ ready state, and 503 `not_ready` (with a `devices` member) otherwise.
 Battery dispatch is available only when write support is enabled, all four `power_mng_*`
 registers are approved on the **Inverters** page, and the device's required capabilities for the
 requested mode are verified (or its engineering mode is on) — see
-[Battery dispatch capabilities](../operation.md#battery-dispatch-capabilities). A device with an
+[Battery dispatch capabilities](../energy/battery-control.md#capability-gates-and-evidence). A device with an
 unverified required capability answers `409 dispatch_unverified`, naming the missing
 capabilities. Starting a dispatch when the device's control snapshot could not be read freshly
 enough answers `503 dispatch_snapshot_stale`; retry. A persisted dispatch record that cannot be
@@ -130,14 +130,14 @@ curl -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/jso
 - `export_to_grid` is reserved but currently returns `409 dispatch_mode_unavailable`.
 - `hold` is a valid `mode` as well: it pins the battery at 0 W under our control, takes no
   `target_soc_percent` and no power budget, and is gated per device like every other mode. It is
-  **not verified on hardware** — see [Energy Manager](../energy-manager.md#hold-is-unverified).
+  **not verified on hardware** — see [Hardware Verification](../reference/hardware-verification.md).
 
 ## Energy Manager
 
 Business-level control in front of battery dispatch, available while the operator has set the inverter
 to mode **External**: one action (`charge`, `discharge`, `hold`,
 `auto`) plus `target_soc_percent` where needed. Actions, errors and readings are described in
-[Energy Manager](../energy-manager.md).
+[Battery Control](../energy/battery-control.md).
 
 ```sh
 curl -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \

@@ -44,7 +44,12 @@ _FRESH_HELP = (
     "with fresh_not_available_for_periodic_metric when the configured mode is reject."
 )
 Fresh = Annotated[bool, Query(description=_FRESH_HELP)]
-_COMMON = (ErrorCode.MISSING_TOKEN, ErrorCode.INVALID_TOKEN, ErrorCode.RATE_LIMITED, ErrorCode.UNKNOWN_DEVICE)
+_COMMON = (
+    ErrorCode.MISSING_TOKEN,
+    ErrorCode.INVALID_TOKEN,
+    ErrorCode.RATE_LIMITED,
+    ErrorCode.UNKNOWN_DEVICE,
+)
 _DEVICE_ERRORS = (
     ErrorCode.NOT_READY,
     ErrorCode.QUEUE_FULL,
@@ -72,7 +77,9 @@ def _to_value(runtime: Runtime, reading: MetricReading) -> MetricValue:
         source=reading.source,
         stale_reason=reading.stale_reason,
         freshness=reading.freshness,
-        enum_value=int(reading.value) if is_enum and isinstance(reading.value, int) else None,
+        enum_value=(
+            int(reading.value) if is_enum and isinstance(reading.value, int) else None
+        ),
         enum_label=reading.enum_label,
     )
 
@@ -86,7 +93,13 @@ def _select_names(runtime: Runtime, names: str | None, fresh: bool) -> list[str]
         raise ProblemError(
             ErrorCode.INVALID_REQUEST,
             detail=f"fresh=true requires an explicit names list of at most {limit} metrics.",
-            errors=[FieldError(parameter="names", code="required_with_fresh", detail="names is required.")],
+            errors=[
+                FieldError(
+                    parameter="names",
+                    code="required_with_fresh",
+                    detail="names is required.",
+                )
+            ],
         )
     if names is None:
         selected = list(runtime.catalog.preselected())
@@ -95,7 +108,13 @@ def _select_names(runtime: Runtime, names: str | None, fresh: bool) -> list[str]
         if not all(selected):
             raise ProblemError(
                 ErrorCode.INVALID_PARAMETER,
-                errors=[FieldError(parameter="names", code="invalid_parameter", detail="Empty metric name in list.")],
+                errors=[
+                    FieldError(
+                        parameter="names",
+                        code="invalid_parameter",
+                        detail="Empty metric name in list.",
+                    )
+                ],
             )
     settings = runtime.settings
     # The registry-defined default set is bounded at startup (64) and not an operator batch.
@@ -103,13 +122,25 @@ def _select_names(runtime: Runtime, names: str | None, fresh: bool) -> list[str]
         raise ProblemError(
             ErrorCode.BATCH_TOO_LARGE,
             detail=f"At most {settings.max_metrics_per_request} metrics per request are allowed.",
-            errors=[FieldError(parameter="names", code="batch_too_large", detail="Too many metric names.")],
+            errors=[
+                FieldError(
+                    parameter="names",
+                    code="batch_too_large",
+                    detail="Too many metric names.",
+                )
+            ],
         )
     if fresh and len(selected) > settings.max_fresh_metrics_per_request:
         raise ProblemError(
             ErrorCode.FRESH_BATCH_TOO_LARGE,
             detail=f"At most {settings.max_fresh_metrics_per_request} metrics per fresh request are allowed.",
-            errors=[FieldError(parameter="names", code="fresh_batch_too_large", detail="Too many metric names.")],
+            errors=[
+                FieldError(
+                    parameter="names",
+                    code="fresh_batch_too_large",
+                    detail="Too many metric names.",
+                )
+            ],
         )
     unknown = [n for n in selected if not runtime.catalog.exists(n)]
     if unknown:
@@ -117,7 +148,11 @@ def _select_names(runtime: Runtime, names: str | None, fresh: bool) -> list[str]
             ErrorCode.UNKNOWN_METRIC,
             status=422,
             errors=[
-                FieldError(parameter="names", code="unknown_metric", detail=f"Unknown metric: {echo_name(n)}")
+                FieldError(
+                    parameter="names",
+                    code="unknown_metric",
+                    detail=f"Unknown metric: {echo_name(n)}",
+                )
                 for n in unknown
             ],
         )
@@ -160,7 +195,10 @@ async def get_metrics(
     runtime: RuntimeDep,
     _: Annotated[Principal, Depends(require_read)],
     names: Annotated[
-        str | None, Query(description="Comma-separated metric names; the preselected metrics when omitted.")
+        str | None,
+        Query(
+            description="Comma-separated metric names; the preselected metrics when omitted."
+        ),
     ] = None,
     fresh: Fresh = False,
 ) -> MetricCollection:
@@ -169,18 +207,28 @@ async def get_metrics(
     selected = _select_names(runtime, names, fresh)
     runtime.ensure_accepting()
     # This request's own reservation; never shared with any other concurrent batch (Requirement 6.10).
-    reservation = runtime.gateway.reserve_budget(device_id, len(selected)) if fresh else None
+    reservation = (
+        runtime.gateway.reserve_budget(device_id, len(selected)) if fresh else None
+    )
     metrics: list[MetricValue] = []
     errors: list[MetricError] = []
     try:
         for name in selected:
             try:
-                reading = await runtime.gateway.read_metric(device_id, name, fresh=fresh, charge=reservation)
+                reading = await runtime.gateway.read_metric(
+                    device_id, name, fresh=fresh, charge=reservation
+                )
             except DeviceApiError as exc:
                 code = normalize_code(exc)
                 if code is ErrorCode.INTERNAL_ERROR:
-                    log.error("Unexpected error code while reading a metric: %s", exc.code)
-                errors.append(MetricError(name=name, code=code.value, detail=field_text(code.value)))
+                    log.error(
+                        "Unexpected error code while reading a metric: %s", exc.code
+                    )
+                errors.append(
+                    MetricError(
+                        name=name, code=code.value, detail=field_text(code.value)
+                    )
+                )
                 continue
             metrics.append(_to_value(runtime, reading))
     finally:

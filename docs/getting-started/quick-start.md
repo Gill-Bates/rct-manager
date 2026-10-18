@@ -12,8 +12,7 @@
 python -m pip install -e '.[dev]'
 ```
 
-Without development tools, `python -m pip install -e .` installs the runtime
-dependencies only.
+`python -m pip install -e .` installs the runtime dependencies only.
 
 ## Configure
 
@@ -23,38 +22,34 @@ Copy `settings.env.example` to `settings.env`:
 cp settings.env.example settings.env
 ```
 
-The file only holds start parameters (`HMAC_SECRET`, `BIND_ADDRESS`, `BIND_PORT`,
-`ALLOW_NON_LOOPBACK_BIND` and optionally `ADMIN_DB_PATH`).
-Devices, authentication, API tokens, logging and export are configured in the
-administration GUI.
-For Docker, supply a stable random `HMAC_SECRET` (`openssl rand -base64 32`)
-before starting. Local startup generates the secret in `settings.env` if absent.
+The file holds only start parameters (`HMAC_SECRET`, `BIND_ADDRESS`, `BIND_PORT`,
+`ALLOW_NON_LOOPBACK_BIND`, optionally `ADMIN_DB_PATH`); devices, authentication, API tokens, logging
+and export are set in the admin GUI. Docker needs a stable random `HMAC_SECRET`
+(`openssl rand -base64 32`) before starting; a local start generates it in `settings.env` if absent.
 
-The application reads `settings.env` at the project root automatically.
-`--env-file` selects another file. Environment variables take precedence.
-See [Environment Variables](../configuration/environment.md) for all settings.
+`settings.env` at the project root is read automatically; `--env-file` selects another file and
+environment variables take precedence. See [Environment Variables](../configuration/environment.md).
 
 ## Administration and tokens
 
 Open `http://127.0.0.1:8000/` after starting the server. The first start prints a boxed
-`FIRST START` block with the one-time `admin` password (8 characters, one special character) in
-clear text, so it can be copy-pasted straight from the console. The password is shown only on this
-initial bootstrap, not on later restarts.
+`FIRST START` block with the one-time `admin` password (see
+[Authentication](../configuration/authentication.md#administration-login)). The first login requires
+a new password (at least 8 characters) before other pages become accessible.
 
-The first login requires a new password (at least 8 characters) before other administration pages
-become accessible.
+Until it is changed, the service is idle: HTTP server and GUI are reachable, while periodic reads,
+heartbeat polling, metric collection and the InfluxDB/QuestDB export stay stopped (warning
+`Initial admin password not changed yet: ... paused ...`). They start automatically after the
+change, without a restart.
 
-Until that password is changed, the service is running but idle: the HTTP server
-and the administration GUI are reachable, while periodic reads, heartbeat
-polling, metric collection and the InfluxDB/QuestDB export stay stopped. The log
-shows `Initial admin password not changed yet: ... paused ...` as a warning.
-After the password change these jobs start automatically; no restart is needed.
-Later starts with an already changed password run normally.
+Create a PAT on **API tokens** and copy it to your API client; the secret is shown only once. API
+authentication is enabled by default even before a PAT exists.
 
-Create a PAT on
-**API tokens** and copy it to your API client; its secret is shown only once.
-API authentication defaults to enabled even before a PAT exists.
-See [Authentication](../configuration/authentication.md).
+## Add an inverter
+
+On the **Overview** page choose **Add inverter** in the Inverters card and enter the inverter's host
+name or IP address (port 8899). **Apply changes** connects without a restart; the service assigns the
+device id (`main`, then `inverter-2`, ...). See [Devices](configuration.md#devices).
 
 ## Validate and start
 
@@ -63,22 +58,32 @@ python -m app validate     # configuration, object registry and write allowlist
 python -m app              # start the server (serve is the default mode)
 ```
 
-Check the service:
+Verify the connection:
 
 ```sh
 curl http://127.0.0.1:8000/health
 curl -H "Authorization: Bearer <token>" http://127.0.0.1:8000/api/v1/devices
+curl -H "Authorization: Bearer <token>" http://127.0.0.1:8000/api/v1/readiness
 ```
+
+`/health` only proves that the process runs; `readiness` is `ready: true` once every inverter answers.
+If it does not, see [Troubleshooting](../troubleshooting.md).
+
+## Optional: Energy Manager
+
+Battery control and the read-only charging plan preview are off until you enable them in the GUI.
+Start with the [Energy Manager overview](../energy-manager.md); the safety gates are described in
+[Battery Control](../energy/battery-control.md#safety-gates).
 
 ## Administration menu
 
-| Page | Purpose |
-| --- | --- |
-| Overview | Configurable widgets with live values (solar, house consumption, grid, battery, TSDB export), optional spot-price, day-ahead, solar-forecast and charging-schedule widgets, and one card per inverter with its energy-flow graphic, online and operating state, and one card per battery tower; add, edit and remove inverters from the Inverters dialog. Values are shown as whole numbers, with the decimal and thousands separators of the browser locale. A value that is missing for any reason (not configured, inverter unreachable, no reading yet, export off) reads `n/a` |
-| Inverters | Write access and the writable parameters |
-| Energy Manager | Manual battery control (charge, keep idle, discharge) per inverter; Off returns control to the inverter's Internal strategy. Spot Market offers a day-ahead price preview and Weather an Open-Meteo solar-forecast preview, both read-only. A compact grid, house and battery energy-flow view appears beside the controls when space allows; see [Energy Manager](../energy-manager.md) |
-| TSDB | InfluxDB 2 / QuestDB export |
-| Prometheus | Metrics endpoint and the exposed metrics |
-| API tokens | Create and revoke personal access tokens |
-| Settings | Documentation, authentication, server, network and the admin password |
-| About | Version, runtime, project and dependency information. The footer of every page shows the version and the build hash `(abc1234)` (`dev` outside an image) |
+| Page           | Purpose                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Overview       | Configurable widgets with live values (solar, house consumption, grid, battery, TSDB export), optional spot-price, day-ahead, solar-forecast and charging-schedule widgets, one card per inverter (energy-flow graphic, online and operating state) and one per battery tower; inverters are added, edited and removed in the Inverters dialog. Values are whole numbers in the browser locale's format; a missing value (not configured, unreachable, no reading yet, export off) reads `n/a` |
+| Inverters      | Write access and the writable parameters                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| Energy Manager | Manual battery control (charge, keep idle, discharge) per inverter; Off returns control to the inverter's Internal strategy. Read-only day-ahead price (Spot Market) and Open-Meteo solar-forecast (Weather) previews; see [Energy Manager](../energy-manager.md) and [Charging Plan](../energy/charging-plan.md)                                                                                                                                                                              |
+| TSDB           | InfluxDB 2 / QuestDB export                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| Prometheus     | Metrics endpoint and the exposed metrics                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| API tokens     | Create and revoke personal access tokens                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| Settings       | Documentation, authentication, server, network and the admin password                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| About          | Version, runtime, project and dependency information. The footer of every page shows the version and the build hash `(abc1234)` (`dev` outside an image)                                                                                                                                                                                                                                                                                                                                       |

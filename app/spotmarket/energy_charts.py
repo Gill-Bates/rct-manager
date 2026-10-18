@@ -115,33 +115,18 @@ class EnergyChartsProvider:
     def fetch_day_ahead(self, config: SpotMarketConfig) -> SpotPriceSnapshot:
         payload = self._get(self._with_zone(config.bidding_zone))
         intervals = self._parse(payload)
-        return SpotPriceSnapshot(
-            provider=SpotMarketProvider.ENERGY_CHARTS,
-            bidding_zone=config.bidding_zone,
-            # Currency is provider metadata, not operator input: Energy-Charts reports EUR.
-            currency=ENERGY_CHARTS_CURRENCY,
-            fetched_at=datetime.now(UTC),
-            intervals=intervals,
-            timezone=self._timezone(payload),
-            source_generated_at=self._optional_datetime(payload, "generated_at"),
-            available_from=self._optional_datetime(payload, "available_from"),
-            available_until=self._optional_datetime(payload, "available_until"),
-        )
+        if not intervals:
+            # Treated like the 404 before publication: no tomorrow yet, not a provider error.
+            raise SpotMarketNotAvailableYet("Energy-Charts next-day prices are not published yet")
+        self._require_full_local_day(intervals, self._timezone(payload))
+        return self._snapshot(config, payload, intervals)
 
     def fetch_today(self, config: SpotMarketConfig) -> SpotPriceSnapshot:
         """Read today's complete day-ahead curve in the bidding zone's local day."""
         payload = self._get(self._with_zone(config.bidding_zone, endpoint=TODAY_PRICE_URL))
-        return SpotPriceSnapshot(
-            provider=SpotMarketProvider.ENERGY_CHARTS,
-            bidding_zone=config.bidding_zone,
-            currency=ENERGY_CHARTS_CURRENCY,
-            fetched_at=datetime.now(UTC),
-            intervals=self._parse(payload),
-            timezone=self._timezone(payload),
-            source_generated_at=self._optional_datetime(payload, "generated_at"),
-            available_from=self._optional_datetime(payload, "available_from"),
-            available_until=self._optional_datetime(payload, "available_until"),
-        )
+        intervals = self._parse(payload)
+        self._require_full_local_day(intervals, self._timezone(payload))
+        return self._snapshot(config, payload, intervals)
 
     def fetch_yesterday(self, config: SpotMarketConfig, timezone: str | None) -> SpotPriceSnapshot:
         """Read only yesterday's day-ahead curve in the bidding zone's local timezone."""
@@ -157,17 +142,9 @@ class EnergyChartsProvider:
             endpoint=TODAY_PRICE_URL,
             extra_params=(("start", yesterday), ("end", yesterday)),
         ))
-        return SpotPriceSnapshot(
-            provider=SpotMarketProvider.ENERGY_CHARTS,
-            bidding_zone=config.bidding_zone,
-            currency=ENERGY_CHARTS_CURRENCY,
-            fetched_at=datetime.now(UTC),
-            intervals=self._parse(payload),
-            timezone=self._timezone(payload),
-            source_generated_at=self._optional_datetime(payload, "generated_at"),
-            available_from=self._optional_datetime(payload, "available_from"),
-            available_until=self._optional_datetime(payload, "available_until"),
-        )
+        intervals = self._parse(payload)
+        self._require_full_local_day(intervals, self._timezone(payload) or timezone)
+        return self._snapshot(config, payload, intervals)
 
     def fetch_current(self, config: SpotMarketConfig) -> SpotPriceSnapshot:
         """Read the provider's current interval from its dedicated v2 endpoint."""
@@ -175,9 +152,22 @@ class EnergyChartsProvider:
         intervals = self._parse(payload)
         if len(intervals) != 1:
             raise SpotMarketResponseError("Energy-Charts current price must contain one interval")
+        return self._snapshot(
+            config, payload, intervals, valid_until=self._optional_datetime(payload, "valid_until")
+        )
+
+    def _snapshot(
+        self,
+        config: SpotMarketConfig,
+        payload: dict,
+        intervals: tuple[SpotPriceInterval, ...],
+        *,
+        valid_until: datetime | None = None,
+    ) -> SpotPriceSnapshot:
         return SpotPriceSnapshot(
             provider=SpotMarketProvider.ENERGY_CHARTS,
             bidding_zone=config.bidding_zone,
+            # Currency is provider metadata, not operator input: Energy-Charts reports EUR.
             currency=ENERGY_CHARTS_CURRENCY,
             fetched_at=datetime.now(UTC),
             intervals=intervals,
@@ -185,8 +175,26 @@ class EnergyChartsProvider:
             source_generated_at=self._optional_datetime(payload, "generated_at"),
             available_from=self._optional_datetime(payload, "available_from"),
             available_until=self._optional_datetime(payload, "available_until"),
-            valid_until=self._optional_datetime(payload, "valid_until"),
+            valid_until=valid_until,
         )
+
+    @staticmethod
+    def _require_full_local_day(intervals: tuple[SpotPriceInterval, ...], timezone: str | None) -> None:
+        """Require one complete local day: first start at local 00:00, last end at the next local 00:00.
+
+        The 900 s continuity is already enforced by ``_parse``; checking the day boundaries in the
+        provider zone also covers DST days (92 or 100 intervals) without counting intervals.
+        """
+        if timezone is None:
+            raise SpotMarketResponseError("Energy-Charts did not provide a timezone")
+        if not intervals:
+            raise SpotMarketResponseError("Energy-Charts returned no price intervals")
+        zone = ZoneInfo(timezone)  # validated by _timezone / the caller
+        first_day = intervals[0].start.astimezone(zone).date()
+        day_start = datetime.combine(first_day, datetime.min.time(), tzinfo=zone)
+        day_end = datetime.combine(first_day + timedelta(days=1), datetime.min.time(), tzinfo=zone)
+        if intervals[0].start != day_start or intervals[-1].end != day_end:
+            raise SpotMarketResponseError("Energy-Charts price series does not cover a complete local day")
 
     @staticmethod
     def _timezone(payload: dict) -> str | None:

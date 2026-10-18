@@ -77,6 +77,9 @@ await page.fill('#new-password', NEW_PASSWORD);
 await page.fill('#confirm-password', NEW_PASSWORD);
 await page.click('#change-password-form button[type=submit]');
 await page.waitForURL('**/ui/dashboard');
+// The one-time usage notice locks the admin API until accepted.
+await page.locator('#disclaimer-accept').waitFor({ state: 'visible', timeout: 10000 });
+await Promise.all([page.waitForNavigation(), page.click('#disclaimer-accept')]);
 
 // TSDB page: enable export and pick a backend so the Status & Log console renders.
 await page.goto(`${base}/ui/tsdb`);
@@ -244,6 +247,35 @@ if (!report.mainScrollable) {
   check('deficit layout matches Inverters behaviour (neither the TSDB nor the Inverters page scrolls the document)',
     inv.footerTop !== null && inv.pageScrolls === false && report.pageScrolls === false,
     JSON.stringify({ invPageScrolls: inv.pageScrolls, tsdbPageScrolls: report.pageScrolls }));
+}
+
+// Regression guard for the Apply bar: at 1280x900 with the QuestDB form, neither the export cards nor
+// the grid may cover "Apply changes" (the grid once shrank below its content), for manual and
+// non-manual downsampling. Geometry plus a trial click, which fails if another element intercepts it.
+await page.setViewportSize({ width: 1280, height: 900 });
+await page.goto(`${base}/ui/tsdb`);
+await page.waitForSelector('#setting-db_type');
+for (const mode of ['manual', 'medium']) {
+  await page.selectOption('#setting-db_type', 'questdb');
+  await page.selectOption('#setting-questdb_downsampling', mode);
+  await page.fill('#setting-questdb_hostname', 'questdb.example.test');
+  if (mode === 'manual') {
+    await page.fill('#setting-questdb_raw_retention_days', '7');
+    await page.press('#setting-questdb_raw_retention_days', 'Tab');
+  }
+  await page.waitForTimeout(300);
+  const apply = page.locator('#export-apply');
+  await apply.scrollIntoViewIfNeeded();
+  const overlap = await page.evaluate(() => {
+    const a = document.getElementById('export-apply').getBoundingClientRect();
+    const hit = (r) => r.left < a.right && r.right > a.left && r.top < a.bottom && r.bottom > a.top;
+    const boxes = [document.querySelector('#main-content > .settings-grid'), ...document.querySelectorAll('#main-content > .settings-grid > .card')];
+    return boxes.filter((n) => n && hit(n.getBoundingClientRect())).map((n) => n.className || n.tagName);
+  });
+  let intercepted = '';
+  try { await apply.click({ trial: true, timeout: 3000 }); } catch (e) { intercepted = String(e.message).split('\n').slice(0, 3).join(' '); }
+  check(`1280x900 QuestDB (${mode}): Apply changes is not covered by the grid or its cards`,
+    overlap.length === 0 && intercepted === '', JSON.stringify({ overlap, intercepted }));
 }
 
 await browser.close();

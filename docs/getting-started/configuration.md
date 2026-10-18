@@ -1,100 +1,48 @@
 # Configuration
 
-Copy `settings.env.example` to `settings.env`. It only holds the start parameters
-`HMAC_SECRET`, `BIND_ADDRESS`, `BIND_PORT`, `ALLOW_NON_LOOPBACK_BIND` and optionally `ADMIN_DB_PATH`.
-Other settings are managed in the administration GUI and persisted in `data/rct.db`; the
-[optional environment variables](../configuration/environment.md) only seed the very first start
-(for example in automated deployments).
-Changes autosave and show a toast; only the inverter list and the TSDB export fields are applied
-explicitly with **Apply changes** (see [Devices](#devices)). The TSDB **Enable export** switch takes
-effect immediately. Leaving a page with unapplied changes
-discards them without a browser warning. Every setting takes effect on its own; a changed listen address or port is switched in the background and the page reconnects by itself.
-Internal tuning (timeouts, retries, cache, limits and intervals) remains fixed in code.
+Copy `settings.env.example` to `settings.env`. It holds only the start parameters `HMAC_SECRET`,
+`BIND_ADDRESS`, `BIND_PORT`, `ALLOW_NON_LOOPBACK_BIND` and optionally `ADMIN_DB_PATH`. All other
+settings are managed in the admin GUI and persisted in `data/rct.db`; the
+[optional environment variables](../configuration/environment.md) only seed the very first start.
+Internal tuning (timeouts, retries, cache, limits, intervals) is fixed in code.
 
-## Administration storage
+Changes autosave and show a toast and take effect on their own; a changed listen address or port
+is switched in the background and the page reconnects. Only the inverter list and the TSDB export
+fields need **Apply changes** (see [Devices](#devices)); the TSDB **Enable export** switch applies
+immediately. Leaving a page with unapplied changes discards them without a warning.
 
-`HMAC_SECRET` is a stable random secret of at least 32 characters (`openssl rand -base64 32`; the deprecated name `ADMIN_SECRET` is still read). Local server startup
-generates it and appends it to `settings.env` when absent. Docker requires it to be set
-before starting because its root filesystem is read-only. Generate a secret with:
+## Secret and database
 
-```sh
-openssl rand -base64 32
-```
+`HMAC_SECRET` encrypts the admin database `data/rct.db` (default location; `ADMIN_DB_PATH` overrides
+it). A local start generates the secret; Docker requires it up front. Back up database and secret
+together. Details: [Environment Variables](../configuration/environment.md#admin-database-and-secret),
+backup and WAL rules: [Operation](../operation.md#backup-and-restore).
 
-Keep the result in `settings.env`, never in version control. The database stores settings
-and credential records using Fernet authenticated encryption (AES with HMAC-SHA256).
-Passwords use a salted hash; PAT secrets are shown once and only their digests are retained.
-Back up `data/rct.db` together with `HMAC_SECRET`; changing the secret prevents decryption.
-The GUI never displays the secret.
-
-`ADMIN_DB_PATH` overrides the database location (default `<project>/data/rct.db`).
-
-The very first start prints the generated `admin` password in clear text in the boxed
-`FIRST START` block on stdout, so it can be copied straight from the console; it is shown only on
-this initial bootstrap, not on later restarts. The console output is persisted and centrally
-collected in systemd/Docker/Kubernetes, so the password may remain in log history — a deliberately
-accepted tradeoff. Change it at first login.
-
-The database runs in SQLite WAL mode (`synchronous=NORMAL`, 5 s busy timeout), so concurrent
-autosaves, sessions and token bookkeeping do not block each other. While the service runs,
-`rct.db-wal` and `rct.db-shm` may exist next to `rct.db`; they get the same 0600 permissions and
-are folded back into `rct.db` on a clean shutdown. Rules:
-
-- Back up while the service is stopped (copy all existing `rct.db*` files together) or online with
-  `sqlite3 data/rct.db ".backup backup.db"`; never copy only `rct.db` of a running service.
-- Keep the directory on a local file system. WAL does not work on NFS or SMB shares.
-- The directory must be writable (in Docker the `rct-data` volume), because SQLite creates the
-  `-wal` and `-shm` files there.
+The first start prints the generated `admin` password, see
+[Authentication](../configuration/authentication.md#administration-login).
 
 ## Device and Network
 
 ### Devices
-Configure inverter endpoints from the **Overview** dashboard with **Add inverter** in the Inverters card; the editor opens in a modal and stores the devices encrypted in `data/rct.db`. Edits stay a draft until **Apply changes**, which rebuilds the inverter connections without a restart; **Discard** drops them. Re-addressing or removing an inverter resets its verification evidence, engineering mode and Energy Manager mode (back to Off) and therefore asks for confirmation. A list the server rejects is rolled back and the previous configuration stays active. A device consists of an IP address or host name and a port; the service assigns the device id (`main` for the first one, then `inverter-2`, `inverter-3`, ...) and keeps it while the device exists, so API paths and exports stay stable. A saved display name takes precedence; otherwise, the dashboard uses the inverter-reported name, then the device id. Editing the host keeps the id; duplicate addresses are rejected. Devices saved earlier keep their ids and custom names. A `DEVICES` environment variable is ignored; the service notes it at startup on INFO level.
+Add inverters on the **Overview** dashboard with **Add inverter** in the Inverters card. The modal editor stores devices encrypted in `data/rct.db`.
 
-### BIND_ADDRESS
-Default: `127.0.0.1`
+- Edits stay a draft until **Apply changes**, which rebuilds the connections without a restart; **Discard** drops them. A list the server rejects is rolled back.
+- Re-addressing or removing an inverter resets its verification evidence, engineering mode and Energy Manager mode (back to Off) and asks for confirmation.
+- A device is an IP address or host name plus a port. The service assigns the id (`main`, then `inverter-2`, `inverter-3`, ...) and keeps it while the device exists, so API paths and exports stay stable. Editing the host keeps the id; duplicate addresses are rejected.
+- Display name precedence: saved name, inverter-reported name, device id.
+- A `DEVICES` environment variable is ignored (INFO note at startup).
 
-REST API listen address. Not the inverter connection address. A non-loopback
-address such as `0.0.0.0` requires `ALLOW_NON_LOOPBACK_BIND=true`. This flag
-allows the bind; it does not enable TLS or secure cookies. Place a TLS-terminating
-reverse proxy in front of the service when it is reachable beyond localhost.
-
-### ALLOW_NON_LOOPBACK_BIND
-Default: `false`
-
-Set to `true` only when a non-loopback listener is required and access to it is
-restricted. Docker Compose sets it because the container listens on `0.0.0.0`
-while the host publishes the port on `127.0.0.1`.
-
-### BIND_PORT
-Default: `8000`
-
-REST API listen port.
-
-The port can also be changed in the GUI; the service then re-binds in the background. In a
-container this moves only the internal listener: the published Docker port mapping and the
-`BIND_PORT` used by the container health check stay as they are, so the container reports
-unhealthy and the published port stops reaching the service until the environment (or compose)
-value and the port mapping match the new port. The GUI says so before it applies the change. After the first start the value saved in the GUI takes
-precedence over `BIND_PORT`.
-
-### Behind reverse proxy
-GUI only. Confirms a TLS-terminating proxy in front of the service and sets the secure flag on session cookies. It does not trust any forwarded header; that is `TRUSTED_PROXIES` below. A `BEHIND_REVERSE_PROXY` variable is ignored with a warning. A consented non-loopback bind logs a warning until this option is enabled in the GUI.
-
-### TRUSTED_PROXIES
-Default: empty
-
-Comma-separated list of reverse-proxy networks (CIDR notation, at most 32). Used to extract the real client IP from the header set by the proxy and to accept `X-Forwarded-Proto` for the administration interface. It is the only proxy trust list. Without it, all callers share the proxy's address. Behind a TLS-terminating proxy that is not listed, administration logins and changes fail with 403.
-
-### FORWARDED_HEADER
-Default: empty
-
-Single HTTP header name set by the reverse proxy (e.g., `X-Forwarded-For`). Must not be `Forwarded` (RFC 7239 is rejected). Required together with `TRUSTED_PROXIES`.
+### Listener, reverse proxy and trusted proxies
+Defaults: `BIND_ADDRESS=127.0.0.1`, `ALLOW_NON_LOOPBACK_BIND=false`, `BIND_PORT=8000`. A non-loopback
+address requires `ALLOW_NON_LOOPBACK_BIND=true`, which enables neither TLS nor secure cookies: put a
+TLS-terminating reverse proxy in front and enable the GUI option "behind reverse proxy". Behind a
+proxy set `TRUSTED_PROXIES` and `FORWARDED_HEADER`. In a container the GUI port moves only the
+internal listener. Details: [Network and TLS](../configuration/network.md).
 
 ## Authentication and Tokens
 
 ### Authentication and tokens
-GUI only: **Require authentication** (default on) and the personal access tokens (`pat_...`) live in the admin database. `AUTH_REQUIRED`, `API_TOKENS` and `API_TOKENS_FILE` are ignored with a warning. Changing settings always needs an admin session or a `read/write` token, regardless of the authentication switch. The scrape token of [`GET /metrics`](../api/prometheus.md) is independent of the switch as well: turning authentication off does not make an untrusted peer's token-free scrape acceptable.
+GUI only: **Require authentication** (default on) and the personal access tokens (`pat_...`) live in the admin database. `AUTH_REQUIRED`, `API_TOKENS` and `API_TOKENS_FILE` are ignored with a warning. Changing settings always needs an admin session or a `read/write` token, regardless of the switch. The scrape token of [`GET /metrics`](../api/prometheus.md) is independent of it too: turning authentication off does not make a token-free scrape from an untrusted peer acceptable.
 
 ## API Behavior
 
@@ -113,11 +61,7 @@ Serve the Prometheus endpoint `GET /metrics`. Set to `false` to answer 404.
 
 ## Push export (optional)
 
-Pushes the metrics of `/metrics` to InfluxDB 2 or QuestDB OSS at a fixed interval. Configure it on
-the GUI **TSDB** page; a saved change restarts the export at once, without a server restart. It does not affect the Prometheus
-endpoint. Details: [Push export](../configuration/export.md). The `DB_TYPE`, `INFLUXDB_*` and
-`QUESTDB_*` variables only seed the very first start and are listed in
-[Environment Variables](../configuration/environment.md).
+Pushes the `/metrics` values to InfluxDB 2 or QuestDB OSS at a fixed interval. Configure it on the GUI **TSDB** page; a saved change restarts the export at once and does not affect the Prometheus endpoint. See [Push export](../configuration/export.md). `DB_TYPE`, `INFLUXDB_*` and `QUESTDB_*` only seed the first start ([Environment Variables](../configuration/environment.md)).
 
 ## Logging and Debugging
 

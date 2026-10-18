@@ -148,8 +148,37 @@ def require_country_code(country_code: str | None) -> str | None:
         return None
     normalized = normalize_country_code(country_code)
     if normalized is None:
-        raise WeatherResponseError("The country filter must be a two-letter country code")
+        raise WeatherResponseError(
+            "The country filter must be a two-letter country code"
+        )
     return normalized
+
+
+@dataclass(frozen=True, slots=True)
+class _SearchRequest:
+    """A validated provider-neutral search: trimmed query, clamped result limit, checked country."""
+
+    query: str
+    limit: int
+    country: str | None
+
+    @property
+    def cache_key(self) -> tuple[str, str | None, int]:
+        return (self.query.casefold(), self.country, self.limit)
+
+
+def _prepare_search(query: str, count: int, country_code: str | None) -> _SearchRequest | None:
+    """Validate the inputs shared by every geocoder; ``None`` means a too-short query (no lookup)."""
+    trimmed = (query or "").strip()
+    if len(trimmed) < MIN_QUERY_LENGTH:
+        return None
+    if len(trimmed) > MAX_QUERY_LENGTH:
+        # Reject rather than truncate: a truncated query would search a different string than the
+        # caller asked for. The admin endpoint enforces the same bound, so this is a guard.
+        raise WeatherResponseError("The location query is too long")
+    limit = max(1, min(int(count), MAX_RESULTS))
+    # An explicit-but-invalid country code is rejected before any request leaves.
+    return _SearchRequest(trimmed, limit, require_country_code(country_code))
 
 
 class PhotonGeocoder:
@@ -178,28 +207,24 @@ class PhotonGeocoder:
             timeout_seconds=LOOKUP_TIMEOUT_SECONDS,
             max_attempts=LOOKUP_MAX_ATTEMPTS,
         )
-        self._cache = cache if cache is not None else TtlCache(CACHE_MAX_ENTRIES, CACHE_TTL_SECONDS)
+        self._cache = (
+            cache
+            if cache is not None
+            else TtlCache(CACHE_MAX_ENTRIES, CACHE_TTL_SECONDS)
+        )
 
     def search(
         self, query: str, *, count: int = MAX_RESULTS, country_code: str | None = None
     ) -> list[GeocodingResult]:
-        trimmed = (query or "").strip()
-        if len(trimmed) < MIN_QUERY_LENGTH:
+        request = _prepare_search(query, count, country_code)
+        if request is None:
             return []
-        if len(trimmed) > MAX_QUERY_LENGTH:
-            # Reject rather than truncate: a truncated query would search a different string than the
-            # caller asked for. The admin endpoint enforces the same bound, so this is a guard.
-            raise WeatherResponseError("The location query is too long")
-        limit = max(1, min(int(count), MAX_RESULTS))
-        # An explicit-but-invalid country code is rejected here, before any request leaves.
-        country = require_country_code(country_code)
-        key = (trimmed.casefold(), country, limit)
-        cached = self._cache.get(key)
+        cached = self._cache.get(request.cache_key)
         if cached is not None:
             return list(cached)
-        payload = self._http.get_json(self._build_url(trimmed, limit, country))
-        results = self._parse(payload, trimmed, limit)
-        self._cache.put(key, tuple(results))
+        payload = self._http.get_json(self._build_url(request.query, request.limit, request.country))
+        results = self._parse(payload, request.query, request.limit)
+        self._cache.put(request.cache_key, tuple(results))
         return results
 
     def _build_url(self, query: str, count: int, country: str | None) -> str:
@@ -259,7 +284,11 @@ class OpenMeteoGeocoder:
             timeout_seconds=LOOKUP_TIMEOUT_SECONDS,
             max_attempts=LOOKUP_MAX_ATTEMPTS,
         )
-        self._cache = cache if cache is not None else TtlCache(CACHE_MAX_ENTRIES, CACHE_TTL_SECONDS)
+        self._cache = (
+            cache
+            if cache is not None
+            else TtlCache(CACHE_MAX_ENTRIES, CACHE_TTL_SECONDS)
+        )
 
     def search(
         self, query: str, *, count: int = MAX_RESULTS, country_code: str | None = None
@@ -272,27 +301,25 @@ class OpenMeteoGeocoder:
         served from a short-lived TTL cache so a type-ahead search does not hit the provider on
         every keystroke.
         """
-        trimmed = (query or "").strip()
-        if len(trimmed) < MIN_QUERY_LENGTH:
+        request = _prepare_search(query, count, country_code)
+        if request is None:
             return []
-        if len(trimmed) > MAX_QUERY_LENGTH:
-            # Reject rather than truncate: a truncated query would search a different string than the
-            # caller asked for. The admin endpoint enforces the same bound, so this is a guard.
-            raise WeatherResponseError("The location query is too long")
-        limit = max(1, min(int(count), MAX_RESULTS))
-        country = require_country_code(country_code)
-        key = (trimmed.casefold(), country, limit)
-        cached = self._cache.get(key)
+        cached = self._cache.get(request.cache_key)
         if cached is not None:
             return list(cached)
-        payload = self._http.get_json(self._build_url(trimmed, limit, country))
-        results = self._parse(payload, trimmed, limit)
-        self._cache.put(key, tuple(results))
+        payload = self._http.get_json(self._build_url(request.query, request.limit, request.country))
+        results = self._parse(payload, request.query, request.limit)
+        self._cache.put(request.cache_key, tuple(results))
         return results
 
     def _build_url(self, query: str, count: int, country: str | None) -> str:
         """Build an HTTPS geocoding URL by varying only query parameters."""
-        params = [("name", query), ("count", str(count)), ("format", "json"), ("language", "en")]
+        params = [
+            ("name", query),
+            ("count", str(count)),
+            ("format", "json"),
+            ("language", "en"),
+        ]
         if country is not None:
             # Open-Meteo expects the alpha-2 code upper-cased for its countryCode filter.
             params.append(("countryCode", country.upper()))
@@ -345,7 +372,11 @@ class OpenMeteoGeocoder:
             admin1=optional_str(record.get("admin1")),
             admin2=optional_str(record.get("admin2")),
             # GeoNames feature codes starting with PPL are populated places; only those are a city.
-            city=name.strip() if str(record.get("feature_code") or "").startswith("PPL") else None,
+            city=(
+                name.strip()
+                if str(record.get("feature_code") or "").startswith("PPL")
+                else None
+            ),
             timezone=optional_timezone(record.get("timezone")),
             postal_code=postal_code,
         )
@@ -378,18 +409,24 @@ def _map_photon_feature(feature: object, query: str) -> GeocodingResult | None:
     district = optional_str(properties.get("district"))
     osm_key, osm_value = properties.get("osm_key"), properties.get("osm_value")
     if osm_key == "place" and osm_value == "postcode":
-        # A postcode area carries its code as ``name`` and has no ``postcode`` property; it is titled
-        # by the place it belongs to.
-        postal_code = raw_name
+        # A postcode area carries its code as ``name`` and is titled by the place it belongs to; it
+        # counts as a postal code only on an exact query match, so a name search never adopts it.
+        postal_code = _exact_postal_match(query, (raw_name,) if raw_name else ())
         city = optional_str(properties.get("city"))
-        name = city or district or optional_str(properties.get("locality")) or postal_code
+        name = (
+            city or district or optional_str(properties.get("locality")) or raw_name
+        )
     else:
         # Any other feature claims a postcode only when the query matched its own code exactly, so a
         # place-name search never shows an arbitrary postcode. A populated place is its own city.
         own_code = optional_str(properties.get("postcode"))
         postal_code = _exact_postal_match(query, (own_code,) if own_code else ())
         city = optional_str(properties.get("city"))
-        if city is None and osm_key == "place" and osm_value in _PHOTON_SETTLEMENT_VALUES:
+        if (
+            city is None
+            and osm_key == "place"
+            and osm_value in _PHOTON_SETTLEMENT_VALUES
+        ):
             city = raw_name
         # For an exact postcode search the postal locality titles the hit, not the matched OSM
         # object (which can be an administrative area); a normal search keeps the provider's name.
@@ -418,7 +455,11 @@ def _map_photon_feature(feature: object, query: str) -> GeocodingResult | None:
 def is_finite_number(value: object) -> bool:
     import math
 
-    return not isinstance(value, bool) and isinstance(value, (int, float)) and math.isfinite(value)
+    return (
+        not isinstance(value, bool)
+        and isinstance(value, (int, float))
+        and math.isfinite(value)
+    )
 
 
 def optional_str(value: object) -> str | None:

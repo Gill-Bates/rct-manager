@@ -1,5 +1,5 @@
-settings.env
 **/settings.env
+**/.env*
 
 # Python
 __pycache__/
@@ -21,8 +21,6 @@ data/
 /site/
 
 # Local agent state
-.omc/
-.omx/
 **/.omc/
 **/.omx/
 .agents/

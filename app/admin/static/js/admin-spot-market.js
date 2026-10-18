@@ -15,8 +15,15 @@ function initEnergyTabs(onShown = null) {
   if (!container || !window.bootstrap) return;
   const fromHash = (location.hash || '').replace(/^#/, '');
   const initial = ENERGY_TABS.includes(fromHash) ? fromHash : 'inverter';
+  // Scrolls only the tab bar (not the page) so the active tab is never hidden in the swipe row.
+  const revealTab = (button) => {
+    const offset = button.getBoundingClientRect().left - container.getBoundingClientRect().left + container.scrollLeft;
+    const left = offset - (container.clientWidth - button.offsetWidth) / 2;
+    container.scrollTo({ left: Math.max(0, left), behavior: 'auto' });
+  };
   for (const button of container.querySelectorAll('[data-bs-toggle="tab"]')) {
     button.addEventListener('shown.bs.tab', () => {
+      revealTab(button);
       const name = button.dataset.tab;
       // replaceState, not a navigation: changing the fragment must not add history entries or
       // trigger the browser's own hashchange scroll.
@@ -209,7 +216,7 @@ async function initSpotMarket() {
   // One automatic read once the form and bidding-zone options are present; later reads are driven
   // after a parameter change, never by a re-render; the background worker owns provider polling.
   scheduleSpotMarketPreview({ immediate: true });
-  window.setInterval(() => scheduleSpotMarketPreview({ immediate: true, resetRetry: false }), 60_000);
+  window.setInterval(() => { if (!document.hidden) scheduleSpotMarketPreview({ immediate: true, resetRetry: false }); }, 60_000);
 }
 
 // Debounce a burst of parameter changes into one preview request, then run it. ``immediate``
@@ -219,7 +226,7 @@ function scheduleSpotMarketPreview({ immediate = false, resetRetry = true } = {}
   clearTimeout(spotMarketPreviewRetryTimer);
   spotMarketPreviewRetryTimer = null;
   if (resetRetry) spotMarketPreviewRetryMs = 5_000;
-  const run = () => previewSpotMarket().catch((error) => toast(messageFrom(error), 'danger'));
+  const run = () => previewSpotMarket({ background: !resetRetry }).catch((error) => toast(messageFrom(error), 'danger'));
   if (immediate) { run(); return; }
   spotMarketPreviewTimer = setTimeout(run, SPOT_MARKET_PREVIEW_DEBOUNCE_MS);
 }
@@ -282,14 +289,14 @@ function spotMarketDateTime(iso, timeZone) {
 // One highlight block of the preview: a leading KPI icon (mirroring the dashboard KPI tiles), a
 // caption, the ct/kWh figure, and when it occurs. The icon is passed in rather than hard-coded so
 // Lowest/Highest can carry visually distinct glyphs; it is decorative (the caption names the tile).
-function spotMarketHighlight(caption, priceEurPerKwh, atIso, icon, colorClass) {
+function spotMarketHighlight(caption, priceEurPerKwh, atIso, icon, colorClass, timeZone) {
   const block = element('div', 'spot-market-highlight');
   const glyph = element('span', `material-icons spot-market-highlight-icon ${colorClass}`, icon);
   glyph.setAttribute('aria-hidden', 'true');
   block.append(glyph);
   block.append(element('span', 'spot-market-highlight-caption', caption));
   block.append(element('span', 'spot-market-highlight-value', centsPerKwh(priceEurPerKwh) ?? 'n/a'));
-  block.append(element('span', 'spot-market-highlight-when', atIso ? spotMarketDateTime(atIso) : 'n/a'));
+  block.append(element('span', 'spot-market-highlight-when', atIso ? spotMarketDateTime(atIso, timeZone) : 'n/a'));
   return block;
 }
 
@@ -354,38 +361,28 @@ function drawSpotMarketChart(result) {
     canvas.parentElement.replaceChildren(element('p', 'text-danger small', 'Price series is invalid or empty.'));
     return;
   }
-  // Ordinal per-day axis: each interval occupies its own slot by its position in the day, not by
-  // its local HH:MM. A normal day keeps the familiar 96 quarter-hour labels (00:00..23:45) and an
-  // identical look; a DST fall-back day keeps BOTH 02:00 intervals (consecutive slots, no
-  // overwrite) and a 100-interval day gets 100 slots. Each dataset carries its own per-point HH:MM
-  // for the tooltip, derived from the interval's absolute start.
+  // Slots are keyed by local time plus occurrence (see buildDayAxis), so DST days stay aligned.
   const days = [yesterday, today, tomorrow];
-  const maxLen = Math.max(96, ...days.map((day) => day.length));
-  const labels = Array.from({ length: maxLen }, (_, index) => {
-    if (index >= 96) return days.find((day) => day.length > index)?.[index]?.label ?? '';
-    const hour = String(Math.floor(index / 4)).padStart(2, '0');
-    const minute = String((index % 4) * 15).padStart(2, '0');
-    return `${hour}:${minute}`;
-  });
-  const align = (day) => {
+  const { labels, slots } = buildDayAxis(days);
+  const maxLen = labels.length;
+  const align = (day, dayIndex) => {
     const data = Array(maxLen).fill(null);
-    const times = Array(maxLen).fill(null);
-    day.forEach((point, index) => { data[index] = point.y; times[index] = point.label; });
-    return { data, times };
+    day.forEach((point, index) => { data[slots[dayIndex][index]] = point.y; });
+    return { data };
   };
   const styles = getComputedStyle($('spot-market-preview'));
   const labelColor = styles.getPropertyValue('--bs-body-color').trim();
   const gridColor = styles.getPropertyValue('--rct-line').trim();
   const series = [
-    { label: 'Yesterday', ...align(yesterday), borderColor: styles.getPropertyValue('--spot-market-yesterday-line').trim() },
-    { label: 'Today', ...align(today), borderColor: styles.getPropertyValue('--spot-market-today-line').trim(), borderDash: [] },
-    { label: 'Tomorrow', ...align(tomorrow), borderColor: styles.getPropertyValue('--spot-market-tomorrow-line').trim(), borderDash: [6, 4] },
+    { label: 'Yesterday', ...align(yesterday, 0), borderColor: styles.getPropertyValue('--spot-market-yesterday-line').trim() },
+    { label: 'Today', ...align(today, 1), borderColor: styles.getPropertyValue('--spot-market-today-line').trim(), borderDash: [] },
+    { label: 'Tomorrow', ...align(tomorrow, 2), borderColor: styles.getPropertyValue('--spot-market-tomorrow-line').trim(), borderDash: [6, 4] },
   ];
   spotMarketPreviewChart = new window.Chart(canvas, {
     type: 'line',
     data: {
-      labels, datasets: series.map(({ label, data, times, borderColor, borderDash }) => ({
-        label, data, times, borderColor, borderDash, backgroundColor: borderColor,
+      labels, datasets: series.map(({ label, data, borderColor, borderDash }) => ({
+        label, data, borderColor, borderDash, backgroundColor: borderColor,
         stepped: 'after', pointRadius: 0, pointHoverRadius: 4, borderWidth: 2, spanGaps: false,
       }))
     },
@@ -399,7 +396,7 @@ function drawSpotMarketChart(result) {
           // Hide series without a value in this slot (null/NaN) instead of inventing one.
           filter: (item) => Number.isFinite(item.parsed?.y),
           callbacks: {
-            title: (items) => items[0].dataset.times?.[items[0].dataIndex] ?? labels[items[0].dataIndex],
+            title: (items) => labels[items[0].dataIndex],
             label: (item) => `${item.dataset.label}: ${item.parsed.y.toLocaleString(undefined, { maximumFractionDigits: 2 })} ct/kWh`,
           }
         },
@@ -458,8 +455,8 @@ function renderSpotMarketPreview(result) {
   // (yesterday/today), independent of whether tomorrow is published. When no figure is available
   // the tile reads "n/a" (see spotMarketHighlight), so the block is never omitted or left blank.
   const grid = element('div', 'spot-market-highlights');
-  grid.append(spotMarketHighlight('Lowest', result.min_price_eur_per_kwh, result.min_price_at, 'trending_down', 'text-success'));
-  grid.append(spotMarketHighlight('Highest', result.max_price_eur_per_kwh, result.max_price_at, 'trending_up', 'text-danger'));
+  grid.append(spotMarketHighlight('Lowest', result.min_price_eur_per_kwh, result.min_price_at, 'trending_down', 'text-success', result.timezone));
+  grid.append(spotMarketHighlight('Highest', result.max_price_eur_per_kwh, result.max_price_at, 'trending_up', 'text-danger', result.timezone));
   nodes.push(grid);
 
   if (stale) nodes.push(refreshFailureNotice(result.refresh_error, result.refresh_error_at));
@@ -497,7 +494,7 @@ function renderSpotMarketPreview(result) {
 // states live only in the preview target. A newer call supersedes an in-flight one — it aborts
 // the stale request and a generation guard discards a stale response that still arrives — so the
 // rendered preview always reflects the latest parameter values.
-async function previewSpotMarket() {
+async function previewSpotMarket({ background = false } = {}) {
   const target = $('spot-market-preview');
   if (!target) return;
   if (spotMarketPreviewController) {
@@ -510,7 +507,7 @@ async function previewSpotMarket() {
   spotMarketPreviewChart = null;
   target.replaceChildren(spotMarketLoadingState());
   try {
-    const result = await api('energy/spot-market/preview', { method: 'POST', body: JSON.stringify(spotMarketBody()), signal: controller.signal });
+    const result = await api('energy/spot-market/preview', { method: 'POST', body: JSON.stringify(spotMarketBody()), signal: controller.signal, background });
     if (generation !== spotMarketPreviewGeneration) return;
     target.replaceChildren(...renderSpotMarketPreview(result));
     if (result.status === 'connected') drawSpotMarketChart(result);
@@ -525,6 +522,10 @@ async function previewSpotMarket() {
     // A superseded request's abort is expected; the newer request owns the target, so leave its
     // loading state in place rather than overwriting it with this stale error.
     if (generation !== spotMarketPreviewGeneration || error.name === 'AbortError') return;
+    if (error.rateLimited) { // short-lived load shedding: retry after Retry-After instead of showing an error
+      spotMarketPreviewRetryTimer = setTimeout(() => scheduleSpotMarketPreview({ immediate: true, resetRetry: false }), pollDelay(spotMarketPreviewRetryMs));
+      return;
+    }
     setPreviewStatus('spot-market-preview-status', null);
     target.replaceChildren(element('p', 'text-danger small mb-0', messageFrom(error)));
     throw error;

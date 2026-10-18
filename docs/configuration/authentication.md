@@ -7,18 +7,25 @@ business API access stays denied until the admin creates one in the GUI.
 
 ## Administration login
 
-The root page redirects to login. The first server startup generates a one-time password
-(8 characters with exactly one special character) for the user `admin` and prints it in clear text
-in the boxed `FIRST START` block on stdout, so it can be copy-pasted straight from the console. It
-is shown only on this initial bootstrap, not on later restarts. Console output is persisted and
-centrally collected in systemd/Docker/Kubernetes, so the password may remain in log history — a
-deliberately accepted tradeoff. The credential is one-time: the first login permits only password
-change and logout until a new password has been set. Administrative sessions use HttpOnly cookies,
-CSRF protection, expiry and login throttling. Disabling API authentication never disables GUI
-authentication.
+The root page redirects to login. The first start generates a one-time password for `admin`
+(8 characters, exactly one special character) and prints it in clear text in the boxed
+`FIRST START` block on stdout, so it can be copied from the console. It appears only on this
+initial bootstrap, never on later restarts; if missed, reset the admin account (there is no file
+to read it from). Console output is persisted and centrally collected (systemd, Docker,
+Kubernetes), so the password may remain in log history, a deliberately accepted tradeoff.
 
-The new admin password needs at least 8 characters. No token is issued automatically; PATs are
-created only by the admin in the GUI.
+The first login permits only password change (at least 8 characters) and logout. Admin sessions
+use HttpOnly cookies, CSRF protection and login throttling. Disabling API authentication never
+disables GUI authentication. No token is issued automatically; PATs are created only by the admin
+in the GUI.
+
+Under **Settings → Session**, set the GUI session lifetime to 0–7 days. The factory default is
+**1 day** from sign-in. **0** disables automatic server-side expiry for new GUI logins; the browser
+still controls how long it keeps the session cookie, and logout or a password change invalidates
+the session. Shortening the lifetime also limits existing sessions from their original sign-in
+time. Increasing it or choosing 0 does not revive an expired session or extend the cookie or
+original expiry of an existing finite session; sign in again to use the new duration. This setting
+does not affect PATs or their separate expiry choices.
 
 ## Personal access tokens
 
@@ -31,7 +38,7 @@ endpoints and on every change; listing, creating or deleting tokens needs a sign
 A real change of the following needs a signed-in session; a PAT gets 403 (re-sending the
 current value is accepted):
 
-- authentication and proxy trust: `auth_required`, `trusted_proxies`, `bind_address`,
+- authentication and proxy trust: `auth_required`, `session_max_days`, `trusted_proxies`, `bind_address`,
   `behind_reverse_proxy`, `forwarded_header`, `metrics_require_token`, `metrics_trusted_sources`,
   `docs_public`;
 - `enable_write_support`, `devices`, `bind_port`, `log_level`;
@@ -40,11 +47,12 @@ current value is accepted):
   These stay readable for a PAT;
 - `enable_metrics_endpoint` while scrapes would not require a token.
 
-Create named PATs with a `read` or `read/write` role and an expiry of 30 days, 90 days (the
-preselected value), 1 year or never on the **API tokens** page. Copy the secret with the **Copy** button when it is shown: it cannot be retrieved
-later, and **Done** and the close button stay disabled until the copy succeeded. The list marks each token's role with a badge. Revoke a token on the same page. The list shows when each token was created, last used (at most
-once per minute; `Never` if unused) and expires. Records are persisted in the encrypted
-SQLite administration database; raw secrets are not stored.
+Create named PATs on the **API tokens** page with a `read` or `read/write` role and an expiry of 30
+days, 90 days (preselected), 1 year or never. Copy the secret with **Copy** when it is shown: it
+cannot be retrieved later, and **Done** and the close button stay disabled until the copy
+succeeded. The list shows role badge, creation, last use (at most once per minute; `Never` if
+unused) and expiry; revoke tokens there. Records live in the encrypted SQLite admin database; raw
+secrets are not stored.
 
 | Role | Permits |
 | --- | --- |
@@ -53,7 +61,9 @@ SQLite administration database; raw secrets are not stored.
 
 Tokens are looked up by a keyed digest and appear in logs only as a short
 non-reversible id. The business rate limit counts per token id and source
-address.
+address. Admin GUI requests of a logged-in browser session are counted separately
+(`ADMIN_SESSION_RATE_LIMIT_*`, see [Environment](environment.md)), so GUI polling and API clients
+never share a budget.
 
 ## Opt-out
 

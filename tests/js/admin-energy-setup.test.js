@@ -41,7 +41,7 @@ function makeNode(tag, byId) {
     set className(v) { this._class = v; }, get className() { return this._class || ''; },
     set textContent(v) { this._text = String(v); this.children = []; }, get textContent() { return this._text; },
     set htmlFor(v) { this._htmlFor = v; }, get htmlFor() { return this._htmlFor || ''; },
-    append(...kids) { for (const k of kids) { k.parentNode = node; k.parentElement = node; node.children.push(k); } },
+    append(...kids) { for (let k of kids) { if (typeof k === 'string') { const text = k; k = makeNode('#text', byId); k._text = text; } k.parentNode = node; k.parentElement = node; node.children.push(k); } },
     replaceChildren(...kids) { node.children = []; node.append(...kids); },
     after(...sibs) { const parent = node.parentNode; if (!parent) return; const at = parent.children.indexOf(node); for (let i = 0; i < sibs.length; i += 1) { sibs[i].parentNode = parent; sibs[i].parentElement = parent; parent.children.splice(at + 1 + i, 0, sibs[i]); } },
     setAttribute(k, v) { node.attributes[k] = String(v); }, getAttribute(k) { return node.attributes[k] ?? null; },
@@ -85,10 +85,13 @@ function harness({ apiImpl } = {}) {
   const byId = new Map();
   const calls = [];
   const toasts = [];
+  const timers = new Set();
   const document = {
     body: makeNode('body', byId),
     getElementById: (id) => byId.get(id) || null,
     createElement: (tag) => makeNode(tag, byId),
+    addEventListener() { },
+    hidden: false,
   };
   const context = {
     document,
@@ -102,23 +105,148 @@ function harness({ apiImpl } = {}) {
     api: apiImpl || (async (p, options) => { calls.push({ path: p, options }); return []; }),
     toast: (message, kind = 'success') => { toasts.push({ message, kind }); },
     messageFrom: (e) => e.message,
+    pollDelay: (ms) => ms,
     NOT_AVAILABLE: 'n/a',
     ENERGY_ACTION_LABELS: {},
+    energyExpertMode: false, // lives in admin-energy-controls.js, which this harness does not load
     // Iterated as [value, text] pairs when the policy <select> is built.
     ENERGY_POLICY_MODES: [['target', 'Target'], ['below', 'Below current SoC']],
     missingRequiredWrites: () => [],
     energyChecklist: () => ({ hardwareVerified: true }),
-    setTimeout, clearTimeout, setInterval, clearInterval,
+    setTimeout(callback, delay) {
+      const timer = setTimeout(() => { timers.delete(timer); callback(); }, delay);
+      timers.add(timer);
+      return timer;
+    },
+    clearTimeout(timer) { timers.delete(timer); clearTimeout(timer); },
+    setInterval(callback, delay) {
+      const timer = setInterval(callback, delay);
+      timers.add(timer);
+      return timer;
+    },
+    clearInterval(timer) { timers.delete(timer); clearInterval(timer); },
     AbortController, Number, Array, Object, Boolean, String, Math, Date, Set, Intl,
   };
   context.window = context;
   context.addEventListener = () => { }; // initDryRunPlan stops polling on pagehide
   vm.runInNewContext(SOURCE, context);
   context.element('div').id = 'energy-plan-schedule'; // the full-width chart host of the Charging plan tab
-  return { context, byId, calls, toasts };
+  return {
+    context, byId, calls, toasts, cleanup: () => {
+      for (const timer of timers) { clearTimeout(timer); clearInterval(timer); }
+      timers.clear();
+    }
+  };
 }
 
 const flush = () => new Promise((resolve) => setImmediate(resolve));
+
+function calibrationView(overrides = {}) {
+  return {
+    device_id: 'dev-1', inverter_serial: 'SN-A', battery_bms_sn: 'BMS-1', battery_replaced: false,
+    commissioning: { commissioned_at: '2021-05-01T00:00:00Z', source: 'logger_derived', determined_at: '2026-10-16T00:00:00Z' },
+    baseline: {
+      date: '2021-05-01T00:00:00Z', battery_cycles: 0, rated_usable_capacity_wh: 10368,
+      current_usable_capacity_wh: 10368, remaining_capacity_percent: 100, source: 'logger_derived',
+    },
+    baseline_unavailable_reason: null,
+    points: [{
+      measured_at: '2026-10-16T12:00:00+00:00', battery_cycles: 128,
+      current_usable_capacity_wh: 8538.35, rated_usable_capacity_wh: 10368, remaining_capacity_percent: 82.35,
+    }],
+    ...overrides,
+  };
+}
+
+function calibrationHarness() {
+  const h = harness();
+  const host = h.context.element('div');
+  host.id = 'energy-plan-calibration';
+  const details = h.context.element('details');
+  details.id = 'energy-plan-diagnostics';
+  details.open = true;
+  const charts = [];
+  h.context.getComputedStyle = () => ({ getPropertyValue: () => '#456789' });
+  h.context.Chart = class {
+    constructor(canvas, config) { charts.push(config); }
+    destroy() { }
+  };
+  const text = () => flatten(host).map((node) => node.textContent).join(' ');
+  return { h, host, charts, text };
+}
+
+test('BMS calibration history starts at the commissioning baseline and shows date, cycles, kWh and percent', () => {
+  const { h, host, charts, text } = calibrationHarness();
+  try {
+    h.context.renderBatteryCalibrationHistory(calibrationView());
+    const table = flatten(host).find((node) => node.tagName === 'table');
+    assert.ok(table);
+    const tableText = flatten(table).map((node) => node.textContent).join(' ');
+    assert.match(tableText, /commissioning/);
+    assert.match(tableText, /128/);
+    assert.match(tableText, /82[.,]35/);
+    assert.match(text(), /SN-A/);
+    assert.match(text(), /not verified on hardware/);
+    const [measured, datasheet] = charts[0].data.datasets;
+    // Wh / 1000 carries binary float noise; compare the kWh values with a tolerance.
+    const measuredPoints = Array.from(measured.data, (p) => [p.x, p.y]);
+    assert.deepEqual(measuredPoints.map(([x]) => x), [Date.parse('2021-05-01T00:00:00Z'), Date.parse('2026-10-16T12:00:00+00:00')]);
+    assert.ok(Math.abs(measuredPoints[0][1] - 10.368) < 1e-9);
+    assert.ok(Math.abs(measuredPoints[1][1] - 8.53835) < 1e-9);
+    assert.equal(datasheet.data[0].y, 10.368);
+    assert.equal(charts[0].options.scales.x.type, 'linear');
+    const callbacks = charts[0].options.plugins.tooltip.callbacks;
+    assert.deepEqual(Array.from(callbacks.afterBody([{ dataIndex: 0, datasetIndex: 0 }])), ['Cycles: 0', 'Remaining: 100 %']);
+    assert.deepEqual(Array.from(callbacks.afterBody([{ dataIndex: 1, datasetIndex: 0 }])), ['Cycles: 128', 'Remaining: 82.35 %']);
+    assert.deepEqual(Array.from(callbacks.afterBody([{ dataIndex: 0, datasetIndex: 1 }])), []);
+  } finally { h.cleanup(); }
+});
+
+test('BMS calibration history without a commissioning date has no baseline point and says so', () => {
+  const { h, host, charts, text } = calibrationHarness();
+  try {
+    h.context.renderBatteryCalibrationHistory(calibrationView({
+      commissioning: null, baseline: null, baseline_unavailable_reason: 'no_commissioning_date',
+    }));
+    assert.equal(charts[0].data.datasets[0].data.length, 1);
+    assert.match(text(), /No commissioning date is known/);
+    assert.ok(flatten(host).some((node) => node.tagName === 'input' && node.type === 'date'));
+  } finally { h.cleanup(); }
+});
+
+test('BMS calibration history empty states: no measurement, unknown serial', () => {
+  const { h, text } = calibrationHarness();
+  try {
+    h.context.renderBatteryCalibrationHistory(calibrationView({ points: [], baseline: null, baseline_unavailable_reason: 'no_measurement' }));
+    assert.match(text(), /No BMS calibration/);
+    h.context.renderBatteryCalibrationHistory(calibrationView({
+      inverter_serial: null, commissioning: null, baseline: null, points: [], baseline_unavailable_reason: 'inverter_serial_unknown',
+    }));
+    assert.match(text(), /serial number is not known yet/);
+    assert.ok(!/Save date/.test(text()));
+  } finally { h.cleanup(); }
+});
+
+test('saving the commissioning date PUTs it for the selected device and re-renders the result', async () => {
+  const calls = [];
+  const h = harness({ apiImpl: async (p, options) => { calls.push({ path: p, options }); return calibrationView(); } });
+  try {
+    const host = h.context.element('div');
+    host.id = 'energy-plan-calibration';
+    const select = h.context.element('select');
+    select.id = 'energy-plan-device';
+    select.value = 'dev-1';
+    h.context.renderBatteryCalibrationHistory(calibrationView({ commissioning: null, baseline: null }));
+    const form = flatten(host).find((node) => node.tagName === 'form');
+    const input = flatten(form).find((node) => node.tagName === 'input');
+    input.value = '2021-06-15';
+    form._listeners.submit({ preventDefault() { } });
+    await flush();
+    assert.equal(calls[0].path, 'energy/devices/dev-1/battery-commissioning');
+    assert.equal(calls[0].options.method, 'PUT');
+    assert.deepEqual(JSON.parse(calls[0].options.body), { commissioned_on: '2021-06-15' });
+  } finally { h.cleanup(); }
+});
 
 // A device payload good enough for refill()/the submit tasks.
 function device(overrides = {}) {
@@ -352,7 +480,7 @@ test('P2.3: switching the plan device requests a fresh dynamic-plan', async () =
   const h = harness({
     apiImpl: async (p) => {
       paths.push(p);
-      if (p === 'energy/planning-devices') return [{ device_id: 'dev-1', device_name: 'RCT DC 10.0' }];
+      if (p === 'energy/planning-devices') return [{ device_id: 'dev-1', device_name: 'RCT DC 10.0', mode: 'manual' }];
       return {};
     },
   });
@@ -373,6 +501,84 @@ test('P2.3: switching the plan device requests a fresh dynamic-plan', async () =
 
   const after = paths.filter((p) => p.includes('dynamic-plan')).length;
   assert.ok(after > before, 'the device-change handler requests the dynamic plan');
+  h.context.stopPlanPolling();
+  h.cleanup();
+});
+
+test('a pending plan keeps its Basic waiting state across background refreshes', async () => {
+  let status = 'spot_prices_unavailable';
+  const h = harness({ apiImpl: async (p) => (p === 'energy/planning-devices' ? [{ device_id: 'dev-1', mode: 'manual' }] : { status, slots: [], window: {} }) });
+  const select = h.context.element('select');
+  select.id = 'energy-plan-device';
+  select.value = 'dev-1';
+  const result = h.context.element('div');
+  result.id = 'energy-plan-result';
+  const waiting = () => result.children.filter((c) => (c.className || '').includes('plan-loading')).length;
+
+  await h.context.loadDryRunPlan();
+  assert.equal(waiting(), 1);
+  vm.runInContext('planPollAttempts = PLAN_POLL_MAX', h.context);
+  await h.context.loadDryRunPlan({ poll: true });
+  assert.equal(waiting(), 1, 'the Basic waiting state remains after retry exhaustion');
+  await h.context.loadDryRunPlan({ poll: true });
+  assert.equal(waiting(), 1, 'a later background refresh keeps the waiting state');
+  status = 'solar_forecast_unavailable';
+  await h.context.loadDryRunPlan({ poll: true });
+  assert.equal(waiting(), 1);
+  h.context.stopPlanPolling(); // the armed 10 s timer would keep the runner alive
+  h.cleanup();
+});
+
+// A transient error during a background poll keeps the pending card and re-arms the poll timer,
+// so the plan still appears once the API answers again.
+test('a failing background poll keeps the pending card and keeps polling', async () => {
+  let mode = 'pending';
+  const h = harness({
+    apiImpl: async (p) => {
+      if (p === 'energy/planning-devices') return [{ device_id: 'dev-1', mode: 'manual' }];
+      if (mode === 'throw') { mode = 'ok'; throw new Error('transient'); }
+      if (mode === 'pending') return { status: 'spot_prices_unavailable', slots: [], window: {} };
+      return { status: 'ok', slots: [], window: {} };
+    },
+  });
+  const select = h.context.element('select');
+  select.id = 'energy-plan-device';
+  select.value = 'dev-1';
+  const result = h.context.element('div');
+  result.id = 'energy-plan-result';
+  const failures = () => result.children.some((c) => (c.className || '').includes('text-danger'));
+
+  await h.context.loadDryRunPlan();
+  h.context.stopPlanPolling();
+  mode = 'throw';
+  await h.context.loadDryRunPlan({ poll: true });
+  assert.equal(failures(), false, 'the transient error text does not replace the card');
+  assert.ok(vm.runInContext('planPollTimer !== null', h.context), 'the next poll is armed');
+  h.context.stopPlanPolling();
+  await h.context.loadDryRunPlan({ poll: true });
+  assert.equal(vm.runInContext('planLastStatus', h.context), 'ok', 'the next poll delivers the plan');
+  h.context.stopPlanPolling();
+  h.cleanup();
+});
+
+// A 429 is short-lived load shedding: the Energy poll keeps what is shown (no failure state on the
+// panels) and waits at least as long as the shared rate-limit cooldown before the next poll.
+test('a 429 on the Energy poll keeps the panels and defers the next poll to the cooldown', async () => {
+  const limited = Object.assign(new Error('Too many requests'), { status: 429, retryAfter: 30, rateLimited: true });
+  const h = harness({ apiImpl: async () => { throw limited; } });
+  const pollStates = [];
+  Object.assign(h.context, {
+    energyPanels: new Map([['dev-1', { setPollState: (state) => pollStates.push(state) }]]),
+    energyHardwareStrategies: new Map(), energyPolling: false, energyPollTimer: null, energyClock: 0,
+    ENERGY_POLL_MS: 3000, ENERGY_POLL_BACKOFF_MS: 30000, ENERGY_POLL_TIMEOUT_MS: 8000,
+    energyPollDelay: 3000, pollDelay: (ms) => Math.max(ms, 31_000),
+  });
+  h.context.element('div').id = 'energy-list';
+  await h.context.pollEnergy();
+  assert.deepEqual(pollStates, [], 'a 429 must not flag the panels as failed');
+  assert.equal(h.context.energyPollDelay, 31_000, 'the next poll waits for the cooldown');
+  clearTimeout(h.context.energyPollTimer);
+  h.cleanup();
 });
 
 // P3.1: nextGridCharge must only merge adjacent charge slots of EQUAL power, so the "Next grid
@@ -521,4 +727,482 @@ test('Off banner text appears only for a real mismatch or an unrecorded Off', ()
   assert.equal(text({ mode: 'manual', mode_recorded: true }, { code: 1, stale: false }).ready, true);
   assert.equal(c.energyOffView({ mode: 'manual', mode_recorded: true }, { code: 4, stale: false }).recorded, false);
   assert.equal(c.energyOffView({ mode: 'off', mode_recorded: false }, { code: 4, stale: false }).recorded, false);
+});
+
+// The KPI strip is built from the plan's own battery snapshot; no second data source.
+function planTiles(plan) {
+  const h = harness();
+  h.context.formatPower = (w) => `${w} W`; // defined in a script this harness does not load
+  const host = h.context.element('div');
+  host.id = 'energy-plan-result';
+  h.context.renderDryRunPlan({ status: 'ok', horizon_hours: 24, slots: [], energy: {}, window: {}, ...plan });
+  const nodes = flatten(host);
+  const strip = nodes.find((n) => (n.className || '').split(/\s+/).includes('energy-plan-highlights'));
+  const tiles = strip ? strip.children : [];
+  return tiles.map((tile) => Object.fromEntries(flatten(tile)
+    .filter((n) => /spot-market-highlight-(caption|value|sub)$/.test(n.className || ''))
+    .map((n) => [n.className.split('-').pop(), n.textContent])));
+}
+
+// Battery remaining is a tertiary device-state line rendered outside the plan-KPI grid.
+function planBatteryLine(plan) {
+  const h = harness();
+  h.context.formatPower = (w) => `${w} W`;
+  const host = h.context.element('div');
+  host.id = 'energy-plan-result';
+  h.context.renderDryRunPlan({ status: 'ok', horizon_hours: 24, slots: [], energy: {}, window: {}, ...plan });
+  const line = flatten(host).find((n) => (n.className || '').split(/\s+/).includes('energy-plan-battery'));
+  const strip = flatten(host).find((n) => (n.className || '').split(/\s+/).includes('energy-plan-highlights'));
+  const inGrid = strip ? flatten(strip).includes(line) : false;
+  // The harness's textContent getter does not concatenate children, so read the text span only
+  // (the glyph span carries the Material Icon ligature, not label text).
+  const textSpan = line ? flatten(line).find((n) => n.tagName === 'span' && (n.className || '').split(/\s+/).includes('energy-plan-battery-value')) : null;
+  const text = textSpan ? textSpan.textContent : null;
+  return { text, inGrid, isTile: line ? (line.className || '').split(/\s+/).includes('spot-market-highlight') : false };
+}
+test('Charging plan shows three plan KPI tiles with Battery remaining as a separate tertiary line', () => {
+  const plan = {
+    battery: { soc_percent: 33, usable_capacity_wh: 10370, remaining_energy_wh: 3422.1 },
+    energy: { grid_charge_energy_wh: 4000 },
+    slots: [{ action: 'charge', start: '2026-01-01T10:00:00Z', end: '2026-01-01T10:15:00Z', max_power_w: 2000, target_soc_percent: 80 }],
+  };
+  const tiles = planTiles(plan);
+  assert.equal(tiles.length, 3);
+  assert.deepEqual(tiles.map((t) => t.caption), ['Target SoC', 'Charge power', 'Total plan grid energy']);
+  const battery = planBatteryLine(plan);
+  assert.equal(battery.inGrid, false, 'Battery remaining must not live inside the plan-KPI grid');
+  assert.equal(battery.isTile, false, 'Battery remaining must not be a .spot-market-highlight tile');
+  assert.match(battery.text, /33 % SoC · 3[.,]42 kWh remaining \/ 10[.,]37 kWh usable/);
+});
+
+test('Battery remaining shows a dash, never NaN or undefined, without a snapshot', () => {
+  for (const battery of [undefined, null, { soc_percent: null }]) {
+    const tiles = planTiles({ battery });
+    assert.equal(tiles.length, 3, 'the plan-KPI grid keeps its three tiles');
+    const line = planBatteryLine({ battery });
+    assert.equal(line.text, 'Not available');
+    assert.ok(!/NaN|undefined|null/.test(line.text));
+  }
+});
+
+test('Charging plan renders for an active inverter without a mode badge', () => {
+  const slots = [{ action: 'charge', start: '2026-01-01T10:00:00Z', end: '2026-01-01T10:15:00Z', max_power_w: 2000, target_soc_percent: 80 }];
+  for (const mode of ['manual', 'external']) {
+    const h = harness();
+    h.context.formatPower = (w) => `${w} W`;
+    const host = h.context.element('div');
+    host.id = 'energy-plan-result';
+    const select = h.context.element('select');
+    select.id = 'energy-plan-device';
+    select.value = 'main';
+    vm.runInContext(`planDevices = [{ device_id: 'main', mode: ${JSON.stringify(mode)} }]`, h.context);
+    h.context.renderDryRunPlan({ status: 'ok', horizon_hours: 24, slots, energy: {}, window: {} });
+    const text = flatten(host).map((n) => n.textContent || '').join(' ');
+    assert.ok(/Next grid charge/.test(text), `mode ${mode}`);
+    assert.ok(!/Manual control|External control|Disabled/.test(text), `mode ${mode}`);
+  }
+});
+
+// The coverage line is driven only by the already-fetched consumption history: days[] with
+// their source. It is neutral text (no success state) in #energy-consumption-import-status and
+// must degrade gracefully when fields are missing (never NaN, never a crash).
+function importStatusHarness() {
+  const h = harness();
+  const slot = h.context.element('div');
+  slot.id = 'energy-consumption-import-status';
+  const text = (index) => slot.children[index]?.textContent ?? null;
+  return { h, slot, text };
+}
+
+function consumptionDays(available, total, source = 'inverter_history', local = 0) {
+  return Array.from({ length: total }, (_, i) => ({
+    date: `2026-01-${String(i + 1).padStart(2, '0')}`,
+    energy_wh: i < available ? 1000 + i : null,
+    source: i >= available ? 'unavailable' : i < local ? 'local_measured' : source,
+  }));
+}
+
+test('Coverage status shows "History coverage · N/60 days" with the source split, neutral', () => {
+  const { h, slot, text } = importStatusHarness();
+  try {
+    h.context.renderInverterHistoryStatus({ days: consumptionDays(60, 60), recording_since: null });
+    assert.equal(text(0), 'History coverage · 60/60 days');
+    assert.equal(text(1), '0 local · 60 inverter');
+    h.context.renderInverterHistoryStatus({ days: consumptionDays(60, 60, 'inverter_history', 42), recording_since: null });
+    assert.equal(text(1), '42 local · 18 inverter');
+    h.context.renderInverterHistoryStatus({ days: consumptionDays(42, 60), recording_since: '2025-11-01T00:00:00Z' });
+    assert.equal(text(0), 'History coverage · 42/60 days');
+    assert.ok(!/Live recording|text-bg-success/.test(slot.children.map((c) => `${c.textContent} ${c.className}`).join(' ')));
+    assert.equal(slot.children.length, 2, 'a re-render replaces rather than appends');
+  } finally { h.cleanup(); }
+});
+
+test('Coverage status: total follows days.length, not a hard-coded 60', () => {
+  const { h, text } = importStatusHarness();
+  try {
+    h.context.renderInverterHistoryStatus({ days: consumptionDays(5, 30), recording_since: null });
+    assert.equal(text(0), 'History coverage · 5/30 days');
+  } finally { h.cleanup(); }
+});
+
+test('Coverage status: with no completed day but a valid recording_since shows "recording since"', () => {
+  const { h, text, slot } = importStatusHarness();
+  try {
+    h.context.renderInverterHistoryStatus({ days: consumptionDays(0, 60), recording_since: '2026-01-05T00:00:00Z' });
+    assert.match(text(0), /^History coverage · 0\/60 days · recording since /);
+    assert.ok(!/NaN|undefined|Invalid/.test(text(0)), 'the date is formatted, never NaN');
+    assert.equal(slot.children.length, 1, 'no source split without any available day');
+  } finally { h.cleanup(); }
+});
+
+test('Coverage status degrades gracefully: missing days render 0/0, no crash', () => {
+  const { h, slot, text } = importStatusHarness();
+  try {
+    h.context.renderInverterHistoryStatus({});
+    assert.equal(text(0), 'History coverage · 0/0 days');
+    assert.equal(h.context.renderInverterHistoryStatus(null), false);
+    assert.equal(slot.children.length, 0, 'a null history leaves nothing');
+  } finally { h.cleanup(); }
+});
+
+// The confidence chip reflects the backend contract (forecast_basis / forecast_confidence). The
+// refactor dropped the second permanent text line (#energy-plan-confidence-note); the weak-forecast
+// explanation is now an accessible hint (title) on the chip itself, so the test asserts the chip
+// text, its hidden state, and the title hint — not a separate note element. Fixtures use the real
+// API value adaptive_history, never an invented string.
+test('Charging plan shows forecast confidence from the plan fields and explains a weak forecast via an accessible hint', () => {
+  const cases = [
+    [{ forecast_basis: 'adaptive_history', forecast_confidence: 'low' }, 'Low confidence', 'Limited consumption history'],
+    [{ forecast_basis: 'adaptive_history', forecast_confidence: 'normal' }, 'Normal confidence', ''],
+    [{ forecast_basis: 'history_fallback', forecast_confidence: 'low' }, 'Low confidence', 'Limited consumption history'],
+    [{ forecast_basis: 'history_fallback', forecast_confidence: 'normal' }, 'Normal confidence', ''],
+    [{ forecast_basis: 'bootstrap_baseline', forecast_confidence: 'low' }, 'Baseline forecast', 'Conservative household baseline while consumption history is collected'],
+    [{ forecast_basis: 'adaptive_history', forecast_confidence: 'unknown' }, '', ''],
+    [{ forecast_basis: 'unknown', forecast_confidence: 'low' }, '', ''],
+    [{}, '', ''],
+  ];
+  for (const [fields, label, explanation] of cases) {
+    const h = harness();
+    const host = h.context.element('div');
+    host.id = 'energy-plan-result';
+    const badge = h.context.element('span');
+    badge.id = 'energy-plan-confidence';
+    h.context.renderDryRunPlan({ status: 'ok', horizon_hours: 24, slots: [], energy: {}, window: {}, ...fields });
+    assert.equal(badge.textContent, label, JSON.stringify(fields));
+    assert.equal(badge.hidden, !label);
+    assert.equal(badge.title || '', explanation);
+    assert.equal(badge.getAttribute('aria-label'), explanation ? `${label}: ${explanation}` : null);
+    h.context.renderDryRunPlan({ status: 'spot_prices_unavailable', slots: [], ...fields });
+    assert.equal(badge.hidden, true, 'no confidence without a plan');
+    assert.equal(badge.getAttribute('aria-label'), null);
+  }
+});
+
+test('pending plan uses an hourglass in Basic mode and retains readiness in Expert mode', () => {
+  const h = harness();
+  const result = h.context.element('div');
+  result.id = 'energy-plan-result';
+  const pending = { status: 'spot_prices_unavailable', slots: [] };
+  h.context.renderDryRunPlan(pending);
+  const wait = result.children[0];
+  assert.equal(wait.getAttribute('role'), 'status');
+  assert.ok(flatten(wait).some((node) => node.textContent === 'hourglass_empty' && node.getAttribute('aria-hidden') === 'true' && node.className.includes('plan-loading-icon')));
+  assert.match(flatten(wait).map((node) => node.textContent).join(' '), /Plan is being prepared.*Please check back in a few minutes/s);
+  assert.equal(result.children[1].hidden, true, 'Basic mode hides the readiness list');
+  h.context.energyExpertMode = true;
+  h.context.renderDryRunPlan(pending);
+  assert.equal(result.children[1].hidden, false, 'Expert mode exposes the readiness list');
+  assert.ok(flatten(result.children[1]).some((node) => node.tagName === 'ul'));
+  h.context.energyExpertMode = false;
+  h.context.renderDryRunPlan({ status: 'spot_disabled', slots: [] });
+  assert.match(flatten(result).map((node) => node.textContent).join(' '), /Enable it in the energy settings/);
+  assert.ok(!flatten(result).some((node) => node.textContent === 'Plan is being prepared'));
+  h.cleanup();
+});
+
+test('battery_state_unavailable shows the operator hint at once in Basic mode and keeps polling', async () => {
+  let mode = 'manual';
+  let planCalls = 0;
+  const h = harness({
+    apiImpl: async (p) => {
+      if (p === 'energy/planning-devices') return [{ device_id: 'a', mode }];
+      planCalls += 1;
+      return mode === 'off' ? { status: 'energy_manager_off', slots: [] } : { status: 'battery_state_unavailable', slots: [], window: {} };
+    }
+  });
+  h.context.pollDelay = () => 5;
+  const result = h.context.element('div');
+  result.id = 'energy-plan-result';
+  const select = h.context.element('select');
+  select.id = 'energy-plan-device';
+  try {
+    h.context.energyExpertMode = false;
+    await h.context.refreshPlanDevices();
+    await h.context.loadDryRunPlan();
+    const texts = flatten(result).map((node) => node.textContent).join(' ');
+    assert.match(texts, /Check that the inverter is connected and reports its battery state and capacity/);
+    assert.ok(!/Plan is being prepared/.test(texts), 'not shown as a generic wait state');
+    assert.ok(!flatten(result).some((node) => node.getAttribute?.('role') === 'status'));
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    assert.ok(planCalls >= 2, `still polled in the background (${planCalls} plan requests)`);
+    mode = 'off';
+    await h.context.refreshPlanDevices();
+    h.context.stopPlanPolling();
+    planCalls = 0;
+    await h.context.loadDryRunPlan();
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    assert.equal(planCalls, 0, 'Energy Manager off requests and polls no plan');
+  } finally { h.context.stopPlanPolling(); h.cleanup(); }
+});
+
+test('Show all intervals offers collapsed details with merged consecutive slots', () => {
+  const h = harness();
+  h.context.formatPower = (w) => `${w} W`;
+  h.context.element('div').id = 'energy-plan-result';
+  const schedule = h.context.element('div');
+  schedule.id = 'energy-plan-schedule';
+  const slot = (start, end, action, power) => ({ start, end, action, max_power_w: power, target_soc_percent: 80, reason: 'forecast PV covers demand' });
+  h.context.renderDryRunPlan({
+    status: 'ok', horizon_hours: 24, energy: {}, window: {},
+    slots: [
+      slot('2026-01-01T10:00:00Z', '2026-01-01T10:15:00Z', 'charge', 2000),
+      slot('2026-01-01T10:15:00Z', '2026-01-01T10:30:00Z', 'charge', 2000),
+      slot('2026-01-01T10:30:00Z', '2026-01-01T11:00:00Z', 'idle', null),
+    ],
+  });
+  const nodes = flatten(schedule);
+  const details = nodes.find((n) => n.tagName === 'details');
+  assert.ok(details, 'a native details element exists');
+  assert.notEqual(details.open, true, 'collapsed by default');
+  assert.equal(nodes.find((n) => n.tagName === 'summary').textContent, 'Show all intervals');
+  const detailTable = flatten(details).find((n) => n.tagName === 'table');
+  assert.equal(flatten(detailTable).filter((n) => n.tagName === 'tr' && flatten(n).some((c) => c.tagName === 'td')).length, 2);
+  // Responsive stacked layout: the table opts into .data-table-stack and every data cell carries
+  // its column name in data-label, so the phone card keeps each value tied to its field. Without
+  // this the mobile layout (admin.css) shows values with no labels, the bug this guards against.
+  const table = detailTable;
+  assert.ok((table.className || '').split(/\s+/).includes('data-table-stack'), 'table opts into the stacked layout');
+  const labels = ['Time', 'Action', 'Power', 'Target SoC', 'Reason'];
+  const dataRows = flatten(detailTable).filter((n) => n.tagName === 'tr' && flatten(n).some((c) => c.tagName === 'td'));
+  for (const dataRow of dataRows) {
+    const cells = dataRow.children.filter((c) => c.tagName === 'td');
+    assert.deepEqual(cells.map((c) => c.dataset.label), labels, 'each cell labelled with its column');
+  }
+});
+
+test('Charging schedule details stay open across a plan refresh', () => {
+  const h = harness();
+  h.context.formatPower = (w) => `${w} W`;
+  h.context.element('div').id = 'energy-plan-result';
+  const plan = { status: 'ok', horizon_hours: 24, energy: {}, window: {}, slots: [{ start: '2026-01-01T10:00:00Z', end: '2026-01-01T10:15:00Z', action: 'charge', max_power_w: 2000, target_soc_percent: 80, reason: 'x' }] };
+  h.context.renderDryRunPlan(plan);
+  h.context.renderDryRunPlan(plan);
+  assert.notEqual(h.byId.get('energy-plan-schedule-details').open, true, 'closed stays closed');
+  h.byId.get('energy-plan-schedule-details').open = true;
+  h.context.renderDryRunPlan(plan);
+  assert.equal(h.byId.get('energy-plan-schedule-details').open, true, 'opened details survive the re-render');
+});
+
+function renderPlan(slots) {
+  const h = harness();
+  h.context.formatPower = (w) => `${(w / 1000).toFixed(2)} kW`;
+  h.context.element('div').id = 'energy-plan-result';
+  const schedule = h.context.element('div');
+  schedule.id = 'energy-plan-schedule';
+  h.context.renderDryRunPlan({ status: 'ok', horizon_hours: 24, energy: {}, window: {}, slots });
+  return { h, nodes: flatten(schedule) };
+}
+
+const REASON_CHARGE = 'forecast deficit, charged as late as permitted';
+const planSlot = (start, end, action, power, reason = REASON_CHARGE, target = 95) => (
+  { start, end, action, max_power_w: power, target_soc_percent: target, reason });
+const bodyRows = (root) => flatten(root).filter((n) => n.tagName === 'tr' && flatten(n).some((c) => c.tagName === 'td'));
+const rowText = (row) => row.children.filter((c) => c.tagName === 'td').map((c) => c.textContent);
+
+test('Plan reasons map to user-facing labels and unknown reasons stay verbatim', () => {
+  const { h } = renderPlan([]);
+  const ctx = h.context;
+  const expected = {
+    'forecast PV covers demand': ['Solar covers forecast demand', 'Solar covers demand'],
+    'battery reserve covers demand': ['Battery can cover forecast demand', 'Battery covers demand'],
+    'forecast deficit, charged as late as permitted': ['Grid charging needed to protect the battery reserve', 'Protect battery reserve'],
+    'charge as late as permitted for target SoC': ['Grid charging scheduled to reach the target SoC', 'Reach target SoC'],
+    'negative spot price, forecast deficit': ['Negative price: charge now for forecast demand', 'Use negative price'],
+    'no spot price for this slot': ['No market price available for this period', undefined],
+  };
+  for (const [reason, [long, short]] of Object.entries(expected)) {
+    assert.equal(ctx.planReasonLabel(reason), long);
+    if (short) assert.equal(ctx.planPurposeLabel(reason), short);
+  }
+  assert.equal(ctx.planReasonLabel('something new'), 'something new');
+  assert.equal(ctx.planPurposeLabel('something new'), 'something new');
+});
+
+test('Plan tooltip shows only relevant fields per action', () => {
+  const { h } = renderPlan([]);
+  const idle = h.context.planTooltipLines(planSlot('2026-01-01T10:00:00Z', '2026-01-01T10:15:00Z', 'idle', null, 'battery reserve covers demand', null)).join('|');
+  assert.match(idle, /No grid charging/);
+  assert.match(idle, /Battery can cover forecast demand/);
+  assert.doesNotMatch(idle, /n\/a|Power:|Target SoC/);
+  const charge = h.context.planTooltipLines(planSlot('2026-01-01T10:00:00Z', '2026-01-01T10:15:00Z', 'charge', 1510)).join('|');
+  assert.match(charge, /Grid charging · 1\.51 kW/);
+  assert.match(charge, /Target SoC 95 %/);
+  assert.match(charge, /protect the battery reserve/);
+});
+
+test('Charging schedule lists only charge windows; Show all intervals lists every interval', () => {
+  const { nodes } = renderPlan([
+    planSlot('2026-01-01T01:00:00Z', '2026-01-01T01:15:00Z', 'charge', 1510),
+    planSlot('2026-01-01T01:15:00Z', '2026-01-01T01:30:00Z', 'idle', null, 'battery reserve covers demand'),
+    planSlot('2026-01-01T01:30:00Z', '2026-01-01T01:45:00Z', 'charge', 1510),
+    planSlot('2026-01-01T01:45:00Z', '2026-01-01T02:00:00Z', 'idle', null, 'battery reserve covers demand'),
+  ]);
+  const details = nodes.find((n) => n.tagName === 'details');
+  const main = nodes.find((n) => n.id === 'energy-plan-charge-schedule');
+  const mainRows = bodyRows(main);
+  assert.equal(mainRows.length, 2, 'idle gap keeps two charging events');
+  assert.deepEqual(rowText(mainRows[0]).slice(1), ['1.51 kW', '95 %', 'Protect battery reserve']);
+  assert.equal(flatten(main).filter((n) => n.tagName === 'th').map((n) => n.textContent).join(','), 'Time,Power,Target SoC,Purpose');
+  assert.equal(bodyRows(details).length, 4);
+  assert.equal(flatten(details).filter((n) => n.tagName === 'th').map((n) => n.textContent).join(','), 'Time,Action,Power,Target SoC,Reason');
+});
+
+test('Charging schedule merges only identical adjacent charge slots', () => {
+  const merged = renderPlan([
+    planSlot('2026-01-01T01:00:00Z', '2026-01-01T01:15:00Z', 'charge', 1510),
+    planSlot('2026-01-01T01:15:00Z', '2026-01-01T01:30:00Z', 'charge', 1510),
+  ]);
+  assert.equal(bodyRows(merged.nodes.find((n) => n.id === 'energy-plan-charge-schedule')).length, 1);
+  const power = renderPlan([
+    planSlot('2026-01-01T01:00:00Z', '2026-01-01T01:15:00Z', 'charge', 1510),
+    planSlot('2026-01-01T01:15:00Z', '2026-01-01T01:30:00Z', 'charge', 2500),
+  ]);
+  assert.equal(bodyRows(power.nodes.find((n) => n.id === 'energy-plan-charge-schedule')).length, 2);
+  const target = renderPlan([
+    planSlot('2026-01-01T01:00:00Z', '2026-01-01T01:15:00Z', 'charge', 1510, REASON_CHARGE, 90),
+    planSlot('2026-01-01T01:15:00Z', '2026-01-01T01:30:00Z', 'charge', 1510, REASON_CHARGE, 95),
+  ]);
+  assert.equal(bodyRows(target.nodes.find((n) => n.id === 'energy-plan-charge-schedule')).length, 2, 'target SoC change splits');
+  const reason = renderPlan([
+    planSlot('2026-01-01T01:00:00Z', '2026-01-01T01:15:00Z', 'charge', 1510),
+    planSlot('2026-01-01T01:15:00Z', '2026-01-01T01:30:00Z', 'charge', 1510, 'charge as late as permitted for target SoC'),
+  ]);
+  assert.equal(bodyRows(reason.nodes.find((n) => n.id === 'energy-plan-charge-schedule')).length, 2, 'reason change splits');
+  // Identical charge slots around an idle slot, and a time gap between them, never merge.
+  const gaps = renderPlan([
+    planSlot('2026-01-01T01:00:00Z', '2026-01-01T01:15:00Z', 'charge', 1510),
+    planSlot('2026-01-01T01:15:00Z', '2026-01-01T01:30:00Z', 'idle', null, 'battery reserve covers demand', null),
+    planSlot('2026-01-01T01:30:00Z', '2026-01-01T01:45:00Z', 'charge', 1510),
+    planSlot('2026-01-01T02:00:00Z', '2026-01-01T02:15:00Z', 'charge', 1510),
+  ]);
+  assert.equal(bodyRows(gaps.nodes.find((n) => n.id === 'energy-plan-charge-schedule')).length, 3);
+});
+
+test('an ok plan without charge slots titles its status card "No grid charging planned"', () => {
+  const { h } = renderPlan([planSlot('2026-01-01T01:00:00Z', '2026-01-01T01:15:00Z', 'idle', null, 'battery reserve covers demand', null)]);
+  const texts = flatten(h.byId.get('energy-plan-result')).map((n) => n.textContent);
+  assert.ok(texts.includes('No grid charging planned'));
+  assert.ok(!texts.some((t) => /No grid charge\b/.test(t || '')));
+});
+
+test('Charging schedule without charge slots says so', () => {
+  const { nodes } = renderPlan([planSlot('2026-01-01T01:00:00Z', '2026-01-01T01:15:00Z', 'idle', null, 'battery reserve covers demand')]);
+  assert.ok(flatten(nodes.find((n) => n.id === 'energy-plan-charge-schedule')).some((n) => n.textContent === 'No grid charging planned.'));
+});
+
+// Product rule: the Charging plan, Spot Market and Weather tabs are shown together only while at
+// least one inverter is Manual; External does not count. The charging-plan select lists only the
+// Manual inverters. Full mode matrix plus the active-tab fallback to Inverter.
+test('the three planning tabs follow a Manual inverter; External does not count, and the select lists only Manual devices', async () => {
+  const paths = [];
+  let list = [];
+  const h = harness({ apiImpl: async (p) => { paths.push(p); return p === 'energy/planning-devices' ? list.map((d) => ({ ...d })) : { status: 'ok', slots: [], window: {} }; } });
+  const select = h.context.element('select');
+  select.id = 'energy-plan-device';
+  const tabs = ['plan', 'spot-market', 'weather'].map((name) => {
+    const item = h.context.element('li');
+    const tab = h.context.element('button');
+    tab.id = `energy-tab-${name}`;
+    item.append(tab);
+    const pane = h.context.element('div');
+    pane.id = `energy-pane-${name}`;
+    return { item, tab, pane };
+  });
+  const inverterTab = h.context.element('button');
+  inverterTab.id = 'energy-tab-inverter';
+  let fallbacks = 0;
+  h.context.bootstrap = {
+    Tab: {
+      getOrCreateInstance: (tab) => {
+        assert.equal(tab, inverterTab);
+        return { show: () => { fallbacks += 1; } };
+      }
+    }
+  };
+  h.context.element('div').id = 'energy-plan-result';
+
+  try {
+    for (const [modes, expected] of [
+      [['off', null], []],          // no Manual inverter -> all three hidden
+      [['external'], []],           // External alone does not unlock the tabs
+      [['external', 'off'], []],    // still no Manual inverter
+      [['manual'], ['a']],          // single Manual -> three visible, select = that device
+      [['manual', 'external'], ['a']], // External is not a plan candidate -> select lists only Manual
+      [['external', 'manual'], ['b']], // order independent: only the Manual device is offered
+    ]) {
+      list = modes.map((mode, index) => ({ device_id: index ? 'b' : 'a', mode }));
+      await h.context.refreshPlanDevices();
+      assert.deepEqual(select.children.map((option) => option.value), expected, modes.join('/'));
+      const anyManual = expected.length > 0;
+      for (const { item, pane } of tabs) {
+        assert.equal(item.hidden, !anyManual, `tab <li> visibility for ${modes.join('/')}`);
+        assert.equal(pane.hidden, !anyManual, `tab pane visibility for ${modes.join('/')}`);
+      }
+    }
+    // Each of the three tabs, when active and then losing the last Manual inverter, falls back to
+    // the Inverter tab.
+    for (const { tab } of tabs) {
+      list = [{ device_id: 'a', mode: 'manual' }];
+      await h.context.refreshPlanDevices();
+      fallbacks = 0;
+      tab.classList.add('active');
+      list = [{ device_id: 'a', mode: 'external' }]; // last Manual inverter leaves Manual
+      await h.context.refreshPlanDevices();
+      assert.equal(fallbacks, 1, `an active ${tab.id} falls back to Inverter`);
+      tab.classList.remove('active');
+    }
+    await h.context.loadDryRunPlan();
+    assert.equal(paths.some((p) => p.includes('dynamic-plan')), false, 'no plan is requested without a Manual inverter');
+  } finally { h.context.stopPlanPolling(); h.cleanup(); }
+});
+
+test('an empty planning-devices list clears the select, hides the tab and requests no plan', async () => {
+  const paths = [];
+  let list = [{ device_id: 'a', device_name: 'A', mode: 'manual' }];
+  const h = harness({ apiImpl: async (p) => { paths.push(p); return p === 'energy/planning-devices' ? list.map((d) => ({ ...d })) : { status: 'ok', slots: [], window: {} }; } });
+  const select = h.context.element('select');
+  select.id = 'energy-plan-device';
+  const item = h.context.element('li');
+  const tab = h.context.element('button');
+  tab.id = 'energy-tab-plan';
+  item.append(tab);
+  const pane = h.context.element('div');
+  pane.id = 'energy-pane-plan';
+  h.context.element('div').id = 'energy-plan-result';
+
+  await h.context.refreshPlanDevices();
+  assert.equal(select.value, 'a');
+  assert.equal(item.hidden, false);
+
+  list = []; // the last inverter was removed
+  await h.context.refreshPlanDevices();
+  assert.equal(select.children.length, 0, 'stale options are removed');
+  assert.equal(select.value, '');
+  assert.equal(item.hidden, true);
+  assert.equal(pane.hidden, true);
+  paths.length = 0;
+  await h.context.loadDryRunPlan({ poll: true });
+  assert.equal(paths.some((p) => p.includes('dynamic-plan')), false, 'no plan for a removed device');
+  h.context.stopPlanPolling();
+  h.cleanup();
 });

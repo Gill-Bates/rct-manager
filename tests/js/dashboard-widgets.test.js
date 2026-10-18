@@ -41,6 +41,8 @@ const EXPECTED_ID_ORDER = [
   'metric-count', 'devices', 'device-count', 'connected-count', 'days-to-calibration',
   'spot-price-current', 'spot-market-status', 'spot-price-curve',
   'solar-forecast-status', 'pv-forecast-curve', 'charging-schedule',
+  'battery-usable-kwh', 'battery-remaining-percent', 'battery-cycles', 'battery-last-calibration',
+  'battery-commissioning-date', 'battery-degradation',
 ];
 
 // --- Production layout helpers -------------------------------------------------------------------
@@ -165,4 +167,65 @@ test('a single bottom-pinned widget that overflows the bound (y=MAX_Y, h=2) fall
   const pvDefault = DEFAULT_LAYOUT.find((def) => def.id === 'pv-power');
   assert.deepStrictEqual(plain(pv), plain(defaultEntry(pvDefault)));
   assert.ok(result.every((entry) => entry.y + entry.h <= MAX_Y));
+});
+
+test('battery widgets start directly below the inverter overview, not in a far-off row', () => {
+  // With float:true nothing compacts upwards, so a default y far below the factory block leaves a
+  // visible gap above an opt-in widget whenever the older opt-in widgets are hidden.
+  const devices = DEFAULT_LAYOUT.find((entry) => entry.id === 'devices');
+  const factoryBottom = devices.y + devices.h;
+  const battery = DEFAULT_LAYOUT.filter((entry) => entry.id.startsWith('battery-') && entry.id !== 'battery-soc');
+  assert.equal(battery.length, 6);
+  for (const entry of battery) {
+    // The chart sits a few rows lower so tiles that grow with content (one row per inverter) do not collide with it.
+    const slack = entry.id === 'battery-degradation' ? 4 : 2;
+    assert.ok(entry.y >= factoryBottom && entry.y <= factoryBottom + slack, `${entry.id} at y=${entry.y}`);
+  }
+});
+
+test('the Add widget list keeps focus on the equivalent button after a rebuild', () => {
+  const start = DASHBOARD_SOURCE.indexOf('  function renderAddWidgetList() {');
+  const end = DASHBOARD_SOURCE.indexOf('  function resetLayout()', start);
+  assert.ok(start >= 0 && end > start, 'renderAddWidgetList must remain discoverable');
+
+  const makeEl = (tag) => ({
+    tag, dataset: {}, children: [], attrs: {}, listeners: {}, className: '', textContent: '',
+    setAttribute(k, v) { this.attrs[k] = v; },
+    focus() { doc.activeElement = this; },
+    addEventListener(type, fn) { this.listeners[type] = fn; },
+    append(...nodes) { this.children.push(...nodes); },
+    replaceChildren(...nodes) { this.children = nodes; },
+    contains(node) { return this.children.some((c) => c === node || c.contains?.(node)); },
+    querySelector(selector) {
+      const id = /data-widget-id="([\w-]+)"/.exec(selector)[1];
+      const found = [];
+      const walk = (n) => { if (n.tag === 'button' && n.dataset.widgetId === id) found.push(n); n.children?.forEach(walk); };
+      walk(this);
+      return found[0] || null;
+    },
+  });
+  const list = makeEl('ul');
+  const doc = { activeElement: { tag: 'body', dataset: {} }, createElement: makeEl };
+  const states = new Map(registry.map((def) => [def.id, { visible: def.defaultVisible }]));
+  const source = `${DASHBOARD_SOURCE.slice(DASHBOARD_SOURCE.indexOf('  const { registry } = window.RCTDashboardRegistry;'),
+    DASHBOARD_SOURCE.indexOf('  const defaultEntry'))}
+  const $ = () => list; const widgetState = states;
+  function toggleWidgetVisibility(id, visible) { states.set(id, { visible }); renderAddWidgetList(); }
+${DASHBOARD_SOURCE.slice(start, end)}
+globalThis.__api = { renderAddWidgetList };`;
+  const context = { window: { RCTDashboardRegistry: { registry } }, document: doc, list, states };
+  context.globalThis = context;
+  vm.runInNewContext(source, context);
+  context.__api.renderAddWidgetList();
+
+  const buttonFor = (id) => list.querySelector(`button[data-widget-id="${id}"]`);
+  const before = buttonFor('battery-cycles');
+  assert.equal(before.textContent, 'Add');
+  // Focus on the button, click it: the list is rebuilt and the old button is gone.
+  doc.activeElement = before;
+  before.listeners.click();
+  const after = buttonFor('battery-cycles');
+  assert.notEqual(after, before);
+  assert.equal(after.textContent, 'Remove');
+  assert.equal(doc.activeElement, after, 'focus moves to the re-rendered button of the same widget');
 });

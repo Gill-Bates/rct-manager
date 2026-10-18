@@ -68,8 +68,8 @@ test('an ok plan draws one chart with uneven slots, a summary label and a plain-
   assert.equal(JSON.stringify(power.data.map((p) => p.y)), "[0,0,3,3]");
   assert.equal(h.element('charging-schedule-canvas')['aria-label'].startsWith('Charging schedule'), true);
   const lines = h.configs[0].options.plugins.tooltip.callbacks.label({ raw: power.data[2] });
-  assert.ok(lines.includes('Power: 3.00 kW'));
-  assert.ok(lines.some((line) => line.startsWith('Reason: Expected shortfall')));
+  assert.ok(lines.includes('Grid charging · 3.00 kW'));
+  assert.ok(lines.some((line) => line.includes('protect the battery reserve')));
 });
 
 test('a non-ok status shows a text state and no chart', async () => {

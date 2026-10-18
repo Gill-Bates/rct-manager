@@ -1,15 +1,21 @@
-"""Battery tower topology and verified usable capacity, derived from cached module serials.
+#!/usr/bin/env python3
+#
+# app/gateway/battery_inventory.py
+# Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
+#
 
-Cache-only: nothing here reads a device. The admin dashboard and the planning port
-(`ModuleCountVerifiedCapacity`) share one classification of the module-serial slots, so the
-topology rules live outside the admin HTTP module. The last-known-good state is owned by the
-gateway (`module_topology_state`), which drops it whenever it invalidates its module inventory.
+"""Battery tower topology and conservative capacity availability from cached readings.
+
+Cache-only: nothing here reads a device. The admin dashboard and planning source use the
+module-serial classification. The gateway drops last-known-good topology when inventory changes.
 """
 
 import logging
 import re
 import threading
 import time
+from dataclasses import dataclass
+from datetime import datetime
 
 log = logging.getLogger(__name__)
 
@@ -18,6 +24,10 @@ log = logging.getLogger(__name__)
 # prefixes unconditionally, so catalog presence alone cannot tell whether a given tower actually
 # exists on this device; _battery_tower_present answers that from readings.
 _BATTERY_TOWER_PREFIXES = ("battery", "battery_placeholder_0")
+CAPACITY_AH_METRICS = ("battery_ah_capacity", "power_mng_amp_hours_measured")
+# BMS serial of the battery; a changed value marks a swapped battery in the calibration history.
+BMS_SERIAL_METRIC = "battery_bms_sn"
+CAPACITY_AH_FRESH_SECONDS = 2 * 24 * 60 * 60
 
 # RCT_MAX_MODULES_PER_TOWER is hardware (2 to 6 modules per tower, per RCT docs).
 # RCT_MODULE_SN_SLOTS is the protocol array size (indices 0-6), not an installable module count.
@@ -37,17 +47,23 @@ RCT_MODULE_SN_SLOTS = 7
 _BATTERY_PRESENCE_SUFFIXES = ("soc", "temperature", "cycles", "status2")
 
 
-def _battery_tower_present(runtime, device_id: str, prefix: str, trusted_module_slots: list[int]) -> bool:
+def _battery_tower_present(
+    runtime, device_id: str, prefix: str, trusted_module_slots: list[int]
+) -> bool:
     """`trusted_module_slots` must be the STABILIZED report's populated_module_slots (see
     _battery_module_report), never the current poll's raw _battery_populated_module_slots() - a
-    transient missing/incomplete serial read must not make an established second tower vanish."""
+    transient missing/incomplete serial read must not make an established second tower vanish.
+    """
     if trusted_module_slots:
         return True
     if prefix != "battery":
         return False  # a placeholder tower with no module serials is not installed
     for suffix in _BATTERY_PRESENCE_SUFFIXES:
         name = f"{prefix}_{suffix}"
-        if runtime.catalog.exists(name) and runtime.gateway.cached_reading(device_id, name) is not None:
+        if (
+            runtime.catalog.exists(name)
+            and runtime.gateway.cached_reading(device_id, name) is not None
+        ):
             return True
     return False
 
@@ -133,20 +149,36 @@ def _raw_battery_module_report(states: list[str]) -> dict:
     complete = _SLOT_UNKNOWN not in states
     populated = _battery_populated_module_slots(states)
     if not complete:
-        return {"module_count": None, "module_count_status": "pending",
-                "populated_module_slots": populated, "_complete": False}
+        return {
+            "module_count": None,
+            "module_count_status": "pending",
+            "populated_module_slots": populated,
+            "_complete": False,
+        }
     if not populated:
-        return {"module_count": None, "module_count_status": "pending",
-                "populated_module_slots": [], "_complete": True}
+        return {
+            "module_count": None,
+            "module_count_status": "pending",
+            "populated_module_slots": [],
+            "_complete": True,
+        }
     contiguous = populated == list(range(len(populated)))
     if contiguous and len(populated) <= RCT_MAX_MODULES_PER_TOWER:
         # A count of 1 is below the documented minimum of 2, but that is a legitimate complete
         # read (e.g. a tower stripped down to one module for service), not a mid-scan artifact -
         # the completeness gate above already ruled the mid-scan case out.
-        return {"module_count": len(populated), "module_count_status": "ok",
-                "populated_module_slots": populated, "_complete": True}
-    return {"module_count": None, "module_count_status": "anomaly",
-            "populated_module_slots": populated, "_complete": True}
+        return {
+            "module_count": len(populated),
+            "module_count_status": "ok",
+            "populated_module_slots": populated,
+            "_complete": True,
+        }
+    return {
+        "module_count": None,
+        "module_count_status": "anomaly",
+        "populated_module_slots": populated,
+        "_complete": True,
+    }
 
 
 # A changed module count must be read twice in a row before it replaces the trusted one, because
@@ -161,10 +193,16 @@ _BATTERY_MODULE_STATE_ATTR = "module_topology_state"
 
 
 def _battery_report_signature(report: dict) -> tuple:
-    return (report["module_count_status"], report["module_count"], tuple(report["populated_module_slots"]))
+    return (
+        report["module_count_status"],
+        report["module_count"],
+        tuple(report["populated_module_slots"]),
+    )
 
 
-def _stabilize_battery_module_report(runtime, device_id: str, prefix: str, raw: dict) -> dict:
+def _stabilize_battery_module_report(
+    runtime, device_id: str, prefix: str, raw: dict
+) -> dict:
     """Holds the last-known-good topology against two things that must never flip it: a mid-scan
     (incomplete) snapshot, and a single changed-but-complete read that has not repeated yet.
 
@@ -197,8 +235,9 @@ def _stabilize_battery_module_report(runtime, device_id: str, prefix: str, raw: 
             state["candidate"] = None
             state["candidate_count"] = 0
             return trusted
-        if (state["candidate"] is not None
-                and _battery_report_signature(raw) == _battery_report_signature(state["candidate"])):
+        if state["candidate"] is not None and _battery_report_signature(
+            raw
+        ) == _battery_report_signature(state["candidate"]):
             state["candidate_count"] += 1
         else:
             state["candidate"] = raw
@@ -223,17 +262,27 @@ def _log_pending_slots(device_id: str, prefix: str, states: list[str]) -> None:
     now = time.monotonic()
     key = (device_id, prefix)
     with _battery_module_lock:
-        if now - _pending_log_last.get(key, -_PENDING_LOG_INTERVAL_SECONDS) < _PENDING_LOG_INTERVAL_SECONDS:
+        if (
+            now - _pending_log_last.get(key, -_PENDING_LOG_INTERVAL_SECONDS)
+            < _PENDING_LOG_INTERVAL_SECONDS
+        ):
             return
         _pending_log_last[key] = now
-    log.debug("%s on %s: module serial slots %s never read yet (states: %s)", prefix, device_id, unknown, states)
+    log.debug(
+        "%s on %s: module serial slots %s never read yet (states: %s)",
+        prefix,
+        device_id,
+        unknown,
+        states,
+    )
 
 
 def _battery_module_report(runtime, device_id: str, prefix: str) -> dict:
     """Trusted module-count report for one tower: captures the current slot-state snapshot (see
     `_battery_module_slot_states`), classifies it (`_raw_battery_module_report`), and runs it
     through the last-known-good stabilizer so neither a mid-scan nor a single flaky complete read
-    can override an already-established topology (see `_stabilize_battery_module_report`)."""
+    can override an already-established topology (see `_stabilize_battery_module_report`).
+    """
     states = _battery_module_slot_states(runtime, device_id, prefix)
     raw = _raw_battery_module_report(states)
     _log_pending_slots(device_id, prefix, states)
@@ -242,42 +291,47 @@ def _battery_module_report(runtime, device_id: str, prefix: str) -> dict:
         log.warning(
             "%s on %s reports module serials in slots %s: not a contiguous run of at most %d slots, so no "
             "module count is derived from it (catalog carries %d slots; documented hardware takes %d modules)",
-            prefix, device_id, report["populated_module_slots"], RCT_MAX_MODULES_PER_TOWER, RCT_MODULE_SN_SLOTS,
+            prefix,
+            device_id,
+            report["populated_module_slots"],
+            RCT_MAX_MODULES_PER_TOWER,
+            RCT_MODULE_SN_SLOTS,
             RCT_MAX_MODULES_PER_TOWER,
         )
     return {k: v for k, v in report.items() if k != "_complete"}
 
 
-# RCT Power Battery datasheet (EU 2024 V1.01): every model is a stack of identical 1.92 kWh battery
-# units (7.6 = 4, 9.6 = 5, 11.5 = 6) with 90 % usable depth of discharge, e.g. 11.5 -> 10.37 kWh usable.
-RCT_USABLE_WH_PER_MODULE = 1920 * 0.9
+@dataclass(frozen=True, slots=True)
+class CapacityCalibrationSample:
+    device_id: str
+    inverter_serial: str
+    measured_at: datetime
+    battery_cycles: int | None
+    reference_ah: float
+    measured_ah: float
+    rated_usable_capacity_wh: float
+    current_usable_capacity_wh: float
+    remaining_capacity_percent: float
+    module_counts: tuple[int, ...]
+    source_contract: str = "bms_ah_ratio_v1"
+    battery_bms_sn: str | None = None
 
 
-class ModuleCountVerifiedCapacity:
-    """Usable capacity = module count x the datasheet's usable Wh per battery unit.
+class MeasuredBatteryCapacity:
+    """Fail closed until a completed BMS calibration can be identified reliably.
 
-    Cache-only (module serials, never a device read). Reports nothing unless every tower's serial
-    scan is complete and every present tower has an "ok" module count, so a mid-scan or anomalous tower never yields a capacity. Rated
-    capacity: state of health is not applied.
+    The Ah registers vary with operating state, so freshness and topology cannot qualify them
+    as a current usable capacity or a permanent degradation measurement.
     """
 
     def __init__(self, runtime) -> None:
         self._runtime = runtime
 
     def verified_usable_capacity_wh(self, device_id: str) -> float | None:
-        modules = 0
-        for prefix in _BATTERY_TOWER_PREFIXES:
-            # A tower whose serial scan has not finished may still turn out to be present, so no
-            # partial (too small) capacity is reported until every slot of every tower is settled.
-            states = _battery_module_slot_states(self._runtime, device_id, prefix)
-            if _SLOT_UNKNOWN in states:
-                return None
-            # The inventory settles each serial slot exactly once, so a complete snapshot is final:
-            # the dashboard's two-read debounce would only delay this until enough callers polled.
-            report = _raw_battery_module_report(states)
-            if not _battery_tower_present(self._runtime, device_id, prefix, report["populated_module_slots"]):
-                continue
-            if report["module_count_status"] != "ok" or not report["module_count"]:
-                return None
-            modules += report["module_count"]
-        return modules * RCT_USABLE_WH_PER_MODULE if modules else None
+        return None
+
+    def calibration_sample(
+        self, device_id: str, measured_at: datetime
+    ) -> CapacityCalibrationSample | None:
+        """No sample until a proven calibration-completion signal is available."""
+        return None

@@ -31,6 +31,7 @@ async def test_export_settings_round_trip(tmp_path):
         changed = await client.post("/admin/api/change-password", headers={"X-CSRF-Token": login.json()["csrf_token"]},
                                     json={"current_password": password, "new_password": "a much stronger password"})
         headers = {"X-CSRF-Token": changed.json()["csrf_token"]}
+        await client.post("/admin/api/accept-disclaimer", headers=headers)
         shown = (await client.get("/admin/api/settings")).json()["settings"]
         assert shown["db_type"] is None and shown["questdb_downsampling"] == "off"
         assert "questdb_password" not in shown and shown["questdb_password_configured"] is False
@@ -77,6 +78,7 @@ async def test_fresh_install_persists_and_exposes_export_off(tmp_path):
         changed = await client.post("/admin/api/change-password", headers={"X-CSRF-Token": login.json()["csrf_token"]},
                                     json={"current_password": password, "new_password": "a much stronger password"})
         headers = {"X-CSRF-Token": changed.json()["csrf_token"]}
+        await client.post("/admin/api/accept-disclaimer", headers=headers)
         # The value the admin JS seeds settingsDraft from, which drives the toggle's checked state.
         shown = (await client.get("/admin/api/settings", headers=headers)).json()["settings"]
         assert shown["metrics_export_enabled"] is False
@@ -117,6 +119,7 @@ async def test_metrics_export_enabled_toggle_is_orthogonal_to_db_type(tmp_path):
         changed = await client.post("/admin/api/change-password", headers={"X-CSRF-Token": login.json()["csrf_token"]},
                                     json={"current_password": password, "new_password": "a much stronger password"})
         headers = {"X-CSRF-Token": changed.json()["csrf_token"]}
+        await client.post("/admin/api/accept-disclaimer", headers=headers)
         shown = (await client.get("/admin/api/settings")).json()["settings"]
         assert shown["metrics_export_enabled"] is True
 
@@ -151,6 +154,7 @@ async def test_dashboard_tsdb_tile_distinguishes_paused_from_unconfigured_and_fa
         changed = await client.post("/admin/api/change-password", headers={"X-CSRF-Token": login.json()["csrf_token"]},
                                     json={"current_password": password, "new_password": "a much stronger password"})
         headers = {"X-CSRF-Token": changed.json()["csrf_token"]}
+        await client.post("/admin/api/accept-disclaimer", headers=headers)
 
         not_configured = (await client.get("/admin/api/devices")).json()["tsdb"]
         assert not_configured["configured"] is False and not_configured["healthy"] is None
@@ -183,6 +187,7 @@ async def test_resaving_an_unchanged_enabled_value_does_not_restart_the_exporter
         changed = await client.post("/admin/api/change-password", headers={"X-CSRF-Token": login.json()["csrf_token"]},
                                     json={"current_password": password, "new_password": "a much stronger password"})
         headers = {"X-CSRF-Token": changed.json()["csrf_token"]}
+        await client.post("/admin/api/accept-disclaimer", headers=headers)
         base = await client.put("/admin/api/settings", headers=headers,
                                 json={"db_type": "questdb", "questdb_hostname": "localhost"})
         assert base.status_code == 200
@@ -248,6 +253,7 @@ async def test_export_target_change_takes_effect_without_a_restart(tmp_path):
             assert h.app.state.admin_store.change_password(
                 h.app.state.first_start_password, "replacement-test-password"
             )
+            h.app.state.admin_store.accept_disclaimer()
             h.client.headers.pop("Authorization")
             csrf = (await h.client.get("/admin/api/session")).json()["csrf_token"]
             login = await h.client.post("/admin/api/login", headers={"X-CSRF-Token": csrf},
@@ -346,6 +352,7 @@ async def test_disabling_export_stops_the_running_task_without_a_restart(tmp_pat
         store = AdminStore(settings.admin_db_path, "s" * 48)
         try:
             assert store.change_password(store.initialize(), "a much stronger password")
+            store.accept_disclaimer()
             with patch("app.admin.store.generate_pat", side_effect=[WRITE_TOKEN]):
                 store.create_token("write test token", "read/write", None)
             async with running_app(settings, settle=False) as h:
@@ -420,6 +427,7 @@ async def test_app_starts_with_export_and_contains_failures(tmp_path):
     store = AdminStore(settings.admin_db_path, "s" * 48)  # the export only starts after the first password change
     try:
         assert store.change_password(store.initialize(), "a much stronger password")
+        store.accept_disclaimer()
     finally:
         store.close()
     async with running_app(settings, settle=False) as h:
@@ -530,6 +538,7 @@ async def test_restart_export_is_a_no_op_once_teardown_has_begun(tmp_path):
         store = AdminStore(settings.admin_db_path, "s" * 48)
         try:
             assert store.change_password(store.initialize(), "a much stronger password")
+            store.accept_disclaimer()
         finally:
             store.close()
         async with running_app(settings, settle=False) as h:

@@ -29,14 +29,20 @@ from app.optimizer.replan import (
     evaluate_replan,
     expected_soc_percent,
 )
-from app.spotmarket.models import SpotMarketProvider, SpotPriceInterval, SpotPriceSnapshot
+from app.spotmarket.models import (
+    SpotMarketProvider,
+    SpotPriceInterval,
+    SpotPriceSnapshot,
+)
 
 NOW = datetime(2026, 1, 15, 22, 0, tzinfo=UTC)
 SLOT = timedelta(minutes=15)
 SLOTS = 16
 
 
-def _planning_input(static_w: float = 3000.0, live_w: float | None = None) -> PlanningInput:
+def _planning_input(
+    static_w: float = 3000.0, live_w: float | None = None
+) -> PlanningInput:
     prices = SpotPriceSnapshot(
         provider=SpotMarketProvider.ENERGY_CHARTS, bidding_zone="DE-LU", currency="EUR", fetched_at=NOW,
         intervals=tuple(
@@ -44,16 +50,30 @@ def _planning_input(static_w: float = 3000.0, live_w: float | None = None) -> Pl
             for i in range(SLOTS)
         ),
     )  # fmt: skip
-    solar = SolarForecast(NOW, tuple(SolarForecastInterval(NOW + SLOT * i, NOW + SLOT * (i + 1), 0.0) for i in range(SLOTS)))
-    consumption = ConsumptionForecast(
-        NOW, tuple(ConsumptionForecastInterval(NOW + SLOT * i, NOW + SLOT * (i + 1), 500.0) for i in range(SLOTS))
+    solar = SolarForecast(
+        NOW,
+        tuple(
+            SolarForecastInterval(NOW + SLOT * i, NOW + SLOT * (i + 1), 0.0)
+            for i in range(SLOTS)
+        ),
     )
-    battery = BatteryState(20.0, 10_000.0, static_w, 3000.0, NOW, live_charge_limit_w=live_w)
+    consumption = ConsumptionForecast(
+        NOW,
+        tuple(
+            ConsumptionForecastInterval(NOW + SLOT * i, NOW + SLOT * (i + 1), 500.0)
+            for i in range(SLOTS)
+        ),
+    )
+    battery = BatteryState(
+        20.0, 10_000.0, static_w, 3000.0, NOW, live_charge_limit_w=live_w
+    )
     return PlanningInput(NOW, battery, prices, solar, consumption, timedelta(hours=4))
 
 
 def _plan(**kwargs):
-    params = PlanParameters(target_soc_percent=60.0, target_time=NOW + timedelta(hours=3))
+    params = PlanParameters(
+        target_soc_percent=60.0, target_time=NOW + timedelta(hours=3)
+    )
     planning_input = _planning_input(**kwargs)
     return DynamicChargeOptimizer(params).plan(planning_input), planning_input
 
@@ -86,7 +106,9 @@ def test_soc_deviation_triggers_only_beyond_the_threshold() -> None:
     small = _observation(plan, planning_input, soc_percent=expected + 3.0)
     large = _observation(plan, planning_input, soc_percent=expected - 8.0)
     assert evaluate_replan(plan.basis, small).replan_required is False
-    assert _codes(evaluate_replan(plan.basis, large)) == {ReplanTriggerCode.SOC_DEVIATION}
+    assert _codes(evaluate_replan(plan.basis, large)) == {
+        ReplanTriggerCode.SOC_DEVIATION
+    }
 
 
 def test_a_lower_verified_live_limit_than_planned_triggers_a_replan() -> None:
@@ -98,12 +120,21 @@ def test_a_lower_verified_live_limit_than_planned_triggers_a_replan() -> None:
     # The replanned input reflects the live limit as the new, lower permitted power.
     replanned, _ = _plan(static_w=3000.0, live_w=1000.0)
     assert replanned.power.permitted_charge_power_w == 1000.0
-    assert evaluate_replan(replanned.basis, _observation(replanned, _planning_input(live_w=1000.0))).triggers == ()
+    assert (
+        evaluate_replan(
+            replanned.basis, _observation(replanned, _planning_input(live_w=1000.0))
+        ).triggers
+        == ()
+    )
 
 
 def test_an_insignificant_limit_change_does_not_trigger() -> None:
     plan, planning_input = _plan()
-    nearly_same = _observation(plan, planning_input, permitted_charge_power_w=plan.basis.permitted_charge_power_w - 20.0)
+    nearly_same = _observation(
+        plan,
+        planning_input,
+        permitted_charge_power_w=plan.basis.permitted_charge_power_w - 20.0,
+    )
     assert evaluate_replan(plan.basis, nearly_same).replan_required is False
 
 
@@ -112,7 +143,10 @@ def test_forecast_changes_trigger_per_source_beyond_their_tolerance() -> None:
     prices, solar, consumption = DynamicChargeOptimizer.forecast_series(planning_input)
 
     def bump(series, delta, index=4):
-        return tuple((start, (value or 0.0) + delta if i == index else value) for i, (start, value) in enumerate(series))
+        return tuple(
+            (start, (value or 0.0) + delta if i == index else value)
+            for i, (start, value) in enumerate(series)
+        )
 
     cases = [
         ("prices", bump(prices, 0.005), bump(prices, 0.05), ReplanTriggerCode.PRICE_FORECAST_CHANGED),
@@ -120,8 +154,12 @@ def test_forecast_changes_trigger_per_source_beyond_their_tolerance() -> None:
         ("consumption_wh", bump(consumption, 100.0), bump(consumption, 900.0), ReplanTriggerCode.CONSUMPTION_FORECAST_CHANGED),
     ]  # fmt: skip
     for field, small, large, code in cases:
-        quiet = evaluate_replan(plan.basis, _observation(plan, planning_input, **{field: small}))
-        loud = evaluate_replan(plan.basis, _observation(plan, planning_input, **{field: large}))
+        quiet = evaluate_replan(
+            plan.basis, _observation(plan, planning_input, **{field: small})
+        )
+        loud = evaluate_replan(
+            plan.basis, _observation(plan, planning_input, **{field: large})
+        )
         assert quiet.replan_required is False, field
         assert _codes(loud) == {code}, field
 
@@ -131,13 +169,21 @@ def test_a_missed_charge_slot_triggers_once_its_time_has_passed() -> None:
     first = plan.basis.planned_charges[0]
     later = first.end + SLOT
     executed = {c.start: c.terminal_energy_wh for c in plan.basis.planned_charges}
-    on_track = _observation(plan, planning_input, now=later, executed_charge_wh=executed)
-    assert ReplanTriggerCode.MISSED_CHARGE_SLOT not in _codes(evaluate_replan(plan.basis, on_track))
+    on_track = _observation(
+        plan, planning_input, now=later, executed_charge_wh=executed
+    )
+    assert ReplanTriggerCode.MISSED_CHARGE_SLOT not in _codes(
+        evaluate_replan(plan.basis, on_track)
+    )
     missed = _observation(plan, planning_input, now=later, executed_charge_wh={})
-    assert ReplanTriggerCode.MISSED_CHARGE_SLOT in _codes(evaluate_replan(plan.basis, missed))
+    assert ReplanTriggerCode.MISSED_CHARGE_SLOT in _codes(
+        evaluate_replan(plan.basis, missed)
+    )
     # A slot that has not ended yet cannot have been missed.
     early = _observation(plan, planning_input, now=first.start, executed_charge_wh={})
-    assert ReplanTriggerCode.MISSED_CHARGE_SLOT not in _codes(evaluate_replan(plan.basis, early))
+    assert ReplanTriggerCode.MISSED_CHARGE_SLOT not in _codes(
+        evaluate_replan(plan.basis, early)
+    )
 
 
 def test_thresholds_are_configurable_and_every_trigger_is_described() -> None:
@@ -155,7 +201,90 @@ def test_expected_soc_interpolates_along_the_trajectory() -> None:
     middle = t0 + (t1 - t0) / 2
     assert expected_soc_percent(plan.basis, middle) == pytest.approx((s0 + s1) / 2)
     assert expected_soc_percent(plan.basis, t0 - SLOT) == s0
-    assert expected_soc_percent(plan.basis, plan.basis.trajectory[-1][0] + SLOT) == plan.basis.trajectory[-1][1]
+    assert (
+        expected_soc_percent(plan.basis, plan.basis.trajectory[-1][0] + SLOT)
+        == plan.basis.trajectory[-1][1]
+    )
+
+
+def test_trajectory_stays_flat_before_the_first_slot_with_a_non_aligned_now() -> None:
+    # Item 6: with an off-grid now (10:07) the first slot starts at 10:15. The trajectory must carry
+    # a (first_slot.start, initial_soc) point so expected_soc_percent is EXACTLY the initial SoC
+    # anywhere in [now, first_slot.start) and only starts changing from the first slot on.
+    from app.optimizer.planner import planning_start
+
+    off_grid_now = datetime(2026, 1, 15, 10, 7, tzinfo=UTC)
+    first_start = planning_start(off_grid_now)
+    assert first_start == datetime(2026, 1, 15, 10, 15, tzinfo=UTC)
+
+    slots = 16
+    # Cheap first window so the optimizer charges in the first slot: the SoC does move once the slot
+    # begins, which is exactly what must NOT happen before it.
+    prices = SpotPriceSnapshot(
+        provider=SpotMarketProvider.ENERGY_CHARTS, bidding_zone="DE-LU", currency="EUR", fetched_at=off_grid_now,
+        intervals=tuple(
+            SpotPriceInterval(first_start + SLOT * i, first_start + SLOT * (i + 1), Decimal("0.05") if i < 4 else Decimal("0.40"))
+            for i in range(slots)
+        ),
+    )  # fmt: skip
+    solar = SolarForecast(
+        off_grid_now,
+        tuple(
+            SolarForecastInterval(
+                first_start + SLOT * i, first_start + SLOT * (i + 1), 0.0
+            )
+            for i in range(slots)
+        ),
+    )
+    consumption = ConsumptionForecast(
+        off_grid_now,
+        tuple(
+            ConsumptionForecastInterval(
+                first_start + SLOT * i, first_start + SLOT * (i + 1), 300.0
+            )
+            for i in range(slots)
+        ),
+    )
+    battery = BatteryState(30.0, 10_000.0, 3000.0, 3000.0, off_grid_now)
+    planning_input = PlanningInput(
+        off_grid_now, battery, prices, solar, consumption, timedelta(hours=4)
+    )
+    plan = DynamicChargeOptimizer(
+        PlanParameters(
+            target_soc_percent=60.0, target_time=first_start + timedelta(hours=3)
+        )
+    ).plan(planning_input)
+
+    initial = plan.basis.soc_percent
+    # Flat across the whole pre-slot gap, including the worked example instant 10:10.
+    assert expected_soc_percent(plan.basis, off_grid_now) == pytest.approx(initial)
+    assert expected_soc_percent(
+        plan.basis, datetime(2026, 1, 15, 10, 10, tzinfo=UTC)
+    ) == pytest.approx(initial)
+    # Exactly at the first slot's start it is still the initial SoC (the flat segment's end).
+    assert expected_soc_percent(plan.basis, first_start) == pytest.approx(initial)
+    # The trajectory carries the explicit (first_slot.start, initial_soc) anchor point.
+    assert any(
+        t == first_start and s == pytest.approx(initial)
+        for t, s in plan.basis.trajectory
+    )
+    # From the first slot on the SoC may change (house load/charging): the plan is not globally flat,
+    # so the flatness above is specifically the pre-slot gap, not a trivially constant trajectory.
+    assert expected_soc_percent(
+        plan.basis, plan.basis.trajectory[-1][0]
+    ) != pytest.approx(initial)
+
+
+def test_trajectory_has_no_duplicate_point_when_now_is_on_a_slot_boundary() -> None:
+    # Item 6 guard: when now already sits on the first slot's start there must be no duplicate or
+    # zero-length leading segment in the trajectory.
+    plan, _ = _plan()  # NOW is 22:00, already aligned
+    starts = [t for t, _ in plan.basis.trajectory]
+    assert starts[0] == NOW
+    assert len(starts) == len(
+        set(starts)
+    ), "trajectory must not contain a duplicate timestamp"
+    assert starts == sorted(starts)
 
 
 def _drop_future_slots(series, keep: int):
@@ -172,7 +301,9 @@ def test_a_lost_future_slot_triggers_even_when_the_shared_slots_are_unchanged() 
         ("consumption_wh", consumption, ReplanTriggerCode.CONSUMPTION_FORECAST_CHANGED),
     ]
     for field, series, code in cases:
-        shortened = _observation(plan, planning_input, **{field: _drop_future_slots(series, 10)})
+        shortened = _observation(
+            plan, planning_input, **{field: _drop_future_slots(series, 10)}
+        )
         assert code in _codes(evaluate_replan(plan.basis, shortened)), field
 
 
@@ -198,7 +329,9 @@ def test_slots_in_the_past_never_trigger() -> None:
         "prices": prices[4:], "solar_wh": solar[4:], "consumption_wh": consumption[4:],
         "executed_charge_wh": {c.start: c.terminal_energy_wh for c in plan.basis.planned_charges},
     }  # fmt: skip
-    decision = evaluate_replan(plan.basis, _observation(plan, planning_input, now=later, **kwargs))
+    decision = evaluate_replan(
+        plan.basis, _observation(plan, planning_input, now=later, **kwargs)
+    )
     assert not (
         _codes(decision)
         & {

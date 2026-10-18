@@ -22,21 +22,31 @@ from app.optimizer.consumption import (
 BUCKET = timedelta(minutes=15)
 
 
-def _bucket(start: datetime, energy_wh: float, coverage: float = 900.0) -> HistoryBucket:
-    return HistoryBucket(start, start + BUCKET, energy_wh, sample_count=10, coverage_seconds=coverage)
+def _bucket(
+    start: datetime, energy_wh: float, coverage: float = 900.0
+) -> HistoryBucket:
+    return HistoryBucket(
+        start, start + BUCKET, energy_wh, sample_count=10, coverage_seconds=coverage
+    )
 
 
 def test_same_weekday_slot_is_preferred_and_uses_the_median() -> None:
     # Five Thursdays at 10:00 UTC; the 5000 Wh spike must not drag the estimate up (median wins).
     history = []
     for week in range(5):
-        start = datetime(2026, 1, 1, 10, 0, tzinfo=UTC) + timedelta(weeks=week)  # 2026-01-01 is Thursday
+        start = datetime(2026, 1, 1, 10, 0, tzinfo=UTC) + timedelta(
+            weeks=week
+        )  # 2026-01-01 is Thursday
         history.append(_bucket(start, [200.0, 210.0, 5000.0, 220.0, 215.0][week]))
     forecaster = HistoricalConsumptionForecaster("UTC")
     now = datetime(2026, 2, 5, 9, 59, tzinfo=UTC)  # Thursday, floors to 09:45
     forecast = forecaster.build(history, now, timedelta(minutes=20))
-    slot = next(iv for iv in forecast.intervals if iv.start.hour == 10 and iv.start.minute == 0)
-    assert slot.energy_wh == pytest.approx(215.0)  # median of the five, not the 5000 outlier
+    slot = next(
+        iv for iv in forecast.intervals if iv.start.hour == 10 and iv.start.minute == 0
+    )
+    assert slot.energy_wh == pytest.approx(
+        215.0
+    )  # median of the five, not the 5000 outlier
 
 
 def test_falls_back_to_same_time_of_day_when_the_weekday_history_is_thin() -> None:
@@ -46,25 +56,148 @@ def test_falls_back_to_same_time_of_day_when_the_weekday_history_is_thin() -> No
     now = datetime(2026, 1, 15, 9, 59, tzinfo=UTC)  # Thursday
     history = []
     for day_offset in (7, 14):  # the two preceding Thursdays
-        history.append(_bucket(datetime(2026, 1, 15, 10, 0, tzinfo=UTC) - timedelta(days=day_offset), 999.0))
+        history.append(
+            _bucket(
+                datetime(2026, 1, 15, 10, 0, tzinfo=UTC) - timedelta(days=day_offset),
+                999.0,
+            )
+        )
     for day in range(5):
-        start = datetime(2026, 1, 9, 10, 0, tzinfo=UTC) + timedelta(days=day)  # Fri..Tue, no Thursday
+        start = datetime(2026, 1, 9, 10, 0, tzinfo=UTC) + timedelta(
+            days=day
+        )  # Fri..Tue, no Thursday
         history.append(_bucket(start, 300.0))
     forecaster = HistoricalConsumptionForecaster("UTC")
     forecast = forecaster.build(history, now, timedelta(minutes=16))
-    slot = next(iv for iv in forecast.intervals if iv.start.hour == 10 and iv.start.minute == 0)
+    slot = next(
+        iv for iv in forecast.intervals if iv.start.hour == 10 and iv.start.minute == 0
+    )
     # Two Thursdays is below the primary threshold, so the same-time-of-day median governs. That
     # slot pool is {999, 999, 300x5}; its median is 300.
+    assert slot.energy_wh == pytest.approx(300.0)
+
+
+def _mixed_bucket(
+    start: datetime, energy_wh: float, *, measured: float, estimated: float
+) -> HistoryBucket:
+    """A bucket with measured AND estimated coverage; ``energy_wh`` covers both parts."""
+    return HistoryBucket(
+        start,
+        start + BUCKET,
+        energy_wh,
+        sample_count=10,
+        coverage_seconds=measured,
+        estimated_seconds=estimated,
+    )
+
+
+def test_estimated_buckets_do_not_enter_the_median_even_when_well_measured() -> None:
+    # Item 2: a bucket with measured >= MIN_BUCKET_COVERAGE_SECONDS AND estimated_seconds > 0 is
+    # quality ESTIMATED and its energy includes estimated Wh. The single shared usable_value rule
+    # must exclude it from the median/index just as the adaptive replay does, so the spike never
+    # inflates the estimate.
+    from app.optimizer.consumption import MIN_PARTIAL_COVERAGE_SECONDS
+
+    now = datetime(2026, 2, 5, 9, 59, tzinfo=UTC)  # Thursday, floors to 09:45
+    history = []
+    # Three same-weekday 10:00 observations that are clean (COMPLETE), all 200 Wh.
+    for week in range(1, 4):
+        history.append(
+            _bucket(
+                datetime(2026, 2, 5, 10, 0, tzinfo=UTC) - timedelta(weeks=week), 200.0
+            )
+        )
+    # Two mixed buckets at the same slot: well measured but carrying estimated energy (ESTIMATED).
+    for week in range(4, 6):
+        history.append(
+            _mixed_bucket(
+                datetime(2026, 2, 5, 10, 0, tzinfo=UTC) - timedelta(weeks=week),
+                9000.0,
+                measured=MIN_PARTIAL_COVERAGE_SECONDS,
+                estimated=100.0,
+            )
+        )
+    forecaster = HistoricalConsumptionForecaster("UTC")
+    forecast = forecaster.build(history, now, timedelta(minutes=20))
+    slot = next(
+        iv for iv in forecast.intervals if iv.start.hour == 10 and iv.start.minute == 0
+    )
+    # Only the three clean observations count: the median is 200, not dragged up by the 9000 spikes.
+    assert slot.energy_wh == pytest.approx(200.0)
+
+
+def test_estimated_buckets_do_not_count_toward_horizon_coverage() -> None:
+    # Item 2: ESTIMATED buckets must not make a slot count as per-slot-backed. Five same-time-of-day
+    # buckets that are all ESTIMATED leave the 10:00 slot uncovered.
+    from app.optimizer.consumption import MIN_PARTIAL_COVERAGE_SECONDS
+
+    now = datetime(2026, 3, 5, 10, 0, tzinfo=UTC)
+    history = [
+        _mixed_bucket(
+            now - timedelta(days=day),
+            300.0,
+            measured=MIN_PARTIAL_COVERAGE_SECONDS,
+            estimated=50.0,
+        )
+        for day in range(1, 6)
+    ]
+    forecaster = HistoricalConsumptionForecaster("UTC")
+    # Not a single slot is backed by a real observation, so the 15-min horizon coverage is 0.
+    assert forecaster.horizon_coverage_ratio(
+        history, now, timedelta(minutes=15)
+    ) == pytest.approx(0.0)
+    assert forecaster.coverage_end(history, now, timedelta(minutes=15)) == now
+
+
+def test_complete_and_sufficient_partial_buckets_still_contribute() -> None:
+    # Item 2: a COMPLETE bucket still counts at full energy; a PARTIAL bucket with coverage at or
+    # above MIN_PARTIAL_COVERAGE_SECONDS still contributes its normalized (full-width) energy.
+    from app.optimizer.consumption import MIN_PARTIAL_COVERAGE_SECONDS
+
+    now = datetime(2026, 2, 5, 9, 59, tzinfo=UTC)
+    # One COMPLETE (900 s, 300 Wh) plus two PARTIAL buckets measured 750 s carrying 250 Wh each;
+    # 250 Wh over 750 s normalizes to 300 Wh for the full 900 s width, so all three agree at 300.
+    history = [
+        _bucket(
+            datetime(2026, 2, 5, 10, 0, tzinfo=UTC) - timedelta(weeks=1),
+            300.0,
+            coverage=900.0,
+        )
+    ]
+    for week in range(2, 4):
+        history.append(
+            HistoryBucket(
+                datetime(2026, 2, 5, 10, 0, tzinfo=UTC) - timedelta(weeks=week),
+                datetime(2026, 2, 5, 10, 0, tzinfo=UTC)
+                - timedelta(weeks=week)
+                + BUCKET,
+                250.0,
+                sample_count=10,
+                coverage_seconds=MIN_PARTIAL_COVERAGE_SECONDS,
+            )
+        )
+    forecaster = HistoricalConsumptionForecaster("UTC")
+    forecast = forecaster.build(history, now, timedelta(minutes=20))
+    slot = next(
+        iv for iv in forecast.intervals if iv.start.hour == 10 and iv.start.minute == 0
+    )
+    # Three observations {300, 300, 300}; the PARTIAL ones contribute normalized energy, not raw.
     assert slot.energy_wh == pytest.approx(300.0)
 
 
 def test_buckets_with_poor_coverage_are_discarded() -> None:
     poor = MIN_BUCKET_COVERAGE_SECONDS - 1.0
     history = [
-        _bucket(datetime(2026, 1, 1, 10, 0, tzinfo=UTC) + timedelta(weeks=week), 5000.0, coverage=poor)
+        _bucket(
+            datetime(2026, 1, 1, 10, 0, tzinfo=UTC) + timedelta(weeks=week),
+            5000.0,
+            coverage=poor,
+        )
         for week in range(MIN_PRIMARY_SAMPLES + 2)
     ]
-    history.append(_bucket(datetime(2026, 1, 8, 11, 0, tzinfo=UTC), 100.0))  # the only well-covered bucket
+    history.append(
+        _bucket(datetime(2026, 1, 8, 11, 0, tzinfo=UTC), 100.0)
+    )  # the only well-covered bucket
     forecaster = HistoricalConsumptionForecaster("UTC")
     now = datetime(2026, 2, 5, 9, 59, tzinfo=UTC)
     forecast = forecaster.build(history, now, timedelta(minutes=16))
@@ -75,7 +208,9 @@ def test_buckets_with_poor_coverage_are_discarded() -> None:
 
 def test_no_history_yields_no_intervals() -> None:
     forecaster = HistoricalConsumptionForecaster("UTC")
-    forecast = forecaster.build([], datetime(2026, 2, 5, 10, 0, tzinfo=UTC), timedelta(hours=2))
+    forecast = forecaster.build(
+        [], datetime(2026, 2, 5, 10, 0, tzinfo=UTC), timedelta(hours=2)
+    )
     assert forecast.intervals == ()
 
 
@@ -85,22 +220,38 @@ def test_results_are_sorted_non_overlapping_and_timezone_aware() -> None:
         for hour in range(8, 20)
     ]
     forecaster = HistoricalConsumptionForecaster("UTC")
-    forecast = forecaster.build(history, datetime(2026, 2, 5, 10, 0, tzinfo=UTC), timedelta(hours=3))
+    forecast = forecaster.build(
+        history, datetime(2026, 2, 5, 10, 0, tzinfo=UTC), timedelta(hours=3)
+    )
     starts = [iv.start for iv in forecast.intervals]
     assert starts == sorted(starts)
-    assert all(forecast.intervals[i].end <= forecast.intervals[i + 1].start for i in range(len(forecast.intervals) - 1))
+    assert all(
+        forecast.intervals[i].end <= forecast.intervals[i + 1].start
+        for i in range(len(forecast.intervals) - 1)
+    )
     assert all(is_aware(iv.start) and is_aware(iv.end) for iv in forecast.intervals)
 
 
 @pytest.mark.parametrize(
     ("local_midnight", "expected_slots"),
     [
-        (datetime(2026, 3, 29, 0, 0, tzinfo=ZoneInfo("Europe/Berlin")), 92),   # spring forward: 23 h day
-        (datetime(2026, 10, 25, 0, 0, tzinfo=ZoneInfo("Europe/Berlin")), 100),  # fall back: 25 h day
-        (datetime(2026, 6, 1, 0, 0, tzinfo=ZoneInfo("Europe/Berlin")), 96),    # ordinary day
+        (
+            datetime(2026, 3, 29, 0, 0, tzinfo=ZoneInfo("Europe/Berlin")),
+            92,
+        ),  # spring forward: 23 h day
+        (
+            datetime(2026, 10, 25, 0, 0, tzinfo=ZoneInfo("Europe/Berlin")),
+            100,
+        ),  # fall back: 25 h day
+        (
+            datetime(2026, 6, 1, 0, 0, tzinfo=ZoneInfo("Europe/Berlin")),
+            96,
+        ),  # ordinary day
     ],
 )
-def test_dst_days_do_not_assume_96_slots(local_midnight: datetime, expected_slots: int) -> None:
+def test_dst_days_do_not_assume_96_slots(
+    local_midnight: datetime, expected_slots: int
+) -> None:
     # A dense same-time-of-day history for every slot, so every slot of the local day is estimated.
     history = []
     for offset_days in range(1, 8):
@@ -130,15 +281,21 @@ def test_primary_index_ignores_buckets_older_than_the_lookback_window() -> None:
     now = datetime(2026, 3, 5, 9, 59, tzinfo=UTC)  # Thursday
     history = []
     for week in range(1, 5):  # four Thursdays, each beyond the 8-week primary window
-        start = now.replace(hour=10, minute=0) - timedelta(weeks=PRIMARY_LOOKBACK_WEEKS + week)
+        start = now.replace(hour=10, minute=0) - timedelta(
+            weeks=PRIMARY_LOOKBACK_WEEKS + week
+        )
         history.append(_bucket(start, 50.0))
     # A recent same-time-of-day pool inside the fallback window.
     for day in range(1, 4):
-        history.append(_bucket(now.replace(hour=10, minute=0) - timedelta(days=day), 300.0))
+        history.append(
+            _bucket(now.replace(hour=10, minute=0) - timedelta(days=day), 300.0)
+        )
     assert all(d <= FALLBACK_LOOKBACK_DAYS for d in (1, 2, 3))
     forecaster = HistoricalConsumptionForecaster("UTC")
     forecast = forecaster.build(history, now, timedelta(minutes=16))
-    slot = next(iv for iv in forecast.intervals if iv.start.hour == 10 and iv.start.minute == 0)
+    slot = next(
+        iv for iv in forecast.intervals if iv.start.hour == 10 and iv.start.minute == 0
+    )
     # The stale primary buckets are excluded, so the recent fallback median (300) governs, not 50.
     assert slot.energy_wh == pytest.approx(300.0)
 
@@ -150,16 +307,24 @@ def test_fallback_index_ignores_buckets_older_than_the_lookback_window() -> None
 
     now = datetime(2026, 3, 5, 9, 59, tzinfo=UTC)
     history = [
-        _bucket(now.replace(hour=10, minute=0) - timedelta(days=FALLBACK_LOOKBACK_DAYS + 1 + day), 300.0)
+        _bucket(
+            now.replace(hour=10, minute=0)
+            - timedelta(days=FALLBACK_LOOKBACK_DAYS + 1 + day),
+            300.0,
+        )
         for day in range(3)
     ]
     # Several well-covered buckets at a different time of day dominate the whole-history median (777)
     # so the fallback result is clearly distinct from the stale 10:00 pool's 300.
     for day in range(1, 6):
-        history.append(_bucket(now.replace(hour=3, minute=0) - timedelta(days=day), 777.0))
+        history.append(
+            _bucket(now.replace(hour=3, minute=0) - timedelta(days=day), 777.0)
+        )
     forecaster = HistoricalConsumptionForecaster("UTC")
     forecast = forecaster.build(history, now, timedelta(minutes=16))
-    slot = next(iv for iv in forecast.intervals if iv.start.hour == 10 and iv.start.minute == 0)
+    slot = next(
+        iv for iv in forecast.intervals if iv.start.hour == 10 and iv.start.minute == 0
+    )
     # The stale 10:00 pool is outside the fallback window, so the per-slot path yields nothing and
     # the blunt whole-history median (777, dominated by the recent 03:00 pool) is used, not 300.
     assert slot.energy_wh == pytest.approx(777.0)
@@ -171,21 +336,29 @@ def test_horizon_coverage_ratio_counts_only_slots_backed_by_real_history() -> No
     # off a handful of buckets.
     now = datetime(2026, 3, 5, 10, 0, tzinfo=UTC)
     history = [
-        _bucket(now - timedelta(days=day), 300.0) for day in range(1, 6)  # five recent 10:00 buckets
+        _bucket(now - timedelta(days=day), 300.0)
+        for day in range(1, 6)  # five recent 10:00 buckets
     ]
     forecaster = HistoricalConsumptionForecaster("UTC")
     # Horizon of 4 slots (10:00..11:00); only the 10:00 slot is backed by the pool.
     ratio = forecaster.horizon_coverage_ratio(history, now, timedelta(hours=1))
     assert ratio == pytest.approx(0.25)
     # A horizon of just the backed slot is fully covered.
-    assert forecaster.horizon_coverage_ratio(history, now, timedelta(minutes=15)) == pytest.approx(1.0)
+    assert forecaster.horizon_coverage_ratio(
+        history, now, timedelta(minutes=15)
+    ) == pytest.approx(1.0)
 
 
 # --- the real coverage_end and the coverage-ratio-based trim path (P2-1, P2-2, P3-1, P3-2) ------
 
 
 def _dense_time_of_day_history(
-    anchor: datetime, span_hours: float, *, days: int = 5, skip: set[datetime] | None = None, zone: str = "UTC"
+    anchor: datetime,
+    span_hours: float,
+    *,
+    days: int = 5,
+    skip: set[datetime] | None = None,
+    zone: str = "UTC",
 ) -> list[HistoryBucket]:
     """Well-covered same-time-of-day buckets so every slot of ``[anchor, anchor+span)`` is backed.
 
@@ -249,7 +422,9 @@ def test_coverage_anchoring_ignores_the_unused_partial_slot() -> None:
     start = planning_start(now)
     assert start == datetime(2026, 3, 5, 12, 15, tzinfo=UTC)
     span = timedelta(hours=6)
-    history = _dense_time_of_day_history(start, 6.0)  # backed only from 12:15 on, not 12:00
+    history = _dense_time_of_day_history(
+        start, 6.0
+    )  # backed only from 12:15 on, not 12:00
     forecaster = HistoricalConsumptionForecaster("UTC")
     # Anchored at the planner's start boundary: the whole plannable span is backed.
     assert forecaster.horizon_coverage_ratio(history, start, span) == pytest.approx(1.0)

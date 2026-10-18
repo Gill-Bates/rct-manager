@@ -234,7 +234,13 @@ class TransportEndpoint:
                 raise DeviceUnreachable("socket_setup_failed") from None
             # Wrapped synchronously, with no await since obtaining ``reader``, so no chunk that
             # arrives for this connection ever reaches the parser without a ledger entry.
-            ledger = ArrivalLedger(reader, self._clock.monotonic)
+            try:
+                ledger = ArrivalLedger(reader, self._clock.monotonic)
+            except RuntimeError:
+                writer.close()
+                with contextlib.suppress(OSError, TimeoutError):
+                    await asyncio.wait_for(writer.wait_closed(), 1.0)
+                raise
             self._writer = writer
             self._epoch += 1
             parser = StreamParser(max_frame_bytes=self._cfg.max_frame_bytes)
@@ -412,7 +418,13 @@ class TransportEndpoint:
                     # An unanswered WRITE is normal for this device: keep the connection for the
                     # read-back (Requirement 9.18) and leave failure counters untouched; ok stays False.
                     self._demux.pending = None
-                    await self._clock.sleep(self._cfg.write_quiet_window_seconds)
+                    try:
+                        await self._clock.sleep(self._cfg.write_quiet_window_seconds)
+                    except asyncio.CancelledError:
+                        # Pending is already cleared, so the outer handler cannot see this write;
+                        # its late answer must not reach the next transaction on this connection.
+                        await self._drop_connection(DeviceUnreachable("transaction_cancelled"))
+                        raise
                     return TransactionResult(outcome)
                 self._read_timeouts_in_a_row += 1
                 diagnostics = self._timeout_diagnostics()

@@ -13,7 +13,14 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-from app.security.ratelimit import MAX_KEYS, AuthFailureTracker, SlidingWindow
+from app.errors import RateLimited
+from app.security.ratelimit import (
+    MAX_KEYS,
+    AuthFailureTracker,
+    RateLimiter,
+    SlidingWindow,
+    admin_session_key,
+)
 from tests.conftest import ManualClock
 
 
@@ -68,8 +75,12 @@ def test_auth_tracker_blocks_after_concurrent_failures() -> None:
     assert tracker.blocked_for("192.0.2.1") > 0
 
 
-def test_overflow_address_is_rejected_instead_of_silently_merged(clock: ManualClock) -> None:
-    tracker = AuthFailureTracker(limit=3, window_seconds=60.0, block_seconds=900.0, clock=clock)
+def test_overflow_address_is_rejected_instead_of_silently_merged(
+    clock: ManualClock,
+) -> None:
+    tracker = AuthFailureTracker(
+        limit=3, window_seconds=60.0, block_seconds=900.0, clock=clock
+    )
     # Fill the table with MAX_KEYS distinct, non-expired addresses so no eviction can free room.
     for i in range(MAX_KEYS):
         tracker._failures[f"10.0.{i // 256}.{i % 256}"] = deque([clock.monotonic()])
@@ -80,3 +91,92 @@ def test_overflow_address_is_rejected_instead_of_silently_merged(clock: ManualCl
     # The capacity-exhausted address was never recorded, so it is never found blocked either.
     assert "__overflow__" not in tracker._blocked_until
     assert tracker.blocked_for("203.0.113.1") == 0.0
+
+
+def _limiter(clock: ManualClock, **overrides) -> RateLimiter:
+    params = {
+        "requests": 3,
+        "window_seconds": 60.0,
+        "auth_fail_limit": 2,
+        "auth_fail_window_seconds": 60.0,
+        "auth_fail_block_seconds": 300.0,
+        "scrape_requests": 5,
+        "scrape_window_seconds": 60.0,
+        "admin_session_requests": 10,
+        "admin_session_window_seconds": 60.0,
+    }
+    return RateLimiter(clock, **{**params, **overrides})  # type: ignore[arg-type]
+
+
+def test_rejected_hits_do_not_extend_the_lockout(clock: ManualClock) -> None:
+    window = SlidingWindow(2, 60.0, clock)
+    assert window.hit("k") is None and window.hit("k") is None
+    for _ in range(50):  # a client that keeps hammering while rejected
+        assert window.hit("k") is not None
+    clock.advance(
+        60.0
+    )  # the two admitted hits leave the window; the rejected ones left no trace
+    assert window.hit("k") is None
+
+
+def test_admin_session_budget_is_separate_from_the_business_budget(
+    clock: ManualClock,
+) -> None:
+    limiter = _limiter(clock)
+    key = admin_session_key("cookie-a", "192.0.2.1")
+    for _ in range(3):
+        limiter.check_request("admin:192.0.2.1")
+    with pytest.raises(RateLimited):
+        limiter.check_request("admin:192.0.2.1")
+    for _ in range(10):  # the exhausted PAT/API budget does not starve the GUI session
+        limiter.check_admin_session(key)
+    with pytest.raises(RateLimited) as exc:
+        limiter.check_admin_session(key)
+    assert exc.value.context["retry_after"] >= 1
+
+
+def test_admin_session_budget_is_isolated_per_session_and_address(
+    clock: ManualClock,
+) -> None:
+    limiter = _limiter(clock, admin_session_requests=2)
+    first = admin_session_key("cookie-a", "192.0.2.1")
+    for _ in range(2):
+        limiter.check_admin_session(first)
+    with pytest.raises(RateLimited):
+        limiter.check_admin_session(first)
+    limiter.check_admin_session(
+        admin_session_key("cookie-b", "192.0.2.1")
+    )  # other browser, same IP
+    limiter.check_admin_session(
+        admin_session_key("cookie-a", "192.0.2.2")
+    )  # same cookie, other IP
+    assert (
+        "cookie-a" not in first
+    )  # the raw session secret never sits in limiter memory
+
+
+def test_admin_session_backs_off_and_recovers_after_retry_after(
+    clock: ManualClock,
+) -> None:
+    limiter = _limiter(clock, admin_session_requests=2)
+    key = admin_session_key("cookie-a", "192.0.2.1")
+    limiter.check_admin_session(key)
+    limiter.check_admin_session(key)
+    with pytest.raises(RateLimited) as exc:
+        limiter.check_admin_session(key)
+    clock.advance(float(exc.value.context["retry_after"]))
+    limiter.check_admin_session(key)
+
+
+def test_login_and_auth_failure_limits_are_unchanged_by_the_admin_budget(
+    clock: ManualClock,
+) -> None:
+    limiter = _limiter(clock, admin_session_requests=1000)
+    for _ in range(3):
+        limiter.check_request("admin-login:192.0.2.1")
+    with pytest.raises(RateLimited):
+        limiter.check_request("admin-login:192.0.2.1")
+    limiter.record_auth_failure("192.0.2.1")
+    limiter.record_auth_failure("192.0.2.1")
+    with pytest.raises(RateLimited):
+        limiter.check_auth_blocked("192.0.2.1")

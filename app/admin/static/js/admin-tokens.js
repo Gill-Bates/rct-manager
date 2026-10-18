@@ -24,6 +24,7 @@ function tokenEmptyRow() {
 function tokenRoleCell(role) {
   const write = role !== 'read';
   const cell = element('td');
+  cell.dataset.label = 'Permission';
   cell.append(element('span', `status-badge ${write ? 'status-badge-warning' : 'status-badge-success'}`, write ? 'Read and write' : 'Read'));
   return cell;
 }
@@ -39,14 +40,17 @@ async function loadTokens() {
   if (!data.tokens?.length) { host.append(tokenEmptyRow()); return; }
   for (const token of data.tokens) {
     const row = element('tr');
-    const nowrap = (text, extra = '') => element('td', `token-nowrap${extra}`, text);
+    // data-label mirrors the column header: the stacked phone layout (.data-table-stack) shows it
+    // beside the value, so each value stays associated with its field without duplicate markup.
+    const labelled = (cell, label) => { cell.dataset.label = label; return cell; };
+    const nowrap = (text, label) => labelled(element('td', 'token-nowrap', text), label);
     const suffixCell = () => {
-      const cell = element('td', 'token-nowrap');
+      const cell = labelled(element('td', 'token-nowrap'), 'Token');
       if (token.suffix) cell.append(element('code', 'token-suffix', `…${token.suffix}`));
       else cell.append('—');
       return cell;
     };
-    const actions = element('td', 'text-end token-nowrap');
+    const actions = element('td', 'text-end token-nowrap data-table-stack-actions');
     const revoke = element('button', 'btn btn-outline-danger btn-sm d-inline-flex align-items-center gap-1');
     const icon = element('span', 'material-icons', 'delete');
     icon.setAttribute('aria-hidden', 'true');
@@ -66,12 +70,12 @@ async function loadTokens() {
     });
     actions.append(revoke);
     row.append(
-      element('td', '', token.name),
+      labelled(element('td', '', token.name), 'Name'),
       tokenRoleCell(token.role),
       suffixCell(),
-      nowrap(formatDate(token.created_at, { time: true })),
-      nowrap(formatDate(token.last_used_at, { time: true, empty: 'Never' })),
-      nowrap(formatDate(token.expires_at, { time: true })),
+      nowrap(formatDate(token.created_at, { time: true }), 'Created'),
+      nowrap(formatDate(token.last_used_at, { time: true, empty: 'Never' }), 'Last used'),
+      nowrap(formatDate(token.expires_at, { time: true }), 'Expires'),
       actions,
     );
     host.append(row);

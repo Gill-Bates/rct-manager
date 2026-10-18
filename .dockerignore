@@ -5,16 +5,23 @@
 .git/
 **/.omc/
 **/.omx/
-.venv/
-venv/
-.hypothesis/
-.pytest_cache/
-.ruff_cache/
-__pycache__/
-*.py[cod]
-*.egg-info/
-data/
-*.zip/
+**/.agents/
+**/.claude/
+**/.aws/
+**/.codex/
+**/.kiro/
+**/.worktrees/
+**/uv.lock
+**/.venv/
+**/venv/
+**/.hypothesis/
+**/.pytest_cache/
+**/.ruff_cache/
+**/__pycache__/
+**/*.py[cod]
+**/*.egg-info/
+**/data/
+**/*.zip
 
 # Not needed by the runtime image
 docs/
@@ -23,6 +30,6 @@ docker/
 !docker/entrypoint.sh
 .github/
 site/
-build/
-dist/
-*.pdf
+**/build/
+**/dist/
+**/*.pdf

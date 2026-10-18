@@ -88,7 +88,6 @@
             id="tsdb-status-icon">cloud_off</span>
           <div>
             <div class="text-secondary small">TSDB export</div><strong id="tsdb-status-label">n/a</strong>
-            <div class="text-secondary small" id="tsdb-status-time"></div>
           </div>
         </div>
       </div>
@@ -116,7 +115,7 @@
           <h2 class="h5 mb-0">Inverters</h2>
           <div class="inverter-add-actions">
             <span id="inverter-onboarding-hint" class="inverter-onboarding-hint small text-secondary" hidden>
-              Add your inverter to start … <span class="material-icons" aria-hidden="true">arrow_forward</span>
+              Add your first inverter to start … <span class="material-icons" aria-hidden="true">arrow_forward</span>
             </span>
             <button id="add-inverter" class="btn btn-primary d-inline-flex align-items-center gap-1" type="button"
               data-bs-toggle="modal" data-bs-target="#inverters-modal" title="Manage inverters"><span
@@ -193,8 +192,8 @@
   </div>
   {% endfor %}
   {% for id, x, y, title, unit in [
-  ('spot-price-curve', 0, 12, 'Day-ahead prices', 'ct/kWh'),
-  ('pv-forecast-curve', 6, 12, 'PV forecast', 'kW'),
+  ('spot-price-curve', 0, 13, 'Day-ahead prices', 'ct/kWh'),
+  ('pv-forecast-curve', 6, 13, 'PV forecast', 'kW'),
   ('charging-schedule', 0, 16, 'Charging schedule', 'kW · %')
   ] %}
   <div class="grid-stack-item d-none" gs-id="{{ id }}" gs-x="{{ x }}" gs-y="{{ y }}" gs-w="6" gs-h="4"
@@ -215,6 +214,46 @@
     </div>
   </div>
   {% endfor %}
+  {% for id, x, title, icon, color in [
+  ('battery-usable-kwh', 0, 'Usable capacity', 'battery_charging_full', 'text-success'),
+  ('battery-remaining-percent', 2, 'Capacity vs datasheet', 'percent', 'text-info'),
+  ('battery-cycles', 4, 'Battery cycles', 'loop', 'text-primary'),
+  ('battery-last-calibration', 6, 'Last calibration', 'event_available', 'text-secondary'),
+  ('battery-commissioning-date', 8, 'Commissioned', 'calendar_today', 'text-warning')
+  ] %}
+  <div class="grid-stack-item d-none" gs-id="{{ id }}" gs-x="{{ x }}" gs-y="10" gs-w="2" gs-h="2"
+    data-widget-id="{{ id }}">
+    <div class="grid-stack-item-content">
+      <div class="card kpi-card battery-tile h-100">
+        <div class="dashboard-widget-header d-none"><span class="dashboard-drag-handle material-icons"
+            aria-hidden="true">drag_indicator</span></div>
+        <div class="card-body"><span class="material-icons {{ color }}" aria-hidden="true">{{ icon }}</span>
+          <div>
+            <div class="text-secondary small">{{ title }}</div><strong id="{{ id }}-value">Loading …</strong>
+            <div class="text-secondary small" id="{{ id }}-detail"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  {% endfor %}
+  <div class="grid-stack-item d-none" gs-id="battery-degradation" gs-x="0" gs-y="13" gs-w="6" gs-h="4"
+    data-widget-id="battery-degradation">
+    <div class="grid-stack-item-content">
+      <section class="card dashboard-forecast-card h-100" aria-label="Battery degradation">
+        <div class="dashboard-widget-header d-none"><span class="dashboard-drag-handle material-icons"
+            aria-hidden="true">drag_indicator</span></div>
+        <div class="card-body">
+          <h2 class="h5 mb-1">Battery degradation</h2>
+          <p class="text-secondary small mb-2">% of datasheet capacity
+            <span class="dashboard-chart-state" id="battery-degradation-state" role="status">Loading …</span>
+          </p>
+          <div class="dashboard-chart-box" id="battery-degradation-box" hidden><canvas id="battery-degradation-canvas"
+              role="img" aria-label="Battery degradation"></canvas></div>
+        </div>
+      </section>
+    </div>
+  </div>
 </div>
 <div id="add-widget-modal" class="modal fade" tabindex="-1" aria-labelledby="add-widget-title" aria-hidden="true">
   <div class="modal-dialog">
@@ -259,4 +298,5 @@
 <script src="/admin/static/js/dashboard.js" defer></script>
 <script src="/admin/static/js/dashboard-forecast.js" defer></script>
 <script src="/admin/static/js/dashboard-charging-schedule.js" defer></script>
+<script src="/admin/static/js/dashboard-battery-health.js" defer></script>
 {% endblock %}

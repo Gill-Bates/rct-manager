@@ -47,6 +47,9 @@ MAX_TIMEZONE_LENGTH = 64
 # A conservative upper bound on how many 15-minute intervals one forecast may carry. A horizon of a
 # few days at quarter-hour resolution is a few hundred; this leaves generous headroom.
 MAX_INTERVALS = 2000
+# Fields an enabled forecast cannot run without. The timezone is deliberately absent: it is
+# descriptive and the forecast is always requested in UTC.
+_FORECAST_REQUIRED_FIELDS = ("latitude", "longitude", "pv_peak_power_wp", "tilt_deg", "azimuth_deg")
 
 
 class WeatherProvider(StrEnum):
@@ -111,7 +114,7 @@ class WeatherConfig(BaseModel):
             return self
         missing = [
             name
-            for name in ("latitude", "longitude", "pv_peak_power_wp", "tilt_deg", "azimuth_deg")
+            for name in _FORECAST_REQUIRED_FIELDS
             if getattr(self, name) is None
         ]
         if missing:
@@ -126,6 +129,4 @@ class WeatherConfig(BaseModel):
         ``_require_complete_when_enabled`` already guarantees this for a validated enabled config;
         the explicit check keeps the cache/provider independent of that invariant.
         """
-        return self.enabled and None not in (
-            self.latitude, self.longitude, self.pv_peak_power_wp, self.tilt_deg, self.azimuth_deg,
-        )
+        return self.enabled and all(getattr(self, name) is not None for name in _FORECAST_REQUIRED_FIELDS)

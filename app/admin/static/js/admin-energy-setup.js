@@ -729,16 +729,28 @@ function setEnergyNote(host, text, { kind = 'secondary', action = null } = {}) {
   if (energyNote.parentNode !== host) host.append(energyNote);
 }
 
+// A mode change on the Inverter tab updates the Charging plan tab without waiting for its refresh.
+function followPlanModes(devices) {
+  const modes = new Map(devices.map((device) => [device.device_id, device.mode]));
+  const changed = planDevices.some((device) => modes.has(device.device_id) && modes.get(device.device_id) !== device.mode);
+  if (!changed) return;
+  for (const device of planDevices) if (modes.has(device.device_id)) device.mode = modes.get(device.device_id);
+  syncPlanSelection();
+  if ($('energy-plan-device')?.value) void loadDryRunPlan();
+}
+
 async function pollEnergy() {
   if (energyPolling) return;
   energyPolling = true;
+  clearTimeout(energyPollTimer); // one timer only: a manual or visibility poll restarts the cycle
   const host = $('energy-list');
   const requestedAt = ++energyClock;
   // A hung fetch must not stop the polling for good; the abort lands in the failure branch.
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(Object.assign(new Error('The energy request timed out.'), { name: 'TimeoutError' })), ENERGY_POLL_TIMEOUT_MS);
   try {
-    const devices = await api('energy/devices', { signal: controller.signal });
+    const devices = await api('energy/devices', { signal: controller.signal, background: true });
+    energyPollDelay = ENERGY_POLL_MS;
     const ids = devices.map((item) => item.device_id);
     // Keep panels of devices that still exist (their unsaved input survives); add or drop the rest.
     for (const [id, panel] of [...energyPanels]) {
@@ -763,6 +775,7 @@ async function pollEnergy() {
       for (const [id, panel] of ordered) { energyPanels.set(id, panel); host.append(panel.root); }
     }
     if (energyHardwareStrategies.size) renderHardwareSummary();
+    followPlanModes(devices);
     setEnergyNote(host, devices.length ? null : 'No inverters configured yet.');
     // The absolute timestamp lives in Diagnostics now (design §13), not a top-of-page line.
     const stamp = `Updated ${new Date().toLocaleTimeString(undefined)}`;
@@ -776,7 +789,10 @@ async function pollEnergy() {
     // every panel; it clears on the next 200. Any other failure (including a timeout) is a
     // transient note (§13).
     const poll503 = error && error.status === 503;
-    for (const panel of energyPanels.values()) panel.setPollState({ poll503, pollFailed: !poll503 });
+    // 429 is short-lived load shedding, not an outage: keep what is shown and wait out Retry-After.
+    const limited = error && error.status === 429;
+    energyPollDelay = poll503 ? ENERGY_POLL_BACKOFF_MS : limited ? pollDelay(ENERGY_POLL_MS) : ENERGY_POLL_MS;
+    if (!limited) for (const panel of energyPanels.values()) panel.setPollState({ poll503, pollFailed: !poll503 });
     if (!energyPanels.size) {
       if (poll503) {
         setEnergyNote(host, 'Manual battery control requires write support to be enabled.', { kind: 'warning', action: { label: 'Open Inverters page', href: '/ui/inverters' } });
@@ -784,18 +800,29 @@ async function pollEnergy() {
         setEnergyNote(host, 'Energy data unavailable. Retrying …', { kind: 'warning' });
       }
     }
-  } finally { clearTimeout(timer); energyPolling = false; }
+  } finally {
+    clearTimeout(timer);
+    energyPolling = false;
+    scheduleEnergyPoll();
+  }
 }
 
-// One line per inverter. An unconnected inverter shows n/a, never the internal device id, so the
-// summary is redrawn after every energy poll as well (the connection state can change between).
+function scheduleEnergyPoll() {
+  clearTimeout(energyPollTimer);
+  energyPollTimer = setTimeout(() => {
+    if (document.hidden) scheduleEnergyPoll(); else pollEnergy();
+  }, energyPollDelay);
+}
+
+// One line per inverter. An unconnected inverter shows its configured host, never the internal
+// device id (the inverter is known even while it does not answer), so the summary is redrawn after every energy poll as well (the connection state can change between).
 function renderHardwareSummary() {
   const rows = [...energyHardwareStrategies.values()].map((device) => {
     const row = element('div');
     const code = Number.isInteger(device.code) ? device.code : null;
     const strategy = code === null ? NOT_AVAILABLE
       : device.label ? `${device.label} (code ${code})` : `Unknown (code ${code})`;
-    const shownName = energyPanels.get(device.device_id)?.isConnected() ? device.device_name : NOT_AVAILABLE;
+    const shownName = energyPanels.get(device.device_id)?.isConnected() ? device.device_name : device.host;
     row.textContent = `${shownName} · Inverter SOC strategy: ${strategy}${device.stale ? ' · stale' : ''}`;
     return row;
   });
@@ -810,7 +837,7 @@ async function pollHardwareStrategies() {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), ENERGY_POLL_TIMEOUT_MS);
   try {
-    const devices = await api('energy/hardware-strategies', { signal: controller.signal });
+    const devices = await api('energy/hardware-strategies', { signal: controller.signal, background: true });
     energyHardwareStrategies.clear();
     for (const device of devices) {
       energyHardwareStrategies.set(device.device_id, device);
@@ -821,6 +848,7 @@ async function pollHardwareStrategies() {
     }
     renderHardwareSummary();
   } catch (error) {
+    if (error && error.status === 429) return; // keep the last strategies; the next 30 s tick retries
     host.textContent = 'Inverter SOC strategy: n/a (unavailable).';
     energyHardwareStrategies.clear();
     for (const panel of energyPanels.values()) panel.setHardwareStrategy(null);
@@ -842,7 +870,7 @@ const PLAN_STATUS_LABELS = {
   solar_forecast_unavailable: 'Solar forecast is not available yet',
   battery_state_unavailable: 'Usable battery capacity is needed',
 };
-const PLAN_ACTION_LABELS = { idle: 'No grid charge', charge: 'Charge from grid', hold: 'Hold', discharge: 'Discharge', auto: 'Automatic' };
+const PLAN_ACTION_LABELS = { idle: 'No grid charging', charge: 'Grid charging', hold: 'Hold', discharge: 'Discharge', auto: 'Automatic' };
 const PLAN_POLICY_LABELS = { gentle: 'Gentle (stay in the preferred power range)', meet_deadline: 'Meet deadline (raise power up to the hard limit if needed)' };
 const LIMITING_REASON_LABELS = {
   reserve_not_securable: 'Reserve not securable',
@@ -949,22 +977,21 @@ function planWindowRow(label, from, until) {
   return row;
 }
 
-// Rotating "please wait" indicator in the loading style of the Spot Market and Weather previews.
 function planWaitState() {
-  const loading = element('div', 'spot-market-loading plan-loading');
+  const loading = element('div', 'spot-market-loading plan-loading text-center');
   loading.setAttribute('role', 'status');
-  const spinner = element('span', 'spinner-border text-secondary');
-  spinner.setAttribute('aria-hidden', 'true');
-  loading.append(spinner, element('span', 'badge rounded-pill text-bg-secondary', 'Please wait …'));
+  const icon = element('span', 'material-icons text-secondary plan-loading-icon', 'hourglass_empty');
+  icon.setAttribute('aria-hidden', 'true');
+  loading.append(icon, element('h3', 'h5 mb-0', 'Plan is being prepared'),
+    element('p', 'text-secondary mb-0', 'Please check back in a few minutes.'));
   return loading;
 }
 
-// Inputs that only need time (a battery read, a price or forecast fetch, learning); every other
-// non-ok status needs an operator action and keeps its explanatory text.
-const PLAN_PENDING_STATUSES = new Set(['battery_state_unavailable', 'insufficient_history', 'spot_prices_unavailable', 'solar_forecast_unavailable']);
+const PLAN_PENDING_STATUSES = new Set(['insufficient_history', 'spot_prices_unavailable', 'solar_forecast_unavailable']);
+const PLAN_RETRY_STATUSES = new Set([...PLAN_PENDING_STATUSES, 'battery_state_unavailable']);
 
 function planStatusCard(title, message) {
-  const card = element('section', 'border rounded p-3 p-md-4');
+  const card = element('section', 'mb-3');
   card.append(element('h3', 'h5 mb-2', title), element('p', 'mb-0', message));
   return card;
 }
@@ -1021,15 +1048,45 @@ function nextGridCharge(slots) {
 }
 
 // Plain-language explanations of the planner's machine-oriented slot reasons (app/optimizer/planner.py);
-// an unknown reason is shown verbatim.
+// an unknown reason is shown verbatim. PURPOSE is the short form for the schedule table.
 const PLAN_REASON_LABELS = {
-  'forecast PV covers demand': 'Solar forecast covers the household consumption',
-  'battery reserve covers demand': 'Battery charge covers the consumption, no grid charge needed',
-  'forecast deficit, charged as late as permitted': 'Expected shortfall: charge from the grid, as late as possible',
-  'charge as late as permitted for target SoC': 'Reach the target SoC: charge as late as possible',
-  'negative spot price, forecast deficit': 'Negative spot price: charge now to cover the expected shortfall',
-  'no spot price for this slot': 'No spot price known for this period',
+  'forecast PV covers demand': 'Solar covers forecast demand',
+  'battery reserve covers demand': 'Battery can cover forecast demand',
+  'forecast deficit, charged as late as permitted': 'Grid charging needed to protect the battery reserve',
+  'charge as late as permitted for target SoC': 'Grid charging scheduled to reach the target SoC',
+  'negative spot price, forecast deficit': 'Negative price: charge now for forecast demand',
+  'no spot price for this slot': 'No market price available for this period',
 };
+const PLAN_PURPOSE_LABELS = {
+  'forecast deficit, charged as late as permitted': 'Protect battery reserve',
+  'charge as late as permitted for target SoC': 'Reach target SoC',
+  'negative spot price, forecast deficit': 'Use negative price',
+  'forecast PV covers demand': 'Solar covers demand',
+  'battery reserve covers demand': 'Battery covers demand',
+};
+
+function planReasonLabel(reason) {
+  return reason ? (PLAN_REASON_LABELS[reason] || reason) : '';
+}
+
+function planPurposeLabel(reason) {
+  return reason ? (PLAN_PURPOSE_LABELS[reason] || reason) : NOT_AVAILABLE;
+}
+
+// Tooltip lines show only what applies: an idle slot has no power or target to report.
+function planTooltipLines(slot) {
+  const watts = planNumber(slot.max_power_w);
+  const target = planNumber(slot.target_soc_percent);
+  const lines = [];
+  if (slot.action === 'charge') {
+    lines.push(Number.isFinite(watts) ? `Grid charging · ${formatPower(watts)}` : 'Grid charging');
+    if (Number.isFinite(target)) lines.push(`Target SoC ${Math.round(target)} %`);
+  } else {
+    lines.push(PLAN_ACTION_LABELS[slot.action] || slot.action);
+  }
+  if (slot.reason) lines.push(planReasonLabel(slot.reason));
+  return lines;
+}
 
 function planSlotTime(slot) {
   const start = new Date(slot.start);
@@ -1092,13 +1149,18 @@ function planChartTickLabel(value) {
   return [date.toLocaleDateString(undefined, { day: '2-digit', month: 'short' }), time];
 }
 
+// Axis unit titles match the legend size and the tick colour; the padding keeps them off the ticks.
+function chartAxisTitle(text, color) {
+  return { display: true, text, color, font: { size: 13, weight: 600 }, padding: { top: 4, bottom: 8 } };
+}
+
 function planChartColors(host) {
   const styles = getComputedStyle(host);
   return {
     label: styles.getPropertyValue('--bs-body-color').trim(),
     grid: styles.getPropertyValue('--rct-line').trim(),
-    power: styles.getPropertyValue('--plan-power').trim(),
-    soc: styles.getPropertyValue('--plan-soc').trim(),
+    power: styles.getPropertyValue('--rct-plan-power').trim(),
+    soc: styles.getPropertyValue('--rct-plan-soc').trim(),
   };
 }
 
@@ -1159,17 +1221,7 @@ function drawPlanChart(canvas, slots) {
           filter: (item, index, items) => items.findIndex((other) => Number.isFinite(other.parsed?.y)) === index,
           callbacks: {
             title: (items) => (items[0]?.raw?.slot ? planSlotTime(items[0].raw.slot) : ''),
-            label: (item) => {
-              const slot = item.raw.slot;
-              const watts = planNumber(slot.max_power_w);
-              const target = planNumber(slot.target_soc_percent);
-              return [
-                `Action: ${PLAN_ACTION_LABELS[slot.action] || slot.action}`,
-                `Power: ${Number.isFinite(watts) ? formatPower(watts) : NOT_AVAILABLE}`,
-                `Target SoC: ${Number.isFinite(target) ? `${Math.round(target)} %` : NOT_AVAILABLE}`,
-                ...(slot.reason ? [`Reason: ${PLAN_REASON_LABELS[slot.reason] || slot.reason}`] : []),
-              ];
-            },
+            label: (item) => planTooltipLines(item.raw.slot),
           },
         },
       },
@@ -1180,12 +1232,12 @@ function drawPlanChart(canvas, slots) {
           ticks: { color: label, maxRotation: 0, callback: planChartTickLabel },
         },
         power: {
-          position: 'left', beginAtZero: true, grid: { color: grid }, ticks: { color: label },
-          title: { display: true, text: 'kW', color: label },
+          position: 'left', beginAtZero: true, grid: { color: grid }, ticks: { color: label, padding: 6 },
+          title: chartAxisTitle('kW', label),
         },
         soc: {
-          position: 'right', min: 0, max: 100, display: hasSoc, grid: { drawOnChartArea: false }, ticks: { color: label },
-          title: { display: true, text: '%', color: label },
+          position: 'right', min: 0, max: 100, display: hasSoc, grid: { drawOnChartArea: false }, ticks: { color: label, padding: 6 },
+          title: chartAxisTitle('%', label),
         },
       },
     },
@@ -1199,27 +1251,10 @@ function planChartSummary(slots) {
   return `Charging schedule ${span}: ${charge.length} grid charge slot${charge.length === 1 ? '' : 's'} of ${slots.length}`;
 }
 
-// Text alternative for the chart: the grid-charge slots, readable without a pointer.
-function planChargeList(slots) {
-  const list = element('ul', 'visually-hidden');
-  const charge = slots.filter((slot) => slot.action === 'charge')
-    .sort((a, b) => new Date(a.start) - new Date(b.start));
-  if (!charge.length) {
-    list.append(element('li', '', 'No grid charge planned.'));
-    return list;
-  }
-  for (const slot of charge) {
-    const watts = planNumber(slot.max_power_w);
-    const target = planNumber(slot.target_soc_percent);
-    list.append(element('li', '', `${planSlotTime(slot)}: ${Number.isFinite(watts) ? formatPower(watts) : NOT_AVAILABLE}`
-      + `, target SoC ${Number.isFinite(target) ? `${Math.round(target)} %` : NOT_AVAILABLE}`));
-  }
-  return list;
-}
-
-// The chart is the schedule view; its tooltip carries the per-slot detail.
-function planSchedule(plan) {
-  const section = element('section', '');
+// The chart is the time overview; the charging schedule table below it is its text alternative.
+// No aria-describedby to that table: a screen reader would read the whole table twice.
+function planSchedule(plan, detailsOpen = false) {
+  const section = element('section', 'energy-plan-section');
   section.setAttribute('aria-labelledby', 'energy-plan-schedule-title');
   const title = element('h3', 'h6', 'Charging schedule');
   title.id = 'energy-plan-schedule-title';
@@ -1239,8 +1274,95 @@ function planSchedule(plan) {
   } else {
     section.append(element('p', 'text-danger small', 'Chart library could not be loaded.'));
   }
-  section.append(planChargeList(plan.slots));
+  section.append(planChargeSchedule(plan.slots), planScheduleDetails(plan.slots, detailsOpen));
   return { section, canvas };
+}
+
+// Stacked-card tables (data-table-stack, admin.css): every cell carries its column name in data-label.
+function planTable(className, captionText, columns, rows) {
+  const table = element('table', `table table-sm energy-plan-slot-table data-table-stack ${className}`);
+  table.append(element('caption', 'visually-hidden', captionText));
+  const head = element('tr');
+  for (const [name, numeric] of columns) {
+    const cell = element('th', numeric ? 'text-end' : '', name);
+    cell.scope = 'col';
+    head.append(cell);
+  }
+  const thead = element('thead');
+  thead.append(head);
+  const body = element('tbody');
+  for (const cells of rows) {
+    const row = element('tr');
+    cells.forEach((cell, index) => { cell.dataset.label = columns[index][0]; });
+    row.append(...cells);
+    body.append(row);
+  }
+  table.append(thead, body);
+  return table;
+}
+
+// Default view: only the planned grid-charging windows. Idle slots are hidden here, not removed from the plan.
+function planChargeSchedule(slots) {
+  const wrap = element('div', 'mt-2');
+  wrap.id = 'energy-plan-charge-schedule';
+  const charge = planSlotRuns(slots.filter((slot) => slot.action === 'charge'));
+  if (!charge.length) {
+    wrap.append(element('p', 'text-secondary small mb-0', 'No grid charging planned.'));
+    return wrap;
+  }
+  const columns = [['Time'], ['Power', true], ['Target SoC', true], ['Purpose']];
+  const rows = charge.map((slot) => {
+    const watts = planNumber(slot.max_power_w);
+    const target = planNumber(slot.target_soc_percent);
+    return [
+      element('td', '', planSlotTime(slot)),
+      element('td', 'text-end', Number.isFinite(watts) ? formatPower(watts) : NOT_AVAILABLE),
+      element('td', 'text-end', Number.isFinite(target) ? `${Math.round(target)} %` : NOT_AVAILABLE),
+      element('td', 'data-table-stack-prose', planPurposeLabel(slot.reason)),
+    ];
+  });
+  wrap.append(planTable('mb-0', 'Planned grid charging windows', columns, rows));
+  return wrap;
+}
+
+// Only directly adjacent slots with the same action, power, target and reason merge; a gap or any change starts a new row.
+function planSlotRuns(slots) {
+  const runs = [];
+  for (const slot of [...slots].sort((a, b) => new Date(a.start) - new Date(b.start))) {
+    const last = runs[runs.length - 1];
+    const same = last
+      && last.action === slot.action && last.max_power_w === slot.max_power_w
+      && last.target_soc_percent === slot.target_soc_percent && (last.reason || '') === (slot.reason || '')
+      && new Date(last.end).getTime() === new Date(slot.start).getTime();
+    if (same) last.end = slot.end;
+    else runs.push({ ...slot });
+  }
+  return runs;
+}
+
+// Collapsed full technical slot history: keyboard and touch friendly, numbers right-aligned.
+function planScheduleDetails(slots, open = false) {
+  const details = element('details', 'energy-plan-slot-details mt-2');
+  details.id = 'energy-plan-schedule-details';
+  details.open = open;
+  details.append(element('summary', '', 'Show all intervals'));
+  // data-table-stack: below the phone breakpoint the five-column table would squeeze "Power"/"162 W"
+  // character-by-character, so each row stacks into a labelled card (admin.css).
+  const columns = [['Time'], ['Action'], ['Power', true], ['Target SoC', true], ['Reason']];
+  const rows = planSlotRuns(slots).map((slot) => {
+    const watts = planNumber(slot.max_power_w);
+    const target = planNumber(slot.target_soc_percent);
+    // The reason is free prose: it spans full width and wraps at word boundaries in the stacked card.
+    return [
+      element('td', '', planSlotTime(slot)),
+      element('td', '', PLAN_ACTION_LABELS[slot.action] || slot.action),
+      element('td', 'text-end', Number.isFinite(watts) && slot.action === 'charge' ? formatPower(watts) : NOT_AVAILABLE),
+      element('td', 'text-end', Number.isFinite(target) ? `${Math.round(target)} %` : NOT_AVAILABLE),
+      element('td', 'data-table-stack-prose', slot.reason ? planReasonLabel(slot.reason) : NOT_AVAILABLE),
+    ];
+  });
+  details.append(planTable('mt-2 mb-0', 'All charging plan intervals', columns, rows));
+  return details;
 }
 
 function planTechnicalDetails(plan) {
@@ -1264,17 +1386,50 @@ function planTechnicalDetails(plan) {
   return parts;
 }
 
-function renderDryRunPlan(plan, { waiting = true } = {}) {
+const PLAN_CONFIDENCE_LABELS = { low: 'Low confidence', normal: 'Normal confidence' };
+// Every ForecastBasis value (app/optimizer/models.py) except the baseline shows its confidence.
+const PLAN_CONFIDENCE_BASES = new Set(['adaptive_history', 'history_fallback']);
+
+// Forecast confidence next to the execution state, from forecast_basis / forecast_confidence only;
+// a missing field hides the part instead of inventing a state.
+function renderPlanConfidence(plan) {
+  const label = $('energy-plan-confidence');
+  if (!label) return;
+  const ok = plan.status === 'ok';
+  const text = !ok ? '' : plan.forecast_basis === 'bootstrap_baseline' ? 'Baseline forecast'
+    : PLAN_CONFIDENCE_BASES.has(plan.forecast_basis) ? (PLAN_CONFIDENCE_LABELS[plan.forecast_confidence] || '') : '';
+  label.hidden = !text;
+  label.textContent = text;
+  const explanation = text === 'Low confidence' ? 'Limited consumption history'
+    : text === 'Baseline forecast' ? 'Conservative household baseline while consumption history is collected' : '';
+  if (explanation) {
+    label.title = explanation;
+    label.setAttribute('aria-label', `${text}: ${explanation}`);
+  } else {
+    label.removeAttribute('title');
+    label.removeAttribute('aria-label');
+  }
+}
+
+function renderDryRunPlan(plan) {
   const host = $('energy-plan-result');
   const technical = $('energy-plan-technical');
   if (technical) technical.replaceChildren(...planTechnicalDetails(plan));
   const forecast = $('energy-plan-forecast');
   if (forecast) forecast.hidden = plan.status !== 'ok';
+  // Read before clearPlanSchedule() removes the element, so a refresh keeps an opened table open.
+  const scheduleDetailsOpen = Boolean($('energy-plan-schedule-details')?.open);
   clearPlanSchedule();
+  renderPlanConfidence(plan);
+  if (plan.status === 'energy_manager_off') {
+    // The inverter was switched off meanwhile: the tab disappears with the next device sync.
+    host.replaceChildren();
+    return;
+  }
   if (plan.status !== 'ok') {
     const states = {
-      battery_state_unavailable: ['Plan not available yet', 'Battery data could not be verified automatically.'],
-      insufficient_history: ['Consumption model is learning', 'We are collecting consumption data. A preliminary plan can use a conservative baseline once the other inputs are ready.'],
+      battery_state_unavailable: ['Plan not available yet', 'Battery data could not be verified automatically. Check that the inverter is connected and reports its battery state and capacity; the plan is re-checked on its own.'],
+      insufficient_history: ['Consumption model is learning', 'No consumption estimate is available yet. Consumption is recorded from the live inverter readings; until enough is stored, the plan uses a conservative baseline.'],
       spot_disabled: ['Plan not available', 'The spot market integration is disabled. Enable it in the energy settings to plan with prices.'],
       solar_not_configured: ['Plan not available', 'The solar forecast is not configured. Complete the solar settings to plan with a forecast.'],
       spot_prices_unavailable: ['Plan not available yet', 'Spot prices could not be loaded yet. Refresh the plan when prices are available.'],
@@ -1282,8 +1437,8 @@ function renderDryRunPlan(plan, { waiting = true } = {}) {
     };
     const [title, message] = states[plan.status] || ['Plan not available yet', 'The plan could not be calculated. Try refreshing.'];
     const readiness = planReadinessCard(plan.status, title, message);
-    if (waiting && PLAN_PENDING_STATUSES.has(plan.status)) {
-      // Basic mode shows the spinner only; the readiness checklist stays available in Expert mode.
+    // Operator-actionable: the explanation shows at once; polling continues via PLAN_RETRY_STATUSES.
+    if (PLAN_RETRY_STATUSES.has(plan.status) && plan.status !== 'battery_state_unavailable') {
       const detail = element('div', 'mt-3');
       detail.dataset.expertOnly = 'true';
       detail.hidden = !(typeof energyExpertMode !== 'undefined' && energyExpertMode);
@@ -1297,49 +1452,273 @@ function renderDryRunPlan(plan, { waiting = true } = {}) {
   const next = nextGridCharge(plan.slots || []);
   const card = next
     ? planStatusCard('Next grid charge', `${planDateTime(next.start)} – ${planDateTime(next.end)}`)
-    : planStatusCard('No grid charge planned', 'The current plan does not schedule a grid charge.');
-  if (next) {
-    // Same hero-metric blocks as the Spot Market view (.spot-market-highlight).
-    const summary = element('div', 'spot-market-highlights mt-3');
-    const add = (caption, value, icon) => {
-      const block = element('div', 'spot-market-highlight');
-      const glyph = element('span', 'material-icons spot-market-highlight-icon text-secondary', icon);
-      glyph.setAttribute('aria-hidden', 'true');
-      block.append(glyph, element('span', 'spot-market-highlight-caption', caption), element('span', 'spot-market-highlight-value', value));
-      summary.append(block);
-    };
-    if (next.target_soc_percent !== null && next.target_soc_percent !== undefined) add('Target SoC', `${Math.round(next.target_soc_percent)} %`, 'battery_charging_full');
-    if (next.max_power_w !== null && next.max_power_w !== undefined) add('Charge power', formatPower(next.max_power_w), 'bolt');
-    if (plan.energy?.grid_charge_energy_wh !== undefined) add('Total plan grid energy', planKwh(plan.energy.grid_charge_energy_wh), 'electric_meter');
-    card.append(summary);
-  }
-  if (plan.forecast_basis === 'bootstrap_baseline') {
-    card.append(element('p', 'small text-secondary mt-3 mb-0', 'Preliminary plan using a conservative household baseline while consumption history is collected.'));
-  } else if (plan.forecast_confidence === 'low') {
-    card.append(element('p', 'small text-secondary mt-3 mb-0', 'Preliminary plan based on limited consumption history.'));
-  }
+    : planStatusCard('No grid charging planned', 'The current plan does not schedule grid charging.');
+  // Three plan-KPI tiles (plan outputs) built from the plan's own snapshot (no second data source).
+  // Battery remaining is a live device state, so it renders as a weaker tertiary line below the grid.
+  const summary = element('div', 'spot-market-highlights energy-plan-highlights mt-3');
+  const add = (caption, value, icon, sub) => {
+    const block = element('div', 'spot-market-highlight');
+    const glyph = element('span', 'material-icons spot-market-highlight-icon text-secondary', icon);
+    glyph.setAttribute('aria-hidden', 'true');
+    block.append(glyph, element('span', 'spot-market-highlight-caption', caption), element('span', 'spot-market-highlight-value', value));
+    if (sub) block.append(element('span', 'spot-market-highlight-sub', sub));
+    summary.append(block);
+  };
+  const known = (value) => value !== null && value !== undefined && Number.isFinite(Number(value));
+  const battery = plan.battery;
+  const hasBattery = known(battery?.remaining_energy_wh) && known(battery?.soc_percent) && known(battery?.usable_capacity_wh);
+  add('Target SoC', next && known(next.target_soc_percent) ? `${Math.round(next.target_soc_percent)} %` : '—', 'battery_charging_full');
+  add('Charge power', next && known(next.max_power_w) ? formatPower(next.max_power_w) : '—', 'bolt');
+  add('Total plan grid energy', known(plan.energy?.grid_charge_energy_wh) ? planKwh(plan.energy.grid_charge_energy_wh) : '—', 'electric_meter');
+  card.append(summary);
+  // The battery is an input of the plan, not an output: a quiet labelled line, not another KPI.
+  const batteryLine = element('p', 'energy-plan-battery d-flex flex-wrap align-items-center gap-2 small text-secondary mt-3 mb-0');
+  const batteryGlyph = element('span', 'material-icons text-secondary', 'battery_5_bar');
+  batteryGlyph.setAttribute('aria-hidden', 'true');
+  const batteryText = hasBattery
+    ? `${Math.round(battery.soc_percent)} % SoC · ${planKwh(battery.remaining_energy_wh)} remaining / ${planKwh(battery.usable_capacity_wh)} usable`
+    : 'Not available';
+  batteryLine.append(batteryGlyph, element('span', 'energy-plan-battery-label', 'Current battery state'), element('span', 'energy-plan-battery-value', batteryText));
+  card.append(batteryLine);
   host.replaceChildren(card);
   const scheduleHost = $('energy-plan-schedule');
-  const { section, canvas } = planSchedule(plan);
+  const { section, canvas } = planSchedule(plan, scheduleDetailsOpen);
   scheduleHost.replaceChildren(section);
   // Drawn after attaching: Chart.js sizes the canvas from its laid-out container.
   if (canvas) drawPlanChart(canvas, plan.slots);
 }
 
 let planDevices = [];
+let calibrationHistoryGeneration = 0;
+let calibrationHistoryRows = [];
+let calibrationChart = null;
+
+const CALIBRATION_BASELINE_NOTES = {
+  inverter_serial_unknown: 'The inverter serial number is not known yet, so no calibration is recorded.',
+  no_commissioning_date: 'No commissioning date is known yet, so the curve has no starting point. '
+    + 'It is read from the inverter logs when they hold energy data; you can also enter it below.',
+  no_measurement: 'The commissioning date is known; the curve starts once the first BMS measurement is recorded.',
+  battery_replaced: 'The battery was replaced (new BMS serial). The derived commissioning date belongs to the '
+    + 'first battery, so the new series has no starting point; enter the replacement date below to add one.',
+};
+
+// Baseline (datasheet capacity at commissioning, 0 cycles) first, then the dated BMS measurements.
+function calibrationRows(history) {
+  const rows = history.points.map((point) => ({
+    at: point.measured_at, cycles: point.battery_cycles, wh: point.current_usable_capacity_wh,
+    rated: point.rated_usable_capacity_wh, percent: point.remaining_capacity_percent, baseline: false,
+  }));
+  const base = history.baseline;
+  if (base) {
+    rows.unshift({
+      at: base.date, cycles: 0, wh: base.current_usable_capacity_wh, rated: base.rated_usable_capacity_wh,
+      percent: base.remaining_capacity_percent, baseline: true,
+    });
+  }
+  return rows;
+}
+
+function drawBatteryCalibrationChart() {
+  calibrationChart?.destroy();
+  calibrationChart = null;
+  const details = $('energy-plan-diagnostics');
+  const canvas = $('energy-plan-calibration-chart');
+  if (!details?.open || !canvas || !globalThis.Chart || !calibrationHistoryRows.length) return;
+  const rows = calibrationHistoryRows;
+  const { label, grid, power } = planChartColors($('energy-plan-calibration'));
+  const times = rows.map((row) => Date.parse(row.at));
+  const dateText = (value) => new Date(value).toLocaleDateString();
+  calibrationChart = new globalThis.Chart(canvas, {
+    type: 'line',
+    data: {
+      datasets: [
+        {
+          label: 'Usable capacity (kWh)', data: rows.map((row, index) => ({ x: times[index], y: row.wh / 1000 })),
+          borderColor: power, backgroundColor: power, pointRadius: 4, tension: 0
+        },
+        {
+          label: 'Datasheet capacity (100%)',
+          data: [{ x: times[0], y: rows[0].rated / 1000 }, { x: times[times.length - 1], y: rows[rows.length - 1].rated / 1000 }],
+          borderColor: label, backgroundColor: label, borderDash: [5, 4], pointRadius: 0, tension: 0
+        },
+      ],
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false, animation: false,
+      plugins: {
+        legend: { labels: { color: label } },
+        tooltip: {
+          callbacks: {
+            title: (items) => (items[0] ? dateText(items[0].parsed?.x ?? times[items[0].dataIndex]) : ''),
+            afterBody: (items) => {
+              if (items[0]?.datasetIndex === 1) return [];
+              const row = rows[items[0]?.dataIndex];
+              return row ? [`Cycles: ${row.cycles ?? 'n/a'}`, `Remaining: ${row.percent} %`] : [];
+            },
+          }
+        },
+      },
+      scales: {
+        x: { type: 'linear', ticks: { color: label, callback: dateText, maxTicksLimit: 8 }, grid: { color: grid } },
+        y: {
+          beginAtZero: true, title: chartAxisTitle('kWh', label),
+          ticks: { color: label }, grid: { color: grid }
+        },
+      },
+    },
+  });
+}
+
+function calibrationCommissioningForm(history, deviceId) {
+  const form = element('form', 'd-flex flex-wrap align-items-end gap-2 mb-2');
+  const field = element('div');
+  const label = element('label', 'form-label small mb-1', 'Commissioning date');
+  label.htmlFor = 'energy-plan-commissioning-date';
+  const input = element('input', 'form-control form-control-sm');
+  input.type = 'date';
+  input.id = 'energy-plan-commissioning-date';
+  input.min = '2010-01-01';
+  input.value = history.commissioning ? history.commissioning.commissioned_at.slice(0, 10) : '';
+  field.append(label, input);
+  const save = element('button', 'btn btn-sm btn-outline-primary', 'Save date');
+  save.type = 'submit';
+  form.append(field, save);
+  const submit = async (request) => {
+    save.disabled = true;
+    try {
+      const result = await api(`energy/devices/${encodeURIComponent(deviceId)}/battery-commissioning`, request);
+      toast('Commissioning date saved.');
+      if ($('energy-plan-device')?.value === deviceId) renderBatteryCalibrationHistory(result);
+    } catch (error) { toast(messageFrom(error), 'danger'); } finally { save.disabled = false; }
+  };
+  form.addEventListener('submit', (event) => {
+    event.preventDefault();
+    if (!input.value) return;
+    void submit({ method: 'PUT', body: JSON.stringify({ commissioned_on: input.value }) });
+  });
+  if (history.commissioning?.source === 'manual') {
+    const clear = element('button', 'btn btn-sm btn-outline-secondary', 'Use derived date');
+    clear.type = 'button';
+    clear.addEventListener('click', () => { void submit({ method: 'DELETE' }); });
+    form.append(clear);
+  }
+  return form;
+}
+
+function renderBatteryCalibrationHistory(history) {
+  const host = $('energy-plan-calibration');
+  if (!host) return;
+  calibrationChart?.destroy();
+  calibrationChart = null;
+  const rows = calibrationRows(history);
+  calibrationHistoryRows = rows;
+  const deviceId = $('energy-plan-device')?.value || history.device_id;
+  const parts = [];
+  if (history.inverter_serial) {
+    const bms = history.battery_bms_sn ? `, BMS ${history.battery_bms_sn}` : '';
+    parts.push(element('p', 'small text-secondary mb-2', `Inverter ${history.inverter_serial}${bms}`));
+  }
+  if (history.baseline_unavailable_reason) {
+    parts.push(element('p', 'small text-secondary mb-2', CALIBRATION_BASELINE_NOTES[history.baseline_unavailable_reason] || ''));
+  } else if (history.baseline?.source === 'logger_derived') {
+    parts.push(element('p', 'small text-secondary mb-2',
+      'The commissioning date was derived from the inverter energy logs and is not verified on hardware.'));
+  }
+  if (history.inverter_serial) parts.push(calibrationCommissioningForm(history, deviceId));
+  if (!history.points.length) {
+    parts.push(element('p', 'small text-secondary', 'No BMS calibration has been recorded yet.'));
+    host.replaceChildren(...parts);
+    return;
+  }
+  parts.push(element('p', 'small text-secondary mb-2',
+    'The datasheet usable capacity is the fixed 100% reference. Dated points come from BMS measurements.'));
+  const box = element('div', 'spot-market-chart-box mb-2');
+  const canvas = element('canvas');
+  canvas.id = 'energy-plan-calibration-chart';
+  canvas.setAttribute('aria-hidden', 'true');
+  box.append(canvas);
+  const table = element('table', 'table table-sm small');
+  const caption = element('caption', 'visually-hidden', 'Battery calibration history: date, cycles, usable capacity and remaining capacity');
+  const header = element('thead');
+  const headerRow = element('tr');
+  for (const title of ['Date', 'Cycles', 'Usable kWh', 'Remaining %']) headerRow.append(element('th', '', title));
+  header.append(headerRow);
+  const body = element('tbody');
+  for (const row of rows) {
+    const tr = element('tr');
+    const when = new Date(row.at);
+    const values = [row.baseline ? `${when.toLocaleDateString()} (commissioning)` : when.toLocaleString(),
+    row.cycles ?? 'n/a',
+    (row.wh / 1000).toLocaleString(undefined, { maximumFractionDigits: 2 }),
+    row.percent.toLocaleString(undefined, { maximumFractionDigits: 2 })];
+    for (const value of values) tr.append(element('td', '', String(value)));
+    body.append(tr);
+  }
+  table.append(caption, header, body);
+  parts.push(box, table);
+  host.replaceChildren(...parts);
+  drawBatteryCalibrationChart();
+}
+
+async function loadBatteryCalibrationHistory(deviceId) {
+  const host = $('energy-plan-calibration');
+  if (!host) return;
+  const generation = ++calibrationHistoryGeneration;
+  calibrationChart?.destroy();
+  calibrationChart = null;
+  calibrationHistoryRows = [];
+  host.replaceChildren(element('p', 'small text-secondary', 'Loading BMS calibration history …'));
+  try {
+    const history = await api(`energy/devices/${encodeURIComponent(deviceId)}/battery-calibration-history`);
+    if (generation !== calibrationHistoryGeneration || $('energy-plan-device')?.value !== deviceId) return;
+    renderBatteryCalibrationHistory({ ...history, points: Array.isArray(history.points) ? history.points : [] });
+  } catch (error) {
+    if (generation === calibrationHistoryGeneration) {
+      host.replaceChildren(element('p', 'small text-danger', `Could not load battery calibration history: ${messageFrom(error)}`));
+    }
+  }
+}
+
+// Only Manual inverters appear in the GUI charging-plan selector and unlock its planning tabs.
+// External uses a separate control path and may still have a plan outside this GUI.
+const planEligible = (device) => device.mode === 'manual';
+
+// Charging plan, Spot Market and Weather are shown together while at least one inverter is Manual.
+// Spot Market and Weather are site-wide provider settings, so their visibility follows the whole
+// device set rather than the currently selected inverter; External alone keeps all three hidden.
+function syncPlanSelection() {
+  const select = $('energy-plan-device');
+  if (!select) return;
+  const choices = planDevices.filter(planEligible);
+  const previous = select.value;
+  select.replaceChildren(...choices.map((device) => {
+    const option = element('option', '', device.device_name || device.device_id);
+    option.value = device.device_id;
+    return option;
+  }));
+  select.value = choices.some((device) => device.device_id === previous) ? previous : (choices[0]?.device_id ?? '');
+  const inverterTab = $('energy-tab-inverter');
+  const visible = Boolean(choices.length);
+  let fellBack = false;
+  for (const name of ['plan', 'spot-market', 'weather']) {
+    const tab = $(`energy-tab-${name}`);
+    const pane = $(`energy-pane-${name}`);
+    if (!tab || !pane) continue;
+    tab.parentElement.hidden = !visible;
+    pane.hidden = !visible;
+    if (!visible && tab.classList.contains('active')) fellBack = true;
+  }
+  if (fellBack && inverterTab && window.bootstrap) {
+    window.bootstrap.Tab.getOrCreateInstance(inverterTab).show();
+  }
+}
 
 // Read-only device list: independent of write support and of the dispatch controller.
 async function refreshPlanDevices() {
   const select = $('energy-plan-device');
   if (!select) return;
   planDevices = await api('energy/planning-devices');
-  const previous = select.value;
-  select.replaceChildren(...planDevices.map((device) => {
-    const option = element('option', '', device.device_name || device.device_id);
-    option.value = device.device_id;
-    return option;
-  }));
-  if (planDevices.some((device) => device.device_id === previous)) select.value = previous;
+  syncPlanSelection();
   fillPlanLimits();
 }
 
@@ -1411,8 +1790,8 @@ let consumptionGeneration = 0;
 
 // Bar colours per source; unavailable days stay empty instead of being drawn as zero.
 const CONSUMPTION_SOURCES = {
-  local_measured: { label: 'Measured locally', color: '--consumption-measured' },
-  inverter_history: { label: 'Inverter day total', color: '--consumption-history' },
+  local_measured: { label: 'Locally measured', color: '--consumption-measured' },
+  inverter_history: { label: 'Recovered from inverter history', color: '--consumption-history' },
 };
 
 function consumptionChartColors() {
@@ -1427,7 +1806,6 @@ function consumptionChartColors() {
 function syncConsumptionChartTheme() {
   if (!consumptionChart) return;
   const { label, grid } = consumptionChartColors();
-  consumptionChart.options.plugins.legend.labels.color = label;
   for (const axis of Object.values(consumptionChart.options.scales)) {
     axis.ticks.color = label;
     axis.grid.color = grid;
@@ -1442,6 +1820,58 @@ function setConsumptionVisible(visible) {
   if (section) section.hidden = !visible;
 }
 
+// Data coverage of the window, neutral on purpose: a day counts once it has a value, whether it
+// was measured locally or recovered from the inverter's day history. Only the already-fetched
+// history is used. A null/undefined history clears the slot.
+function renderInverterHistoryStatus(history) {
+  const slot = $('energy-consumption-import-status');
+  if (!slot) return false;
+  if (!history) {
+    slot.replaceChildren();
+    return false;
+  }
+  const days = Array.isArray(history.days) ? history.days : [];
+  const known = days.filter((day) => Number.isFinite(day.energy_wh));
+  const since = Date.parse(history.recording_since);
+  let coverage = `History coverage · ${known.length}/${days.length} days`;
+  if (!known.length && Number.isFinite(since)) {
+    coverage += ` · recording since ${new Date(since).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: '2-digit' })}`;
+  }
+  const parts = [element('span', '', coverage)];
+  if (known.length) {
+    const local = known.filter((day) => day.source === 'local_measured').length;
+    const inverter = known.filter((day) => day.source === 'inverter_history').length;
+    parts.push(element('span', 'energy-consumption-sources', `${local} local · ${inverter} inverter`));
+  }
+  slot.replaceChildren(...parts);
+  return true;
+}
+
+// One button per data series; each toggles exactly its own dataset (keyboard and touch operable)
+// and reports the state through aria-pressed, which also drives the strike-through.
+function consumptionLegend(chart, datasets) {
+  const group = element('div', 'energy-consumption-legend');
+  group.setAttribute('role', 'group');
+  group.setAttribute('aria-label', 'Data sources');
+  datasets.forEach((dataset, index) => {
+    const button = element('button', 'energy-consumption-legend-item');
+    button.type = 'button';
+    button.setAttribute('aria-pressed', 'true');
+    const swatch = element('span', 'energy-consumption-legend-swatch');
+    swatch.style.backgroundColor = dataset.backgroundColor;
+    swatch.setAttribute('aria-hidden', 'true');
+    button.append(swatch, element('span', '', dataset.label));
+    button.addEventListener('click', () => {
+      const visible = chart.isDatasetVisible(index);
+      chart.setDatasetVisibility(index, !visible);
+      button.setAttribute('aria-pressed', String(!visible));
+      chart.update('none');
+    });
+    group.append(button);
+  });
+  return group;
+}
+
 function drawConsumptionChart(history) {
   consumptionChart?.destroy();
   consumptionChart = null;
@@ -1449,10 +1879,13 @@ function drawConsumptionChart(history) {
   const status = $('energy-consumption-status');
   const days = Array.isArray(history?.days) ? history.days : [];
   const known = days.filter((day) => Number.isFinite(day.energy_wh));
+  const hasImportStatus = renderInverterHistoryStatus(history);
   if (!known.length) {
     status.replaceChildren();
     host.replaceChildren();
-    setConsumptionVisible(false);
+    // Keep the section visible while the import status still has something to say (import off, or
+    // on but no completed day yet), so it can explain the otherwise-empty chart.
+    setConsumptionVisible(hasImportStatus);
     return;
   }
   setConsumptionVisible(true);
@@ -1461,8 +1894,8 @@ function drawConsumptionChart(history) {
     return;
   }
   const average = known.reduce((sum, day) => sum + day.energy_wh, 0) / known.length / 1000;
-  status.replaceChildren(element('span', 'badge rounded-pill text-bg-secondary',
-    `Ø ${average.toLocaleString(undefined, { maximumFractionDigits: 1 })} kWh/day · ${known.length} of ${days.length} days`));
+  status.replaceChildren(element('span', '',
+    `Ø ${average.toLocaleString(undefined, { maximumFractionDigits: 1 })} kWh/day`));
   const box = element('div', 'spot-market-chart-box');
   const canvas = element('canvas');
   canvas.setAttribute('role', 'img');
@@ -1479,14 +1912,15 @@ function drawConsumptionChart(history) {
       backgroundColor: color, borderColor: color, stack: 'kwh', borderRadius: 2,
     };
   });
-  consumptionChart = new window.Chart(canvas, {
+  const chart = new window.Chart(canvas, {
     type: 'bar',
     data: { labels, datasets },
     options: {
       responsive: true, maintainAspectRatio: false, animation: false,
       interaction: { mode: 'index', intersect: false, axis: 'x' },
       plugins: {
-        legend: { display: true, labels: { color: label } },
+        // The legend is HTML (consumptionLegend): every entry is a real button for its own series.
+        legend: { display: false },
         tooltip: {
           filter: (item) => Number.isFinite(item.parsed?.y),
           callbacks: { label: (item) => `${item.dataset.label}: ${item.parsed.y.toLocaleString(undefined, { maximumFractionDigits: 2 })} kWh` },
@@ -1494,10 +1928,12 @@ function drawConsumptionChart(history) {
       },
       scales: {
         x: { stacked: true, grid: { color: grid }, ticks: { color: label, autoSkip: true, maxTicksLimit: 8, maxRotation: 0 } },
-        y: { stacked: true, beginAtZero: true, grid: { color: grid }, ticks: { color: label }, title: { display: true, text: 'kWh', color: label } },
+        y: { stacked: true, beginAtZero: true, grid: { color: grid }, ticks: { color: label, padding: 6 }, title: chartAxisTitle('kWh', label) },
       },
     },
   });
+  consumptionChart = chart;
+  host.prepend(consumptionLegend(chart, datasets));
 }
 
 async function loadConsumptionHistory(deviceId) {
@@ -1508,6 +1944,7 @@ async function loadConsumptionHistory(deviceId) {
   consumptionChart?.destroy();
   consumptionChart = null;
   $('energy-consumption-status')?.replaceChildren();
+  $('energy-consumption-import-status')?.replaceChildren();
   host.replaceChildren();
   setConsumptionVisible(false);
   try {
@@ -1525,8 +1962,10 @@ async function loadConsumptionHistory(deviceId) {
 // every new load (refresh, device change) and when the page is hidden or left.
 const PLAN_POLL_MS = 10_000;
 const PLAN_POLL_MAX = 30;
+const PLAN_REFRESH_MS = 5 * 60 * 1000;
 let planPollTimer = null;
 let planPollAttempts = 0;
+let planLastStatus = null; // a status change restarts the wait; a background refresh does not
 
 function stopPlanPolling() {
   clearTimeout(planPollTimer);
@@ -1540,15 +1979,14 @@ function armPlanPolling() {
     if (document.hidden) { armPlanPolling(); return; }
     planPollAttempts += 1;
     void loadDryRunPlan({ poll: true });
-  }, PLAN_POLL_MS);
+  }, pollDelay(PLAN_POLL_MS));
 }
 
 async function loadDryRunPlan({ poll = false } = {}) {
   const select = $('energy-plan-device');
-  const button = $('energy-plan-load');
   const host = $('energy-plan-result');
   stopPlanPolling();
-  if (!poll) planPollAttempts = 0;
+  if (!poll) { planPollAttempts = 0; planLastStatus = null; }
   if (!poll) {
     clearPlanForecast();
     clearPlanSchedule();
@@ -1558,28 +1996,43 @@ async function loadDryRunPlan({ poll = false } = {}) {
     return;
   }
   const generation = ++planGeneration; // a slower earlier response must not overwrite a newer one
+  if (typeof energyExpertMode !== 'undefined' && energyExpertMode) void loadBatteryCalibrationHistory(select.value);
   if (!poll) {
     void loadConsumptionHistory(select.value);
-    button.disabled = true;
     host.replaceChildren(planWaitState());
   }
   try {
-    const plan = await api(`energy/devices/${encodeURIComponent(select.value)}/dynamic-plan`);
+    // Keep the Energy Manager mode current; Off inverters drop out of the plan select.
+    // Same endpoint as refreshPlanDevices(): adopting the list also drops removed inverters.
+    await api('energy/planning-devices', { background: poll }).then((list) => {
+      if (Array.isArray(list)) planDevices = list;
+    }).catch(() => { });
     if (generation !== planGeneration) return;
+    const before = select.value;
+    syncPlanSelection();
+    if (!select.value) return; // no active inverter: the tab is hidden and nothing is requested
+    if (select.value !== before) { fillPlanLimits(); void loadDryRunPlan(); return; }
+    const plan = await api(`energy/devices/${encodeURIComponent(select.value)}/dynamic-plan`, { background: poll });
+    if (generation !== planGeneration) return;
+    if (plan.status !== planLastStatus) { planLastStatus = plan.status; planPollAttempts = 0; }
     const exhausted = planPollAttempts >= PLAN_POLL_MAX;
-    renderDryRunPlan(plan, { waiting: !exhausted });
-    if (PLAN_PENDING_STATUSES.has(plan.status) && !exhausted) armPlanPolling();
+    renderDryRunPlan(plan);
+    if (PLAN_RETRY_STATUSES.has(plan.status) && !exhausted) armPlanPolling();
   } catch (error) {
-    if (generation === planGeneration) host.replaceChildren(element('p', 'text-danger', messageFrom(error)));
-  } finally {
-    if (generation === planGeneration) button.disabled = false;
+    if (generation !== planGeneration) return;
+    // A background poll that fails transiently keeps what is shown and keeps a pending plan polling.
+    if (poll && planLastStatus !== null) {
+      if (PLAN_RETRY_STATUSES.has(planLastStatus) && planPollAttempts < PLAN_POLL_MAX) armPlanPolling();
+      return;
+    }
+    host.replaceChildren(element('p', 'text-danger', messageFrom(error)));
   }
 }
 
 function initDryRunPlan() {
   const select = $('energy-plan-device');
   if (!select) return;
-  $('energy-plan-load').addEventListener('click', () => { void loadDryRunPlan(); });
+  $('energy-plan-diagnostics')?.addEventListener('toggle', drawBatteryCalibrationChart);
   select.addEventListener('change', () => { fillPlanLimits(); void loadDryRunPlan(); });
   $('energy-plan-limits')?.addEventListener('submit', (event) => { void savePlanLimits(event); });
   const planExpertSwitch = $('energy-plan-expert-mode');
@@ -1591,6 +2044,10 @@ function initDryRunPlan() {
     planExpertSwitch.addEventListener('change', () => setEnergyExpertMode(planExpertSwitch.checked));
   }
   window.addEventListener('pagehide', stopPlanPolling);
+  // The plan follows spot prices and forecasts, so it reloads by itself; no manual refresh needed.
+  setInterval(() => { if (!document.hidden && select.value) void loadDryRunPlan({ poll: true }); }, PLAN_REFRESH_MS);
+  // Staggered with the other visibility refreshes so returning to the tab is not a request burst.
+  document.addEventListener('visibilitychange', () => { if (!document.hidden && select.value) setTimeout(() => void loadDryRunPlan({ poll: true }), 600 + Math.random() * 600); });
   select.addEventListener('focus', () => { refreshPlanDevices().catch(() => { }); });
   refreshPlanDevices().then(() => loadDryRunPlan())
     .catch((error) => $('energy-plan-result').replaceChildren(element('p', 'text-danger', messageFrom(error))));
@@ -1606,6 +2063,7 @@ function setEnergyExpertMode(enabled) {
   if (state) state.textContent = enabled ? 'On' : 'Off';
   const advanced = $('energy-plan-advanced');
   if (advanced) advanced.hidden = !enabled;
+  if (enabled && $('energy-plan-device')?.value) void loadBatteryCalibrationHistory($('energy-plan-device').value);
   for (const node of document.querySelectorAll('#energy-plan-result [data-expert-only]')) node.hidden = !enabled;
   const form = $('energy-plan-limits');
   if (form) {
@@ -1636,9 +2094,8 @@ function initEnergy() {
   initDryRunPlan();
   pollEnergy();
   pollHardwareStrategies();
-  setInterval(() => { if (!document.hidden) pollEnergy(); }, ENERGY_POLL_MS);
   setInterval(() => { if (!document.hidden) pollHardwareStrategies(); }, 30000);
   document.addEventListener('visibilitychange', () => { if (!document.hidden) pollEnergy(); });
-  document.addEventListener('visibilitychange', () => { if (!document.hidden) pollHardwareStrategies(); });
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) setTimeout(pollHardwareStrategies, 300 + Math.random() * 600); });
 }
 

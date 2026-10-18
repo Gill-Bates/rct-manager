@@ -287,6 +287,9 @@
 
   function renderAddWidgetList() {
     const list = $('add-widget-list');
+    // The rebuild destroys the clicked button; without a refocus focus falls to <body> and the
+    // modal's Escape handler (bound to the modal element) no longer fires.
+    const focusedId = list.contains(document.activeElement) ? document.activeElement.dataset.widgetId : null;
     list.replaceChildren(
       ...DEFAULT_LAYOUT.map((def) => {
         const visible = widgetState.get(def.id)?.visible !== false;
@@ -299,11 +302,13 @@
         button.className = visible ? 'btn btn-sm btn-outline-secondary' : 'btn btn-sm btn-primary';
         button.textContent = visible ? 'Remove' : 'Add';
         button.setAttribute('aria-label', `${visible ? 'Remove' : 'Add'} widget: ${def.label}`);
+        button.dataset.widgetId = def.id;
         button.addEventListener('click', () => toggleWidgetVisibility(def.id, !visible));
         item.append(label, button);
         return item;
       })
     );
+    if (focusedId) list.querySelector(`button[data-widget-id="${focusedId}"]`)?.focus();
   }
 
   function resetLayout() {
@@ -382,10 +387,11 @@
       $('dashboard-edit-toggle').disabled = true;
       try { await saveLayout(); } finally { $('dashboard-edit-toggle').disabled = false; }
     });
+    // An Escape inside a modal (its own handler hides it before this one runs) must not also cancel the edit.
     document.addEventListener('keydown', (event) => {
       if (!editingNow || event.key !== 'Escape' || event.isComposing ||
         event.ctrlKey || event.metaKey || event.altKey || event.shiftKey ||
-        (event.target instanceof Element && event.target.closest('input, textarea, [contenteditable]')) ||
+        (event.target instanceof Element && event.target.closest('input, textarea, [contenteditable], .modal')) ||
         document.querySelector('.modal.show')) return;
       cancelEditing();
     });

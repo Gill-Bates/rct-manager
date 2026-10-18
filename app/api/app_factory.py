@@ -10,7 +10,13 @@ import asyncio
 import contextlib
 import functools
 import logging
-from collections.abc import AsyncIterator, Callable, Iterable, Iterator, Mapping
+from collections.abc import (
+    AsyncIterator,
+    Callable,
+    Iterable,
+    Iterator,
+    Mapping,
+)
 from dataclasses import dataclass, field, replace
 from datetime import timedelta
 from pathlib import Path
@@ -31,7 +37,11 @@ from app.admin.api import router as admin_router
 from app.admin.dispatch_api import router as admin_dispatch_router
 from app.admin.energy_api import router as admin_energy_router
 from app.admin.energy_verification import router as admin_energy_verification_router
-from app.admin.forecast_refresh import drain_store_threads, run_solar_refresh_loop, run_spot_market_refresh_loop
+from app.admin.forecast_refresh import (
+    drain_store_threads,
+    run_solar_refresh_loop,
+    run_spot_market_refresh_loop,
+)
 from app.admin.store import AdminStore
 from app.admin.ui import install_ui
 from app.api.body_limit import BodyLimitMiddleware
@@ -58,19 +68,27 @@ from app.dispatch.soc_policy import SocTargetPolicy, SocTargetPolicyRegistry
 from app.dispatch.store import DispatchStore
 from app.energy.manager import EnergyManager
 from app.energy.models import EnergyMode, ModeRecord
+from app.energy.plan_handoff import PlanDispatchHandoff
 from app.errors import ConfigError, DeviceApiError, ReconfigurationBuildError
-from app.gateway.battery_inventory import RCT_MODULE_SN_SLOTS, ModuleCountVerifiedCapacity
+from app.gateway.battery_inventory import (
+    BMS_SERIAL_METRIC,
+    CAPACITY_AH_METRICS,
+    RCT_MODULE_SN_SLOTS,
+    MeasuredBatteryCapacity,
+)
 from app.gateway.cache import MemoryCache
 from app.gateway.energy_readings import RctEnergyReadings
 from app.gateway.live_charge_limit import RctLiveChargeLimitProvider
 from app.gateway.rct import DeviceBinding, RctGateway
 from app.gateway.rct_dispatch import RctDispatchGateway
+from app.limits import DEFAULT_DEVICE_POWER_LIMIT_W
 from app.observability.event_hub import EventHub
 from app.observability.exporter import DeviceView, EndpointView, MetricsExporter
 from app.observability.log_stream import TsdbLogHandler, register_tsdb_log_type
 from app.observability.names import build_metric_names, metric_help
 from app.observability.stats import ServiceCounters
 from app.optimizer.runtime_sources import build_runtime_planning_service
+from app.optimizer.service import PlanningService
 from app.protocol.types import StructKind
 from app.scheduling.budget import WorkBudget
 from app.scheduling.heartbeat import Heartbeat
@@ -103,14 +121,25 @@ from app.weather.timezone import TimezoneResolver
 
 log = logging.getLogger(__name__)
 _PERIODIC_CHECK_SECONDS = 10.0
+_PLAN_HANDOFF_POLL_SECONDS = 30.0
 _NAME_RETRY_SECONDS = 15.0  # between attempts to read the inverter's own name
 _SERIAL_MAX_ATTEMPTS = 3  # tries to read the serial number once the name is known
 _PASSWORD_POLL_SECONDS = 1.0
-_RECONFIGURE_DRAIN_SECONDS = 10.0  # shutdown waits this long for an in-flight reconfiguration
-_REFRESH_CYCLE_SECONDS = 10.0  # 8 reads per cycle cover 40 values within the 2 x pas.period threshold
-_INVENTORY_CHECK_SECONDS = 15.0  # loop cadence; read_module_inventory itself gates the slow device reads
+_RECONFIGURE_DRAIN_SECONDS = (
+    10.0  # shutdown waits this long for an in-flight reconfiguration
+)
+_REFRESH_CYCLE_SECONDS = (
+    10.0  # 8 reads per cycle cover 40 values within the 2 x pas.period threshold
+)
+_INVENTORY_CHECK_SECONDS = (
+    15.0  # loop cadence; read_module_inventory itself gates the slow device reads
+)
+_CAPACITY_AH_REFRESH_SECONDS = 24 * 60 * 60
+_CAPACITY_AH_RETRY_SECONDS = 6 * 60 * 60
 _bearer = HTTPBearer(auto_error=False, description="Bearer token")
-_FAVICON_BYTES = (Path(__file__).resolve().parent.parent / "admin" / "static" / "img" / "favicon.ico").read_bytes()
+_FAVICON_BYTES = (
+    Path(__file__).resolve().parent.parent / "admin" / "static" / "img" / "favicon.ico"
+).read_bytes()
 _DOCS_HEADERS = {
     # Public, token-free page (DOCS_PUBLIC): restrictive by default since it ships "Try it out".
     "Content-Security-Policy": (
@@ -128,7 +157,9 @@ class _Parts:
     endpoints: list[TransportEndpoint] = field(default_factory=list)
     serializers: list[AccessSerializer] = field(default_factory=list)
     heartbeats: list[tuple[TransportEndpoint, Heartbeat]] = field(default_factory=list)
-    device_endpoints: list[tuple[DeviceEntry, TransportEndpoint]] = field(default_factory=list)
+    device_endpoints: list[tuple[DeviceEntry, TransportEndpoint]] = field(
+        default_factory=list
+    )
     periodic: list[PeriodicManager] = field(default_factory=list)
     refresh_devices: list[str] = field(default_factory=list)
     endpoint_views: list[EndpointView] = field(default_factory=list)
@@ -155,7 +186,9 @@ class _DeviceGraph:
     endpoints: list[TransportEndpoint] = field(default_factory=list)
     serializers: list[AccessSerializer] = field(default_factory=list)
     heartbeats: list[tuple[TransportEndpoint, Heartbeat]] = field(default_factory=list)
-    device_endpoints: list[tuple[DeviceEntry, TransportEndpoint]] = field(default_factory=list)
+    device_endpoints: list[tuple[DeviceEntry, TransportEndpoint]] = field(
+        default_factory=list
+    )
     periodic: list[PeriodicManager] = field(default_factory=list)
     refresh_devices: list[str] = field(default_factory=list)
     endpoint_views: list[EndpointView] = field(default_factory=list)
@@ -169,7 +202,9 @@ _GRAPH_FIELDS = (
 )  # fmt: skip
 
 
-def load_allowlist(settings: Settings, catalog: RegistryCatalog, selected: list[str] | None = None) -> Allowlist:
+def load_allowlist(
+    settings: Settings, catalog: RegistryCatalog, selected: list[str] | None = None
+) -> Allowlist:
     # With write support off the allowlist is "none" regardless of the file: a disabled feature
     # must not be able to fail the whole service start on a broken/garbage allowlist file. The
     # file is read only when writes are enabled (including _load_default_write_entries, which
@@ -179,7 +214,14 @@ def load_allowlist(settings: Settings, catalog: RegistryCatalog, selected: list[
     available = Allowlist.load(settings.write_allowlist_path, catalog)
     if selected is None:
         return available
-    return Allowlist({name: entry for name in selected if (entry := available.entry(name)) is not None}, catalog)
+    return Allowlist(
+        {
+            name: entry
+            for name in selected
+            if (entry := available.entry(name)) is not None
+        },
+        catalog,
+    )
 
 
 @dataclass(slots=True)
@@ -198,7 +240,9 @@ class _IdentityReset:
     soc_target_policy: SocTargetPolicy
 
 
-def _plan_identity_resets(runtime: Runtime, reset_ids: Iterable[str]) -> list[_IdentityReset]:
+def _plan_identity_resets(
+    runtime: Runtime, reset_ids: Iterable[str]
+) -> list[_IdentityReset]:
     """Read the current identity-bound state of every affected device and build its reset target.
 
     Pure reads: nothing is mutated here, so the plan for the whole set is computed before any single
@@ -228,7 +272,10 @@ def _plan_identity_resets(runtime: Runtime, reset_ids: Iterable[str]) -> list[_I
             if old_limits is not None and old_limits.engineering_mode
             else None
         )
-        switch_energy_off = runtime.energy is not None and runtime.energy.mode(device_id) is not EnergyMode.OFF
+        switch_energy_off = (
+            runtime.energy is not None
+            and runtime.energy.mode(device_id) is not EnergyMode.OFF
+        )
         # SocTargetPolicy is per-device/firmware (design doc), so it is an identity-bound claim
         # exactly like the capability evidence above and must not survive onto the new device.
         plans.append(
@@ -260,7 +307,9 @@ async def _apply_identity_reset(runtime: Runtime, reset: _IdentityReset) -> None
         await runtime.dispatch.set_device_limits(reset.device_id, reset.limits)
     if reset.switch_energy_off and runtime.energy is not None:
         await runtime.energy.set_mode(reset.device_id, EnergyMode.OFF, actor=None)
-    await runtime.dispatch.set_soc_target_policy(reset.device_id, reset.soc_target_policy)
+    await runtime.dispatch.set_soc_target_policy(
+        reset.device_id, reset.soc_target_policy
+    )
 
 
 class _LiveDevices(Mapping[str, DeviceEntry]):
@@ -293,10 +342,16 @@ def _roles(settings: Settings) -> dict[str, str]:
 
 
 def _endpoint_view(
-    settings: Settings, clock: Clock, endpoint: TransportEndpoint, serializer: AccessSerializer
+    settings: Settings,
+    clock: Clock,
+    endpoint: TransportEndpoint,
+    serializer: AccessSerializer,
 ) -> EndpointView:
     counters = endpoint.counters
-    window, threshold = settings.unexpected_frame_window_seconds, settings.foreign_access_frame_threshold
+    window, threshold = (
+        settings.unexpected_frame_window_seconds,
+        settings.foreign_access_frame_threshold,
+    )
     return EndpointView(
         endpoint.endpoint_id,
         counters,
@@ -348,19 +403,30 @@ def _build_device_graph(
             device_ids=tuple(d.device_id for d in entries),
         )
         endpoint = TransportEndpoint(
-            endpoint_id, key, config, clock, connector=connector, on_value=gateway.value_sink(key)
+            endpoint_id,
+            key,
+            config,
+            clock,
+            connector=connector,
+            on_value=gateway.value_sink(key),
         )
         serializer = AccessSerializer(
             endpoint,
             gateway.handler(endpoint),
             queue_max_length=settings.queue_max_length,
             queue_max_wait_seconds=settings.queue_max_wait_seconds,
-            budget=WorkBudget(settings.device_budget_transactions, settings.device_budget_window_seconds, clock),
+            budget=WorkBudget(
+                settings.device_budget_transactions,
+                settings.device_budget_window_seconds,
+                clock,
+            ),
             cache_hit=gateway.cache_hit,
         )
         graph.endpoints.append(endpoint)
         graph.serializers.append(serializer)
-        graph.endpoint_views.append(_endpoint_view(settings, clock, endpoint, serializer))
+        graph.endpoint_views.append(
+            _endpoint_view(settings, clock, endpoint, serializer)
+        )
         for entry in entries:
             binding = DeviceBinding(entry, endpoint, serializer)
             gateway.add_device(binding)
@@ -378,7 +444,12 @@ def _build_device_graph(
             if periodic_names:
                 object_ids = [catalog.object_entry(n).object_id for n in periodic_names]
                 binding.periodic = PeriodicManager(
-                    endpoint, serializer, entry.key, object_ids, settings.periodic_interval_seconds, clock
+                    endpoint,
+                    serializer,
+                    entry.key,
+                    object_ids,
+                    settings.periodic_interval_seconds,
+                    clock,
                 )
                 graph.periodic.append(binding.periodic)
                 graph.refresh_devices.append(entry.device_id)
@@ -386,12 +457,18 @@ def _build_device_graph(
 
 
 def _build(
-    settings: Settings, clock: Clock, connector: Connector | None, selected_writes: list[str] | None = None,
+    settings: Settings,
+    clock: Clock,
+    connector: Connector | None,
+    selected_writes: list[str] | None = None,
     selected_exposed: list[str] | None = None,
 ) -> tuple[RctGateway, RegistryCatalog, _Parts, ShutdownCoordinator]:
     catalog = RegistryCatalog.from_file(settings.object_registry_path)
     if settings.heartbeat_metric_name not in catalog.names():
-        raise ConfigError("invalid_object_registry", detail="HEARTBEAT_METRIC_NAME is not in the object registry")
+        raise ConfigError(
+            "invalid_object_registry",
+            detail="HEARTBEAT_METRIC_NAME is not in the object registry",
+        )
     if settings.enable_vendor_diagnostics and not any(
         entry.struct is StructKind.SLAVE_DATA for entry in catalog.entries()
     ):
@@ -427,16 +504,31 @@ def _build(
     )
     parts = _Parts()
     periodic_names = _effective_periodic_names(settings, catalog, selected_exposed)
-    graph = _build_device_graph(settings, clock, connector, catalog, gateway, periodic_names)
+    graph = _build_device_graph(
+        settings, clock, connector, catalog, gateway, periodic_names
+    )
     parts.adopt(graph)
     numeric = [e for e in catalog.entries() if is_numeric(e.value_type)]
     names = build_metric_names(numeric)
-    exposed = selected_exposed if selected_exposed is not None else settings.metrics_exposed_names or catalog.preselected()
+    exposed = (
+        selected_exposed
+        if selected_exposed is not None
+        else settings.metrics_exposed_names or catalog.preselected()
+    )
     unknown = [n for n in exposed if n not in names]
     if unknown:
-        raise ConfigError("invalid_metrics_exposed_names", detail=f"METRICS_EXPOSED_NAMES: not exportable: {unknown}")
+        raise ConfigError(
+            "invalid_metrics_exposed_names",
+            detail=f"METRICS_EXPOSED_NAMES: not exportable: {unknown}",
+        )
     parts.exporter = MetricsExporter(
-        cache, clock.monotonic, parts.service, parts.device_views, parts.endpoint_views, names, exposed,
+        cache,
+        clock.monotonic,
+        parts.service,
+        parts.device_views,
+        parts.endpoint_views,
+        names,
+        exposed,
         {e.name: e.enum_labels for e in catalog.entries() if e.enum_labels},
         {e.name: metric_help(e) for e in numeric},
     )
@@ -463,7 +555,9 @@ def _build(
 # single-tower inverter may not answer them, and an unanswered READ drops the connection. They join
 # the periodic set at runtime via _activate_second_tower once the stabilized module inventory
 # confirms the tower.
-_DASHBOARD_METRIC_NAMES = tuple(n for n in DEVICE_CARD_METRIC_NAMES if n not in SECOND_TOWER_METRIC_NAMES)
+_DASHBOARD_METRIC_NAMES = tuple(
+    n for n in DEVICE_CARD_METRIC_NAMES if n not in SECOND_TOWER_METRIC_NAMES
+)
 
 # The module_sn slots read out-of-band by the inventory loop. Seven slots is the catalog array size
 # (RCT_MODULE_SN_SLOTS), not a module limit; both tower prefixes are read so devices() can classify
@@ -474,7 +568,9 @@ _MODULE_INVENTORY_NAMES = (
 )
 
 
-def _with_dashboard_metric_names(periodic_names: list[str], catalog: RegistryCatalog) -> list[str]:
+def _with_dashboard_metric_names(
+    periodic_names: list[str], catalog: RegistryCatalog
+) -> list[str]:
     """Keep device-card values fed even when they are not in METRICS_EXPOSED_NAMES.
 
     Periodic reads stay within MAX_PERIODIC_PER_DEVICE; silently skip extra names once that cap
@@ -482,7 +578,11 @@ def _with_dashboard_metric_names(periodic_names: list[str], catalog: RegistryCat
     """
     if not periodic_names:
         return periodic_names  # periodic reads disabled or no preselected metrics: leave it off
-    extra = [n for n in _DASHBOARD_METRIC_NAMES if catalog.exists(n) and n not in periodic_names]
+    extra = [
+        n
+        for n in _DASHBOARD_METRIC_NAMES
+        if catalog.exists(n) and n not in periodic_names
+    ]
     room = MAX_PERIODIC_PER_DEVICE - len(periodic_names)
     return periodic_names + extra[: max(room, 0)]
 
@@ -496,7 +596,9 @@ _ENERGY_METRIC_NAMES = (
 _CONSUMPTION_COUNTER_NAMES = ("energy_e_load_total", "energy_e_load_day")
 
 
-def _with_energy_metric_names(periodic_names: list[str], catalog: RegistryCatalog) -> list[str]:
+def _with_energy_metric_names(
+    periodic_names: list[str], catalog: RegistryCatalog
+) -> list[str]:
     """Pin the energy-flow figures, the way the dashboard pins its own values.
 
     The readings are cache-only and feed the dashboard flow graphic as well as the Energy Manager,
@@ -507,7 +609,9 @@ def _with_energy_metric_names(periodic_names: list[str], catalog: RegistryCatalo
     if not periodic_names:
         return periodic_names
     extra = [
-        n for n in (*_ENERGY_METRIC_NAMES, *_CONSUMPTION_COUNTER_NAMES) if catalog.exists(n) and n not in periodic_names
+        n
+        for n in (*_ENERGY_METRIC_NAMES, *_CONSUMPTION_COUNTER_NAMES)
+        if catalog.exists(n) and n not in periodic_names
     ]
     shortfall = len(periodic_names) + len(extra) - MAX_PERIODIC_PER_DEVICE
     names = list(periodic_names)
@@ -516,14 +620,19 @@ def _with_energy_metric_names(periodic_names: list[str], catalog: RegistryCatalo
         victims = [n for n in reversed(names) if n not in flow][:shortfall]
         log.warning(
             "Periodic selection is full (%d); dropping %d metric(s) to keep the energy-flow metrics: %s",
-            MAX_PERIODIC_PER_DEVICE, len(victims), ", ".join(victims),
+            MAX_PERIODIC_PER_DEVICE,
+            len(victims),
+            ", ".join(victims),
         )
         names = [n for n in names if n not in set(victims)]
     return names + extra
 
 
-def _periodic_names(settings: Settings, catalog: RegistryCatalog,
-                    selected_exposed: list[str] | None = None) -> list[str]:
+def _periodic_names(
+    settings: Settings,
+    catalog: RegistryCatalog,
+    selected_exposed: list[str] | None = None,
+) -> list[str]:
     """A programmatic periodic_metrics list wins (not env-settable); else the exposed numeric metrics."""
     if not settings.enable_periodic_reads:
         return []
@@ -551,14 +660,21 @@ def _effective_periodic_names(
 ) -> list[str]:
     """Periodic names plus the pinned dashboard and Energy Manager values."""
     names = _periodic_names(settings, catalog, selected_exposed)
-    if settings.periodic_metrics:  # a programmatic periodic_metrics list (not env-settable) is kept as given
+    if (
+        settings.periodic_metrics
+    ):  # a programmatic periodic_metrics list (not env-settable) is kept as given
         return names
     # Order is the cap priority: flow metrics before card metrics before module serials.
     names = _with_energy_metric_names(names, catalog)
     return _with_dashboard_metric_names(names, catalog)
 
 
-def _seed_limits(settings: Settings, stored: dict[str, DeviceLimits]) -> dict[str, DeviceLimits]:
+def _seed_limits(
+    settings: Settings,
+    stored: dict[str, DeviceLimits],
+    *,
+    default_fallback: bool = False,
+) -> dict[str, DeviceLimits]:
     """Stored operator limits win; the environment only seeds a device that has no record yet.
 
     Usable capacity is per-device (P2-8): an install may run several batteries with different usable
@@ -570,13 +686,28 @@ def _seed_limits(settings: Settings, stored: dict[str, DeviceLimits]) -> dict[st
     never applied on top of a device that already has a different per-device capacity set.
     """
     legacy_capacity = settings.dispatch_usable_battery_capacity_wh
-    if settings.dispatch_max_charge_power_w is not None and settings.dispatch_max_discharge_power_w is not None:
+    if (
+        settings.dispatch_max_charge_power_w is not None
+        and settings.dispatch_max_discharge_power_w is not None
+    ):
         for device in settings.devices:
             stored.setdefault(
                 device.device_id,
                 DeviceLimits(
                     settings.dispatch_max_charge_power_w,
                     settings.dispatch_max_discharge_power_w,
+                    usable_capacity_wh=legacy_capacity,
+                ),
+            )
+    # Live dispatch only: Basic mode never asks for power limits, so a device with neither a stored
+    # record nor an environment value gets the conservative default (in memory; Expert can persist).
+    if default_fallback:
+        for device in settings.devices:
+            stored.setdefault(
+                device.device_id,
+                DeviceLimits(
+                    DEFAULT_DEVICE_POWER_LIMIT_W,
+                    DEFAULT_DEVICE_POWER_LIMIT_W,
                     usable_capacity_wh=legacy_capacity,
                 ),
             )
@@ -587,7 +718,8 @@ def _seed_limits(settings: Settings, stored: dict[str, DeviceLimits]) -> dict[st
                     "Seeding per-device usable battery capacity for %s from the legacy global "
                     "DISPATCH_USABLE_BATTERY_CAPACITY_WH=%s; set it per device via the dispatch API, "
                     "the per-device value is authoritative from then on",
-                    device_id, legacy_capacity,
+                    device_id,
+                    legacy_capacity,
                 )
                 stored[device_id] = replace(limits, usable_capacity_wh=legacy_capacity)
     return stored
@@ -621,7 +753,11 @@ async def _log_startup_device(
     """
     await asyncio.gather(connect, return_exceptions=True)
     address = f"{entry.host}:{entry.port}"
-    timeout = settings.queue_max_wait_seconds + settings.connect_timeout_seconds + settings.read_total_timeout_seconds
+    timeout = (
+        settings.queue_max_wait_seconds
+        + settings.connect_timeout_seconds
+        + settings.read_total_timeout_seconds
+    )
     first_attempt = True
     name_known = False
     serial_attempts = 0
@@ -630,11 +766,17 @@ async def _log_startup_device(
             # The serial is best effort: a few tries, then the card simply omits it.
             try:
                 async with asyncio.timeout(timeout):
-                    serial = _printable(await gateway.read_inverter_serial(entry.device_id))[:64]
+                    serial = _printable(
+                        await gateway.read_inverter_serial(entry.device_id)
+                    )[:64]
             except (DeviceApiError, TimeoutError):
                 serial_attempts += 1
                 if serial_attempts >= _SERIAL_MAX_ATTEMPTS:
-                    log.warning("Inverter %s at %s: serial number could not be read", entry.device_id, address)
+                    log.warning(
+                        "Inverter %s at %s: serial number could not be read",
+                        entry.device_id,
+                        address,
+                    )
                     return
             else:
                 if serial:
@@ -642,19 +784,35 @@ async def _log_startup_device(
                 return
         elif endpoint.state is not EndpointState.CONNECTED:
             if first_attempt:
-                log.warning("Inverter %s at %s: connection failed", entry.device_id, address)
+                log.warning(
+                    "Inverter %s at %s: connection failed", entry.device_id, address
+                )
         else:
             try:
                 async with asyncio.timeout(timeout):
                     raw_name = await gateway.read_inverter_name(entry.device_id)
             except (DeviceApiError, TimeoutError) as exc:
                 if first_attempt:
-                    reason = exc.code if isinstance(exc, DeviceApiError) else "startup_timeout"
-                    log.warning("Inverter %s at %s: connected, name read failed (%s)", entry.device_id, address, reason)
+                    reason = (
+                        exc.code
+                        if isinstance(exc, DeviceApiError)
+                        else "startup_timeout"
+                    )
+                    log.warning(
+                        "Inverter %s at %s: connected, name read failed (%s)",
+                        entry.device_id,
+                        address,
+                        reason,
+                    )
             else:
                 name = _printable(raw_name)[:64] or "unknown"
                 gateway.set_reported_name(entry.device_id, name)
-                log.info("Inverter %s at %s: connected, name=%s", entry.device_id, address, name)
+                log.info(
+                    "Inverter %s at %s: connected, name=%s",
+                    entry.device_id,
+                    address,
+                    name,
+                )
                 name_known = True
                 continue
         first_attempt = False
@@ -679,21 +837,35 @@ async def _refresh_loop(gateway: RctGateway, device_id: str, clock: Clock) -> No
             log.exception("Periodic value refresh failed")
 
 
-def _activate_second_tower(runtime: Runtime, manager: PeriodicManager, device_id: str) -> bool:
+def _activate_second_tower(
+    runtime: Runtime, manager: PeriodicManager, device_id: str
+) -> bool:
     """Add the second tower's live metrics to the periodic set once its topology is confirmed.
 
     Returns True when the tower is confirmed (the caller then stops asking), False while it is not.
     """
     if not second_tower_confirmed(runtime, device_id):
         return False
-    ids = [runtime.catalog.object_entry(n).object_id for n in SECOND_TOWER_METRIC_NAMES if runtime.catalog.exists(n)]
+    ids = [
+        runtime.catalog.object_entry(n).object_id
+        for n in SECOND_TOWER_METRIC_NAMES
+        if runtime.catalog.exists(n)
+    ]
     if manager.add_object_ids(ids):
-        log.info("Second battery tower confirmed on %s: registering its live metrics", device_id)
+        log.info(
+            "Second battery tower confirmed on %s: registering its live metrics",
+            device_id,
+        )
     return True
 
 
 async def _inventory_loop(
-    gateway: RctGateway, device_id: str, clock: Clock, activate_second_tower: Callable[[], bool] | None = None
+    gateway: RctGateway,
+    device_id: str,
+    clock: Clock,
+    activate_second_tower: Callable[[], bool] | None = None,
+    capacity_ah_names: tuple[str, ...] = (),
+    bms_serial_name: str | None = None,
 ) -> None:
     """Drive the bounded initial discovery of the static module-serial inventory, then idle.
 
@@ -705,6 +877,7 @@ async def _inventory_loop(
     cheap refresh - there is deliberately no recurring device re-probe. (A very-slow explicit
     rediscovery for hardware-change-without-reconfiguration could be added here later.)
     """
+    next_capacity_read = clock.monotonic() + _INVENTORY_CHECK_SECONDS
     while True:
         try:
             await gateway.read_module_inventory(device_id, _MODULE_INVENTORY_NAMES)
@@ -713,9 +886,53 @@ async def _inventory_loop(
         if activate_second_tower is not None:
             try:
                 if activate_second_tower():
-                    activate_second_tower = None  # one-way: the periodic set keeps the metrics
+                    activate_second_tower = (
+                        None  # one-way: the periodic set keeps the metrics
+                    )
             except Exception:
                 log.exception("Second-tower detection failed")
+        status = gateway.device_status(device_id)
+        if (
+            capacity_ah_names
+            and clock.monotonic() >= next_capacity_read
+            and status.state in READY_STATES
+            and status.queue_length == 0
+        ):
+            failed = False
+            for name in capacity_ah_names:
+                try:
+                    await gateway.read_system(device_id, name)
+                except DeviceApiError:
+                    failed = True
+                    log.debug(
+                        "Battery Ah background read failed: device=%s metric=%s",
+                        device_id,
+                        name,
+                    )
+                except Exception:
+                    failed = True
+                    log.exception(
+                        "Battery Ah background read failed: device=%s metric=%s",
+                        device_id,
+                        name,
+                    )
+            if not failed and bms_serial_name is not None:
+                # Best effort: without a fresh BMS serial the sample just carries none.
+                try:
+                    await gateway.read_system(device_id, bms_serial_name)
+                except DeviceApiError:
+                    log.debug(
+                        "Battery BMS serial background read failed: device=%s",
+                        device_id,
+                    )
+                except Exception:
+                    log.exception(
+                        "Battery BMS serial background read failed: device=%s",
+                        device_id,
+                    )
+            next_capacity_read = clock.monotonic() + (
+                _CAPACITY_AH_RETRY_SECONDS if failed else _CAPACITY_AH_REFRESH_SECONDS
+            )
         await clock.sleep(_INVENTORY_CHECK_SECONDS)
 
 
@@ -725,14 +942,18 @@ async def _export_loop(runtime: Runtime, parts: _Parts) -> None:
 
     try:
         parts.service.export_enabled = True
-        await PushExporter(runtime.settings, parts.exporter, parts.service, runtime.clock).run()
+        await PushExporter(
+            runtime.settings, parts.exporter, parts.service, runtime.clock
+        ).run()
     except Exception:
         log.exception("Metrics export stopped")
     finally:
         parts.service.export_enabled = False
 
 
-async def _await_password_change(store: AdminStore, start_jobs: Callable[[], None]) -> None:
+async def _await_password_change(
+    store: AdminStore, start_jobs: Callable[[], None]
+) -> None:
     """Hold the device jobs back until the bootstrap password is replaced, then start them."""
     while await asyncio.to_thread(store.password_change_pending):
         await asyncio.sleep(_PASSWORD_POLL_SECONDS)
@@ -757,6 +978,7 @@ def _lifespan(
         refresh_tasks: list[asyncio.Task] = []
         dispatch_tasks: list[asyncio.Task] = []
         planning_tasks: list[asyncio.Task] = []
+        dispatch_recovered = asyncio.Event()
         connects: dict[int, asyncio.Task] = {}
         # Set first thing in the teardown: runtime.shutting_down() only turns true once the shutdown
         # coordinator runs, and a reconfiguration must stop starting work before that as well.
@@ -778,13 +1000,21 @@ def _lifespan(
 
         def start_connections() -> None:
             # Connecting never blocks the start: an unreachable device leaves the service up (Requirement 7.8).
-            new_connects = {id(ep): asyncio.create_task(ep.start()) for ep in parts.endpoints}
+            new_connects = {
+                id(ep): asyncio.create_task(ep.start()) for ep in parts.endpoints
+            }
             connects.update(new_connects)
             connect_tasks.extend(new_connects.values())
             tasks.extend(new_connects.values())
             for entry, endpoint in parts.device_endpoints:
                 task = asyncio.create_task(
-                    _log_startup_device(new_connects[id(endpoint)], endpoint, gateway, entry, runtime.settings)
+                    _log_startup_device(
+                        new_connects[id(endpoint)],
+                        endpoint,
+                        gateway,
+                        entry,
+                        runtime.settings,
+                    )
                 )
                 startup_tasks.append(task)
                 tasks.append(task)
@@ -808,22 +1038,49 @@ def _lifespan(
 
         def start_polling_tasks() -> None:
             for endpoint, heartbeat in parts.heartbeats:
-                task = asyncio.create_task(_heartbeat_loop(connects[id(endpoint)], heartbeat))
+                task = asyncio.create_task(
+                    _heartbeat_loop(connects[id(endpoint)], heartbeat)
+                )
                 heartbeat_tasks.append(task)
                 tasks.append(task)
             for manager in parts.periodic:
                 task = asyncio.create_task(_periodic_loop(manager, runtime.clock))
                 periodic_tasks.append(task)
                 tasks.append(task)
-            for device_id, manager in zip(parts.refresh_devices, parts.periodic, strict=True):
-                task = asyncio.create_task(_refresh_loop(gateway, device_id, runtime.clock))
+            for device_id, manager in zip(
+                parts.refresh_devices, parts.periodic, strict=True
+            ):
+                task = asyncio.create_task(
+                    _refresh_loop(gateway, device_id, runtime.clock)
+                )
                 refresh_tasks.append(task)
                 tasks.append(task)
-                inv_task = asyncio.create_task(_inventory_loop(
-                    gateway, device_id, runtime.clock,
-                    functools.partial(_activate_second_tower, runtime, manager, device_id),
-                ))
-                refresh_tasks.append(inv_task)  # same per-device lifecycle as the refresh loop
+                inv_task = asyncio.create_task(
+                    _inventory_loop(
+                        gateway,
+                        device_id,
+                        runtime.clock,
+                        functools.partial(
+                            _activate_second_tower, runtime, manager, device_id
+                        ),
+                        (
+                            CAPACITY_AH_METRICS
+                            if all(
+                                runtime.catalog.exists(name)
+                                for name in CAPACITY_AH_METRICS
+                            )
+                            else ()
+                        ),
+                        (
+                            BMS_SERIAL_METRIC
+                            if runtime.catalog.exists(BMS_SERIAL_METRIC)
+                            else None
+                        ),
+                    )
+                )
+                refresh_tasks.append(
+                    inv_task
+                )  # same per-device lifecycle as the refresh loop
                 tasks.append(inv_task)
 
         def start_planning_tasks() -> None:
@@ -832,17 +1089,53 @@ def _lifespan(
                 return
             services = {
                 device_id: build_runtime_planning_service(
-                    runtime, store, device_id,
+                    runtime,
+                    store,
+                    device_id,
                     lambda: app.state.spotmarket_config,
                     lambda: app.state.weather_config,
                 )
                 for device_id in runtime.devices
             }
             app.state.planning_services = services
-            for service in services.values():
+            for device_id, service in services.items():
                 task = asyncio.create_task(service.run())
                 planning_tasks.append(task)
                 tasks.append(task)
+                if runtime.energy is not None:
+                    enabled = runtime.settings.enable_automatic_dispatch
+                    handoff = PlanDispatchHandoff(
+                        manager=runtime.energy,
+                        enable_automatic_dispatch=enabled,
+                    )
+                    task = asyncio.create_task(run_plan_handoff(device_id, service, handoff, enabled))
+                    planning_tasks.append(task)
+                    tasks.append(task)
+
+        async def run_plan_handoff(
+            device_id: str,
+            service: PlanningService,
+            handoff: PlanDispatchHandoff,
+            enabled: bool,
+        ) -> None:
+            """Offer the current slot on its own bounded tick, including expiry handback."""
+            last_logged_slot = object()
+            while True:
+                if enabled:
+                    await dispatch_recovered.wait()
+                try:
+                    slot = service.scheduler.active_slot(runtime.clock.now())
+                    if enabled or slot != last_logged_slot:
+                        await handoff.offer(device_id, slot)
+                        last_logged_slot = slot
+                except Exception:
+                    log.exception("Plan handoff failed for device %s", device_id)
+                    if enabled:
+                        try:
+                            await handoff.offer(device_id, None)
+                        except Exception:
+                            log.exception("Plan handback failed for device %s", device_id)
+                await runtime.clock.sleep(_PLAN_HANDOFF_POLL_SECONDS)
 
         async def _recover_dispatch() -> None:
             """Await the startup recovery sweep before any dispatch loop starts, and fold its
@@ -862,32 +1155,86 @@ def _lifespan(
                 log.exception("Battery dispatch recovery failed")
                 return
             runtime.dispatch_recovery_failed = False
+            dispatch_recovered.set()
             start_dispatch_tasks(runtime.devices)
 
         def start_device_jobs() -> None:
             if is_closing():
                 return  # a late password change must not re-register periodic reads after their teardown
-            if store is not None:
-                tasks.append(asyncio.create_task(run_spot_market_refresh_loop(
-                    store, app.state.spotmarket_provider, app, app.state.spotmarket_refresh_event
-                )))
-                tasks.append(asyncio.create_task(run_solar_refresh_loop(
-                    store, app.state.solar_forecast_provider, app, app.state.weather_refresh_event
-                )))
+            if store is not None and runtime.energy is not None:
+                # Both forecast loops rest while every inverter is off (the factory state).
+                tasks.append(
+                    asyncio.create_task(
+                        run_spot_market_refresh_loop(
+                            store,
+                            app.state.spotmarket_provider,
+                            app,
+                            app.state.spotmarket_refresh_event,
+                            activity=runtime.energy.activity,
+                        )
+                    )
+                )
+                tasks.append(
+                    asyncio.create_task(
+                        run_solar_refresh_loop(
+                            store,
+                            app.state.solar_forecast_provider,
+                            app,
+                            app.state.weather_refresh_event,
+                            activity=runtime.energy.activity,
+                        )
+                    )
+                )
             historian = getattr(app.state, "consumption_historian", None)
             if historian is not None:
                 # Drains the household-load buffer into 15-minute SQLite buckets off the receiver path.
                 tasks.append(asyncio.create_task(historian.run()))
-            if historian is not None and store is not None and runtime.settings.consumption_daily_backfill_enabled:
-                from app.admin.consumption_backfill import ConsumptionHistoryBackfillService
+            if historian is not None and store is not None:
+                # Read-only import of the inverter's day totals; always on, it never writes to the device.
+                from app.admin.consumption_backfill import (
+                    ConsumptionHistoryBackfillService,
+                )
                 from app.gateway.rct_history import RctDailyConsumptionHistory
 
-                site_timezone = lambda: getattr(getattr(app.state, "weather_config", None), "timezone", None) or "UTC"
-                tasks.append(asyncio.create_task(ConsumptionHistoryBackfillService(
-                    RctDailyConsumptionHistory(gateway, site_timezone), store, runtime.clock, site_timezone,
-                    lambda: list(runtime.devices),
-                    lambda device_id: gateway.device_status(device_id).state in READY_STATES,
-                ).run()))
+                site_timezone = (
+                    lambda: getattr(
+                        getattr(app.state, "weather_config", None), "timezone", None
+                    )
+                    or "UTC"
+                )
+                tasks.append(
+                    asyncio.create_task(
+                        ConsumptionHistoryBackfillService(
+                            RctDailyConsumptionHistory(gateway, site_timezone),
+                            store,
+                            runtime.clock,
+                            site_timezone,
+                            lambda: list(runtime.devices),
+                            lambda device_id: gateway.device_status(device_id).state
+                            in READY_STATES,
+                        ).run()
+                    )
+                )
+            if (
+                store is not None
+                and runtime.settings.battery_commissioning_derivation_enabled
+            ):
+                from app.admin.battery_commissioning import BatteryCommissioningService
+                from app.gateway.rct_history import RctCommissioningHistory
+
+                tasks.append(
+                    asyncio.create_task(
+                        BatteryCommissioningService(
+                            RctCommissioningHistory(gateway, runtime.clock.sleep),
+                            store,
+                            runtime.clock,
+                            lambda: list(runtime.devices),
+                            gateway.reported_serial,
+                            lambda device_id: gateway.device_status(device_id).state
+                            in READY_STATES,
+                        ).run()
+                    )
+                )
             start_polling_tasks()
             start_planning_tasks()
             if runtime.dispatch is not None:
@@ -917,11 +1264,15 @@ def _lifespan(
                     old_task.cancel()
                     with contextlib.suppress(asyncio.CancelledError):
                         await old_task
-                    tasks[:] = [t for t in tasks if t is not old_task]  # drop the dead reference
+                    tasks[:] = [
+                        t for t in tasks if t is not old_task
+                    ]  # drop the dead reference
                     export_task = None
                     runtime.export_task = None
                     parts.service.export_enabled = False
-                elif store is not None and await asyncio.to_thread(store.password_change_pending):
+                elif store is not None and await asyncio.to_thread(
+                    store.password_change_pending
+                ):
                     return  # device jobs (export among them) are still held back by _await_password_change
                 start_export_task()
 
@@ -975,7 +1326,9 @@ def _lifespan(
                     )
                 }
                 for device_id in removed | readdressed:
-                    await runtime.dispatch.force_restore_or_raise(device_id)  # raises: abort, nothing torn down yet
+                    await runtime.dispatch.force_restore_or_raise(
+                        device_id
+                    )  # raises: abort, nothing torn down yet
                 # A removed id is reset like a re-addressed one: _normalize_devices hands a freed id
                 # (e.g. "main") to the next device added without an id, and that device must not
                 # inherit the removed hardware's capabilities, engineering mode or operating mode.
@@ -988,14 +1341,21 @@ def _lifespan(
                 return  # nothing has been built or torn down yet
             # Same set as at boot: this path runs on every Inverters-page save, and a narrower one
             # would make the Energy Manager card go dark on the next settings change.
-            periodic_names = _effective_periodic_names(target, runtime.catalog, selected_exposed)
+            periodic_names = _effective_periodic_names(
+                target, runtime.catalog, selected_exposed
+            )
             # Built BEFORE any teardown: a failure here leaves the old graph fully running. The
             # build registers its bindings in the live gateway, so the old map is put back until
             # the old graph has actually been torn down.
             old_bindings = gateway.device_bindings()
             try:
                 graph = _build_device_graph(
-                    target, runtime.clock, connector, runtime.catalog, gateway, periodic_names
+                    target,
+                    runtime.clock,
+                    connector,
+                    runtime.catalog,
+                    gateway,
+                    periodic_names,
                 )
             except Exception as exc:
                 raise ReconfigurationBuildError(str(exc)) from exc
@@ -1040,34 +1400,58 @@ def _lifespan(
                 # The old graph is already torn down, so what runs now is a partial one. Say so
                 # loudly and keep readiness red until the operator restarts or saves again.
                 runtime.graph_failed = True
-                log.exception("Device reconfiguration failed after the old graph was torn down; service marked not ready")
+                log.exception(
+                    "Device reconfiguration failed after the old graph was torn down; service marked not ready"
+                )
                 raise
 
         async def _swap_graph(graph: _DeviceGraph, target: Settings) -> None:
             old_tasks = [
-                *connect_tasks, *startup_tasks, *heartbeat_tasks, *periodic_tasks, *refresh_tasks, *dispatch_tasks,
+                *connect_tasks,
+                *startup_tasks,
+                *heartbeat_tasks,
+                *periodic_tasks,
+                *refresh_tasks,
+                *dispatch_tasks,
                 *planning_tasks,
             ]
             for task in old_tasks:
                 task.cancel()
             await asyncio.gather(*old_tasks, return_exceptions=True)
-            tasks[:] = [t for t in tasks if t not in old_tasks]  # drop the dead references
+            tasks[:] = [
+                t for t in tasks if t not in old_tasks
+            ]  # drop the dead references
             for group in (
-                connect_tasks, startup_tasks, heartbeat_tasks, periodic_tasks, refresh_tasks, dispatch_tasks,
+                connect_tasks,
+                startup_tasks,
+                heartbeat_tasks,
+                periodic_tasks,
+                refresh_tasks,
+                dispatch_tasks,
                 planning_tasks,
             ):
                 group.clear()
             app.state.planning_services = {}
             connects.clear()
 
-            stop_results = await asyncio.gather(*(s.stop() for s in parts.serializers), return_exceptions=True)
-            close_results = await asyncio.gather(*(e.close() for e in parts.endpoints), return_exceptions=True)
-            errors = [r for r in (*stop_results, *close_results) if isinstance(r, BaseException)]
+            stop_results = await asyncio.gather(
+                *(s.stop() for s in parts.serializers), return_exceptions=True
+            )
+            close_results = await asyncio.gather(
+                *(e.close() for e in parts.endpoints), return_exceptions=True
+            )
+            errors = [
+                r
+                for r in (*stop_results, *close_results)
+                if isinstance(r, BaseException)
+            ]
             if errors:
                 # The new graph must never start while an old connection or worker might still be
                 # running: that violates the swap's own invariant. Raising here routes into the
                 # caller's except-block, which already marks the service not ready.
-                raise RuntimeError("Old device graph could not be stopped cleanly") from errors[0]
+                raise RuntimeError(
+                    "Old device graph could not be stopped cleanly"
+                ) from errors[0]
 
             # Read off the event loop; fetched after the teardown so the window to the set_limits()
             # below stays as short as it was with the synchronous read.
@@ -1095,14 +1479,18 @@ def _lifespan(
                 # Rebuilt the same way as at boot: stored operator values win, the environment only
                 # seeds a device that has no record, so a device-list change cannot silently drop a
                 # limit or an engineering switch an operator set.
-                runtime.dispatch.set_limits(_seed_limits(target, stored))
+                runtime.dispatch.set_limits(
+                    _seed_limits(target, stored, default_fallback=True)
+                )
 
             for serializer in parts.serializers:
                 serializer.start()
             start_connections()
             # Same guard start_device_jobs() already uses: a device added while the bootstrap
             # password is still pending must not jump the queue ahead of _await_password_change().
-            if store is None or not await asyncio.to_thread(store.password_change_pending):
+            if store is None or not await asyncio.to_thread(
+                store.password_change_pending
+            ):
                 if is_closing():
                     return
                 start_polling_tasks()
@@ -1120,7 +1508,9 @@ def _lifespan(
         reconfigure_lock = asyncio.Lock()
 
         async def reconfigure_devices() -> None:
-            async with reconfigure_lock:  # concurrent settings saves must not interleave teardown/rebuild
+            async with (
+                reconfigure_lock
+            ):  # concurrent settings saves must not interleave teardown/rebuild
                 await _reconfigure_devices_unlocked()
 
         # Serializes write-support transitions on the event loop. The generation is bumped on every switch
@@ -1143,7 +1533,9 @@ def _lifespan(
                     # get_capabilities(), get_soc_target_policies(), get_energy_states(), get_device_configs());
                     # called directly here it would block the event loop on a live write-support enable. It
                     # builds an UNpublished bundle in the worker and touches no shared runtime state there.
-                    bundle = await asyncio.to_thread(_create_dispatch, runtime, app.state.dispatch_config)
+                    bundle = await asyncio.to_thread(
+                        _create_dispatch, runtime, app.state.dispatch_config
+                    )
                     # Back on the event loop: a concurrent settings save may have turned write support
                     # off during the build. Publish nothing in that case — close the unpublished store
                     # and drop the bundle — so runtime.dispatch stays None rather than being set with a
@@ -1158,8 +1550,10 @@ def _lifespan(
                     app.state.dispatch_store = bundle.store
                     if runtime.energy is not None:
                         runtime.energy.attach_dispatch(
-                            port=runtime.dispatch, store=bundle.store,
-                            readings=runtime.energy_readings, modes=bundle.energy_modes,
+                            port=runtime.dispatch,
+                            store=bundle.store,
+                            readings=runtime.energy_readings,
+                            modes=bundle.energy_modes,
                         )
                 # Re-checked after the slow build/await: a concurrent settings save may have turned
                 # write support off meanwhile. The controller object is harmless on its own (only the
@@ -1171,7 +1565,9 @@ def _lifespan(
                 if active:
                     return  # loops already running: nothing to (re)start
                 # While the bootstrap password is pending, start_device_jobs() will start them later.
-                if store is None or not await asyncio.to_thread(store.password_change_pending):
+                if store is None or not await asyncio.to_thread(
+                    store.password_change_pending
+                ):
                     if not _write_support_live():
                         return
                     tasks.append(asyncio.create_task(_recover_dispatch()))
@@ -1193,11 +1589,21 @@ def _lifespan(
                     return pending
                 for device_id in list(runtime.devices):
                     try:
-                        await runtime.dispatch.force_restore_or_raise(device_id, StopReason.WRITE_NOT_ALLOWED)
-                        if runtime.energy is not None and runtime.energy.mode(device_id) is not EnergyMode.OFF:
-                            await runtime.energy.set_mode(device_id, EnergyMode.OFF, actor=None)
+                        await runtime.dispatch.force_restore_or_raise(
+                            device_id, StopReason.WRITE_NOT_ALLOWED
+                        )
+                        if (
+                            runtime.energy is not None
+                            and runtime.energy.mode(device_id) is not EnergyMode.OFF
+                        ):
+                            await runtime.energy.set_mode(
+                                device_id, EnergyMode.OFF, actor=None
+                            )
                     except Exception:
-                        log.exception("Restore after disabling write access is pending for device %s", device_id)
+                        log.exception(
+                            "Restore after disabling write access is pending for device %s",
+                            device_id,
+                        )
                         pending.append(device_id)
                 return pending
 
@@ -1205,7 +1611,9 @@ def _lifespan(
         app.state.disable_dispatch = disable_dispatch
         app.state.restart_export = restart_export
         app.state.reconfigure_devices = reconfigure_devices
-        app.state.loop = asyncio.get_running_loop()  # lets a sync admin route schedule restart_export
+        app.state.loop = (
+            asyncio.get_running_loop()
+        )  # lets a sync admin route schedule restart_export
 
         if store is not None:
             app.state.spotmarket_refresh_event = asyncio.Event()
@@ -1226,14 +1634,22 @@ def _lifespan(
                 "Initial admin password not changed yet: periodic reads, heartbeat polling, "
                 "metric collection and export are paused until the admin has logged in and changed it."
             )
-            tasks.append(asyncio.create_task(_await_password_change(store, start_device_jobs)))
+            tasks.append(
+                asyncio.create_task(_await_password_change(store, start_device_jobs))
+            )
         else:
             start_device_jobs()
-        log.info("Service started: %d device(s), %d transport endpoint(s)", len(runtime.devices), len(parts.endpoints))
+        log.info(
+            "Service started: %d device(s), %d transport endpoint(s)",
+            len(runtime.devices),
+            len(parts.endpoints),
+        )
         try:
             yield
         finally:
-            closing = True  # an in-flight reconfiguration stops starting work from here on
+            closing = (
+                True  # an in-flight reconfiguration stops starting work from here on
+            )
             # Detach the log tap first so nothing in teardown can leak a root handler or feed a hub
             # that is about to be closed; mirrors the addHandler on startup.
             logging.getLogger().removeHandler(tsdb_log_handler)
@@ -1243,10 +1659,14 @@ def _lifespan(
             try:
                 # Let a reconfiguration that is mid-teardown finish before the final cancel, so no
                 # task or connection it starts can outlive the sweep below; bounded against a hang.
-                await asyncio.wait_for(reconfigure_lock.acquire(), timeout=_RECONFIGURE_DRAIN_SECONDS)
+                await asyncio.wait_for(
+                    reconfigure_lock.acquire(), timeout=_RECONFIGURE_DRAIN_SECONDS
+                )
                 reconfigure_lock.release()
             except TimeoutError:
-                log.warning("A device reconfiguration did not finish during shutdown; cancelling its tasks anyway")
+                log.warning(
+                    "A device reconfiguration did not finish during shutdown; cancelling its tasks anyway"
+                )
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
@@ -1262,7 +1682,13 @@ def _lifespan(
     return lifespan
 
 
-_SWAGGER_UI_ROOT = Path(__file__).resolve().parent.parent / "admin" / "static" / "vendor" / "swagger-ui"
+_SWAGGER_UI_ROOT = (
+    Path(__file__).resolve().parent.parent
+    / "admin"
+    / "static"
+    / "vendor"
+    / "swagger-ui"
+)
 
 
 def _add_docs(app: FastAPI, settings: Settings) -> None:
@@ -1273,7 +1699,9 @@ def _add_docs(app: FastAPI, settings: Settings) -> None:
         if not active.docs_public:
             raise ProblemError(ErrorCode.DOCS_NOT_AVAILABLE)
         ctx: SecurityContext = request.app.state.security
-        ctx.limiter.check_request(source_address(request, ctx))  # docs count against the request rate
+        ctx.limiter.check_request(
+            source_address(request, ctx)
+        )  # docs count against the request rate
 
     # Self-hosted, pinned swagger-ui-dist build: the FastAPI default loads swagger-ui-bundle.js and
     # swagger-ui.css from cdn.jsdelivr.net, which would need a CSP exception for a third-party
@@ -1299,8 +1727,11 @@ def _add_docs(app: FastAPI, settings: Settings) -> None:
         return HTMLResponse(DOCS_PAGE, headers=_DOCS_HEADERS)
 
     if settings.docs_public:
-        log.info("API documentation: http://%s:%d/docs (OpenAPI: /openapi.json)",
-                 url_host(settings.bind_address), settings.bind_port)
+        log.info(
+            "API documentation: http://%s:%d/docs (OpenAPI: /openapi.json)",
+            url_host(settings.bind_address),
+            settings.bind_port,
+        )
     else:
         log.info("API documentation disabled (DOCS_PUBLIC=false)")
 
@@ -1327,7 +1758,9 @@ def _create_dispatch(runtime: Runtime, config: DispatchConfig) -> "_DispatchBund
     """
     settings = runtime.settings
     gateway = runtime.gateway
-    dispatch_store = DispatchStore(settings.dispatch_db_path, settings.hmac_secret.get_secret_value())
+    dispatch_store = DispatchStore(
+        settings.dispatch_db_path, settings.hmac_secret.get_secret_value()
+    )
     dispatch_store.initialize()
     # One registry instance for the adapter and the controller: a second one would be a
     # second truth about which hardware is verified.
@@ -1335,9 +1768,13 @@ def _create_dispatch(runtime: Runtime, config: DispatchConfig) -> "_DispatchBund
     # Same rule for the per-device SoC-target derivation policy: one instance, so an operator's
     # policy change reaches the adapter that actually writes the register, not just the
     # controller.
-    soc_target_policies = SocTargetPolicyRegistry(dispatch_store.get_soc_target_policies())
+    soc_target_policies = SocTargetPolicyRegistry(
+        dispatch_store.get_soc_target_policies()
+    )
     dispatch_gateway = RctDispatchGateway(
-        gateway, capabilities=dispatch_capabilities, soc_target_policies=soc_target_policies
+        gateway,
+        capabilities=dispatch_capabilities,
+        soc_target_policies=soc_target_policies,
     )
     # The live capability registry, so a verification reaches the published grid sign without a
     # restart. The readings are cache-only and never queue a device transaction.
@@ -1346,7 +1783,9 @@ def _create_dispatch(runtime: Runtime, config: DispatchConfig) -> "_DispatchBund
     # The store is the truth for the per-device limits and the engineering switch: they are an
     # operator setting, made through the admin dispatch API, and must survive a restart. The
     # environment values are only a bootstrap seed for a device that has no record yet.
-    limits = _seed_limits(settings, dispatch_store.get_device_configs())
+    limits = _seed_limits(
+        settings, dispatch_store.get_device_configs(), default_fallback=True
+    )
     controller = DispatchController(
         dispatch_gateway,
         dispatch_store,
@@ -1365,7 +1804,10 @@ def _create_dispatch(runtime: Runtime, config: DispatchConfig) -> "_DispatchBund
         live_charge_limit=RctLiveChargeLimitProvider(gateway),
     )
     return _DispatchBundle(
-        store=dispatch_store, controller=controller, energy_readings=energy_readings, energy_modes=energy_modes
+        store=dispatch_store,
+        controller=controller,
+        energy_readings=energy_readings,
+        energy_modes=energy_modes,
     )
 
 
@@ -1394,8 +1836,14 @@ def _load_default_write_entries(settings: Settings, catalog: RegistryCatalog) ->
     Raises ``ConfigError`` when the file is unusable; the boot path treats that as "none" while
     writes are off, a live enable refuses.
     """
-    allowlist = load_allowlist(settings.model_copy(update={"enable_write_support": True}), catalog)
-    return {name: entry for name in catalog.names() if (entry := allowlist.entry(name)) is not None}
+    allowlist = load_allowlist(
+        settings.model_copy(update={"enable_write_support": True}), catalog
+    )
+    return {
+        name: entry
+        for name in catalog.names()
+        if (entry := allowlist.entry(name)) is not None
+    }
 
 
 def _load_spotmarket_config(admin_store: AdminStore | None) -> SpotMarketConfig:
@@ -1418,7 +1866,9 @@ def _load_spotmarket_config(admin_store: AdminStore | None) -> SpotMarketConfig:
             return SpotMarketConfig()
         return SpotMarketConfig.model_validate(stored)
     except ValueError:
-        log.warning("Stored spot-market configuration is invalid; using defaults", exc_info=True)
+        log.warning(
+            "Stored spot-market configuration is invalid; using defaults", exc_info=True
+        )
         return SpotMarketConfig()
 
 
@@ -1442,13 +1892,24 @@ def _load_weather_config(admin_store: AdminStore | None) -> WeatherConfig:
             return WeatherConfig()
         return WeatherConfig.model_validate(stored)
     except ValueError:
-        log.warning("Stored weather configuration is invalid; using defaults", exc_info=True)
+        log.warning(
+            "Stored weather configuration is invalid; using defaults", exc_info=True
+        )
         return WeatherConfig()
 
 
-def create_app(settings: Settings, *, clock: Clock | None = None, connector: Connector | None = None) -> FastAPI:
+def create_app(
+    settings: Settings,
+    *,
+    clock: Clock | None = None,
+    connector: Connector | None = None,
+) -> FastAPI:
     clock = clock or SystemClock()
-    admin_store = AdminStore(settings.admin_db_path, settings.hmac_secret.get_secret_value()) if settings.hmac_secret else None
+    admin_store = (
+        AdminStore(settings.admin_db_path, settings.hmac_secret.get_secret_value())
+        if settings.hmac_secret
+        else None
+    )
     selected_writes = selected_exposed = bootstrap_password = None
     if admin_store is not None:
         bootstrap_password = admin_store.initialize()
@@ -1461,18 +1922,31 @@ def create_app(settings: Settings, *, clock: Clock | None = None, connector: Con
             admin_store.put("operator_settings", overrides)
         if overrides:
             settings = Settings.model_validate({**settings.model_dump(), **overrides})
+        if "session_max_days" not in overrides:
+            # Older operator settings must use the same validated lifetime as the login cookies.
+            settings = admin_store.merge_operator_settings(
+                settings, {"session_max_days": settings.session_max_days}
+            )
         selected_exposed = admin_store.get("exposed_names")
         if selected_exposed is not None:
-            settings = settings.model_copy(update={"metrics_exposed_names": selected_exposed})
+            settings = settings.model_copy(
+                update={"metrics_exposed_names": selected_exposed}
+            )
         selected_writes = admin_store.get("write_names")
         if selected_writes is None:
-            selected_writes = []  # deny by default: the shipped catalog lists what may be enabled, nothing is on
+            selected_writes = (
+                []
+            )  # deny by default: the shipped catalog lists what may be enabled, nothing is on
             admin_store.put("write_names", selected_writes)
-    gateway, catalog, parts, coordinator = _build(settings, clock, connector, selected_writes, selected_exposed)
+    gateway, catalog, parts, coordinator = _build(
+        settings, clock, connector, selected_writes, selected_exposed
+    )
     spotmarket_config = _load_spotmarket_config(admin_store)
     weather_config = _load_weather_config(admin_store)
     if admin_store is not None and selected_exposed is None:
-        admin_store.put("exposed_names", settings.metrics_exposed_names or catalog.preselected())
+        admin_store.put(
+            "exposed_names", settings.metrics_exposed_names or catalog.preselected()
+        )
     runtime = Runtime(
         settings,
         clock,
@@ -1486,7 +1960,7 @@ def create_app(settings: Settings, *, clock: Clock | None = None, connector: Con
         gateway,
     )
     runtime.dispatch_control_registers = frozenset(RctDispatchGateway.REQUIRED_WRITES)
-    runtime.battery_capacity = ModuleCountVerifiedCapacity(runtime)
+    runtime.battery_capacity = MeasuredBatteryCapacity(runtime)
     # Built unconditionally and shared with the Energy Manager: it publishes the effective target
     # window from the same bounds the controller validates against, with or without dispatch.
     dispatch_config = DispatchConfig(
@@ -1511,7 +1985,9 @@ def create_app(settings: Settings, *, clock: Clock | None = None, connector: Con
     # Built unconditionally so the dashboard's energy_flow projection (app/admin/api.py::devices())
     # reads cache-only, sign-normalized figures even with write support/dispatch disabled; the
     # dispatch-enabled branch below replaces this with the live capability registry.
-    runtime.energy_readings = RctEnergyReadings(gateway, capabilities=CapabilityRegistry())
+    runtime.energy_readings = RctEnergyReadings(
+        gateway, capabilities=CapabilityRegistry()
+    )
     if _dispatch_enabled(settings):
         # Boot runs on the main thread before the event loop starts, so building and publishing in
         # two steps here is still atomic with respect to any request handler.
@@ -1540,8 +2016,12 @@ def create_app(settings: Settings, *, clock: Clock | None = None, connector: Con
         from app.admin.consumption import ConsumptionHistorian
 
         consumption_historian = ConsumptionHistorian(
-            admin_store, clock,
-            timezone=lambda: getattr(getattr(app.state, "weather_config", None), "timezone", None) or "UTC",
+            admin_store,
+            clock,
+            timezone=lambda: getattr(
+                getattr(app.state, "weather_config", None), "timezone", None
+            )
+            or "UTC",
         )
         gateway.set_sample_sink(consumption_historian.sink)
     app.state.consumption_historian = consumption_historian
@@ -1589,29 +2069,47 @@ def create_app(settings: Settings, *, clock: Clock | None = None, connector: Con
     def _restart_listener() -> None:
         hook = getattr(app.state, "server_restart", None)  # set by run_server
         if hook is None:
-            log.warning("The listener settings changed, but this server was not started by run_server")
+            log.warning(
+                "The listener settings changed, but this server was not started by run_server"
+            )
             return
         hook()
 
     def _listener_differs() -> bool:
         desired, running = app.state.admin_desired_settings, app.state.runtime.settings
-        return (desired.bind_address, desired.bind_port) != (running.bind_address, running.bind_port)
+        return (desired.bind_address, desired.bind_port) != (
+            running.bind_address,
+            running.bind_port,
+        )
 
-    app.state.background_restart = BackgroundRestart(_restart_listener, needed=_listener_differs)
+    app.state.background_restart = BackgroundRestart(
+        _restart_listener, needed=_listener_differs
+    )
     app.state.dispatch_store = dispatch_store
     app.state.dispatch_config = dispatch_config
-    app.state.first_start_password = bootstrap_password  # printed by the server once it is listening
+    app.state.first_start_password = (
+        bootstrap_password  # printed by the server once it is listening
+    )
     if admin_store is not None:
         try:
-            app.state.default_write_entries = _load_default_write_entries(settings, catalog)
+            app.state.default_write_entries = _load_default_write_entries(
+                settings, catalog
+            )
         except ConfigError:
             if settings.enable_write_support:
                 raise
-            app.state.default_write_entries = {}  # a missing file is fine while writes are off; a live enable reloads it
+            app.state.default_write_entries = (
+                {}
+            )  # a missing file is fine while writes are off; a live enable reloads it
         app.state.build_write_allowlist = lambda names: Allowlist(
-            {name: app.state.default_write_entries[name] for name in names if name in app.state.default_write_entries},
+            {
+                name: app.state.default_write_entries[name]
+                for name in names
+                if name in app.state.default_write_entries
+            },
             catalog,
         )
+
         # Constructed after app.state.default_write_entries / build_write_allowlist exist, with
         # late-bound closures over them: an operator can change the approved register names on the
         # Inverters page at any time, so a snapshot taken here would go stale. The manager is built
@@ -1690,14 +2188,22 @@ def create_app(settings: Settings, *, clock: Clock | None = None, connector: Con
             auth_fail_block_seconds=settings.auth_fail_block_seconds,
             scrape_requests=settings.metrics_rate_limit_requests,
             scrape_window_seconds=settings.metrics_rate_limit_window_seconds,
+            admin_session_requests=settings.admin_session_rate_limit_requests,
+            admin_session_window_seconds=settings.admin_session_rate_limit_window_seconds,
         ),
         ClientIpResolver(settings.trusted_proxies, settings.forwarded_header),
         write_enabled=settings.enable_write_support,
         vendor_enabled=settings.enable_vendor_diagnostics,
     )
     register_handlers(app)
-    app.add_middleware(BodyLimitMiddleware)  # inner layer: RequestContextMiddleware below stays outermost
-    app.add_middleware(RequestContextMiddleware, header=settings.correlation_id_header, counters=parts.service)
+    app.add_middleware(
+        BodyLimitMiddleware
+    )  # inner layer: RequestContextMiddleware below stays outermost
+    app.add_middleware(
+        RequestContextMiddleware,
+        header=settings.correlation_id_header,
+        counters=parts.service,
+    )
 
     @app.get("/favicon.ico", include_in_schema=False)
     async def favicon() -> Response:
@@ -1711,10 +2217,18 @@ def create_app(settings: Settings, *, clock: Clock | None = None, connector: Con
         app.include_router(admin_energy_verification_router)
         install_ui(app)
     read_auth = [Depends(_bearer)]
-    for router in (health.business, catalog_router.router, values.router, plan_router.router, consumption_router.router):
+    for router in (
+        health.business,
+        catalog_router.router,
+        values.router,
+        plan_router.router,
+        consumption_router.router,
+    ):
         app.include_router(router, dependencies=read_auth)
     # Declared in OpenAPI only; _bearer uses auto_error=False, so the handler keeps the trusted-source exception.
-    app.include_router(metrics.router, dependencies=read_auth if settings.metrics_require_token else [])
+    app.include_router(
+        metrics.router, dependencies=read_auth if settings.metrics_require_token else []
+    )
     if settings.enable_vendor_diagnostics:
         app.include_router(vendor.router, dependencies=[Depends(_bearer)])
     # Always registered and gated per request on the live switch, so toggling write access needs no

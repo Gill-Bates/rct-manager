@@ -34,6 +34,8 @@ from tests.fakes import FakeNetwork
 HOST = "192.0.2.77"
 PORT = 48899
 SLAVE_NETWORK_ID = 7654321
+
+
 def _fixed_pat(label: str) -> str:
     body = PAT_PREFIX + label.ljust(40, "0")
     return body + _pat_checksum(body)
@@ -51,10 +53,14 @@ def make_settings(**overrides) -> Settings:
     """Settings without any file or environment input; tuned so tests do not wait."""
     base = {
         "object_registry_path": REGISTRY_FIXTURE,
-        "write_allowlist_path": REGISTRY_FIXTURE.with_name("objects_write_allowed.json"),
+        "write_allowlist_path": REGISTRY_FIXTURE.with_name(
+            "objects_write_allowed.json"
+        ),
         "devices": [
             DeviceEntry(device_id="main", host=HOST, port=PORT),
-            DeviceEntry(device_id="slave1", host=HOST, port=PORT, network_id=SLAVE_NETWORK_ID),
+            DeviceEntry(
+                device_id="slave1", host=HOST, port=PORT, network_id=SLAVE_NETWORK_ID
+            ),
         ],
         # The production factory default is off; keep the scrape endpoint on for the many tests that
         # exercise /metrics content and behavior. The endpoint-default tests set this explicitly.
@@ -95,7 +101,32 @@ async def wait_settled(app: FastAPI, timeout: float = 3.0) -> None:
     """Wait until every device left the ``starting`` state (first heartbeat done)."""
     runtime = app.state.runtime
     async with asyncio.timeout(timeout):
-        while any(runtime.gateway.device_status(d).state is DeviceState.STARTING for d in runtime.devices):
+        while any(
+            runtime.gateway.device_status(d).state is DeviceState.STARTING
+            for d in runtime.devices
+        ):
+            await asyncio.sleep(0.01)
+
+
+async def wait_startup_traffic_done(app: FastAPI, timeout: float = 5.0) -> None:
+    """Wait until the boot-time device traffic (name/serial reads, periodic registration) is over.
+
+    ``wait_settled`` returns after the first heartbeat, while these background tasks are still
+    sending frames; a test that asserts "no device I/O" must take its frame baseline after them.
+    """
+    gateway = app.state.runtime.gateway
+    async with asyncio.timeout(timeout):
+        while True:
+            startup_running = any(
+                getattr(task.get_coro(), "__qualname__", "") == "_log_startup_device"
+                for task in asyncio.all_tasks()
+            )
+            bindings = [gateway._device(d) for d in app.state.runtime.devices]
+            registering = any(
+                b.periodic is not None and not b.periodic.available for b in bindings
+            )
+            if not startup_running and not registering:
+                return
             await asyncio.sleep(0.01)
 
 
@@ -119,10 +150,15 @@ async def running_app(
         store = AdminStore(Path(directory) / "admin.db", "s" * 48)
         password = store.initialize()
         assert store.change_password(password, "replacement-test-password")
-        with patch("app.admin.store.generate_pat", side_effect=[READ_TOKEN, WRITE_TOKEN]):
+        store.accept_disclaimer()  # a fully set-up admin: PAT/admin calls are no longer gated
+        with patch(
+            "app.admin.store.generate_pat", side_effect=[READ_TOKEN, WRITE_TOKEN]
+        ):
             store.create_token("read test token", "read", None)
             store.create_token("write test token", "read/write", None)
-        app.state.security.tokens = TokenStore(auth_required=settings.auth_required, admin_store=store)
+        app.state.security.tokens = TokenStore(
+            auth_required=settings.auth_required, admin_store=store
+        )
         try:
             async with app.router.lifespan_context(app):
                 transport = httpx.ASGITransport(app=app, client=("127.0.0.1", 50000))
@@ -131,8 +167,12 @@ async def running_app(
                 # satisfied for the session-cookie flows. A per-request Origin header overrides it.
                 default = {"Origin": "http://test"}
                 if authorize:
-                    default["Authorization"] = f"Bearer {READ_TOKEN}"  # explicit headers override it
-                async with httpx.AsyncClient(transport=transport, base_url="http://test", headers=default) as client:
+                    default["Authorization"] = (
+                        f"Bearer {READ_TOKEN}"  # explicit headers override it
+                    )
+                async with httpx.AsyncClient(
+                    transport=transport, base_url="http://test", headers=default
+                ) as client:
                     if settle:
                         await wait_settled(app)
                     yield Harness(app, client, net)
@@ -146,10 +186,17 @@ ACTION_NAME = "com_service"
 
 
 def write_fixtures(
-    directory: Path, *, minimum: float = 0.0, maximum: float = 1.0, step: float | None = 0.01, approve: bool = True
+    directory: Path,
+    *,
+    minimum: float = 0.0,
+    maximum: float = 1.0,
+    step: float | None = 0.01,
+    approve: bool = True,
 ) -> dict[str, Path]:
     """Registry with one writable float next to the real entries plus a matching write allowlist."""
-    registry = json.loads(Path(make_settings().object_registry_path).read_text(encoding="utf-8"))
+    registry = json.loads(
+        Path(make_settings().object_registry_path).read_text(encoding="utf-8")
+    )
     registry["entries"].append(
         {
             "name": TARGET_NAME,
@@ -165,12 +212,25 @@ def write_fixtures(
     )
     entries = [{"name": ACTION_NAME, "data_type": "t_enum", "allowed_values": [1]}]
     if approve:
-        entry = {"name": TARGET_NAME, "data_type": "t_float", "minimum": minimum, "maximum": maximum}
+        entry = {
+            "name": TARGET_NAME,
+            "data_type": "t_float",
+            "minimum": minimum,
+            "maximum": maximum,
+        }
         entries.append({**entry, "step": step} if step is not None else entry)
-    registry_path, allowlist_path = directory / "objects_read.json", directory / "objects_write_allowed.json"
+    registry_path, allowlist_path = (
+        directory / "objects_read.json",
+        directory / "objects_write_allowed.json",
+    )
     registry_path.write_text(json.dumps(registry), encoding="utf-8")
-    allowlist_path.write_text(json.dumps({"version": 1, "entries": entries}), encoding="utf-8")
-    return {"object_registry_path": registry_path, "write_allowlist_path": allowlist_path}
+    allowlist_path.write_text(
+        json.dumps({"version": 1, "entries": entries}), encoding="utf-8"
+    )
+    return {
+        "object_registry_path": registry_path,
+        "write_allowlist_path": allowlist_path,
+    }
 
 
 def dispatch_capabilities(
@@ -200,7 +260,9 @@ def dispatch_capabilities(
                     name=name,
                     status=status,
                     soc_strategy_external_code=(
-                        soc_strategy_external_code if name is CapabilityName.WRITE_PATH else None
+                        soc_strategy_external_code
+                        if name is CapabilityName.WRITE_PATH
+                        else None
                     ),
                     enum_byte_width=1,
                     bool_byte_width=1,
@@ -239,14 +301,20 @@ DISPATCH_READ_NAMES = (
 
 def dispatch_fixtures(directory: Path) -> dict[str, Path]:
     """Registry and allowlist containing the exact production dispatch metrics."""
-    registry = json.loads(Path(make_settings().object_registry_path).read_text(encoding="utf-8"))
+    registry = json.loads(
+        Path(make_settings().object_registry_path).read_text(encoding="utf-8")
+    )
     present = {entry["name"] for entry in registry["entries"]}
     production = json.loads(
-        (Path(__file__).resolve().parents[1] / "app" / "catalog" / "objects.json").read_text(encoding="utf-8")
+        (
+            Path(__file__).resolve().parents[1] / "app" / "catalog" / "objects.json"
+        ).read_text(encoding="utf-8")
     )
     required = set(DISPATCH_WRITE_NAMES + DISPATCH_READ_NAMES)
     registry["entries"].extend(
-        entry for entry in production["entries"] if entry["name"] in required and entry["name"] not in present
+        entry
+        for entry in production["entries"]
+        if entry["name"] in required and entry["name"] not in present
     )
     by_name = {entry["name"]: entry for entry in production["entries"]}
     allowlist_entries = []
@@ -262,8 +330,13 @@ def dispatch_fixtures(directory: Path) -> dict[str, Path]:
     registry_path = directory / "dispatch_objects.json"
     allowlist_path = directory / "dispatch_write_allowed.json"
     registry_path.write_text(json.dumps(registry), encoding="utf-8")
-    allowlist_path.write_text(json.dumps({"version": 1, "entries": allowlist_entries}), encoding="utf-8")
-    return {"object_registry_path": registry_path, "write_allowlist_path": allowlist_path}
+    allowlist_path.write_text(
+        json.dumps({"version": 1, "entries": allowlist_entries}), encoding="utf-8"
+    )
+    return {
+        "object_registry_path": registry_path,
+        "write_allowlist_path": allowlist_path,
+    }
 
 
 async def admin_session_headers(client, password: str) -> dict[str, str]:
@@ -273,7 +346,12 @@ async def admin_session_headers(client, password: str) -> dict[str, str]:
     """
     csrf = (await client.get("/admin/api/session")).json()["csrf_token"]
     login = await client.post(
-        "/admin/api/login", headers={"X-CSRF-Token": csrf}, json={"username": "admin", "password": password}
+        "/admin/api/login",
+        headers={"X-CSRF-Token": csrf},
+        json={"username": "admin", "password": password},
     )
     assert login.status_code == 200, login.text
-    return {"X-CSRF-Token": login.json()["csrf_token"]}
+    headers = {"X-CSRF-Token": login.json()["csrf_token"]}
+    # A fully set-up admin: accept the one-time disclaimer (idempotent) so normal admin calls work.
+    await client.post("/admin/api/accept-disclaimer", headers=headers)
+    return headers

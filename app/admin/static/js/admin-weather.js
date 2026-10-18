@@ -598,7 +598,7 @@ async function initWeather() {
     });
   }
   scheduleWeatherPreview({ immediate: true });
-  window.setInterval(() => scheduleWeatherPreview({ immediate: true, resetRetry: false }), 60_000);
+  window.setInterval(() => { if (!document.hidden) scheduleWeatherPreview({ immediate: true, resetRetry: false }); }, 60_000);
 }
 
 // On a manual latitude/longitude edit, re-derive the timezone from the new coordinates (debounced).
@@ -628,7 +628,7 @@ function scheduleWeatherPreview({ immediate = false, resetRetry = true } = {}) {
   clearTimeout(weatherPreviewRetryTimer);
   weatherPreviewRetryTimer = null;
   if (resetRetry) weatherPreviewRetryMs = 5_000;
-  const run = () => previewWeather().catch((error) => toast(messageFrom(error), 'danger'));
+  const run = () => previewWeather({ background: !resetRetry }).catch((error) => toast(messageFrom(error), 'danger'));
   if (immediate) { run(); return; }
   weatherPreviewTimer = setTimeout(run, WEATHER_PREVIEW_DEBOUNCE_MS);
 }
@@ -832,31 +832,21 @@ function drawWeatherChart(result) {
     canvas.parentElement.replaceChildren(element('p', 'text-danger small', 'Forecast series is invalid or empty.'));
     return;
   }
-  // Ordinal per-day axis (mirrors drawSpotMarketChart): each interval occupies its own slot by its
-  // position in the day, not by its local HH:MM. A normal day keeps the familiar 96 quarter-hour
-  // labels (00:00..23:45) and an identical look; a DST fall-back day keeps BOTH 02:00 intervals
-  // (consecutive slots, no overwrite) and a 100-interval day gets 100 slots. Each dataset keeps its
-  // own per-point HH:MM for the tooltip.
-  const maxLen = Math.max(96, ...candidates.map((candidate) => candidate.points.length));
-  const labels = Array.from({ length: maxLen }, (_, index) => {
-    if (index >= 96) return candidates.find((candidate) => candidate.points.length > index)?.points[index]?.label ?? '';
-    const hour = String(Math.floor(index / 4)).padStart(2, '0');
-    const minute = String((index % 4) * 15).padStart(2, '0');
-    return `${hour}:${minute}`;
-  });
-  const align = (points) => {
+  // Slots are keyed by local time plus occurrence (see buildDayAxis), so DST days stay aligned.
+  const { labels, slots } = buildDayAxis(candidates.map((candidate) => candidate.points));
+  const maxLen = labels.length;
+  const align = (points, dayIndex) => {
     const data = Array(maxLen).fill(null);
-    const times = Array(maxLen).fill(null);
-    points.forEach((point, index) => { data[index] = point.y; times[index] = point.label; });
-    return { data, times };
+    points.forEach((point, index) => { data[slots[dayIndex][index]] = point.y; });
+    return { data };
   };
-  const series = candidates.map((candidate) => ({ ...candidate, ...align(candidate.points) }));
+  const series = candidates.map((candidate, dayIndex) => ({ ...candidate, ...align(candidate.points, dayIndex) }));
   weatherPreviewChart = new window.Chart(canvas, {
     type: 'line',
     data: {
       labels,
-      datasets: series.map(({ label, data, times, borderColor, borderDash }) => ({
-        label, data, times, borderColor, borderDash, backgroundColor: borderColor,
+      datasets: series.map(({ label, data, borderColor, borderDash }) => ({
+        label, data, borderColor, borderDash, backgroundColor: borderColor,
         stepped: 'after', pointRadius: 0, pointHoverRadius: 4, borderWidth: 2, spanGaps: false,
       })),
     },
@@ -870,7 +860,7 @@ function drawWeatherChart(result) {
           // Hide series without a value in this slot (null/NaN) instead of inventing one.
           filter: (item) => Number.isFinite(item.parsed?.y),
           callbacks: {
-            title: (items) => items[0].dataset.times?.[items[0].dataIndex] ?? labels[items[0].dataIndex],
+            title: (items) => labels[items[0].dataIndex],
             label: (item) => `${item.dataset.label}: ${Number(item.parsed.y).toFixed(2)} kW`,
           },
         },
@@ -965,7 +955,7 @@ function renderWeatherPreview(result) {
   return nodes;
 }
 
-async function previewWeather() {
+async function previewWeather({ background = false } = {}) {
   const target = $('weather-preview');
   if (!target) return;
   // A transient invalid number (e.g. a value being typed that is out of range) is not preview-fable:
@@ -981,7 +971,7 @@ async function previewWeather() {
   // The previous preview stays in place while the request runs (the template ships the initial
   // loading state), so a refresh swaps content once instead of flashing a spinner every time.
   try {
-    const result = await api('energy/weather/preview', { method: 'POST', body: JSON.stringify(weatherBody()), signal: controller.signal });
+    const result = await api('energy/weather/preview', { method: 'POST', body: JSON.stringify(weatherBody()), signal: controller.signal, background });
     if (generation !== weatherPreviewGeneration) return;
     setWeatherTimezone(result.timezone ?? weatherTimezone);
     const signature = JSON.stringify([result, weatherTimezone]);
@@ -1003,6 +993,10 @@ async function previewWeather() {
     }
   } catch (error) {
     if (generation !== weatherPreviewGeneration || error.name === 'AbortError') return;
+    if (error.rateLimited) { // short-lived load shedding: keep the preview and retry after Retry-After
+      weatherPreviewRetryTimer = setTimeout(() => scheduleWeatherPreview({ immediate: true, resetRetry: false }), pollDelay(weatherPreviewRetryMs));
+      return;
+    }
     weatherPreviewRendered = null;
     weatherPreviewChart?.destroy();
     weatherPreviewChart = null;

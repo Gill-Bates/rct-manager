@@ -49,10 +49,16 @@
     Object.freeze({ id: 'days-to-calibration', label: 'Days to calibration', kind: 'kpi', defaultSize: Object.freeze({ w: 2, h: 2 }), defaultVisible: false, defaultX: 4, defaultY: 0 }),
     Object.freeze({ id: 'spot-price-current', label: 'Spot price', kind: 'kpi', defaultSize: Object.freeze({ w: 2, h: 2 }), defaultVisible: false, defaultX: 0, defaultY: 10 }),
     Object.freeze({ id: 'spot-market-status', label: 'Day-ahead', kind: 'kpi', defaultSize: Object.freeze({ w: 2, h: 2 }), defaultVisible: false, defaultX: 2, defaultY: 10 }),
-    Object.freeze({ id: 'spot-price-curve', label: 'Day-ahead prices', kind: 'chart', defaultSize: Object.freeze({ w: 6, h: 4 }), defaultVisible: false, defaultX: 0, defaultY: 12 }),
+    Object.freeze({ id: 'spot-price-curve', label: 'Day-ahead prices', kind: 'chart', defaultSize: Object.freeze({ w: 6, h: 4 }), defaultVisible: false, defaultX: 0, defaultY: 13 }),
     Object.freeze({ id: 'solar-forecast-status', label: 'Solar forecast', kind: 'kpi', defaultSize: Object.freeze({ w: 2, h: 2 }), defaultVisible: false, defaultX: 4, defaultY: 10 }),
-    Object.freeze({ id: 'pv-forecast-curve', label: 'PV forecast', kind: 'chart', defaultSize: Object.freeze({ w: 6, h: 4 }), defaultVisible: false, defaultX: 6, defaultY: 12 }),
+    Object.freeze({ id: 'pv-forecast-curve', label: 'PV forecast', kind: 'chart', defaultSize: Object.freeze({ w: 6, h: 4 }), defaultVisible: false, defaultX: 6, defaultY: 13 }),
     Object.freeze({ id: 'charging-schedule', label: 'Charging schedule', kind: 'chart', defaultSize: Object.freeze({ w: 6, h: 4 }), defaultVisible: false, defaultX: 0, defaultY: 16 }),
+    Object.freeze({ id: 'battery-usable-kwh', label: 'Battery usable capacity', kind: 'kpi', defaultSize: Object.freeze({ w: 2, h: 2 }), defaultVisible: false, defaultX: 0, defaultY: 10 }),
+    Object.freeze({ id: 'battery-remaining-percent', label: 'Battery remaining capacity', kind: 'kpi', defaultSize: Object.freeze({ w: 2, h: 2 }), defaultVisible: false, defaultX: 2, defaultY: 10 }),
+    Object.freeze({ id: 'battery-cycles', label: 'Battery cycles', kind: 'kpi', defaultSize: Object.freeze({ w: 2, h: 2 }), defaultVisible: false, defaultX: 4, defaultY: 10 }),
+    Object.freeze({ id: 'battery-last-calibration', label: 'Last battery calibration', kind: 'kpi', defaultSize: Object.freeze({ w: 2, h: 2 }), defaultVisible: false, defaultX: 6, defaultY: 10 }),
+    Object.freeze({ id: 'battery-commissioning-date', label: 'Commissioning date', kind: 'kpi', defaultSize: Object.freeze({ w: 2, h: 2 }), defaultVisible: false, defaultX: 8, defaultY: 10 }),
+    Object.freeze({ id: 'battery-degradation', label: 'Battery degradation', kind: 'chart', defaultSize: Object.freeze({ w: 6, h: 4 }), defaultVisible: false, defaultX: 0, defaultY: 13 }),
   ]);
 
   // Browser path: expose the frozen registry as a global, consumed by dashboard.js (loaded after

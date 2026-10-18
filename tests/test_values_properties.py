@@ -7,7 +7,7 @@
 """Properties 14 (cache consistency), 17 (scalar share) and 18."""
 
 import asyncio
-import math
+import struct
 from datetime import timedelta
 from pathlib import Path
 
@@ -17,12 +17,12 @@ from hypothesis import strategies as st
 
 from app.catalog.registry import RegistryCatalog
 from app.config import DeviceEntry
-from app.errors import DecodeLengthMismatch, DeviceUnreachable
+from app.errors import DecodeLengthMismatch, DeviceUnreachable, ProtocolError
 from app.gateway.base import StaleReason
 from app.gateway.cache import MemoryCache
 from app.gateway.rct import DeviceBinding, RctGateway
 from app.protocol.types import DataType
-from app.protocol.values import decode_value, encode_value
+from app.protocol.values import decode_value, encode_value, integer_bounds
 from app.scheduling.retry import RetryConfig
 from app.scheduling.serializer import AccessSerializer
 from app.security.allowlist import Allowlist
@@ -60,14 +60,33 @@ def test_bool_round_trip(value: bool) -> None:
 
 
 @PROP
-@given(st.floats(width=32))
+@given(st.floats(width=32, allow_nan=False, allow_infinity=False))
 def test_float_round_trip(value: float) -> None:
     result = decode_value(DataType.FLOAT, encode_value(DataType.FLOAT, value))
-    assert (math.isnan(value) and math.isnan(result)) or result == value
+    assert result == value
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_non_finite_float_is_rejected_on_both_wire_boundaries(value: float) -> None:
+    with pytest.raises(ValueError, match="finite"):
+        encode_value(DataType.FLOAT, value)
+    with pytest.raises(ProtocolError) as exc:
+        decode_value(DataType.FLOAT, struct.pack(">f", value))
+    assert exc.value.code == "invalid_float"
+
+
+def test_integer_bounds_match_the_encoder() -> None:
+    for kind, bounds in _INT_RANGES.items():
+        assert integer_bounds(kind) == bounds
 
 
 @PROP
-@given(st.text(alphabet=st.characters(exclude_categories=("Cs",), exclude_characters="\x00�"), max_size=40))
+@given(
+    st.text(
+        alphabet=st.characters(exclude_categories=("Cs",), exclude_characters="\x00�"),
+        max_size=40,
+    )
+)
 def test_string_round_trip(value: str) -> None:
     assert decode_value(DataType.STRING, encode_value(DataType.STRING, value)) == value
 
@@ -91,7 +110,9 @@ def test_length_mismatch_reports_expected_and_received() -> None:
 # Feature: rct-manager, Property 18: string decoding terminates for every byte sequence
 @PROP
 @given(st.binary(max_size=200), st.sampled_from(["utf-8", "latin-1"]))
-def test_string_decoding_terminates_and_is_deterministic(payload: bytes, encoding: str) -> None:
+def test_string_decoding_terminates_and_is_deterministic(
+    payload: bytes, encoding: str
+) -> None:
     first = decode_value(DataType.STRING, payload, encoding=encoding)
     assert first == decode_value(DataType.STRING, payload, encoding=encoding)
     assert "\x00" not in first
@@ -113,7 +134,9 @@ def test_fixed_width_string_round_trips_through_nul_padding() -> None:
 
 def test_fixed_width_string_rejects_text_that_does_not_fit() -> None:
     with pytest.raises(ValueError, match="does not fit"):
-        encode_value(DataType.STRING, "0123456789ABCDEF", byte_width=16)  # exactly 16 bytes, no room for a NUL
+        encode_value(
+            DataType.STRING, "0123456789ABCDEF", byte_width=16
+        )  # exactly 16 bytes, no room for a NUL
     with pytest.raises(ValueError, match="does not fit"):
         encode_value(DataType.STRING, "too long for the field", byte_width=16)
 
@@ -121,22 +144,38 @@ def test_fixed_width_string_rejects_text_that_does_not_fit() -> None:
 _REGISTRY = Path(__file__).resolve().parent / "fixtures" / "objects.json"
 
 
-async def _read_with_cache(ttl: int, grace: int, age: int, device_ok: bool, wall_jump: int) -> tuple:
+async def _read_with_cache(
+    ttl: int, grace: int, age: int, device_ok: bool, wall_jump: int
+) -> tuple:
     clock = AutoClock()
     net = FakeNetwork(clock, fail_connects=0 if device_ok else 1000)
     catalog = RegistryCatalog.from_file(_REGISTRY)
     cache = MemoryCache(ttl, grace)
     gateway = RctGateway(
-        catalog, cache, clock, Allowlist({}, catalog), retry=RetryConfig(response_timeout_seconds=0.01)
+        catalog,
+        cache,
+        clock,
+        Allowlist({}, catalog),
+        retry=RetryConfig(response_timeout_seconds=0.01),
     )
     device = DeviceEntry(device_id="inv1", host="10.0.0.5")
     cfg = EndpointConfig(response_timeout_seconds=0.01, min_interval=timedelta(0))
-    endpoint = TransportEndpoint("endpoint-1", device.key.endpoint, cfg, clock, connector=net.connect)
-    serializer = AccessSerializer(endpoint, gateway.handler(endpoint), cache_hit=gateway.cache_hit)
+    endpoint = TransportEndpoint(
+        "endpoint-1", device.key.endpoint, cfg, clock, connector=net.connect
+    )
+    serializer = AccessSerializer(
+        endpoint, gateway.handler(endpoint), cache_hit=gateway.cache_hit
+    )
     serializer.start()
     gateway.add_device(DeviceBinding(device, endpoint, serializer))
     key = ("inv1", "battery_power")
-    cache.put(key, 1.5, measured_at=clock.now(), received_monotonic=clock.monotonic(), origin="transaction")
+    cache.put(
+        key,
+        1.5,
+        measured_at=clock.now(),
+        received_monotonic=clock.monotonic(),
+        origin="transaction",
+    )
     started = clock.monotonic()
     clock.advance(age)
     clock.jump_wall(wall_jump)  # a system time step must not change age or validity
@@ -160,16 +199,34 @@ async def _read_with_cache(ttl: int, grace: int, age: int, device_ok: bool, wall
     device_ok=st.booleans(),
     wall_jump=st.integers(-3600, 3600),
 )
-def test_cache_fields_are_consistent(ttl: int, grace: int, age: int, device_ok: bool, wall_jump: int) -> None:
-    outcome, waited, frames = asyncio.run(_read_with_cache(ttl, grace, age, device_ok, wall_jump))
+def test_cache_fields_are_consistent(
+    ttl: int, grace: int, age: int, device_ok: bool, wall_jump: int
+) -> None:
+    outcome, waited, frames = asyncio.run(
+        _read_with_cache(ttl, grace, age, device_ok, wall_jump)
+    )
     if age <= ttl:
-        assert (outcome.source, outcome.stale, outcome.stale_reason, frames) == ("cache", False, None, 0)
+        assert (outcome.source, outcome.stale, outcome.stale_reason, frames) == (
+            "cache",
+            False,
+            None,
+            0,
+        )
         assert outcome.age_seconds == pytest.approx(age)
     elif device_ok:
-        assert (outcome.source, outcome.stale, outcome.stale_reason) == ("device", False, None)
+        assert (outcome.source, outcome.stale, outcome.stale_reason) == (
+            "device",
+            False,
+            None,
+        )
         assert outcome.age_seconds == 0
-    elif waited <= ttl + grace:  # the failed attempts consumed time, so the age is taken at the end
-        assert (outcome.source, outcome.stale_reason) == ("cache", StaleReason.DEVICE_UNREACHABLE)
+    elif (
+        waited <= ttl + grace
+    ):  # the failed attempts consumed time, so the age is taken at the end
+        assert (outcome.source, outcome.stale_reason) == (
+            "cache",
+            StaleReason.DEVICE_UNREACHABLE,
+        )
         assert outcome.stale is (waited > ttl)
         assert outcome.age_seconds == pytest.approx(waited)
     else:

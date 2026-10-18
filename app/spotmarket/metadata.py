@@ -55,7 +55,8 @@ class BiddingZoneMetadataCache:
         self._load = load
         self._save = save
         self._loaded = load is None
-        self._lock = threading.Lock()
+        self._lock = threading.Lock()  # guards state only, never held across a provider fetch
+        self._refresh_lock = threading.Lock()  # serialises fetches so concurrent refreshes do not stack
         self._cached: BiddingZoneCatalog | None = None
         self._refresh_failed = False
 
@@ -75,18 +76,22 @@ class BiddingZoneMetadataCache:
 
         Raises :class:`SpotMarketError` when the fetch fails and no catalog is stored at all.
         """
-        with self._lock:
-            self._ensure_loaded()
+        with self._refresh_lock:
+            with self._lock:
+                self._ensure_loaded()
             try:
                 catalog = self._fetch()
             except SpotMarketError as exc:
-                self._refresh_failed = True
-                if self._cached is None:
+                with self._lock:
+                    self._refresh_failed = True
+                    cached = self._cached
+                if cached is None:
                     raise
                 log.warning("Bidding-zone list refresh failed (%s); keeping the stored list", exc)
-                return self._listing(self._cached, stale=True)
-            self._cached = catalog
-            self._refresh_failed = False
+                return self._listing(cached, stale=True)
+            with self._lock:
+                self._cached = catalog
+                self._refresh_failed = False
             self._persist(catalog)
             return self._listing(catalog, stale=False)
 

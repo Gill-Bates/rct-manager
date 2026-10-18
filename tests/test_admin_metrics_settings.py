@@ -21,6 +21,7 @@ async def test_prometheus_settings_apply_live_and_persist(tmp_path):
                         enable_metrics_endpoint=True)
     app = create_app(settings)
     assert app.state.admin_store.change_password(app.state.first_start_password, "a much stronger password")
+    app.state.admin_store.accept_disclaimer()
     updates = {
         "metrics_require_token": False,
         "metrics_trusted_sources": ["192.0.2.10", "2001:db8::/32"],
@@ -140,6 +141,7 @@ async def test_device_heading_prefers_display_name_then_reported_name_then_id(tm
                         devices=[DeviceEntry(device_id="main", host="192.0.2.10", port=8899)])
     app = create_app(settings)
     app.state.admin_store.change_password(app.state.first_start_password, "a much stronger password")
+    app.state.admin_store.accept_disclaimer()
     token = app.state.admin_store.create_token("devices", "read/write", None)[1]
     headers = {"Authorization": f"Bearer {token}"}
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver", headers={"Origin": "http://testserver"}) as client:
@@ -165,6 +167,7 @@ async def test_device_heading_prefers_display_name_then_reported_name_then_id(tm
                                                     display_name="Roof Inverter")])
     named_app = create_app(named_settings)
     named_app.state.admin_store.change_password(named_app.state.first_start_password, "a much stronger password")
+    named_app.state.admin_store.accept_disclaimer()
     named_token = named_app.state.admin_store.create_token("devices", "read/write", None)[1]
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=named_app), base_url="http://testserver", headers={"Origin": "http://testserver"}) as client:
         named_app.state.runtime.gateway.set_reported_name("main", "Garage Inverter")

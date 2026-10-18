@@ -53,6 +53,9 @@ try {
   await page.locator('#confirm-password').fill(NEW_PASSWORD);
   await page.locator('#change-password-form button[type=submit]').click();
   await page.waitForURL('**/ui/dashboard');
+  // The one-time usage notice locks the admin API until accepted.
+  await page.locator('#disclaimer-accept').waitFor({ state: 'visible', timeout: 10000 });
+  await Promise.all([page.waitForNavigation(), page.click('#disclaimer-accept')]);
   await page.goto(`${base}/ui/energy`);
   await page.waitForSelector('.energy-panel');
   const manualResponse = page.waitForResponse((response) => response.request().method() === 'PUT' && response.url().endsWith('/mode'));

@@ -490,35 +490,179 @@ def test_daily_values_never_enter_the_forecast_history_or_the_pruned_window(tmp_
     assert kept == ["2026-10-14"]
 
 
-async def test_disabled_daily_backfill_sends_no_logger_history_query() -> None:
-    from unittest.mock import patch
+async def test_daily_backfill_always_starts_without_a_switch(tmp_path) -> None:
+    from unittest.mock import AsyncMock, patch
 
-    from app.catalog.registry import RegistryCatalog
-    from app.gateway.rct import RctGateway
-    from tests.api_helpers import ROOT_CATALOG, make_settings, running_app
+    from app.admin.store import AdminStore
+    from tests.api_helpers import make_settings, running_app
 
-    settings = make_settings()
-    assert settings.consumption_daily_backfill_enabled is False
-    compound_ids = {
-        e.object_id for e in (RegistryCatalog.from_file(ROOT_CATALOG).object_entry(n) for n in _compound_names())
-    }
-    # The service is built synchronously during lifespan startup, so a settled app proves it never was.
-    with (
-        patch.object(RctGateway, "query_history_series") as query,
-        patch("app.admin.consumption_backfill.ConsumptionHistoryBackfillService") as service,
-    ):
-        async with running_app(settings) as harness:
-            sent = {frame.object_id for _, frame in harness.net.frames}
-    service.assert_not_called()
-    query.assert_not_called()
-    assert sent.isdisjoint(compound_ids)
+    # Runtime components the import needs: an admin store (history persistence) with the bootstrap
+    # password changed, so the device jobs start, plus the gateway.
+    settings = make_settings(hmac_secret="s" * 48, admin_db_path=tmp_path / "rct.db")
+    store = AdminStore(settings.admin_db_path, "s" * 48)
+    try:
+        assert store.change_password(store.initialize(), "a much stronger password")
+    finally:
+        store.close()
+    # The import is not optional: no settings switch exists to turn it off.
+    assert not hasattr(settings, "consumption_daily_backfill_enabled")
+    # The service is built synchronously during lifespan startup, so a settled app proves it was.
+    with patch("app.admin.consumption_backfill.ConsumptionHistoryBackfillService") as service:
+        service.return_value.run = AsyncMock()
+        async with running_app(settings):
+            pass
+    service.assert_called_once()
+    service.return_value.run.assert_awaited_once()
 
 
-def _compound_names() -> list[str]:
-    import json
+def _day_history(points):
+    from app.gateway.rct_history import RctDailyConsumptionHistory
+    from app.protocol.timeseries import TimeSeriesPoint
 
-    from tests.api_helpers import ROOT_CATALOG
+    class _Gateway:
+        async def query_history_series(self, device_id, name, before):
+            return tuple(
+                TimeSeriesPoint(datetime(2026, 10, day, 23, 59, 59, tzinfo=UTC), wh)
+                for day, wh in points
+            )
 
-    entries = json.loads(ROOT_CATALOG.read_text(encoding="utf-8"))
-    entries = entries["entries"] if isinstance(entries, dict) else entries
-    return [e["name"] for e in entries if e.get("response_type")]
+    return RctDailyConsumptionHistory(_Gateway(), lambda: "Europe/Berlin")
+
+
+def _read_days(history):
+    before = datetime(2026, 10, 15, 0, 0, tzinfo=UTC)
+    readings = asyncio.run(history.daily_consumption("main", before=before, limit=10))
+    return {r.local_date.day: r.energy_wh for r in readings}
+
+
+def test_refinement_points_of_one_day_pick_the_largest_without_a_warning(caplog) -> None:
+    # Real device shape: the same 23:59:59 stamp repeated with sub-Wh jitter, last not the max.
+    history = _day_history(
+        [(14, 20103.80078125), (14, 20104.0), (14, 20103.66), (13, 300.0)]
+    )
+    with caplog.at_level("DEBUG", logger="app.gateway.rct_history"):
+        days = _read_days(history)
+    assert days == {14: 20104.0, 13: 300.0}
+    assert not [r for r in caplog.records if r.levelname == "WARNING"]
+
+
+def test_identical_repeated_points_are_a_silent_duplicate(caplog) -> None:
+    history = _day_history([(14, 500.0), (14, 500.0)])
+    with caplog.at_level("DEBUG", logger="app.gateway.rct_history"):
+        assert _read_days(history) == {14: 500.0}
+    assert not [r for r in caplog.records if r.levelname == "WARNING"]
+
+
+def test_conflicting_points_warn_once_with_both_values_and_keep_the_largest(caplog) -> None:
+    history = _day_history([(14, 100.0), (14, 200.0), (13, 300.0)])
+    with caplog.at_level("WARNING", logger="app.gateway.rct_history"):
+        assert _read_days(history) == {14: 200.0, 13: 300.0}
+        _read_days(history)
+    warnings = [m for m in caplog.messages if "conflicting logger points" in m]
+    assert len(warnings) == 1
+    assert "100.0" in warnings[0] and "200.0" in warnings[0]
+
+
+def test_day_logger_uses_wall_clock_date_at_local_midnight_boundary() -> None:
+    from datetime import date
+    from zoneinfo import ZoneInfo
+
+    from app.gateway.rct_history import RctDailyConsumptionHistory
+    from app.protocol.timeseries import TimeSeriesPoint
+
+    class _Gateway:
+        query_before = None
+
+        async def query_history_series(self, device_id, name, before):
+            self.query_before = before
+            return (
+                TimeSeriesPoint(datetime(2026, 10, 16, 23, 59, 59, tzinfo=UTC), 19_000.0),
+                TimeSeriesPoint(datetime(2026, 10, 15, 23, 59, 59, tzinfo=UTC), 18_018.7),
+            )
+
+    gateway = _Gateway()
+    history = RctDailyConsumptionHistory(gateway, lambda: "Europe/Berlin")
+    before = datetime(2026, 10, 16, tzinfo=ZoneInfo("Europe/Berlin"))
+    readings = asyncio.run(history.daily_consumption("main", before=before, limit=10))
+
+    assert gateway.query_before == datetime(2026, 10, 16, tzinfo=UTC)
+    assert [(reading.local_date, reading.energy_wh) for reading in readings] == [
+        (date(2026, 10, 15), 18_018.7)
+    ]
+
+
+def test_day_logger_discards_invalid_and_implausible_values() -> None:
+    from app.gateway.rct_history import RctDailyConsumptionHistory
+    from app.protocol.timeseries import TimeSeriesPoint
+
+    class _Gateway:
+        async def query_history_series(self, device_id, name, before):
+            return tuple(
+                TimeSeriesPoint(datetime(2026, 10, day, 23, 59, 59, tzinfo=UTC), value)
+                for day, value in ((14, float("nan")), (13, -5.0), (12, 5e9), (11, 9_000.0))
+            )
+
+    history = RctDailyConsumptionHistory(_Gateway(), lambda: "Europe/Berlin")
+    readings = asyncio.run(history.daily_consumption("main", before=datetime(2026, 10, 16, tzinfo=UTC), limit=10))
+    assert [(r.local_date.day, r.energy_wh) for r in readings] == [(11, 9_000.0)]
+
+
+# --- F2: retention prune indexes exist after init (review finding 2) ---------------------------
+
+
+def _index_names(store: AdminStore) -> set[str]:
+    with store.connect() as db:
+        return {row["name"] for row in db.execute("SELECT name FROM sqlite_schema WHERE type='index'").fetchall()}
+
+
+def test_init_creates_the_batch_time_prune_index(tmp_path: Path) -> None:
+    # Retention deletes consumption_applied_batches by batch_time, which does not lead the
+    # (device_id, batch_id) primary key. Without this index the hourly prune full-scans an
+    # append-only ledger that grows unbounded on an active install. It is created and
+    # startup-verified by the same mechanism as the interval_start prune index.
+    store = _store(tmp_path)
+    names = _index_names(store)
+    assert "consumption_applied_batches_batch_time_idx" in names
+    assert "consumption_history_intervals_interval_start_idx" in names
+
+
+def test_prune_index_survives_a_store_reopen(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    store.close()
+    reopened = AdminStore(tmp_path / "rct.db", SECRET)
+    reopened.initialize()
+    assert "consumption_applied_batches_batch_time_idx" in _index_names(reopened)
+
+
+# --- F3: the counter buffer logs its drops like the power buffer (review finding 3) ------------
+
+
+def test_counter_buffer_is_bounded_and_counts_and_logs_its_drops(caplog) -> None:
+    from app.admin.consumption import MAX_BUFFERED_COUNTER_READINGS
+    from app.optimizer.meter import TOTAL_COUNTER
+
+    sink = ConsumptionSampleSink()
+    overflow = 1200
+    with caplog.at_level("WARNING", logger="app.admin.consumption"):
+        for i in range(MAX_BUFFERED_COUNTER_READINGS + overflow):
+            sink.sample("main", TOTAL_COUNTER, float(i), BASE + timedelta(seconds=i))
+
+    drained = sink.drain_counters()["main"][TOTAL_COUNTER]
+    assert len(drained) == MAX_BUFFERED_COUNTER_READINGS  # never exceeds the bound
+    assert sink.dropped_counters == overflow  # every reading past the bound is accounted
+    assert drained[0][1] == pytest.approx(float(overflow))  # oldest-first eviction
+
+    # Sparse logging mirrors the power buffer: the 1st drop and every 1000th -> {1, 1000} = 2 records.
+    warnings = [r for r in caplog.records if "counter buffer full" in r.getMessage()]
+    assert len(warnings) == 2
+
+
+def test_restore_counters_trim_also_counts_drops() -> None:
+    from app.admin.consumption import MAX_BUFFERED_COUNTER_READINGS
+    from app.optimizer.meter import TOTAL_COUNTER
+
+    sink = ConsumptionSampleSink()
+    series = [(BASE + timedelta(seconds=i), float(i)) for i in range(MAX_BUFFERED_COUNTER_READINGS + 5)]
+    sink.restore_counters("main", {TOTAL_COUNTER: series})
+    assert sink.dropped_counters == 5
+    assert len(sink.drain_counters()["main"][TOTAL_COUNTER]) == MAX_BUFFERED_COUNTER_READINGS

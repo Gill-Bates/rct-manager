@@ -77,6 +77,9 @@ async def _ready_client(app, password):
         json={"current_password": password, "new_password": PASSWORD2},
     )
     assert changed.status_code == 200
+    accepted = await client.post("/admin/api/accept-disclaimer",
+                                 headers={"X-CSRF-Token": changed.json()["csrf_token"]})
+    assert accepted.status_code == 200
     return client
 
 

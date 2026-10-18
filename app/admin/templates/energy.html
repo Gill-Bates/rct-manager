@@ -4,32 +4,33 @@
 <div class="page-heading">
     <div>
         <h1>Energy Manager</h1>
-        <p class="text-secondary mb-0">Battery control per inverter, plus the spot-market and weather data sources that
-            will feed later energy optimisation. Spot-market and weather settings are inputs only; they never control
-            the inverter directly.</p>
+        <p class="text-secondary mb-0">Battery control per inverter, plus spot-market and weather inputs for the
+            read-only charging plan. Spot-market and weather settings never control the inverter directly.</p>
     </div>
 </div>
 
 {# Bootstrap tabs: no full-page reload, keyboard operable (arrow keys move between tabs), and the
 active tab is reflected in the URL fragment by admin.js so a reload or a shared link reopens it.
-Default tab is Inverter; Charging plan is the read-only Dry-Run preview. #}
+Default tab is Inverter. Charging plan, Spot Market and Weather stay hidden until at least one
+inverter is Manual (energy-setup.js shows all three together); External does not count. All three
+start hidden to avoid a first-paint flash. #}
 <ul class="nav nav-tabs energy-tabs mb-3" id="energy-tabs" role="tablist">
     <li class="nav-item" role="presentation">
         <button type="button" class="nav-link active" id="energy-tab-inverter" data-bs-toggle="tab"
             data-bs-target="#energy-pane-inverter" data-tab="inverter" role="tab" aria-controls="energy-pane-inverter"
             aria-selected="true">Inverter</button>
     </li>
-    <li class="nav-item" role="presentation">
+    <li class="nav-item" role="presentation" hidden>
         <button type="button" class="nav-link" id="energy-tab-plan" data-bs-toggle="tab"
             data-bs-target="#energy-pane-plan" data-tab="plan" role="tab" aria-controls="energy-pane-plan"
             aria-selected="false">Charging plan</button>
     </li>
-    <li class="nav-item" role="presentation">
+    <li class="nav-item" role="presentation" hidden>
         <button type="button" class="nav-link" id="energy-tab-spot-market" data-bs-toggle="tab"
             data-bs-target="#energy-pane-spot-market" data-tab="spot-market" role="tab"
             aria-controls="energy-pane-spot-market" aria-selected="false">Spot Market</button>
     </li>
-    <li class="nav-item" role="presentation">
+    <li class="nav-item" role="presentation" hidden>
         <button type="button" class="nav-link" id="energy-tab-weather" data-bs-toggle="tab"
             data-bs-target="#energy-pane-weather" data-tab="weather" role="tab" aria-controls="energy-pane-weather"
             aria-selected="false">Weather</button>
@@ -55,46 +56,54 @@ Default tab is Inverter; Charging plan is the read-only Dry-Run preview. #}
 
     {# Charging plan: read-only Dry-Run preview of the dynamic charging planner. It only reads
     /admin/api/energy/devices/{id}/dynamic-plan and never commands the battery. #}
-    <div class="tab-pane fade" id="energy-pane-plan" role="tabpanel" aria-labelledby="energy-tab-plan"
-        tabindex="0">
+    <div class="tab-pane fade" id="energy-pane-plan" role="tabpanel" aria-labelledby="energy-tab-plan" tabindex="0">
         <section class="card" id="energy-plan-card" aria-labelledby="energy-plan-title">
             <div class="card-body">
-                <div class="d-flex flex-wrap justify-content-between align-items-start gap-3 mb-3">
-                    <div>
-                        <h2 class="h5 card-title mb-1" id="energy-plan-title">Charging plan</h2>
-                        <p class="text-secondary small mb-0">Preview only · No inverter commands are sent</p>
-                    </div>
-                    <div class="form-check form-switch mb-0">
-                        <input class="form-check-input" type="checkbox" role="switch" id="energy-plan-expert-mode"
-                            autocomplete="off">
-                        <label class="form-check-label" for="energy-plan-expert-mode">Expert mode</label>
-                    </div>
-                </div>
-                <div class="row g-2 align-items-end mb-3">
-                    <div class="col-12 col-sm-auto">
-                        <label class="form-label" for="energy-plan-device">Inverter</label>
-                        <select class="form-select" id="energy-plan-device" autocomplete="off"></select>
-                    </div>
-                    <div class="col-12 col-sm-auto">
-                        <button type="button" class="btn btn-outline-secondary btn-sm" id="energy-plan-load"
-                            aria-label="Refresh plan"><span aria-hidden="true">↻</span> Refresh</button>
-                    </div>
-                </div>
-                <div class="row g-3">
-                    <div class="col-12 col-xl-7">
-                        <div id="energy-plan-result" aria-live="polite"></div>
-                    </div>
-                    {# Context for the plan: the consumption history the forecast learns from. #}
-                    <section class="col-12 col-xl-5" id="energy-consumption-section" aria-labelledby="energy-consumption-title" hidden>
-                        <div class="spot-market-preview-title-row">
-                            <h3 class="h6 mb-0" id="energy-consumption-title">Household consumption · last 60 days</h3>
-                            <div id="energy-consumption-status" class="spot-market-preview-status" aria-live="polite"></div>
+                <div class="energy-plan-head mb-3">
+                    <div class="energy-plan-head-title">
+                        {# Title and forecast confidence share one line; the confidence is set by renderDryRunPlan. #}
+                        <div class="energy-plan-title-row">
+                            <h2 class="h5 card-title mb-0" id="energy-plan-title">Charging plan</h2>
+                            <span class="energy-plan-status" aria-live="polite">
+                                <span class="small text-secondary" id="energy-plan-confidence" hidden></span>
+                            </span>
                         </div>
-                        <div id="energy-consumption" class="spot-market-preview" aria-live="polite"></div>
-                    </section>
+                        {# Compact but unambiguous: the visible text states the read-only nature and
+                        that no inverter commands are sent; the fuller safety meaning is carried for
+                        assistive technology via aria-describedby, without a large paragraph. #}
+                        <p class="text-secondary small mb-0 mt-1" id="energy-plan-readonly-note"
+                            aria-describedby="energy-plan-readonly-detail">Read-only preview · No inverter commands</p>
+                        <span id="energy-plan-readonly-detail" class="visually-hidden">The charging plan is a
+                            preview only and never sends commands to the inverter.</span>
+                    </div>
+                    <div class="energy-plan-head-controls" role="group" aria-label="Charging plan controls">
+                        <div class="energy-plan-device-field">
+                            <label class="form-label mb-1" for="energy-plan-device">Inverter</label>
+                            <select class="form-select" id="energy-plan-device" autocomplete="off"></select>
+                        </div>
+                        <div class="form-check form-switch mb-0 energy-plan-expert-field">
+                            <input class="form-check-input" type="checkbox" role="switch" id="energy-plan-expert-mode"
+                                autocomplete="off">
+                            <label class="form-check-label" for="energy-plan-expert-mode">Expert mode</label>
+                        </div>
+                    </div>
                 </div>
+                {# Result area at full width: summary, then the schedule, then the optional consumption history. #}
+                <div id="energy-plan-result" aria-live="polite"></div>
                 {# Full card width: the time-series chart and the slot table need the room. #}
-                <div id="energy-plan-schedule" class="mt-3"></div>
+                <div id="energy-plan-schedule"></div>
+                {# Context for the plan: the consumption history the forecast learns from. Hidden reserves no space. #}
+                <section class="energy-plan-section" id="energy-consumption-section" aria-labelledby="energy-consumption-title" hidden>
+                    <div class="spot-market-preview-title-row">
+                        <h3 class="h6 mb-0" id="energy-consumption-title">Household consumption · last 60 days</h3>
+                    </div>
+                    <div class="energy-consumption-meta small text-secondary">
+                        <div id="energy-consumption-status" aria-live="polite"></div>
+                        <div id="energy-consumption-import-status" class="energy-consumption-coverage"
+                            aria-live="polite"></div>
+                    </div>
+                    <div id="energy-consumption" class="spot-market-preview" aria-live="polite"></div>
+                </section>
                 <div id="energy-plan-advanced" class="mt-3" hidden>
                     <details id="energy-plan-diagnostics">
                         <summary>Advanced diagnostics</summary>
@@ -103,38 +112,52 @@ Default tab is Inverter; Charging plan is the read-only Dry-Run preview. #}
                                 <h3 class="h6" id="energy-plan-diag-battery-title">Battery capacity</h3>
                                 <dl class="row small mb-0" id="energy-plan-diag-battery"></dl>
                             </section>
+                            <section class="mb-3" aria-labelledby="energy-plan-calibration-title">
+                                <h3 class="h6" id="energy-plan-calibration-title">Battery calibration history</h3>
+                                <div id="energy-plan-calibration" aria-live="polite">
+                                    <p class="small text-secondary">Calibration history has not been loaded.</p>
+                                </div>
+                            </section>
                             <section class="mb-3" aria-labelledby="energy-plan-diag-power-title">
                                 <h3 class="h6" id="energy-plan-diag-power-title">Power limits</h3>
                                 <dl class="row small mb-0" id="energy-plan-diag-power"></dl>
                             </section>
-                            <section class="mb-3" id="energy-plan-forecast" aria-labelledby="energy-plan-forecast-title" hidden>
+                            <section class="mb-3" id="energy-plan-forecast" aria-labelledby="energy-plan-forecast-title"
+                                hidden>
                                 <h3 class="h6" id="energy-plan-forecast-title">Forecast inputs</h3>
                                 <div id="energy-plan-technical"></div>
                             </section>
-                            <form id="energy-plan-limits" class="row g-2 align-items-end mb-3 d-none" aria-labelledby="energy-plan-limits-title" hidden>
-                    <h4 class="h6 col-12 mb-0" id="energy-plan-limits-title">Battery data override</h4>
-                    <p class="col-12 text-secondary small mb-0">Enter verified values for this inverter only. The
-                        planner uses these values in place of automatically detected battery data. This works with
-                        write access off and does not enable battery control. Leave the capacity empty to clear its
-                        override.</p>
-                    <div class="col-auto">
-                        <label class="form-label small mb-1" for="energy-plan-charge">Maximum charging power (kW)</label>
-                        <input class="form-control form-control-sm" type="number" id="energy-plan-charge" name="charge"
-                            min="0.001" max="50" step="0.001" required>
-                    </div>
-                    <div class="col-auto">
-                        <label class="form-label small mb-1" for="energy-plan-discharge">Maximum discharging power (kW)</label>
-                        <input class="form-control form-control-sm" type="number" id="energy-plan-discharge"
-                            name="discharge" min="0.001" max="50" step="0.001" required>
-                    </div>
-                    <div class="col-auto">
-                        <label class="form-label small mb-1" for="energy-plan-capacity">Usable capacity (kWh)</label>
-                        <input class="form-control form-control-sm" type="number" id="energy-plan-capacity"
-                            name="capacity" min="0.1" max="1000" step="0.1">
-                    </div>
-                    <div class="col-auto">
-                        <button type="submit" class="btn btn-primary btn-sm">Save expert override</button>
-                    </div>
+                            <form id="energy-plan-limits" class="row g-2 align-items-end mb-3 d-none"
+                                aria-labelledby="energy-plan-limits-title" hidden>
+                                <h4 class="h6 col-12 mb-0" id="energy-plan-limits-title">Battery data override</h4>
+                                <p class="col-12 text-secondary small mb-0">Enter verified values for this inverter
+                                    only. The
+                                    planner uses these values in place of automatically detected battery data. This
+                                    works with
+                                    write access off and does not enable battery control. Leave the capacity empty to
+                                    clear its
+                                    override.</p>
+                                <div class="col-auto">
+                                    <label class="form-label small mb-1" for="energy-plan-charge">Maximum charging power
+                                        (kW)</label>
+                                    <input class="form-control form-control-sm" type="number" id="energy-plan-charge"
+                                        name="charge" min="0.001" max="50" step="0.001" required>
+                                </div>
+                                <div class="col-auto">
+                                    <label class="form-label small mb-1" for="energy-plan-discharge">Maximum discharging
+                                        power (kW)</label>
+                                    <input class="form-control form-control-sm" type="number" id="energy-plan-discharge"
+                                        name="discharge" min="0.001" max="50" step="0.001" required>
+                                </div>
+                                <div class="col-auto">
+                                    <label class="form-label small mb-1" for="energy-plan-capacity">Usable capacity
+                                        (kWh)</label>
+                                    <input class="form-control form-control-sm" type="number" id="energy-plan-capacity"
+                                        name="capacity" min="0.1" max="1000" step="0.1">
+                                </div>
+                                <div class="col-auto">
+                                    <button type="submit" class="btn btn-primary btn-sm">Save expert override</button>
+                                </div>
                             </form>
                         </div>
                     </details>
@@ -170,7 +193,8 @@ Default tab is Inverter; Charging plan is the read-only Dry-Run preview. #}
                     <div class="card-body spot-market-preview-card-body">
                         <div class="spot-market-preview-title-row">
                             <h2 class="h5 card-title">Day-ahead preview</h2>
-                            <div id="spot-market-preview-status" class="spot-market-preview-status" aria-live="polite"></div>
+                            <div id="spot-market-preview-status" class="spot-market-preview-status" aria-live="polite">
+                            </div>
                         </div>
                         <div id="spot-market-preview" class="spot-market-preview" aria-live="polite">
                             <div class="spot-market-loading" role="status">
@@ -221,7 +245,8 @@ Default tab is Inverter; Charging plan is the read-only Dry-Run preview. #}
                     <div class="card-body spot-market-preview-card-body">
                         <div class="spot-market-preview-title-row">
                             <h2 class="h5 card-title">Forecast preview</h2>
-                            <div id="weather-preview-status" class="spot-market-preview-status" aria-live="polite"></div>
+                            <div id="weather-preview-status" class="spot-market-preview-status" aria-live="polite">
+                            </div>
                         </div>
                         <div id="weather-site-summary"></div>
                         <div id="weather-preview" class="spot-market-preview" aria-live="polite">

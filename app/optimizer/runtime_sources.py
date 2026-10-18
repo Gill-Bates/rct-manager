@@ -9,11 +9,17 @@
 from collections.abc import Callable
 from datetime import datetime, timedelta
 
-from app.admin.forecast_refresh import local_three_day_window, solar_config_key, spot_config_key
+from app.admin.forecast_refresh import (
+    local_three_day_window,
+    solar_config_key,
+    spot_config_key,
+)
 from app.admin.store import AdminStore
 from app.api.runtime import Runtime
 from app.dispatch.models import DeviceLimits
 from app.dispatch.store import DispatchStore
+from app.energy.activity import EnergyActivity
+from app.energy.models import EnergyMode
 from app.energy.soc_window import effective_target_window
 from app.errors import DeviceApiError
 from app.gateway.base import DeviceState
@@ -33,7 +39,9 @@ from app.weather.models import WeatherConfig
 
 
 class StoredSpotPriceSource:
-    def __init__(self, store: AdminStore, config: Callable[[], SpotMarketConfig]) -> None:
+    def __init__(
+        self, store: AdminStore, config: Callable[[], SpotMarketConfig]
+    ) -> None:
         self._store = store
         self._config = config
 
@@ -111,7 +119,9 @@ class StoredDeviceLimitsSource:
         settings = runtime.settings
         if settings.hmac_secret is None or not settings.dispatch_db_path.exists():
             return None
-        store = DispatchStore(settings.dispatch_db_path, settings.hmac_secret.get_secret_value())
+        store = DispatchStore(
+            settings.dispatch_db_path, settings.hmac_secret.get_secret_value()
+        )
         store.initialize()
         return store.get_device_configs().get(device_id)
 
@@ -121,7 +131,10 @@ def _device_started(runtime: Runtime, device_id: str) -> bool:
     try:
         status = runtime.gateway.device_status(device_id)
         # STARTING lasts until the first heartbeat tick; any completed transaction already proves the link.
-        return status.state is not DeviceState.STARTING or status.last_success_at is not None
+        return (
+            status.state is not DeviceState.STARTING
+            or status.last_success_at is not None
+        )
     except DeviceApiError:
         return True  # an unknown device is not a start race; let the normal checks report it
 
@@ -137,12 +150,16 @@ def build_runtime_planning_service(
     settings = runtime.settings
     if runtime.energy_readings is None:
         raise RuntimeError("energy readings are not configured")
-    reserve, cap = effective_target_window(settings.dispatch_min_soc, settings.dispatch_max_soc)
+    reserve, cap = effective_target_window(
+        settings.dispatch_min_soc, settings.dispatch_max_soc
+    )
     return PlanningService(
         device_id=device_id,
         clock=runtime.clock,
-        optimizer=DynamicChargeOptimizer(PlanParameters(reserve_soc_percent=reserve, max_soc_percent=cap)),
-        scheduler=InMemoryPlanScheduler(),
+        optimizer=DynamicChargeOptimizer(
+            PlanParameters(reserve_soc_percent=reserve, max_soc_percent=cap)
+        ),
+        scheduler=InMemoryPlanScheduler(runtime.clock),
         prices=StoredSpotPriceSource(store, spot_config),
         solar=StoredSolarForecastSource(store, weather_config),
         consumption=StoredConsumptionForecastSource(
@@ -164,4 +181,10 @@ def build_runtime_planning_service(
         consumption_max_age_seconds=settings.consumption_max_age_seconds,
         battery_max_age_seconds=settings.battery_max_age_seconds,
         device_ready=lambda device_id: _device_started(runtime, device_id),
+        # Without an Energy Manager there is no mode, which is the same as off.
+        activity=(
+            runtime.energy.activity
+            if runtime.energy is not None
+            else EnergyActivity(lambda _device_id: EnergyMode.OFF, lambda: ())
+        ),
     )

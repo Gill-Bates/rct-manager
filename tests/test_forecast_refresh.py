@@ -491,3 +491,111 @@ def test_local_three_day_window_rejects_an_unknown_zone() -> None:
     with pytest.raises(Exception) as raised:
         forecast_refresh.local_three_day_window(datetime(2026, 3, 10, tzinfo=UTC), "Not/AZone")
     assert type(raised.value).__name__ == "ZoneInfoNotFoundError"
+
+
+class _FixedClock:
+    def now(self):
+        return NOW
+
+
+class _SolarProvider:
+    def __init__(self):
+        self.calls = 0
+
+    def fetch_preview(self, config, now):
+        self.calls += 1
+        starts = [start for day in _three_days(NOW) for start in day]
+        return SolarForecast(created_at=now, intervals=tuple(
+            SolarForecastInterval(start, start + timedelta(minutes=15), 100.0) for start in starts
+        ))
+
+
+class _ModeMap:
+    """Real EnergyActivity over a mutable mode map; a missing device is Off, like a fresh install."""
+
+    def __init__(self, **modes):
+        from app.energy.activity import EnergyActivity
+        from app.energy.models import EnergyMode
+
+        self.off = EnergyMode.OFF
+        self.modes = dict(modes)
+        self.activity = EnergyActivity(lambda d: self.modes.get(d, self.off), lambda: ("a", "b"))
+
+    def set(self, device_id, mode):
+        self.modes[device_id] = mode
+        self.activity.notify()
+
+
+async def _pump(cycles=60):
+    for _ in range(cycles):
+        await asyncio.sleep(0.005)
+
+
+async def _run_both_loops(tmp_path, modes):
+    from app.admin.forecast_refresh import run_solar_refresh_loop
+
+    store = _store(tmp_path)
+    spot, solar = _Provider(), _SolarProvider()
+    app = SimpleNamespace(state=SimpleNamespace(spotmarket_config=SPOT, weather_config=SOLAR))
+    spot_event, solar_event = asyncio.Event(), asyncio.Event()
+    tasks = [
+        asyncio.create_task(run_spot_market_refresh_loop(
+            store, spot, app, spot_event, _FixedClock(), modes.activity)),
+        asyncio.create_task(run_solar_refresh_loop(
+            store, solar, app, solar_event, _FixedClock(), modes.activity)),
+    ]
+
+    async def stop():
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        await drain_store_threads()
+        store.close()
+
+    return spot, solar, spot_event, solar_event, stop
+
+
+@pytest.mark.asyncio
+async def test_provider_loops_rest_while_every_inverter_is_off_and_follow_mode_changes(tmp_path):
+    from app.energy.models import EnergyMode
+
+    modes = _ModeMap()  # fresh install: no stored mode at all
+    spot, solar, spot_event, solar_event, stop = await _run_both_loops(tmp_path, modes)
+    try:
+        await _pump()
+        spot_event.set()  # a configuration save must not force a fetch while everything is off
+        solar_event.set()
+        await _pump()
+        assert spot.calls == [] and solar.calls == 0
+
+        modes.set("a", EnergyMode.MANUAL)  # Off -> Manual evaluates both jobs at once
+        await _pump(200)
+        assert spot.calls and solar.calls == 1
+
+        before_spot, before_solar = list(spot.calls), solar.calls
+        modes.set("a", EnergyMode.OFF)  # last active inverter -> Off: no new provider operation
+        spot_event.set()
+        solar_event.set()
+        await _pump()
+        assert spot.calls == before_spot and solar.calls == before_solar
+    finally:
+        await stop()
+
+
+@pytest.mark.asyncio
+async def test_shared_provider_jobs_follow_any_active_inverter_not_one_device(tmp_path):
+    from app.energy.models import EnergyMode
+
+    modes = _ModeMap(a=EnergyMode.OFF, b=EnergyMode.EXTERNAL)  # A off, B external
+    spot, solar, _, _, stop = await _run_both_loops(tmp_path, modes)
+    try:
+        await _pump(200)
+        assert spot.calls and solar.calls == 1, "one active inverter keeps the shared jobs alive"
+        assert modes.activity.device_energy_active("b") and not modes.activity.device_energy_active("a")
+        modes.set("a", EnergyMode.MANUAL)  # manual + external: still active
+        assert modes.activity.any_energy_active()
+        modes.set("a", EnergyMode.OFF)
+        modes.set("b", EnergyMode.OFF)  # A off + B off after an earlier On: asleep again
+        assert not modes.activity.any_energy_active()
+    finally:
+        await stop()

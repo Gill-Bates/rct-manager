@@ -20,6 +20,7 @@ const path = require('node:path');
 const vm = require('node:vm');
 
 const SOURCE = fs.readFileSync(path.join(__dirname, '../../app/admin/static/js/admin-weather.js'), 'utf8');
+const AXIS_SOURCE = fs.readFileSync(path.join(__dirname, '../../app/admin/static/js/admin-chart-axis.js'), 'utf8');
 
 // A minimal DOM node: children, classList, dataset, attributes and the handful of methods the
 // source touches. querySelector/querySelectorAll walk the subtree by [data-field] / [role].
@@ -125,6 +126,7 @@ function harness({ apiImpl } = {}) {
     __previewScheduled: 0,
   };
   context.window = context;
+  vm.runInNewContext(AXIS_SOURCE, context);
   vm.runInNewContext(SOURCE, context);
   return { context, byId, ensure, fieldsContainer, siteSummaryContainer, providerFieldsContainer, pvFieldsContainer, paths };
 }
@@ -940,7 +942,8 @@ test('a DST fall-back day keeps both duplicated-wall-clock forecast intervals', 
   const points = today.data.filter((value) => value !== null);
   assert.equal(points.length, 2, 'both duplicated-hour intervals are kept, neither overwritten');
   assert.deepEqual(points, [1.5, 2.5], 'both distinct kW values survive in input order');
-  assert.deepEqual(today.times.slice(0, 2), ['02:00', '02:00'], 'both carry the 02:00 wall-clock label');
+  const labels = captured.config.data.labels;
+  assert.deepEqual([today.data[labels.indexOf('02:00')], today.data[labels.indexOf('02:00 (2)')]], [1.5, 2.5], 'each sits in its own 02:00 occurrence slot');
 });
 
 test('a manual coordinate edit clears the stale location name and region', () => {
@@ -972,4 +975,37 @@ test('a programmatic selectWeatherLocation still sets the name (reset fires only
   h.context.selectWeatherLocation(HIT, search, results);
   assert.equal(h.byId.get('weather-selected-location').textContent, 'Remscheid');
   assert.equal(h.context.weatherBody().location_name, 'Remscheid');
+});
+
+function drawWeatherDay(count, startIso) {
+  const h = harness();
+  const box = makeNode('div', h.byId);
+  const canvas = makeNode('canvas', h.byId);
+  canvas.id = 'weather-chart';
+  box.append(canvas);
+  h.ensure('weather-preview').append(box);
+  let config = null;
+  h.context.Chart = class { constructor(_c, cfg) { config = cfg; this.options = cfg.options; } destroy() { } update() { } };
+  h.context.getComputedStyle = () => ({ getPropertyValue: () => '#123456' });
+  const intervals = Array.from({ length: count }, (_, index) => {
+    const start = Date.parse(startIso) + index * 900_000;
+    return { start: new Date(start).toISOString(), end: new Date(start + 900_000).toISOString(), power_kw: index };
+  });
+  h.context.drawWeatherChart({ timezone: 'Europe/Berlin', yesterday_intervals: [], today_intervals: intervals, next_day_intervals: [] });
+  return { labels: config.data.labels, today: config.data.datasets.find((d) => d.label === 'Today').data };
+}
+
+test('Weather chart on a DST fall-back day (100 slots) keeps values under their real local time', () => {
+  const { labels, today } = drawWeatherDay(100, '2026-10-24T22:00:00Z');
+  assert.equal(labels.length, 100);
+  assert.deepEqual(labels.slice(8, 16), ['02:00', '02:15', '02:30', '02:45', '02:00 (2)', '02:15 (2)', '02:30 (2)', '02:45 (2)']);
+  assert.equal(today[labels.indexOf('03:00')], 16);
+  assert.equal(today[labels.indexOf('02:00 (2)')], 12);
+});
+
+test('Weather chart on a DST spring-forward day (92 slots) leaves the skipped hour empty', () => {
+  const { labels, today } = drawWeatherDay(92, '2026-03-28T23:00:00Z');
+  assert.equal(labels.length, 96);
+  assert.deepEqual(today.slice(labels.indexOf('02:00'), labels.indexOf('03:00')), [null, null, null, null]);
+  assert.equal(today[labels.indexOf('03:00')], 8);
 });

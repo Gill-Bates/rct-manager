@@ -9,6 +9,7 @@
 Any internal failure rejects the request instead of admitting it.
 """
 
+import hashlib
 import logging
 import math
 import threading
@@ -39,15 +40,30 @@ def caller_key(token_id: str | None, address: str) -> str:
     return f"{token_id or '-'}|{_bucket(address)}"
 
 
+def admin_session_key(session_token: str | None, address: str) -> str:
+    """Admin-GUI caller: source address (IPv6 as /64) plus a digest of the session cookie.
+
+    The digest keeps the raw session secret out of limiter memory; tabs of one browser share it.
+    """
+    digest = hashlib.sha256((session_token or "").encode()).hexdigest()[:16]
+    return f"admin-session|{_bucket(address)}|{digest}"
+
+
 class SlidingWindow:
-    """Per-key request counter over a sliding window on the monotonic axis."""
+    """Per-key request counter over a sliding window on the monotonic axis.
+
+    Rejected requests are not recorded, so a caller that backs off is admitted again once the
+    oldest admitted request leaves the window.
+    """
 
     def __init__(self, limit: int, window_seconds: float, clock: Clock) -> None:
         self._limit = limit
         self._window = window_seconds
         self._clock = clock
         self._hits: dict[str, deque[float]] = {}
-        self._lock = threading.Lock()  # shared by the event loop and threadpool handlers
+        self._lock = (
+            threading.Lock()
+        )  # shared by the event loop and threadpool handlers
 
     def set_limit(self, limit: int, window_seconds: float) -> None:
         """Live reconfiguration; existing timestamps stay valid under the new window."""
@@ -61,9 +77,13 @@ class SlidingWindow:
 
     def _make_room(self, now: float) -> None:
         """Drops expired keys only; dropping an active one would reset a live limit."""
-        for key in [k for k, s in self._hits.items() if not s or s[-1] <= now - self._window]:
+        for key in [
+            k for k, s in self._hits.items() if not s or s[-1] <= now - self._window
+        ]:
             del self._hits[key]
-        if len(self._hits) >= MAX_KEYS:  # still full: reject instead of forgetting an active caller
+        if (
+            len(self._hits) >= MAX_KEYS
+        ):  # still full: reject instead of forgetting an active caller
             raise RuntimeError("rate limiter capacity exhausted")
 
     def hit(self, key: str) -> float | None:
@@ -86,7 +106,9 @@ class SlidingWindow:
 class AuthFailureTracker:
     """Failed authentications per source address; reaching the limit blocks the address."""
 
-    def __init__(self, limit: int, window_seconds: float, block_seconds: float, clock: Clock) -> None:
+    def __init__(
+        self, limit: int, window_seconds: float, block_seconds: float, clock: Clock
+    ) -> None:
         self._limit = limit
         self._window = window_seconds
         self._block = block_seconds
@@ -116,7 +138,11 @@ class AuthFailureTracker:
     def _record_failure(self, address: str) -> None:
         now = self._clock.monotonic()
         if address not in self._failures and len(self._failures) >= MAX_KEYS:
-            for known in [a for a, s in self._failures.items() if not s or s[-1] <= now - self._window]:
+            for known in [
+                a
+                for a, s in self._failures.items()
+                if not s or s[-1] <= now - self._window
+            ]:
                 del self._failures[known]
             if len(self._failures) >= MAX_KEYS:
                 # Capacity exhausted and no stale entries to evict: fail closed rather than
@@ -128,8 +154,13 @@ class AuthFailureTracker:
         while stamps and stamps[0] <= now - self._window:
             stamps.popleft()
         if len(stamps) >= self._limit:
-            if address not in self._blocked_until and len(self._blocked_until) >= MAX_KEYS:
-                self._blocked_until = {a: u for a, u in self._blocked_until.items() if u > now}
+            if (
+                address not in self._blocked_until
+                and len(self._blocked_until) >= MAX_KEYS
+            ):
+                self._blocked_until = {
+                    a: u for a, u in self._blocked_until.items() if u > now
+                }
                 if len(self._blocked_until) >= MAX_KEYS:
                     raise RuntimeError("auth block capacity exhausted")
             self._blocked_until[address] = now + self._block
@@ -150,11 +181,22 @@ class RateLimiter:
         auth_fail_block_seconds: float,
         scrape_requests: int,
         scrape_window_seconds: float,
+        admin_session_requests: int = 600,
+        admin_session_window_seconds: float = 60,
     ) -> None:
+        # Cookie-session GUI traffic polls constantly; it must neither starve nor be starved by
+        # the strict per-token business budget, so it has its own window.
+        self._admin_sessions = SlidingWindow(
+            admin_session_requests, admin_session_window_seconds, clock
+        )
         self._business = SlidingWindow(requests, window_seconds, clock)
         self._scrapes = SlidingWindow(scrape_requests, scrape_window_seconds, clock)
-        self._auth = AuthFailureTracker(auth_fail_limit, auth_fail_window_seconds, auth_fail_block_seconds, clock)
-        self._fallback_retry = max(window_seconds, scrape_window_seconds)
+        self._auth = AuthFailureTracker(
+            auth_fail_limit, auth_fail_window_seconds, auth_fail_block_seconds, clock
+        )
+        self._fallback_retry = max(
+            window_seconds, scrape_window_seconds, admin_session_window_seconds
+        )
 
     def _reject(self, retry_after: float) -> RateLimited:
         return RateLimited(retry_after=max(1, math.ceil(retry_after)))
@@ -171,6 +213,10 @@ class RateLimiter:
     def check_request(self, caller: str) -> None:
         """Count a business request regardless of its eventual status code (Requirement 13.1)."""
         self._count(self._business, caller, "request")
+
+    def check_admin_session(self, caller: str) -> None:
+        """Count an admin-GUI request of a cookie session against the separate session budget."""
+        self._count(self._admin_sessions, caller, "admin session request")
 
     def check_scrape(self, caller: str) -> None:
         self._count(self._scrapes, caller, "scrape")
@@ -191,5 +237,7 @@ class RateLimiter:
         try:
             self._auth.record_failure(address)
         except Exception:
-            log.exception("Could not record an authentication failure; rejecting the request")
+            log.exception(
+                "Could not record an authentication failure; rejecting the request"
+            )
             raise self._reject(self._fallback_retry) from None

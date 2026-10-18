@@ -19,7 +19,14 @@ import asyncio
 import contextlib
 import logging
 import math
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping, Sequence
+from collections.abc import (
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Iterable,
+    Mapping,
+    Sequence,
+)
 from datetime import timedelta
 
 from app.clock import Clock
@@ -37,6 +44,7 @@ from app.dispatch.models import (
     PowerDirection,
 )
 from app.dispatch.store import DispatchStore
+from app.energy.activity import EnergyActivity
 from app.energy.errors import EnergyRejected
 from app.energy.models import (
     _ACTION_FOR_MODE,
@@ -71,6 +79,8 @@ _MODE_FOR_ACTION: dict[EnergyAction, DispatchMode] = {
     EnergyAction.DISCHARGE: DispatchMode.DISCHARGE_TO_LOAD,
     EnergyAction.HOLD: DispatchMode.HOLD,
 }
+
+
 def _actor_name(actor: str | None) -> str | None:
     """A caller-supplied name reduced to what ``ModeRecord`` accepts: printable ASCII, bounded.
 
@@ -79,7 +89,9 @@ def _actor_name(actor: str | None) -> str | None:
     """
     if actor is None:
         return None
-    printable = "".join(char for char in actor if 32 <= ord(char) <= 126)[:CHANGED_BY_MAX_LENGTH]
+    printable = "".join(char for char in actor if 32 <= ord(char) <= 126)[
+        :CHANGED_BY_MAX_LENGTH
+    ]
     return printable or None
 
 
@@ -99,7 +111,9 @@ class EnergyManager:
         allowlist_candidates: Callable[[], frozenset[str]] | None,
         required_writes: tuple[str, ...],
         internal_strategy_write: str,
-        revoke_writes: Callable[[Iterable[str]], Awaitable[Sequence[str]]] | None = None,
+        revoke_writes: (
+            Callable[[Iterable[str]], Awaitable[Sequence[str]]] | None
+        ) = None,
         modes: Mapping[str, ModeRecord] | None = None,
     ) -> None:
         self._port = port
@@ -110,7 +124,9 @@ class EnergyManager:
         self._devices = devices
         # A callable follows the live admin switch; a plain bool is fixed (in-process callers, tests).
         self._write_support_enabled = (
-            write_support_enabled if callable(write_support_enabled) else (lambda: write_support_enabled)
+            write_support_enabled
+            if callable(write_support_enabled)
+            else (lambda: write_support_enabled)
         )
         # Setter, reader and candidate set are deliberately separate and all late-bound: an operator
         # can change the approved register names on the Inverters page at any time, so a snapshot
@@ -130,6 +146,8 @@ class EnergyManager:
         # other way round, so the one-directional order rules a lock cycle out.
         self._locks: dict[str, asyncio.Lock] = {}
         self._approval_lock = asyncio.Lock()  # approvals are shared by all devices
+        # Mode ``off`` (also: no stored mode) is the factory state and means operational rest.
+        self.activity = EnergyActivity(self.mode, lambda: tuple(self._devices))
 
     def attach_dispatch(
         self,
@@ -144,7 +162,7 @@ class EnergyManager:
         self._store = store
         self._readings = readings
         self._mode_states = dict(modes)
-
+        self.activity.notify()
 
     def _lock(self, device_id: str) -> asyncio.Lock:
         return self._locks.setdefault(device_id, asyncio.Lock())
@@ -167,6 +185,14 @@ class EnergyManager:
     def mode(self, device_id: str) -> EnergyMode:
         return self._record(device_id).mode
 
+    def device_energy_active(self, device_id: str) -> bool:
+        """False while the device is ``off`` or has no stored mode."""
+        return self.activity.device_energy_active(device_id)
+
+    def any_energy_active(self) -> bool:
+        """True while at least one configured inverter is ``manual`` or ``external``."""
+        return self.activity.any_energy_active()
+
     def mode_record(self, device_id: str) -> ModeRecord:
         """The mode row of one device, for the admin surface's display-only fields."""
         return self._record(device_id)
@@ -182,13 +208,19 @@ class EnergyManager:
         contributed. A device in mode ``off`` whose required writes were approved on the
         Inverters page still reports them here.
         """
-        return tuple(await self._approved_writes()) if self._approved_writes is not None else ()
+        return (
+            tuple(await self._approved_writes())
+            if self._approved_writes is not None
+            else ()
+        )
 
     def required_write_names(self) -> tuple[str, ...]:
         """The register names every manual command needs, so the GUI need not repeat the list."""
         return tuple(self._required_writes)
 
-    def gate_decisions(self, device_id: str) -> tuple[tuple[EnergyAction, GateDecision], ...]:
+    def gate_decisions(
+        self, device_id: str
+    ) -> tuple[tuple[EnergyAction, GateDecision], ...]:
         """The raw gate decision per action, for the admin surface only.
 
         It is computed here rather than in the router so the router carries no business logic.
@@ -204,14 +236,16 @@ class EnergyManager:
         return tuple(
             (
                 action,
-                released
-                if action is EnergyAction.AUTO
-                else evaluate_gate(
-                    _MODE_FOR_ACTION[action],
-                    registry,
-                    device_id=device_id,
-                    device_engineering_mode=engineering,
-                    limit_export=self._config.limit_export_during_discharge,
+                (
+                    released
+                    if action is EnergyAction.AUTO
+                    else evaluate_gate(
+                        _MODE_FOR_ACTION[action],
+                        registry,
+                        device_id=device_id,
+                        device_engineering_mode=engineering,
+                        limit_export=self._config.limit_export_during_discharge,
+                    )
                 ),
             )
             for action in EnergyAction
@@ -226,14 +260,17 @@ class EnergyManager:
         if self._approved_writes is None:
             return []
         try:
-            approved = frozenset(await self._approved_writes())  # ordered tuple in, membership set out
+            approved = frozenset(
+                await self._approved_writes()
+            )  # ordered tuple in, membership set out
         except Exception:
             # An already-applied hardware command must not turn into a 500 just because the
             # allowlist read failed; fail closed and treat every required write as missing (H7).
-            log.exception("Reading the approved write names failed; treating all required writes as missing")
+            log.exception(
+                "Reading the approved write names failed; treating all required writes as missing"
+            )
             return list(self._required_writes)
         return [name for name in self._required_writes if name not in approved]
-
 
     async def command(
         self, device_id: str, command: EnergyCommand, *, actor: str | None
@@ -246,7 +283,10 @@ class EnergyManager:
         self._entry(device_id)
         async with self._lock(device_id):
             if self._port is None:
-                log.warning("Energy command refused: dispatch is not configured (device=%s)", device_id)
+                log.warning(
+                    "Energy command refused: dispatch is not configured (device=%s)",
+                    device_id,
+                )
                 raise EnergyRejected("dispatch_store_unavailable", device_id=device_id)
             self._authorize(device_id, actor)
             # AUTO only ends our operation and replays the stored snapshot; it never submits a new
@@ -254,21 +294,37 @@ class EnergyManager:
             # gateway write allowlist (system=True skips only the request budget). The admin
             # Parameters endpoint refuses to revoke a required dispatch write name while any device
             # is in a mode other than off or has an unfinished dispatch; if not, the handback fails closed below.
-            if command.action is not EnergyAction.AUTO and not self._write_support_enabled():
-                log.warning("Energy command refused: write support is disabled (device=%s)", device_id)
-                raise EnergyRejected("energy_write_support_required", device_id=device_id)
-            missing = await self._missing_write_names() if command.action is not EnergyAction.AUTO else []
+            if (
+                command.action is not EnergyAction.AUTO
+                and not self._write_support_enabled()
+            ):
+                log.warning(
+                    "Energy command refused: write support is disabled (device=%s)",
+                    device_id,
+                )
+                raise EnergyRejected(
+                    "energy_write_support_required", device_id=device_id
+                )
+            missing = (
+                await self._missing_write_names()
+                if command.action is not EnergyAction.AUTO
+                else []
+            )
             if missing:
                 log.warning(
                     "Energy command refused: write approval for %s was revoked (device=%s)",
                     ", ".join(missing), device_id,
                 )  # fmt: skip
-                raise EnergyRejected("energy_action_unavailable", device_id=device_id, missing=missing)
+                raise EnergyRejected(
+                    "energy_action_unavailable", device_id=device_id, missing=missing
+                )
             self._validate(command)
             if command.action is EnergyAction.AUTO:
                 status = await self._handback(device_id)
             else:
-                status = await self._port.submit(device_id, self._dispatch_command(device_id, command))
+                status = await self._port.submit(
+                    device_id, self._dispatch_command(device_id, command)
+                )
             log.info(
                 "Energy command accepted: device=%s action=%s target=%s state=%s actor=%s",
                 device_id, command.action.value, command.target_soc_percent, status.state.value,
@@ -287,10 +343,17 @@ class EnergyManager:
             log.info("Energy command refused: device %s is switched off", device_id)
             raise EnergyRejected("energy_manager_off", device_id=device_id)
         if mode is EnergyMode.MANUAL and not from_admin:
-            log.info("Energy command refused: device %s is in manual mode (actor=%s)", device_id, _actor_name(actor))
+            log.info(
+                "Energy command refused: device %s is in manual mode (actor=%s)",
+                device_id,
+                _actor_name(actor),
+            )
             raise EnergyRejected("energy_manager_not_external", device_id=device_id)
         if mode is EnergyMode.EXTERNAL and from_admin:
-            log.info("Energy command refused: device %s is controlled by an external app", device_id)
+            log.info(
+                "Energy command refused: device %s is controlled by an external app",
+                device_id,
+            )
             raise EnergyRejected("energy_manager_external", device_id=device_id)
 
     def _validate(self, command: EnergyCommand) -> None:
@@ -311,7 +374,9 @@ class EnergyManager:
         if not math.isfinite(command.max_power_w):
             raise EnergyRejected("value_not_finite", field="max_power_w")
         if not 0 < command.max_power_w <= MAX_POWER_W:
-            raise EnergyRejected("value_out_of_range", field="max_power_w", maximum=MAX_POWER_W)
+            raise EnergyRejected(
+                "value_out_of_range", field="max_power_w", maximum=MAX_POWER_W
+            )
 
     def _validate_target(self, target: float) -> None:
         if not math.isfinite(target):
@@ -323,10 +388,15 @@ class EnergyManager:
             # The effective window is published on every status, so a caller can see what it must
             # stay inside; a target is never silently clamped, because that would change the goal.
             raise EnergyRejected(
-                "value_out_of_range", field="target_soc_percent", minimum=window.min, maximum=window.max
+                "value_out_of_range",
+                field="target_soc_percent",
+                minimum=window.min,
+                maximum=window.max,
             )
 
-    def _dispatch_command(self, device_id: str, command: EnergyCommand) -> DispatchCommand:
+    def _dispatch_command(
+        self, device_id: str, command: EnergyCommand
+    ) -> DispatchCommand:
         assert self._port is not None
         mode = _MODE_FOR_ACTION[command.action]
         valid_until = self._clock.now() + timedelta(seconds=COMMAND_TTL_SECONDS)
@@ -335,7 +405,10 @@ class EnergyManager:
             return DispatchCommand(mode, None, 0.0, valid_until)
         limits = self._port.device_limits(device_id)
         if limits is None:
-            log.warning("Energy command refused: no power limits configured for device %s", device_id)
+            log.warning(
+                "Energy command refused: no power limits configured for device %s",
+                device_id,
+            )
             raise EnergyRejected("dispatch_limits_missing", device_id=device_id)
         power = command.max_power_w
         if power is None:
@@ -363,11 +436,16 @@ class EnergyManager:
             if exc.code != "dispatch_not_found":
                 raise
             status = await self._port.status(device_id)  # idempotent: already automatic
-        if status.state is DispatchState.FAULT_RESTORE_PENDING or status.restore_required:
-            log.error("Energy handback incomplete: device %s still requires a restore", device_id)
+        if (
+            status.state is DispatchState.FAULT_RESTORE_PENDING
+            or status.restore_required
+        ):
+            log.error(
+                "Energy handback incomplete: device %s still requires a restore",
+                device_id,
+            )
             raise EnergyRejected("dispatch_restore_required", device_id=device_id)
         return status
-
 
     async def set_mode(
         self, device_id: str, mode: EnergyMode, *, actor: str | None
@@ -378,16 +456,24 @@ class EnergyManager:
                 await self._switch_off(device_id, actor)
             else:
                 await self._switch_on(device_id, mode, actor)
+            # Committed mode first, then the workers; the response follows only after both.
+            self.activity.notify()
             status = None if self._port is None else await self._port.status(device_id)
             return await self._project(device_id, status)
 
-    async def _switch_on(self, device_id: str, mode: EnergyMode, actor: str | None) -> None:
+    async def _switch_on(
+        self, device_id: str, mode: EnergyMode, actor: str | None
+    ) -> None:
         """Design 2.6.1: read-only preflight, hand back when the owner changes, then the add-only
         approval and the commit.
         """
         if not self._write_support_enabled():
             # Deliberately not flipped here: it is a global security switch the operator sets in Settings.
-            log.warning("Mode %s refused: write support is disabled (device=%s)", mode.value, device_id)
+            log.warning(
+                "Mode %s refused: write support is disabled (device=%s)",
+                mode.value,
+                device_id,
+            )
             raise EnergyRejected("energy_write_support_required", device_id=device_id)
         if (
             self._port is None
@@ -396,11 +482,18 @@ class EnergyManager:
             or self._approved_writes is None
             or self._allowlist_candidates is None
         ):
-            log.error("Mode %s refused: the dispatch store or the write allowlist is unavailable", mode.value)
+            log.error(
+                "Mode %s refused: the dispatch store or the write allowlist is unavailable",
+                mode.value,
+            )
             raise EnergyRejected("dispatch_store_unavailable", device_id=device_id)
         limits: DeviceLimits | None = self._port.device_limits(device_id)
         if limits is None:
-            log.warning("Mode %s refused: no power limits configured for device %s", mode.value, device_id)
+            log.warning(
+                "Mode %s refused: no power limits configured for device %s",
+                mode.value,
+                device_id,
+            )
             raise EnergyRejected("dispatch_limits_missing", device_id=device_id)
         candidates = self._allowlist_candidates()
         unavailable = [name for name in self._required_writes if name not in candidates]
@@ -413,7 +506,9 @@ class EnergyManager:
                 mode.value, ", ".join(unavailable), device_id,
             )  # fmt: skip
             raise EnergyRejected(
-                "energy_write_support_required", device_id=device_id, missing=unavailable
+                "energy_write_support_required",
+                device_id=device_id,
+                missing=unavailable,
             )
         current = self._record(device_id)
         if current.armed and current.mode is not mode:
@@ -431,7 +526,9 @@ class EnergyManager:
             record = ModeRecord(
                 device_id=device_id,
                 mode=mode,
-                added_write_names=tuple(dict.fromkeys((*current.added_write_names, *missing))),
+                added_write_names=tuple(
+                    dict.fromkeys((*current.added_write_names, *missing))
+                ),
                 changed_at=current.changed_at if same else self._clock.now(),
                 changed_by=current.changed_by if same else _actor_name(actor),
             )
@@ -455,7 +552,7 @@ class EnergyManager:
                             ",".join(missing), device_id,
                         )  # fmt: skip
                 raise
-        self._mode_states[device_id] = record  # memory only after the commit returned
+        self._mode_states[device_id] = record
         log.warning(
             "Energy Manager mode set: device=%s mode=%s added_writes=%s actor=%s",
             device_id, mode.value, ",".join(missing) or "-", record.changed_by,
@@ -467,7 +564,9 @@ class EnergyManager:
             return
         status = await self._port.status(device_id)
         if status.state is not DispatchState.IDLE or status.restore_required:
-            await self._handback(device_id)  # raises dispatch_restore_required, mode stays as it was
+            await self._handback(
+                device_id
+            )  # raises dispatch_restore_required, mode stays as it was
 
     async def _switch_off(self, device_id: str, actor: str | None) -> None:
         """Confirm the inverter's Internal strategy before recording Off."""
@@ -484,7 +583,9 @@ class EnergyManager:
             raise EnergyRejected("dispatch_store_unavailable", device_id=device_id)
         name = self._internal_strategy_write
         if name not in self._allowlist_candidates():
-            raise EnergyRejected("energy_write_support_required", device_id=device_id, missing=[name])
+            raise EnergyRejected(
+                "energy_write_support_required", device_id=device_id, missing=[name]
+            )
         async with self._approval_lock:
             existing = list(await self._approved_writes())
             added = name not in existing
@@ -492,7 +593,9 @@ class EnergyManager:
                 await self._approve_writes(existing + [name])
             try:
                 try:
-                    await self._port.switch_to_internal(device_id, idle_only=not current.armed)
+                    await self._port.switch_to_internal(
+                        device_id, idle_only=not current.armed
+                    )
                 except DispatchRejected as exc:
                     if exc.code == "dispatch_restore_required":
                         raise EnergyRejected(exc.code, device_id=device_id) from exc
@@ -502,7 +605,11 @@ class EnergyManager:
                 record = ModeRecord(
                     device_id=device_id,
                     mode=EnergyMode.OFF,
-                    added_write_names=tuple(dict.fromkeys((*current.added_write_names, *((name,) if added else ())))),
+                    added_write_names=tuple(
+                        dict.fromkeys(
+                            (*current.added_write_names, *((name,) if added else ()))
+                        )
+                    ),
                     changed_at=self._clock.now(),
                     changed_by=_actor_name(actor),
                 )
@@ -512,11 +619,17 @@ class EnergyManager:
                     if self._revoke_writes is not None:
                         await self._revoke_writes([name])
                     else:
-                        log.error("Off failed and write approval for %s remains (device=%s)", name, device_id)
+                        log.error(
+                            "Off failed and write approval for %s remains (device=%s)",
+                            name,
+                            device_id,
+                        )
                 raise
         self._mode_states[device_id] = record
-        log.info("Energy Manager switched off: device=%s (write approvals left untouched)", device_id)
-
+        log.info(
+            "Energy Manager switched off: device=%s (write approvals left untouched)",
+            device_id,
+        )
 
     async def status(self, device_id: str) -> EnergyDeviceStatus:
         self._entry(device_id)
@@ -524,7 +637,9 @@ class EnergyManager:
         return await self._project(device_id, status)
 
     def _window(self) -> TargetSocWindow:
-        lower, upper = effective_target_window(self._config.min_soc, self._config.max_soc)
+        lower, upper = effective_target_window(
+            self._config.min_soc, self._config.max_soc
+        )
         return TargetSocWindow(min=lower, max=upper)
 
     def _gate(self, device_id: str, mode: DispatchMode, limits: DeviceLimits):
@@ -541,10 +656,18 @@ class EnergyManager:
             limit_export=self._config.limit_export_during_discharge,
         )
 
-    async def _project(self, device_id: str, status: DispatchStatus | None) -> EnergyDeviceStatus:
-        action = _ACTION_FOR_MODE.get(status.mode) if status is not None and status.mode else None
+    async def _project(
+        self, device_id: str, status: DispatchStatus | None
+    ) -> EnergyDeviceStatus:
+        action = (
+            _ACTION_FOR_MODE.get(status.mode)
+            if status is not None and status.mode
+            else None
+        )
         state = (
-            _STATE_FOR_DISPATCH_STATE[status.state] if status is not None else EnergyState.AUTOMATIC
+            _STATE_FOR_DISPATCH_STATE[status.state]
+            if status is not None
+            else EnergyState.AUTOMATIC
         )
         stop_reason = (
             _STOP_REASON_PUBLIC.get(status.stop_reason)
@@ -556,19 +679,26 @@ class EnergyManager:
         except Exception:
             # A status must not be able to fail on an advisory figure: a stale or broken reading
             # cannot be allowed to block the stop command an operator needs.
-            log.warning("Energy readings for device %s could not be read", device_id, exc_info=True)
+            log.warning(
+                "Energy readings for device %s could not be read",
+                device_id,
+                exc_info=True,
+            )
             readings = absent_readings()
         return EnergyDeviceStatus(
             device_id=device_id,
             mode=self.mode(device_id),
             state=state,
             action=action,
-            target_soc_percent=status.target_soc_percent if status is not None else None,
+            target_soc_percent=(
+                status.target_soc_percent if status is not None else None
+            ),
             # No power budget applies while idle or while holding; the commanded pair carries the
             # zero instead.
             power_limit_w=(
                 status.max_power_w
-                if status is not None and action in (EnergyAction.CHARGE, EnergyAction.DISCHARGE)
+                if status is not None
+                and action in (EnergyAction.CHARGE, EnergyAction.DISCHARGE)
                 else None
             ),
             power_limit_clamped=(
@@ -576,7 +706,9 @@ class EnergyManager:
             ),
             commanded_power_w=status.commanded_power_w if status is not None else 0.0,
             commanded_direction=(
-                status.commanded_direction if status is not None else PowerDirection.NONE
+                status.commanded_direction
+                if status is not None
+                else PowerDirection.NONE
             ),
             until=status.valid_until if status is not None else None,
             stop_reason=stop_reason,
@@ -610,10 +742,15 @@ class EnergyManager:
         """
         reason = await self._blocking_reason(device_id)
         return tuple(
-            ActionAvailability(action, available=False, reason=reason)
-            if reason is not None
-            and not (action is EnergyAction.AUTO and reason is ActionReason.WRITE_NOT_PERMITTED)
-            else self._availability(device_id, action, status)
+            (
+                ActionAvailability(action, available=False, reason=reason)
+                if reason is not None
+                and not (
+                    action is EnergyAction.AUTO
+                    and reason is ActionReason.WRITE_NOT_PERMITTED
+                )
+                else self._availability(device_id, action, status)
+            )
             for action in EnergyAction
         )
 
@@ -633,9 +770,13 @@ class EnergyManager:
             return ActionAvailability(action, available=True)
         limits = self._port.device_limits(device_id)
         if limits is None:
-            return ActionAvailability(action, available=False, reason=ActionReason.LIMITS_MISSING)
+            return ActionAvailability(
+                action, available=False, reason=ActionReason.LIMITS_MISSING
+            )
         if status is not None and status.state is DispatchState.FAULT_RESTORE_PENDING:
-            return ActionAvailability(action, available=False, reason=ActionReason.RESTORE_REQUIRED)
+            return ActionAvailability(
+                action, available=False, reason=ActionReason.RESTORE_REQUIRED
+            )
         if not self._gate(device_id, _MODE_FOR_ACTION[action], limits).allowed:
             return ActionAvailability(
                 action, available=False, reason=ActionReason.HARDWARE_NOT_VERIFIED

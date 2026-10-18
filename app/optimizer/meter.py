@@ -21,7 +21,8 @@ meter), an implied mean power above :data:`MAX_PLAUSIBLE_POWER_W`, a stalled cou
 gaps longer than :data:`MAX_ESTIMATE_GAP`. When the total counter is unusable for a pair, the day
 counter delta is the fallback; when both are usable but disagree, the total wins and the mismatch is
 counted. Counter semantics that need real hardware to confirm (day rollover instant and zone, wrap
-behaviour) are documented in ``docs/development/architecture.md`` as unverified; none is assumed here
+behaviour) are listed as unverified in ``docs/reference/hardware-verification.md``; counter capture is
+described in ``docs/energy/consumption.md`` ("Counter capture"). None is assumed here
 beyond "non-decreasing between resets".
 """
 
@@ -91,7 +92,12 @@ Reading = tuple[datetime, float]
 
 
 def _usable(value: float) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value >= 0.0
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+        and value >= 0.0
+    )
 
 
 def _day_delta(day: Sequence[Reading], start: datetime, end: datetime) -> float | None:
@@ -116,7 +122,12 @@ def _day_delta(day: Sequence[Reading], start: datetime, end: datetime) -> float 
 
 
 def _spread(
-    buckets: dict[datetime, MeterAccumulator], start: datetime, end: datetime, energy_wh: float, *, estimated: bool
+    buckets: dict[datetime, MeterAccumulator],
+    start: datetime,
+    end: datetime,
+    energy_wh: float,
+    *,
+    estimated: bool,
 ) -> None:
     """Spread ``energy_wh`` of the span ``start``..``end`` over the buckets it covers, by time."""
     total = (end - start).total_seconds()
@@ -137,7 +148,10 @@ def _spread(
 
 
 def attribute_counter(
-    total: Sequence[Reading], day: Sequence[Reading] = (), *, anchor: Reading | None = None
+    total: Sequence[Reading],
+    day: Sequence[Reading] = (),
+    *,
+    anchor: Reading | None = None,
 ) -> MeterAttribution:
     """Attribute consecutive total-counter readings (after ``anchor``) to 15-minute buckets.
 
@@ -151,7 +165,9 @@ def attribute_counter(
     )
     if anchor is not None:
         ordered.insert(0, (anchor[0].astimezone(UTC), anchor[1]))
-    day_sorted = sorted(((t.astimezone(UTC), v) for t, v in day), key=lambda reading: reading[0])
+    day_sorted = sorted(
+        ((t.astimezone(UTC), v) for t, v in day), key=lambda reading: reading[0]
+    )
     stats = result.stats
     for (t0, v0), (t1, v1) in itertools.pairwise(ordered):
         seconds = (t1 - t0).total_seconds()
@@ -167,12 +183,18 @@ def attribute_counter(
         day_delta = _day_delta(day_sorted, t0, t1) if day_sorted else None
         if delta is None:
             # Total counter unusable for this pair: the day counter, if it is plausible, stands in.
-            if day_delta is not None and _plausible(day_delta, seconds) and (day_delta > 0 or not gap):
+            if (
+                day_delta is not None
+                and _plausible(day_delta, seconds)
+                and (day_delta > 0 or not gap)
+            ):
                 delta = day_delta
                 stats.day_fallbacks += 1
             else:
                 continue
-        elif day_delta is not None and abs(day_delta - delta) > max(CROSS_CHECK_ABS_WH, CROSS_CHECK_REL * delta):
+        elif day_delta is not None and abs(day_delta - delta) > max(
+            CROSS_CHECK_ABS_WH, CROSS_CHECK_REL * delta
+        ):
             stats.cross_check_mismatches += 1
             # The total counter wins (below); this records the raw day-vs-total divergence of the one
             # offending span so a human can see at DEBUG whether the day counter lags, quantises
@@ -201,9 +223,13 @@ def _plausible(delta_wh: float, seconds: float) -> bool:
     return delta_wh * 3600.0 / seconds <= MAX_PLAUSIBLE_POWER_W
 
 
-def _total_delta(v0: float, v1: float, seconds: float, gap: bool, stats: MeterStats) -> float | None:
+def _total_delta(
+    v0: float, v1: float, seconds: float, gap: bool, stats: MeterStats
+) -> float | None:
     if not _usable(v0) or not _usable(v1) or v1 < v0:
-        stats.discarded_negative += 1  # a decreasing counter is a reset or a replaced meter
+        stats.discarded_negative += (
+            1  # a decreasing counter is a reset or a replaced meter
+        )
         return None
     delta = v1 - v0
     if not _plausible(delta, seconds):

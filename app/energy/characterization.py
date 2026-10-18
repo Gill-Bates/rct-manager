@@ -42,6 +42,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Protocol
 
+from app.clock import is_aware
+
 # The measured fields of a sample, in declaration order. Used to validate values and to let the
 # sampler flag the ones it could not populate.
 MEASURED_FIELDS: tuple[str, ...] = (
@@ -119,7 +121,7 @@ class CharacterizationSample:
     unavailable_fields: frozenset[str] = field(default_factory=frozenset)
 
     def __post_init__(self) -> None:
-        if self.timestamp.tzinfo is None:
+        if not is_aware(self.timestamp):
             raise ValueError("characterization sample timestamp must be timezone-aware")
         unknown = set(self.unavailable_fields) - set(MEASURED_FIELDS)
         if unknown:

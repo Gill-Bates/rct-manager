@@ -27,6 +27,7 @@ test('admin startup preserves the Bootstrap library global', async () => {
     document: { body: { dataset: {} }, addEventListener() {}, dispatchEvent() {} },
     CustomEvent: class {},
     api() {},
+    pollDelay: (ms) => ms,
     element() {},
     confirmAction() {},
     initShell() {},

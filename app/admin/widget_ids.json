@@ -14,5 +14,11 @@
   "spot-price-curve",
   "solar-forecast-status",
   "pv-forecast-curve",
-  "charging-schedule"
+  "charging-schedule",
+  "battery-usable-kwh",
+  "battery-remaining-percent",
+  "battery-cycles",
+  "battery-last-calibration",
+  "battery-commissioning-date",
+  "battery-degradation"
 ]

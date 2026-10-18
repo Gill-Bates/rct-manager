@@ -60,7 +60,13 @@ def resolve_zone(name: str | None) -> ZoneInfo:
 
 
 def load_daily_consumption(
-    store: AdminStore, device_id: str, first: date, last: date, *, zone_name: str, now: datetime
+    store: AdminStore,
+    device_id: str,
+    first: date,
+    last: date,
+    *,
+    zone_name: str,
+    now: datetime,
 ) -> list[DailyConsumption]:
     """Resolve the days from the local store only; blocking SQLite, call from a worker thread."""
     zone = resolve_zone(zone_name)
@@ -126,7 +132,9 @@ class ConsumptionHistoryBackfillService:
             if due is not None and now < due and not reconnected:
                 continue
             ok = await self.backfill_device(device_id)
-            self._next_run[device_id] = self._clock.now() + (SUCCESS_INTERVAL if ok else RETRY_INTERVAL)
+            self._next_run[device_id] = self._clock.now() + (
+                SUCCESS_INTERVAL if ok else RETRY_INTERVAL
+            )
 
     async def backfill_device(self, device_id: str) -> bool:
         """Fill missing completed days of the 60-day window; ``False`` when the device could not answer."""
@@ -135,7 +143,11 @@ class ConsumptionHistoryBackfillService:
         except asyncio.CancelledError:
             raise
         except DeviceApiError as exc:
-            log.info("Inverter day history of %s not available (%s); retrying later", device_id, exc.code)
+            log.info(
+                "Inverter day history of %s not available (%s); retrying later",
+                device_id,
+                exc.code,
+            )
         except Exception:
             log.exception("Inverter day history backfill of %s failed", device_id)
         return False
@@ -147,21 +159,41 @@ class ConsumptionHistoryBackfillService:
         today = now.astimezone(zone).date()
         first, last = today - timedelta(days=WINDOW_DAYS), today - timedelta(days=1)
         resolved = await _store_thread(
-            partial(load_daily_consumption, self._store, device_id, first, last, zone_name=zone_name, now=now)
+            partial(
+                load_daily_consumption,
+                self._store,
+                device_id,
+                first,
+                last,
+                zone_name=zone_name,
+                now=now,
+            )
         )
         missing = {d.date for d in resolved if d.source is DailySource.UNAVAILABLE}
         if not missing:
             return True
         found: dict[date, float] = {}
-        before = local_day_bounds(today, zone)[0]  # the running day is never a completed day
+        before = local_day_bounds(today, zone)[
+            0
+        ]  # the running day is never a completed day
         for query in range(MAX_QUERIES_PER_RUN):
             if query:
-                await self._clock.sleep(PAUSE_BETWEEN_QUERIES_SECONDS)  # frees the shared device queue
-            readings = await self._provider.daily_consumption(device_id, before=before, limit=QUERY_LIMIT)
-            fresh = [r for r in readings if r.local_date < before.astimezone(zone).date()]
+                await self._clock.sleep(
+                    PAUSE_BETWEEN_QUERIES_SECONDS
+                )  # frees the shared device queue
+            readings = await self._provider.daily_consumption(
+                device_id, before=before, limit=QUERY_LIMIT
+            )
+            fresh = [
+                r for r in readings if r.local_date < before.astimezone(zone).date()
+            ]
             if not fresh:
                 break
-            found.update((r.local_date, r.energy_wh) for r in fresh if first <= r.local_date <= last)
+            found.update(
+                (r.local_date, r.energy_wh)
+                for r in fresh
+                if first <= r.local_date <= last
+            )
             oldest = min(r.local_date for r in fresh)
             if oldest <= first or not (missing - found.keys()):
                 break
@@ -179,6 +211,9 @@ class ConsumptionHistoryBackfillService:
         ]
         await _store_thread(self._store.upsert_consumption_daily, device_id, rows)
         log.info(
-            "Inverter day history of %s: %d of %d missing day(s) stored", device_id, len(rows), len(missing)
+            "Inverter day history of %s: %d of %d missing day(s) stored",
+            device_id,
+            len(rows),
+            len(missing),
         )
         return True

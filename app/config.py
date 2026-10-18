@@ -45,6 +45,7 @@ def _warn_once(message: str, *args: object) -> None:
         _WARNED.add(message)
         log.warning(message, *args)
 
+
 MAX_DEVICES = 32
 MAX_PERIODIC_METRICS = 64
 # A restore is one stop write plus four framework writes, each followed by a bounded readback.
@@ -110,7 +111,9 @@ class DeviceEntry(BaseModel):
     device_id: str  # path component of the REST contract
     host: str
     port: int = Field(8899, ge=1, le=65535)
-    network_id: int | None = Field(None, ge=0, le=2**32 - 1)  # set -> addressed via the plant network
+    network_id: int | None = Field(
+        None, ge=0, le=2**32 - 1
+    )  # set -> addressed via the plant network
     display_name: str | None = None
 
     @field_validator("display_name")
@@ -120,9 +123,14 @@ class DeviceEntry(BaseModel):
         # starting. The strict 400 for new input lives in the admin API.
         if value is None:
             return value
-        cleaned = "".join(c if c.isprintable() else " " for c in value)[:DISPLAY_NAME_MAX]
+        cleaned = "".join(c if c.isprintable() else " " for c in value)[
+            :DISPLAY_NAME_MAX
+        ]
         if cleaned != value:
-            log.warning("Device display name was shortened or cleaned of control characters: %r", cleaned)
+            log.warning(
+                "Device display name was shortened or cleaned of control characters: %r",
+                cleaned,
+            )
         return cleaned
 
     @field_validator("device_id")
@@ -138,6 +146,10 @@ class DeviceEntry(BaseModel):
         # Brackets are URL syntax for an IPv6 literal, not part of the socket host; strip them so
         # text and structured/admin config agree on one canonical value.
         value = strip_ipv6_brackets(value)
+        try:
+            value = str(ip_address(value))
+        except ValueError:
+            value = value.lower()
         if not value or any(c.isspace() for c in value):
             raise ValueError("host must not be empty or contain whitespace")
         return value
@@ -160,7 +172,9 @@ def parse_devices(raw: str) -> list[DeviceEntry]:
     for index, item in enumerate(_split_list(raw), start=1):
         device_id, sep, address = item.partition("=")
         if not sep:
-            raise ValueError(f"device entry {index} must have the form id=host:port[@network_id]")
+            raise ValueError(
+                f"device entry {index} must have the form id=host:port[@network_id]"
+            )
         address, at, net = address.partition("@")
         network_id: int | None = None
         if at:
@@ -172,11 +186,15 @@ def parse_devices(raw: str) -> list[DeviceEntry]:
         if address.startswith("["):
             host, bracket, rest = address[1:].partition("]")
             if not bracket or (rest and not rest.startswith(":")):
-                raise ValueError(f"device entry {index} has a malformed bracketed address")
+                raise ValueError(
+                    f"device entry {index} has a malformed bracketed address"
+                )
             if rest:
                 port = rest[1:].strip()
         elif address.count(":") > 1:
-            raise ValueError(f"device entry {index}: an IPv6 address needs brackets, e.g. [::1]:8899")
+            raise ValueError(
+                f"device entry {index}: an IPv6 address needs brackets, e.g. [::1]:8899"
+            )
         else:
             host, colon, given = address.partition(":")
             if colon:
@@ -184,7 +202,12 @@ def parse_devices(raw: str) -> list[DeviceEntry]:
         if not (port.isascii() and port.isdigit()):
             raise ValueError(f"device entry {index} has a non-numeric port")
         entries.append(
-            DeviceEntry(device_id=device_id.strip(), host=host.strip(), port=int(port), network_id=network_id)
+            DeviceEntry(
+                device_id=device_id.strip(),
+                host=host.strip(),
+                port=int(port),
+                network_id=network_id,
+            )
         )
     return entries
 
@@ -298,9 +321,18 @@ class Settings(BaseSettings):
 
     @classmethod
     def settings_customise_sources(
-        cls, settings_cls, init_settings, env_settings, dotenv_settings, file_secret_settings
+        cls,
+        settings_cls,
+        init_settings,
+        env_settings,
+        dotenv_settings,
+        file_secret_settings,
     ):
-        return (init_settings, _OperatorOnly(env_settings), _OperatorOnly(dotenv_settings))
+        return (
+            init_settings,
+            _OperatorOnly(env_settings),
+            _OperatorOnly(dotenv_settings),
+        )
 
     # HTTP server and operating environment
     bind_address: IPvAnyAddress = IPv4Address("127.0.0.1")
@@ -318,10 +350,14 @@ class Settings(BaseSettings):
 
     # Authentication is configured in the admin GUI; rate limits remain operator settings.
     auth_required: bool = True
+    session_max_days: int = Field(1, ge=0, le=7)
     trusted_proxies: list[IPvAnyNetwork] = Field(default_factory=list, max_length=32)
     forwarded_header: str = ""
     rate_limit_requests: int = Field(60, ge=1, le=10_000)
     rate_limit_window_seconds: int = Field(60, ge=1, le=3600)
+    # Cookie-session admin GUI traffic (polling, several tabs); PAT callers keep rate_limit_*.
+    admin_session_rate_limit_requests: int = Field(600, ge=1, le=100_000)
+    admin_session_rate_limit_window_seconds: int = Field(60, ge=1, le=3600)
     auth_fail_limit: int = Field(5, ge=1, le=100)
     auth_fail_window_seconds: int = Field(300, ge=10, le=3600)
     auth_fail_block_seconds: int = Field(900, ge=10, le=86_400)
@@ -371,16 +407,18 @@ class Settings(BaseSettings):
     max_fresh_metrics_per_request: int = Field(8, ge=1, le=64)
     fresh_periodic_mode: FreshPeriodicMode = FreshPeriodicMode.OBSERVE
     enable_vendor_diagnostics: bool = False
-    # Inverter day-history backfill: unit and day semantics of logger.day_eload_log_ts are unverified
-    # on hardware, so it stays off until verified. Internal switch, not an operator setting.
-    consumption_daily_backfill_enabled: bool = False
+    # Commissioning-date derivation from logger_year/month_eac_log_ts: same unverified logger history
+    # query contract, so it is off until verified on hardware. A manual date works regardless.
+    battery_commissioning_derivation_enabled: bool = False
     problem_type_base_uri: str = "urn:device-api:problem"
     correlation_id_header: str = "X-Request-Id"
     foreign_access_frame_threshold: int = Field(10, ge=1, le=10_000)
 
     # Writes
     enable_write_support: bool = False
-    write_allowlist_path: Path = _PROJECT_DIR / "app" / "catalog" / "default_write_allowlist.json"
+    write_allowlist_path: Path = (
+        _PROJECT_DIR / "app" / "catalog" / "default_write_allowlist.json"
+    )
 
     # Battery dispatch. Hardware-dependent values have no guessed default and fail closed: the
     # sign conventions and the external-control strategy code are no longer settings but fields of
@@ -416,12 +454,18 @@ class Settings(BaseSettings):
     dispatch_max_operation_duration_seconds: float = Field(21_600.0, ge=60, le=86_400)
     # The shorter cap, in force only while a device's engineering mode is *active*, i.e. while
     # dispatch runs on hardware that is not verified for the requested mode.
-    dispatch_max_operation_duration_engineering_seconds: float = Field(1800.0, ge=60, le=7200)
+    dispatch_max_operation_duration_engineering_seconds: float = Field(
+        1800.0, ge=60, le=7200
+    )
 
     # Periodic reads
-    enable_periodic_reads: bool = True  # code switch only; empty periodic_metrics falls back to preselected
+    enable_periodic_reads: bool = (
+        True  # code switch only; empty periodic_metrics falls back to preselected
+    )
     # Not in OPERATOR_FIELDS: only settable programmatically, never via environment.
-    periodic_metrics: list[str] = Field(default_factory=list, max_length=MAX_PERIODIC_METRICS)
+    periodic_metrics: list[str] = Field(
+        default_factory=list, max_length=MAX_PERIODIC_METRICS
+    )
     periodic_interval_seconds: int = Field(30, ge=1, le=3600)
 
     # Charging strategy (dynamic charging plan). Code switches only, NOT in OPERATOR_FIELDS: these
@@ -451,7 +495,9 @@ class Settings(BaseSettings):
     # and the GUI toggle shows off until an operator opts in. An existing persisted value is kept.
     enable_metrics_endpoint: bool = False
     metrics_require_token: bool = True
-    metrics_trusted_sources: list[IPvAnyNetwork] = Field(default_factory=list, max_length=32)
+    metrics_trusted_sources: list[IPvAnyNetwork] = Field(
+        default_factory=list, max_length=32
+    )
     metrics_exposed_names: list[str] = Field(default_factory=list, max_length=256)
     metrics_rate_limit_requests: int = Field(120, ge=1, le=10_000)
     metrics_rate_limit_window_seconds: int = Field(60, ge=1, le=3600)
@@ -483,13 +529,28 @@ class Settings(BaseSettings):
     questdb_username: str | None = None  # HTTP Basic Auth only (QuestDB OSS)
     questdb_password: SecretStr | None = None
     questdb_downsampling: QuestDbDownsampling = QuestDbDownsampling.OFF
-    questdb_raw_retention_days: int | None = Field(None, ge=1, le=36_500)  # None: preset default
-    questdb_retention_days: int = Field(365, ge=0, le=36_500)  # total retention; 0 keeps everything
+    questdb_raw_retention_days: int | None = Field(
+        None, ge=1, le=36_500
+    )  # None: preset default
+    questdb_retention_days: int = Field(
+        365, ge=0, le=36_500
+    )  # total retention; 0 keeps everything
 
     @field_validator(
-        "db_type", "influxdb_hostname", "influxdb_port", "influxdb_organization", "influxdb_bucket", "influxdb_token",
-        "questdb_hostname", "questdb_port", "questdb_username", "questdb_password", "questdb_downsampling",
-        "questdb_raw_retention_days", "questdb_retention_days", mode="before",
+        "db_type",
+        "influxdb_hostname",
+        "influxdb_port",
+        "influxdb_organization",
+        "influxdb_bucket",
+        "influxdb_token",
+        "questdb_hostname",
+        "questdb_port",
+        "questdb_username",
+        "questdb_password",
+        "questdb_downsampling",
+        "questdb_raw_retention_days",
+        "questdb_retention_days",
+        mode="before",
     )
     @classmethod
     def _blank_is_unset(cls, value: object, info: ValidationInfo) -> object:
@@ -499,11 +560,18 @@ class Settings(BaseSettings):
             if info.field_name in {"db_type", "questdb_downsampling"}:
                 value = value.lower()
             if not value:
-                return {"questdb_downsampling": "off", "questdb_retention_days": 365}.get(info.field_name)
+                return {
+                    "questdb_downsampling": "off",
+                    "questdb_retention_days": 365,
+                }.get(info.field_name)
         return value
 
     @field_validator(
-        "trusted_proxies", "metrics_trusted_sources", "periodic_metrics", "metrics_exposed_names", mode="before"
+        "trusted_proxies",
+        "metrics_trusted_sources",
+        "periodic_metrics",
+        "metrics_exposed_names",
+        mode="before",
     )
     @classmethod
     def _comma_lists(cls, value: object) -> object:
@@ -526,7 +594,9 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def _cross_checks(self) -> Self:
         if self.hmac_secret is None and self.admin_secret is not None:
-            self.hmac_secret = self.admin_secret  # keeps databases encrypted under the old name readable
+            self.hmac_secret = (
+                self.admin_secret
+            )  # keeps databases encrypted under the old name readable
         if self.max_fresh_metrics_per_request > self.max_metrics_per_request:
             raise ValueError(
                 f"MAX_FRESH_METRICS_PER_REQUEST ({self.max_fresh_metrics_per_request}) must not exceed "
@@ -553,7 +623,10 @@ class Settings(BaseSettings):
             * DISPATCH_RESTORE_WRITES
             * (self.write_response_timeout_ms / 1000 + SYSTEM_READBACK_TIMEOUT_SECONDS)
         )
-        if restore_writes > self.shutdown_grace_seconds - self.shutdown_periodic_reserve_seconds:
+        if (
+            restore_writes
+            > self.shutdown_grace_seconds - self.shutdown_periodic_reserve_seconds
+        ):
             # A warning, not an error: it only matters while a dispatch is active at shutdown.
             _warn_once(
                 "SHUTDOWN_GRACE_SECONDS minus SHUTDOWN_PERIODIC_RESERVE_SECONDS (%.1f s) is below the %.1f s "
@@ -568,7 +641,10 @@ class Settings(BaseSettings):
                 f"CHEAP_PERCENTILE ({self.cheap_percentile}) must be smaller than "
                 f"EXPENSIVE_PERCENTILE ({self.expensive_percentile})"
             )
-        if self.dispatch_max_operation_duration_engineering_seconds > self.dispatch_max_operation_duration_seconds:
+        if (
+            self.dispatch_max_operation_duration_engineering_seconds
+            > self.dispatch_max_operation_duration_seconds
+        ):
             raise ValueError(
                 f"DISPATCH_MAX_OPERATION_DURATION_ENGINEERING_SECONDS "
                 f"({self.dispatch_max_operation_duration_engineering_seconds}) must not exceed "
@@ -579,7 +655,9 @@ class Settings(BaseSettings):
                 "DISPATCH_POWER_WRITE_DEADBAND_W must not exceed DISPATCH_GRID_CONTROL_DEADBAND_W"
             )
         if self.forwarded_header.strip().lower() == "forwarded":
-            raise ValueError("FORWARDED_HEADER must name a single-address header such as X-Forwarded-For")
+            raise ValueError(
+                "FORWARDED_HEADER must name a single-address header such as X-Forwarded-For"
+            )
         if self.behind_reverse_proxy and not self.trusted_proxies:
             _warn_once(
                 "BEHIND_REVERSE_PROXY=true but TRUSTED_PROXIES is empty. HTTPS admin requests through an HTTP "
@@ -593,12 +671,16 @@ class Settings(BaseSettings):
         ):
             # The scrape trust check uses the direct peer, so a proxy network listed here lets every
             # client behind that proxy scrape without a token.
-            _warn_once("METRICS_TRUSTED_SOURCES overlaps TRUSTED_PROXIES: clients behind the proxy skip the scrape token")
+            _warn_once(
+                "METRICS_TRUSTED_SOURCES overlaps TRUSTED_PROXIES: clients behind the proxy skip the scrape token"
+            )
         if self.forwarded_header and not self.trusted_proxies:
             raise ValueError("FORWARDED_HEADER requires a non-empty TRUSTED_PROXIES")
         loopback = ip_address(str(self.bind_address)).is_loopback
         if not loopback and not self.allow_non_loopback_bind:
-            raise ValueError("ALLOW_NON_LOOPBACK_BIND=true is required for a non-loopback BIND_ADDRESS")
+            raise ValueError(
+                "ALLOW_NON_LOOPBACK_BIND=true is required for a non-loopback BIND_ADDRESS"
+            )
         if not loopback and not self.behind_reverse_proxy:
             log.warning(
                 "BIND_ADDRESS is not loopback and 'behind reverse proxy' is off: terminate TLS in front of "
@@ -611,40 +693,73 @@ class Settings(BaseSettings):
     def _check_export(self) -> None:
         if self.db_type is DbType.INFLUXDB_V2:
             missing = [
-                name for name, value in (
-                    ("INFLUXDB_HOSTNAME", self.influxdb_hostname), ("INFLUXDB_ORGANIZATION", self.influxdb_organization),
-                    ("INFLUXDB_BUCKET", self.influxdb_bucket), ("INFLUXDB_TOKEN", self.influxdb_token),
-                ) if not value
+                name
+                for name, value in (
+                    ("INFLUXDB_HOSTNAME", self.influxdb_hostname),
+                    ("INFLUXDB_ORGANIZATION", self.influxdb_organization),
+                    ("INFLUXDB_BUCKET", self.influxdb_bucket),
+                    ("INFLUXDB_TOKEN", self.influxdb_token),
+                )
+                if not value
             ]
             if missing:
-                raise ValueError(f"{', '.join(missing)} required for DB_TYPE=influxdb_v2")
+                raise ValueError(
+                    f"{', '.join(missing)} required for DB_TYPE=influxdb_v2"
+                )
             endpoint = self.export_endpoint()
-            self._guard_plaintext(endpoint, True, self.influxdb_allow_plaintext_credentials, "INFLUXDB")
+            self._guard_plaintext(
+                endpoint, True, self.influxdb_allow_plaintext_credentials, "INFLUXDB"
+            )
         elif self.db_type is DbType.QUESTDB:
             if not self.questdb_hostname:
                 raise ValueError("QUESTDB_HOSTNAME required for DB_TYPE=questdb")
             if bool(self.questdb_username) != bool(self.questdb_password):
-                raise ValueError("QUESTDB_USERNAME and QUESTDB_PASSWORD must be set together or not at all")
+                raise ValueError(
+                    "QUESTDB_USERNAME and QUESTDB_PASSWORD must be set together or not at all"
+                )
             endpoint = self.export_endpoint()
             self._guard_plaintext(
-                endpoint, bool(self.questdb_username), self.questdb_allow_plaintext_credentials, "QUESTDB"
+                endpoint,
+                bool(self.questdb_username),
+                self.questdb_allow_plaintext_credentials,
+                "QUESTDB",
             )
             raw, total = self.questdb_raw_retention_days, self.questdb_retention_days
             if self.questdb_downsampling is QuestDbDownsampling.MANUAL and raw is None:
-                raise ValueError("QUESTDB_RAW_RETENTION_DAYS is required for manual downsampling")
-            if self.questdb_downsampling in {QuestDbDownsampling.LOW, QuestDbDownsampling.MEDIUM,
-                                            QuestDbDownsampling.HIGH} and raw is not None and total and raw > total:
+                raise ValueError(
+                    "QUESTDB_RAW_RETENTION_DAYS is required for manual downsampling"
+                )
+            if (
+                self.questdb_downsampling
+                in {
+                    QuestDbDownsampling.LOW,
+                    QuestDbDownsampling.MEDIUM,
+                    QuestDbDownsampling.HIGH,
+                }
+                and raw is not None
+                and total
+                and raw > total
+            ):
                 raise ValueError(
                     f"QUESTDB_RAW_RETENTION_DAYS ({raw}) must not exceed QUESTDB_RETENTION_DAYS ({total})"
                 )
         else:
             return
-        verify = self.influxdb_verify_tls if self.db_type is DbType.INFLUXDB_V2 else self.questdb_verify_tls
+        verify = (
+            self.influxdb_verify_tls
+            if self.db_type is DbType.INFLUXDB_V2
+            else self.questdb_verify_tls
+        )
         if endpoint.tls and not verify:
-            log.warning("TLS certificate verification is disabled for the export target %s", endpoint.host)
+            log.warning(
+                "TLS certificate verification is disabled for the export target %s",
+                endpoint.host,
+            )
 
     @staticmethod
-    def _guard_plaintext(endpoint: Endpoint, has_credentials: bool, allowed: bool, prefix: str) -> None:
+    def _guard_plaintext(
+        endpoint: Endpoint, has_credentials: bool, allowed: bool, prefix: str
+    ) -> None:
         if not has_credentials or endpoint.tls or endpoint.is_loopback:
             return
         if not allowed:
@@ -652,17 +767,29 @@ class Settings(BaseSettings):
                 f"{prefix} credentials must not be sent over plain HTTP; enable TLS (https URL or "
                 f"{prefix}_TLS_ENABLED=true) or set {prefix}_ALLOW_PLAINTEXT_CREDENTIALS=true for trusted networks"
             )
-        log.warning("%s credentials are sent over plain HTTP to '%s'; use only on trusted networks", prefix, endpoint.host)
+        log.warning(
+            "%s credentials are sent over plain HTTP to '%s'; use only on trusted networks",
+            prefix,
+            endpoint.host,
+        )
 
     def export_endpoint(self) -> Endpoint | None:
-        """Resolved target of the active backend; None while the export is disabled."""
+        """Resolved target of the configured backend; None when no backend is selected."""
         if self.db_type is DbType.INFLUXDB_V2:
             return resolve_endpoint(
-                self.influxdb_hostname or "", self.influxdb_port, self.influxdb_tls_enabled, 8086, "INFLUXDB_HOSTNAME"
+                self.influxdb_hostname or "",
+                self.influxdb_port,
+                self.influxdb_tls_enabled,
+                8086,
+                "INFLUXDB_HOSTNAME",
             )
         if self.db_type is DbType.QUESTDB:
             return resolve_endpoint(
-                self.questdb_hostname or "", self.questdb_port, self.questdb_tls_enabled, 9000, "QUESTDB_HOSTNAME"
+                self.questdb_hostname or "",
+                self.questdb_port,
+                self.questdb_tls_enabled,
+                9000,
+                "QUESTDB_HOSTNAME",
             )
         return None
 
@@ -672,9 +799,15 @@ class Settings(BaseSettings):
             raise ValueError("device list contains duplicate device ids")
         keys = [d.key for d in self.devices]
         if len(set(keys)) != len(keys):
-            raise ValueError("device list contains duplicate physical device keys (endpoint plus network id)")
+            raise ValueError(
+                "device list contains duplicate physical device keys (endpoint plus network id)"
+            )
         for endpoint in self.endpoints:
-            direct = [d for d in self.devices if d.key.endpoint == endpoint and d.network_id is None]
+            direct = [
+                d
+                for d in self.devices
+                if d.key.endpoint == endpoint and d.network_id is None
+            ]
             if len(direct) != 1:
                 raise ValueError(
                     f"each transport endpoint needs exactly one directly attached device without network id "
@@ -688,7 +821,9 @@ class Settings(BaseSettings):
         for device in self.devices:
             if device.network_id is None:
                 result.setdefault(device.key.endpoint, device.device_id)
-        for device in self.devices:  # a missing direct device is rejected by _check_devices
+        for (
+            device
+        ) in self.devices:  # a missing direct device is rejected by _check_devices
             result.setdefault(device.key.endpoint, device.device_id)
         return result
 
@@ -707,7 +842,12 @@ def format_validation_error(exc: ValidationError) -> str:
         if err["type"] == "missing":
             text = "is required and has no default"
         line = f"{name}: {text}"
-        if loc and str(loc[0]) not in _SECRET_FIELDS and err["type"] != "missing" and "input" in err:
+        if (
+            loc
+            and str(loc[0]) not in _SECRET_FIELDS
+            and err["type"] != "missing"
+            and "input" in err
+        ):
             line += f" (rejected value: {err['input']!r})"
         lines.append(line)
     return "\n".join(lines)
@@ -737,13 +877,17 @@ def parse_env_file(path: Path) -> dict[str, str]:
         with open(path, encoding="utf-8") as f:
             text = f.read(_MAX_ENV_FILE_BYTES + 1)
         if len(text) > _MAX_ENV_FILE_BYTES:
-            return {}  # an over-cap file cannot be a valid settings file; same fail-soft as an OSError
+            return (
+                {}
+            )  # an over-cap file cannot be a valid settings file; same fail-soft as an OSError
         return parse_env_text(text)
     except (OSError, UnicodeError):
         return {}
 
 
-def warn_ignored_settings(env_file: Path | str | None = None, environ: Mapping[str, str] | None = None) -> None:
+def warn_ignored_settings(
+    env_file: Path | str | None = None, environ: Mapping[str, str] | None = None
+) -> None:
     """Name (never show values of) settings that are set but fixed in code or owned by the admin GUI."""
     env = os.environ if environ is None else environ
     names = {k.upper() for k in env}
@@ -775,12 +919,19 @@ def warn_auth_disabled(settings: Settings) -> None:
         "without a token%s",
         settings.bind_address,
         settings.bind_port,
-        " and can WRITE allowlisted device settings" if settings.enable_write_support else "",
+        (
+            " and can WRITE allowlisted device settings"
+            if settings.enable_write_support
+            else ""
+        ),
     )
 
 
 def _legacy_secret_in_use(settings: Settings) -> bool:
-    return settings.admin_secret is not None and settings.admin_secret == settings.hmac_secret
+    return (
+        settings.admin_secret is not None
+        and settings.admin_secret == settings.hmac_secret
+    )
 
 
 def load_settings(env_file: Path | str | None = None) -> Settings:
@@ -789,7 +940,9 @@ def load_settings(env_file: Path | str | None = None) -> Settings:
     try:
         settings = Settings(_env_file=env_file) if env_file else Settings()
     except ValidationError as exc:
-        raise ConfigError("invalid_configuration", detail=format_validation_error(exc)) from None
+        raise ConfigError(
+            "invalid_configuration", detail=format_validation_error(exc)
+        ) from None
     if os.environ.get("HMAC_SECRET") is None and _legacy_secret_in_use(settings):
         log.warning("ADMIN_SECRET is deprecated, rename it to HMAC_SECRET")
     warn_auth_disabled(settings)

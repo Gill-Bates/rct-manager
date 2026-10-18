@@ -70,7 +70,7 @@
     const host = $('settings-sections');
     host.replaceChildren();
     const groups = {
-      settings: ['Access', 'Server', 'Network', 'Account'],
+      settings: ['Access', 'Server', 'Network', 'Session', 'Account'],
       dashboard: ['Inverters'],
       inverters: ['Write access'],
       tsdb: ['Export'],

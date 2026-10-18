@@ -21,15 +21,16 @@
     solar_not_configured: 'Solar forecast not configured',
     solar_forecast_unavailable: 'Plan not available yet: no solar forecast',
     battery_state_unavailable: 'Plan not available yet: battery state unknown',
+    energy_manager_off: 'Energy Manager off: charging plan inactive',
   };
-  const ACTION_LABELS = { charge: 'Grid charge', idle: 'No grid charge' };
+  const ACTION_LABELS = { charge: 'Grid charging', idle: 'No grid charging' };
   const REASON_LABELS = {
-    'forecast PV covers demand': 'Solar forecast covers the household consumption',
-    'battery reserve covers demand': 'Battery charge covers the consumption, no grid charge needed',
-    'forecast deficit, charged as late as permitted': 'Expected shortfall: charge from the grid, as late as possible',
-    'charge as late as permitted for target SoC': 'Reach the target SoC: charge as late as possible',
-    'negative spot price, forecast deficit': 'Negative spot price: charge now to cover the expected shortfall',
-    'no spot price for this slot': 'No spot price known for this period',
+    'forecast PV covers demand': 'Solar covers forecast demand',
+    'battery reserve covers demand': 'Battery can cover forecast demand',
+    'forecast deficit, charged as late as permitted': 'Grid charging needed to protect the battery reserve',
+    'charge as late as permitted for target SoC': 'Grid charging scheduled to reach the target SoC',
+    'negative spot price, forecast deficit': 'Negative price: charge now for forecast demand',
+    'no spot price for this slot': 'No market price available for this period',
   };
 
   let chart = null;
@@ -47,7 +48,7 @@
     const read = (name, fallback) => styles.getPropertyValue(name).trim() || fallback;
     return {
       label: read('--bs-body-color', '#212529'), grid: read('--rct-line', '#dee2e6'),
-      power: read('--plan-power', '#0d6efd'), soc: read('--plan-soc', '#fd7e14'),
+      power: read('--rct-plan-power', '#0d6efd'), soc: read('--rct-plan-soc', '#fd7e14'),
     };
   }
 
@@ -120,12 +121,15 @@
     const watts = Number(slot.max_power_w);
     const target = slot.target_soc_percent === null || slot.target_soc_percent === undefined
       ? NaN : Number(slot.target_soc_percent);
-    return [
-      `Action: ${ACTION_LABELS[slot.action] || slot.action}`,
-      `Power: ${Number.isFinite(watts) ? `${(watts / 1000).toFixed(2)} kW` : 'n/a'}`,
-      `Target SoC: ${Number.isFinite(target) ? `${Math.round(target)} %` : 'n/a'}`,
-      ...(slot.reason ? [`Reason: ${REASON_LABELS[slot.reason] || slot.reason}`] : []),
-    ];
+    const lines = [];
+    if (slot.action === 'charge') {
+      lines.push(Number.isFinite(watts) ? `Grid charging · ${(watts / 1000).toFixed(2)} kW` : 'Grid charging');
+      if (Number.isFinite(target)) lines.push(`Target SoC ${Math.round(target)} %`);
+    } else {
+      lines.push(ACTION_LABELS[slot.action] || slot.action);
+    }
+    if (slot.reason) lines.push(REASON_LABELS[slot.reason] || slot.reason);
+    return lines;
   }
 
   function draw(Chart, slots) {
@@ -211,11 +215,11 @@
   }
 
   async function load(signal) {
-    const devices = await window.RCTAdmin.api('energy/planning-devices', { signal });
+    const devices = await window.RCTAdmin.api('energy/planning-devices', { signal, background: true });
     if (!Array.isArray(devices) || !devices.length) return { empty: true };
     const device = devices[0];
     const plan = await window.RCTAdmin.api(
-      `energy/devices/${encodeURIComponent(device.device_id)}/dynamic-plan`, { signal });
+      `energy/devices/${encodeURIComponent(device.device_id)}/dynamic-plan`, { signal, background: true });
     return { device, plan };
   }
 
@@ -240,6 +244,10 @@
       draw(Chart, plan.slots);
     } catch (error) {
       if (generation !== mine) return;
+      if (error?.rateLimited) { // keep what is drawn and retry once the rate-limit cooldown ended
+        setTimeout(() => { if (!document.hidden && visible()) void refresh(); }, window.RCTAdmin.pollDelay(5000));
+        return;
+      }
       destroy();
       setState(window.RCTAdmin.messageFrom(error) || 'Charging schedule unavailable');
     } finally {
@@ -257,7 +265,7 @@
   }
 
   window.RCTDashboardChargingSchedule = Object.freeze({ sync, resize: () => chart?.resize() });
-  setInterval(() => { if (visible()) void refresh(); }, REFRESH_MS);
+  setInterval(() => { if (!document.hidden && visible()) void refresh(); }, REFRESH_MS);
   if (typeof MutationObserver !== 'undefined') {
     new MutationObserver(syncTheme).observe(document.documentElement, { attributes: true, attributeFilter: ['data-bs-theme'] });
   }

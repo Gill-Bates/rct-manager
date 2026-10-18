@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+from app.errors import ProtocolError
 from app.protocol.types import DataType
 from app.protocol.values import decode_value, encode_value
 
@@ -41,11 +42,11 @@ def test_normal_values_are_unchanged(raw: int) -> None:
     assert _decode(raw) == struct.unpack(">f", raw.to_bytes(4, "big"))[0]
 
 
-def test_zero_nan_and_infinity_are_unchanged() -> None:
+def test_zero_is_unchanged_and_non_finite_values_are_rejected() -> None:
     assert _decode(0x00000000) == 0.0
-    assert math.isnan(_decode(0x7FC00000))
-    assert _decode(0x7F800000) == math.inf
-    assert _decode(0xFF800000) == -math.inf
+    for raw in (0x7FC00000, 0x7F800000, 0xFF800000):  # NaN, +inf, -inf
+        with pytest.raises(ProtocolError):
+            _decode(raw)
 
 
 async def test_subnormal_write_readback_preserves_value(tmp_path: Path) -> None:

@@ -35,7 +35,9 @@ class _FakeResponse(io.BytesIO):
         return False
 
 
-def _patch_opener(monkeypatch, *, payload=None, raw=None, error=None, capture=None, errors=None):
+def _patch_opener(
+    monkeypatch, *, payload=None, raw=None, error=None, capture=None, errors=None
+):
     sequence = list(errors) if errors is not None else []
 
     def fake_open(request, timeout=None):
@@ -62,9 +64,18 @@ def _feature(**properties):
     """
     lon = properties.pop("lon", 7.1925)
     lat = properties.pop("lat", 51.1798)
-    base = {"name": "Remscheid", "country": "Germany", "countrycode": "DE", "state": "North Rhine-Westphalia"}
+    base = {
+        "name": "Remscheid",
+        "country": "Germany",
+        "countrycode": "DE",
+        "state": "North Rhine-Westphalia",
+    }
     base.update(properties)
-    return {"type": "Feature", "geometry": {"type": "Point", "coordinates": [lon, lat]}, "properties": base}
+    return {
+        "type": "Feature",
+        "geometry": {"type": "Point", "coordinates": [lon, lat]},
+        "properties": base,
+    }
 
 
 def _photon(*features):
@@ -119,7 +130,11 @@ def test_a_same_origin_redirect_is_allowed():
     # Same scheme, host and port: the handler delegates to urllib and yields a follow-up request to
     # the new path rather than refusing it.
     handler = http_json._SameOriginRedirectHandler()
-    follow_up = _redirect(handler, "https://photon.komoot.io/api?q=Rem", "https://photon.komoot.io/api/v2?q=Rem")
+    follow_up = _redirect(
+        handler,
+        "https://photon.komoot.io/api?q=Rem",
+        "https://photon.komoot.io/api/v2?q=Rem",
+    )
     assert isinstance(follow_up, Request)
     assert follow_up.full_url == "https://photon.komoot.io/api/v2?q=Rem"
 
@@ -128,14 +143,29 @@ def test_a_cross_origin_redirect_is_refused_by_the_handler():
     # A redirect to a different host must raise, never reach the internal/other target.
     handler = http_json._SameOriginRedirectHandler()
     with pytest.raises(HTTPError):
-        _redirect(handler, "https://photon.komoot.io/api?q=Rem", "https://127.0.0.1/api?q=Rem")
+        _redirect(
+            handler, "https://photon.komoot.io/api?q=Rem", "https://127.0.0.1/api?q=Rem"
+        )
 
 
 def test_an_https_to_http_downgrade_redirect_is_refused_by_the_handler():
     # Same host but a scheme downgrade (https -> http) differs in origin and must be refused.
     handler = http_json._SameOriginRedirectHandler()
     with pytest.raises(HTTPError):
-        _redirect(handler, "https://photon.komoot.io/api?q=Rem", "http://photon.komoot.io/api?q=Rem")
+        _redirect(
+            handler,
+            "https://photon.komoot.io/api?q=Rem",
+            "http://photon.komoot.io/api?q=Rem",
+        )
+
+
+@pytest.mark.parametrize(
+    "target", ["https://photon.komoot.io:bad/api", "https://[broken/api"]
+)
+def test_a_malformed_redirect_raises_http_error(target):
+    handler = http_json._SameOriginRedirectHandler()
+    with pytest.raises(HTTPError, match="invalid redirect URL"):
+        _redirect(handler, "https://photon.komoot.io/api", target)
 
 
 def test_features_are_mapped_from_geojson(monkeypatch):
@@ -161,7 +191,12 @@ def test_features_are_mapped_from_geojson(monkeypatch):
 
 def test_lon_lat_order_is_not_swapped(monkeypatch):
     # A feature far from the equator/meridian proves the mapper reads coordinates[0]=lon,[1]=lat.
-    _patch_opener(monkeypatch, payload=_photon(_feature(name="Toronto", lon=-79.3832, lat=43.6532, countrycode="CA")))
+    _patch_opener(
+        monkeypatch,
+        payload=_photon(
+            _feature(name="Toronto", lon=-79.3832, lat=43.6532, countrycode="CA")
+        ),
+    )
     hit = PhotonGeocoder().search("Toronto")[0]
     assert hit.latitude == pytest.approx(43.6532)
     assert hit.longitude == pytest.approx(-79.3832)
@@ -178,7 +213,9 @@ def test_lon_lat_order_is_not_swapped(monkeypatch):
         ("M5V 3L9", "Toronto", "CA"),
     ],
 )
-def test_international_postal_codes_need_no_country_specific_code(monkeypatch, code, place, countrycode):
+def test_international_postal_codes_need_no_country_specific_code(
+    monkeypatch, code, place, countrycode
+):
     # Numeric, alphabetic and alphanumeric-with-space codes are all sent verbatim as the free q
     # query; the application never classifies them with a country-specific regex.
     from urllib.parse import urlencode
@@ -195,12 +232,26 @@ def test_international_postal_codes_need_no_country_specific_code(monkeypatch, c
     assert hit.country_code == countrycode.lower()
 
 
-def test_a_globally_ambiguous_code_yields_several_distinguishable_candidates(monkeypatch):
+def test_a_globally_ambiguous_code_yields_several_distinguishable_candidates(
+    monkeypatch,
+):
     # The same code exists in several countries; each candidate is distinct by country/country_code
     # so the operator can tell them apart. No country is assumed.
     payload = _photon(
-        _feature(name="Someplace", postcode="1000", country="Belgium", countrycode="BE", state="Brussels"),
-        _feature(name="Otherplace", postcode="1000", country="Denmark", countrycode="DK", state="Capital Region"),
+        _feature(
+            name="Someplace",
+            postcode="1000",
+            country="Belgium",
+            countrycode="BE",
+            state="Brussels",
+        ),
+        _feature(
+            name="Otherplace",
+            postcode="1000",
+            country="Denmark",
+            countrycode="DK",
+            state="Capital Region",
+        ),
     )
     _patch_opener(monkeypatch, payload=payload)
     results = PhotonGeocoder().search("1000")
@@ -217,7 +268,9 @@ def test_an_explicit_country_filter_reaches_the_request(monkeypatch):
 
 def test_an_invalid_explicit_country_code_is_rejected_not_silently_global(monkeypatch):
     def fail(*_a, **_k):
-        raise AssertionError("an invalid explicit country code must be rejected before any request")
+        raise AssertionError(
+            "an invalid explicit country code must be rejected before any request"
+        )
 
     monkeypatch.setattr(http_json._OPENER, "open", fail)
     with pytest.raises(WeatherResponseError):
@@ -227,19 +280,28 @@ def test_an_invalid_explicit_country_code_is_rejected_not_silently_global(monkey
 def test_the_exact_postal_code_match_wins_over_other_listed_codes(monkeypatch):
     # The place carries one postcode; a query for exactly that code surfaces it, a name query does
     # not fabricate a postal_code match.
-    _patch_opener(monkeypatch, payload=_photon(_feature(name="Titusville", postcode="32781", countrycode="US")))
+    _patch_opener(
+        monkeypatch,
+        payload=_photon(
+            _feature(name="Titusville", postcode="32781", countrycode="US")
+        ),
+    )
     assert PhotonGeocoder().search("32781")[0].postal_code == "32781"
 
 
 def test_a_place_name_query_matches_no_postal_code(monkeypatch):
-    _patch_opener(monkeypatch, payload=_photon(_feature(name="Remscheid", postcode="42857")))
+    _patch_opener(
+        monkeypatch, payload=_photon(_feature(name="Remscheid", postcode="42857"))
+    )
     hit = PhotonGeocoder().search("Remscheid")[0]
     # The query is a name, so there is no exact postcode match; the place's own code is not surfaced
     # (a name search must not show an arbitrary one of the place's many postcodes).
     assert hit.postal_code is None
 
 
-def test_an_exact_postcode_match_prefers_the_postal_city_over_the_osm_object_name(monkeypatch):
+def test_an_exact_postcode_match_prefers_the_postal_city_over_the_osm_object_name(
+    monkeypatch,
+):
     # The reported bug: for an exact postcode hit Photon's ``name`` is the matched OSM object, which
     # for 42899 is the administrative area "Nordrhein-Westfalen", not the postal city. The adapter
     # must title the hit with Photon's ``city`` ("Remscheid"), not that administrative name, while
@@ -248,9 +310,13 @@ def test_an_exact_postcode_match_prefers_the_postal_city_over_the_osm_object_nam
         "type": "Feature",
         "geometry": {"type": "Point", "coordinates": [7.2336, 51.2088]},
         "properties": {
-            "name": "Nordrhein-Westfalen", "postcode": "42899", "city": "Remscheid",
-            "district": "Lüttringhausen", "state": "Nordrhein-Westfalen",
-            "country": "Germany", "countrycode": "DE",
+            "name": "Nordrhein-Westfalen",
+            "postcode": "42899",
+            "city": "Remscheid",
+            "district": "Lüttringhausen",
+            "state": "Nordrhein-Westfalen",
+            "country": "Germany",
+            "countrycode": "DE",
         },
     }
     _patch_opener(monkeypatch, payload=_photon(feature))
@@ -264,15 +330,20 @@ def test_an_exact_postcode_match_prefers_the_postal_city_over_the_osm_object_nam
     assert hit.longitude == pytest.approx(7.2336)
 
 
-def test_an_exact_postcode_match_falls_back_to_district_when_city_is_absent(monkeypatch):
+def test_an_exact_postcode_match_falls_back_to_district_when_city_is_absent(
+    monkeypatch,
+):
     # Priority is city -> district -> name on an exact postcode hit, so a hit carrying only a
     # district titles with the district rather than the administrative object name.
     feature = {
         "type": "Feature",
         "geometry": {"type": "Point", "coordinates": [7.2336, 51.2088]},
         "properties": {
-            "name": "Nordrhein-Westfalen", "postcode": "42899",
-            "district": "Lüttringhausen", "state": "Nordrhein-Westfalen", "countrycode": "DE",
+            "name": "Nordrhein-Westfalen",
+            "postcode": "42899",
+            "district": "Lüttringhausen",
+            "state": "Nordrhein-Westfalen",
+            "countrycode": "DE",
         },
     }
     _patch_opener(monkeypatch, payload=_photon(feature))
@@ -289,7 +360,9 @@ def test_an_exact_postcode_match_falls_back_to_district_when_city_is_absent(monk
         ("M5V 3L9", "Toronto", "CA"),
     ],
 )
-def test_exact_postcode_hits_title_with_the_city_not_the_region(monkeypatch, code, city, countrycode):
+def test_exact_postcode_hits_title_with_the_city_not_the_region(
+    monkeypatch, code, city, countrycode
+):
     # Regression for the geocoding-mapping defect across formats (numeric, alphabetic-with-space,
     # alphanumeric): when Photon returns the region as ``name`` and the postal city separately, an
     # exact postcode query surfaces the city, with no country-specific parsing.
@@ -297,8 +370,11 @@ def test_exact_postcode_hits_title_with_the_city_not_the_region(monkeypatch, cod
         "type": "Feature",
         "geometry": {"type": "Point", "coordinates": [7.0, 51.0]},
         "properties": {
-            "name": "Some Region", "postcode": code, "city": city,
-            "state": "Some Region", "countrycode": countrycode,
+            "name": "Some Region",
+            "postcode": code,
+            "city": city,
+            "state": "Some Region",
+            "countrycode": countrycode,
         },
     }
     _patch_opener(monkeypatch, payload=_photon(feature))
@@ -309,8 +385,11 @@ def test_exact_postcode_hits_title_with_the_city_not_the_region(monkeypatch, cod
 
 
 def test_a_postcode_only_feature_falls_back_to_the_code_as_name(monkeypatch):
-    feature = {"type": "Feature", "geometry": {"type": "Point", "coordinates": [7.19, 51.18]},
-               "properties": {"postcode": "42899", "country": "Germany", "countrycode": "DE"}}
+    feature = {
+        "type": "Feature",
+        "geometry": {"type": "Point", "coordinates": [7.19, 51.18]},
+        "properties": {"postcode": "42899", "country": "Germany", "countrycode": "DE"},
+    }
     _patch_opener(monkeypatch, payload=_photon(feature))
     hit = PhotonGeocoder().search("42899")[0]
     assert hit.name == "42899"
@@ -334,34 +413,54 @@ def test_a_non_list_features_value_is_a_response_error(monkeypatch):
 
 
 def test_a_feature_without_name_or_coordinates_is_skipped(monkeypatch):
-    payload = {"features": [
-        {"type": "Feature", "geometry": {"type": "Point", "coordinates": [7.0, 51.0]}, "properties": {}},  # no name
-        {"type": "Feature", "geometry": {"type": "Point", "coordinates": [7.0]}, "properties": {"name": "x"}},  # bad coords
-        _feature(name="Valid"),
-    ]}
+    payload = {
+        "features": [
+            {
+                "type": "Feature",
+                "geometry": {"type": "Point", "coordinates": [7.0, 51.0]},
+                "properties": {},
+            },  # no name
+            {
+                "type": "Feature",
+                "geometry": {"type": "Point", "coordinates": [7.0]},
+                "properties": {"name": "x"},
+            },  # bad coords
+            _feature(name="Valid"),
+        ]
+    }
     _patch_opener(monkeypatch, payload=payload)
     assert [r.name for r in PhotonGeocoder().search("Rem")] == ["Valid"]
 
 
 def test_a_feature_with_non_finite_coordinates_is_skipped(monkeypatch):
-    bad = {"type": "Feature", "geometry": {"type": "Point", "coordinates": ["nan", 51.0]},
-           "properties": {"name": "Broken"}}
+    bad = {
+        "type": "Feature",
+        "geometry": {"type": "Point", "coordinates": ["nan", 51.0]},
+        "properties": {"name": "Broken"},
+    }
     _patch_opener(monkeypatch, payload={"features": [bad, _feature(name="Valid")]})
     assert [r.name for r in PhotonGeocoder().search("Rem")] == ["Valid"]
 
 
 def test_a_feature_with_out_of_range_coordinates_is_skipped(monkeypatch):
-    _patch_opener(monkeypatch, payload=_photon(_feature(name="Bad", lat=120.0), _feature(name="Valid")))
+    _patch_opener(
+        monkeypatch,
+        payload=_photon(_feature(name="Bad", lat=120.0), _feature(name="Valid")),
+    )
     assert [r.name for r in PhotonGeocoder().search("Rem")] == ["Valid"]
 
 
 def test_a_malformed_feature_is_skipped(monkeypatch):
-    _patch_opener(monkeypatch, payload={"features": ["not-a-dict", _feature(name="Valid")]})
+    _patch_opener(
+        monkeypatch, payload={"features": ["not-a-dict", _feature(name="Valid")]}
+    )
     assert [r.name for r in PhotonGeocoder().search("Rem")] == ["Valid"]
 
 
 def test_results_are_limited(monkeypatch):
-    _patch_opener(monkeypatch, payload=_photon(*[_feature(name=f"City{i}") for i in range(50)]))
+    _patch_opener(
+        monkeypatch, payload=_photon(*[_feature(name=f"City{i}") for i in range(50)])
+    )
     assert len(PhotonGeocoder().search("City", count=3)) == 3
 
 
@@ -410,7 +509,9 @@ def test_invalid_json_is_a_response_error(monkeypatch):
 
 def test_an_over_long_query_is_rejected_not_truncated(monkeypatch):
     def fail(*_a, **_k):
-        raise AssertionError("an over-long query must be rejected before any network call")
+        raise AssertionError(
+            "an over-long query must be rejected before any network call"
+        )
 
     monkeypatch.setattr(http_json._OPENER, "open", fail)
     with pytest.raises(WeatherResponseError):
@@ -495,8 +596,12 @@ def test_the_cache_is_bounded_in_size():
 
 def _om_result(**overrides):
     base = {
-        "name": "Remscheid", "latitude": 51.1798, "longitude": 7.1925,
-        "country": "Germany", "country_code": "DE", "admin1": "North Rhine-Westphalia",
+        "name": "Remscheid",
+        "latitude": 51.1798,
+        "longitude": 7.1925,
+        "country": "Germany",
+        "country_code": "DE",
+        "admin1": "North Rhine-Westphalia",
         "timezone": "Europe/Berlin",
     }
     base.update(overrides)
@@ -522,7 +627,9 @@ def test_open_meteo_applies_the_country_filter(monkeypatch):
 
 def test_open_meteo_rejects_an_invalid_explicit_country_code(monkeypatch):
     def fail(*_a, **_k):
-        raise AssertionError("an invalid explicit country code must be rejected before any request")
+        raise AssertionError(
+            "an invalid explicit country code must be rejected before any request"
+        )
 
     monkeypatch.setattr(http_json._OPENER, "open", fail)
     with pytest.raises(WeatherResponseError):
@@ -543,7 +650,9 @@ def test_open_meteo_name_query_has_no_postal_code(monkeypatch):
 
 
 def test_open_meteo_malformed_postcodes_leave_postal_code_none(monkeypatch):
-    _patch_opener(monkeypatch, payload={"results": [_om_result(postcodes="not-a-list")]})
+    _patch_opener(
+        monkeypatch, payload={"results": [_om_result(postcodes="not-a-list")]}
+    )
     assert OpenMeteoGeocoder().search("42857")[0].postal_code is None
 
 
@@ -592,7 +701,9 @@ def test_timezone_is_resolved_for_a_second_zone(monkeypatch):
     assert TimezoneResolver().resolve(40.7128, -74.0060) == "America/New_York"
 
 
-def test_a_missing_timezone_in_the_response_is_a_failure_not_an_empty_success(monkeypatch):
+def test_a_missing_timezone_in_the_response_is_a_failure_not_an_empty_success(
+    monkeypatch,
+):
     # A response without a usable zone is a hard error, never a silent empty/wrong result.
     _patch_opener(monkeypatch, payload={"utc_offset_seconds": 7200})
     with pytest.raises(WeatherResponseError):
@@ -607,7 +718,9 @@ def test_a_malformed_timezone_in_the_response_is_a_failure(monkeypatch):
 
 def test_out_of_range_coordinates_make_no_request(monkeypatch):
     def fail(*_a, **_k):
-        raise AssertionError("out-of-range coordinates must be rejected before any network call")
+        raise AssertionError(
+            "out-of-range coordinates must be rejected before any network call"
+        )
 
     monkeypatch.setattr(http_json._OPENER, "open", fail)
     with pytest.raises(WeatherResponseError):
@@ -620,19 +733,34 @@ def test_timezone_derivation_network_failure_is_a_weather_connection_error(monke
         TimezoneResolver().resolve(51.18, 7.19)
 
 
-def test_identical_coordinates_are_served_from_the_timezone_cache(monkeypatch):
+def _counting_open(monkeypatch, zones):
     calls = {"n": 0}
 
     def counting_open(request, timeout=None):
         calls["n"] += 1
-        return _FakeResponse(json.dumps({"timezone": "Europe/Berlin"}).encode())
+        return _FakeResponse(
+            json.dumps({"timezone": zones[min(calls["n"], len(zones)) - 1]}).encode()
+        )
 
     monkeypatch.setattr(http_json._OPENER, "open", counting_open)
+    return calls
+
+
+def test_identical_coordinates_are_served_from_the_timezone_cache(monkeypatch):
+    calls = _counting_open(monkeypatch, ["Europe/Berlin"])
     resolver = TimezoneResolver()
     assert resolver.resolve(51.18, 7.19) == "Europe/Berlin"
-    # A sub-kilometre variant rounds to the same cache key, so it is served without a second call.
-    assert resolver.resolve(51.1803, 7.1897) == "Europe/Berlin"
+    assert resolver.resolve(51.18, 7.19) == "Europe/Berlin"
     assert calls["n"] == 1
+
+
+def test_nearby_coordinates_do_not_share_a_timezone_cache_entry(monkeypatch):
+    # A zone boundary can lie between two points a few hundred metres apart; the key is exact.
+    calls = _counting_open(monkeypatch, ["Europe/Berlin", "Europe/Amsterdam"])
+    resolver = TimezoneResolver()
+    assert resolver.resolve(51.1803, 7.1897) == "Europe/Berlin"
+    assert resolver.resolve(51.1804, 7.1897) == "Europe/Amsterdam"
+    assert calls["n"] == 2
 
 
 # Live Photon shapes (photon.komoot.io, lang=en), trimmed to the properties the mapper reads.
@@ -640,66 +768,224 @@ def _live(name, osm_key, osm_value, **props):
     return {
         "type": "Feature",
         "geometry": {"type": "Point", "coordinates": [7.2, 51.2]},
-        "properties": {"osm_key": osm_key, "osm_value": osm_value, "name": name, **props},
+        "properties": {
+            "osm_key": osm_key,
+            "osm_value": osm_value,
+            "name": name,
+            **props,
+        },
     }
 
 
 @pytest.mark.parametrize(
     ("code", "city", "district", "state", "country", "countrycode"),
     [
-        ("42899", "Remscheid", "Lüttringhausen", "North Rhine-Westphalia", "Germany", "DE"),
+        (
+            "42899",
+            "Remscheid",
+            "Lüttringhausen",
+            "North Rhine-Westphalia",
+            "Germany",
+            "DE",
+        ),
         ("SW1A 1AA", "London", "Westminster", "England", "United Kingdom", "GB"),
     ],
 )
 def test_a_postcode_area_carries_its_code_in_name_and_titles_with_the_city(
     monkeypatch, code, city, district, state, country, countrycode
 ):
-    feature = _live(code, "place", "postcode", type="other", city=city, district=district,
-                    state=state, country=country, countrycode=countrycode)
+    feature = _live(
+        code,
+        "place",
+        "postcode",
+        type="other",
+        city=city,
+        district=district,
+        state=state,
+        country=country,
+        countrycode=countrycode,
+    )
     _patch_opener(monkeypatch, payload=_photon(feature))
     hit = PhotonGeocoder().search(code)[0]
     assert (hit.name, hit.city, hit.district) == (city, city, district)
     assert hit.postal_code == code
-    assert (hit.admin1, hit.country, hit.country_code) == (state, country, countrycode.lower())
+    assert (hit.admin1, hit.country, hit.country_code) == (
+        state,
+        country,
+        countrycode.lower(),
+    )
 
 
 def test_a_postcode_area_without_a_city_titles_with_its_district(monkeypatch):
-    feature = _live("428997", "place", "postcode", district="Bedok", country="Singapore", countrycode="SG")
+    feature = _live(
+        "428997",
+        "place",
+        "postcode",
+        district="Bedok",
+        country="Singapore",
+        countrycode="SG",
+    )
     _patch_opener(monkeypatch, payload=_photon(feature))
-    hit = PhotonGeocoder().search("42899")[0]
+    hit = PhotonGeocoder().search("428997")[0]
     assert (hit.name, hit.city, hit.postal_code) == ("Bedok", None, "428997")
+
+
+def test_a_postcode_area_in_a_name_search_never_supplies_a_postal_code(monkeypatch):
+    # The area's code is only adopted when the query matched it exactly; the title falls back to
+    # the place it belongs to (or the raw code when nothing else names it).
+    payload = _photon(
+        _live(
+            "42899",
+            "place",
+            "postcode",
+            type="other",
+            city="Remscheid",
+            countrycode="DE",
+        ),
+        _live("428997", "place", "postcode", district="Bedok", countrycode="SG"),
+        _live("99999", "place", "postcode", countrycode="DE"),
+    )
+    _patch_opener(monkeypatch, payload=payload)
+    remscheid, bedok, bare = PhotonGeocoder().search("Remscheid")
+    assert (remscheid.name, remscheid.postal_code) == ("Remscheid", None)
+    assert (bedok.name, bedok.postal_code) == ("Bedok", None)
+    assert (bare.name, bare.postal_code) == ("99999", None)
+
+
+def test_a_postcode_area_is_matched_case_insensitively_and_exactly(monkeypatch):
+    _patch_opener(
+        monkeypatch,
+        payload=_photon(
+            _live("SW1A 1AA", "place", "postcode", city="London", countrycode="GB")
+        ),
+    )
+    assert PhotonGeocoder().search("sw1a 1aa")[0].postal_code == "SW1A 1AA"
+    assert PhotonGeocoder().search("SW1A")[0].postal_code is None
 
 
 def test_a_settlement_is_its_own_city_and_claims_no_postal_code(monkeypatch):
     payload = _photon(
-        _live("Berlin", "place", "city", type="city", country="Germany", countrycode="DE"),
-        _live("Berlin", "place", "town", type="city", county="Worcester", state="Maryland",
-              country="United States", countrycode="US", postcode="21811"),
+        _live(
+            "Berlin", "place", "city", type="city", country="Germany", countrycode="DE"
+        ),
+        _live(
+            "Berlin",
+            "place",
+            "town",
+            type="city",
+            county="Worcester",
+            state="Maryland",
+            country="United States",
+            countrycode="US",
+            postcode="21811",
+        ),
     )
     _patch_opener(monkeypatch, payload=payload)
     germany, maryland = PhotonGeocoder().search("Berlin")
-    assert (germany.name, germany.city, germany.postal_code) == ("Berlin", "Berlin", None)
+    assert (germany.name, germany.city, germany.postal_code) == (
+        "Berlin",
+        "Berlin",
+        None,
+    )
     # The place's own postcode is not surfaced for a name search.
-    assert (maryland.city, maryland.postal_code, maryland.admin2) == ("Berlin", None, "Worcester")
+    assert (maryland.city, maryland.postal_code, maryland.admin2) == (
+        "Berlin",
+        None,
+        "Worcester",
+    )
 
 
 def test_a_non_settlement_object_is_not_a_city_and_keeps_its_postal_city(monkeypatch):
-    feature = _live("Remscheid Hbf", "railway", "station", type="house", postcode="42859",
-                    district="Alt-Remscheid", locality="Gemarkung Remscheid", city="Remscheid")
+    feature = _live(
+        "Remscheid Hbf",
+        "railway",
+        "station",
+        type="house",
+        postcode="42859",
+        district="Alt-Remscheid",
+        locality="Gemarkung Remscheid",
+        city="Remscheid",
+    )
     _patch_opener(monkeypatch, payload=_photon(feature))
     hit = PhotonGeocoder().search("Remscheid")[0]
     assert (hit.name, hit.city, hit.postal_code) == ("Remscheid Hbf", "Remscheid", None)
-    peak = _live("Remscheid", "natural", "peak", type="other", county="Rhein-Sieg-Kreis")
+    peak = _live(
+        "Remscheid", "natural", "peak", type="other", county="Rhein-Sieg-Kreis"
+    )
     _patch_opener(monkeypatch, payload=_photon(peak))
     assert PhotonGeocoder().search("Remscheid")[0].city is None
 
 
 def test_open_meteo_marks_only_populated_places_as_city(monkeypatch):
-    payload = {"results": [
-        _om_result(name="Remscheid", feature_code="PPLA3"),
-        _om_result(name="Hohenstein", feature_code="MT"),
-    ]}
+    payload = {
+        "results": [
+            _om_result(name="Remscheid", feature_code="PPLA3"),
+            _om_result(name="Hohenstein", feature_code="MT"),
+        ]
+    }
     _patch_opener(monkeypatch, payload=payload)
     town, mountain = OpenMeteoGeocoder().search("Rem")
     assert town.city == "Remscheid"
     assert mountain.city is None
+
+
+# --- Shared search preparation (both geocoders) ------------------------------
+
+
+@pytest.fixture(params=[PhotonGeocoder, OpenMeteoGeocoder])
+def geocoder_cls(request):
+    return request.param
+
+
+def test_search_trims_and_ignores_a_too_short_query_without_a_request(
+    monkeypatch, geocoder_cls
+):
+    def fail(*_a, **_k):
+        raise AssertionError("a too-short query must not reach the network")
+
+    monkeypatch.setattr(http_json._OPENER, "open", fail)
+    assert geocoder_cls().search("  a  ") == []
+    assert geocoder_cls().search("") == []
+    assert geocoder_cls().search(None) == []  # type: ignore[arg-type]
+
+
+def test_search_accepts_the_minimum_and_maximum_query_length(monkeypatch, geocoder_cls):
+    capture = {}
+    _patch_opener(monkeypatch, payload={}, capture=capture)
+    geocoder_cls().search("x" * geocoding.MIN_QUERY_LENGTH)
+    geocoder_cls().search(" " + "y" * geocoding.MAX_QUERY_LENGTH + " ")
+    assert capture["calls"] == 2
+
+
+def test_search_clamps_the_result_count(monkeypatch, geocoder_cls):
+    capture = {}
+    _patch_opener(monkeypatch, payload={}, capture=capture)
+    geocoder_cls().search("Berlin", count=0)
+    assert "=1&" in capture["url"] + "&"
+    geocoder_cls().search("Berlin", count=10_000)
+    assert f"={geocoding.MAX_RESULTS}&" in capture["url"] + "&"
+
+
+def test_search_validates_the_country_code(monkeypatch, geocoder_cls):
+    capture = {}
+    _patch_opener(monkeypatch, payload={}, capture=capture)
+    geocoder = geocoder_cls()
+    geocoder.search("Berlin", country_code=None)
+    assert "ountry" not in capture["url"]
+    # A blank code means "no filter": same cache entry, so no second request.
+    geocoder.search("Berlin", country_code="  ")
+    assert capture["calls"] == 1
+    with pytest.raises(WeatherResponseError):
+        geocoder.search("Berlin", country_code="D1")
+
+
+def test_search_cache_key_ignores_query_case_and_padding(monkeypatch, geocoder_cls):
+    capture = {}
+    _patch_opener(monkeypatch, payload={}, capture=capture)
+    geocoder = geocoder_cls()
+    geocoder.search("Berlin")
+    geocoder.search("  BERLIN ")
+    assert capture["calls"] == 1
+    geocoder.search("Berlin", country_code="de")
+    geocoder.search("Berlin", count=3)
+    assert capture["calls"] == 3

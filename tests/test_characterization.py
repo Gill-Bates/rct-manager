@@ -13,7 +13,9 @@ synchronous timestamp), with ``max_sample_age_seconds`` exposing the skew. And t
 energy counters are recorded VERBATIM: nothing here differences them or computes any efficiency.
 """
 
+import dataclasses
 import math
+import typing
 from datetime import UTC, datetime
 
 import pytest
@@ -41,6 +43,16 @@ def consistent_sample(**values: MeasuredValue | None) -> CharacterizationSample:
     """
     unavailable = frozenset(name for name in MEASURED_FIELDS if values.get(name) is None)
     return CharacterizationSample(timestamp=NOW, unavailable_fields=unavailable, **values)
+
+
+def test_measured_fields_lists_every_optional_measurement_exactly_once() -> None:
+    hints = typing.get_type_hints(CharacterizationSample)
+    optional_measurements = {
+        f.name for f in dataclasses.fields(CharacterizationSample)
+        if hints[f.name] == MeasuredValue | None
+    }
+    assert len(MEASURED_FIELDS) == len(set(MEASURED_FIELDS))
+    assert set(MEASURED_FIELDS) == optional_measurements
 
 
 def test_timestamp_must_be_timezone_aware() -> None:

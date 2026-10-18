@@ -15,11 +15,9 @@ python -m pytest -q
 python -m app validate
 ```
 
-`validate` needs `HMAC_SECRET` (copy `settings.env.example` to `settings.env`
-first or pass it in the environment); devices are configured in the GUI.
-
-Tests live in `tests/`; `pytest` runs with `asyncio_mode = "auto"`. Property
-tests use `hypothesis`.
+`validate` needs `HMAC_SECRET` (copy `settings.env.example` to `settings.env` or pass it in the
+environment). Tests live in `tests/`; `pytest` runs with `asyncio_mode = "auto"`, property tests use
+`hypothesis`.
 
 ## Browser E2E (manual)
 

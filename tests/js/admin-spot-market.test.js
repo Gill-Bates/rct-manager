@@ -21,6 +21,7 @@ const path = require('node:path');
 const vm = require('node:vm');
 
 const SOURCE = fs.readFileSync(path.join(__dirname, '../../app/admin/static/js/admin-spot-market.js'), 'utf8');
+const AXIS_SOURCE = fs.readFileSync(path.join(__dirname, '../../app/admin/static/js/admin-chart-axis.js'), 'utf8');
 
 // A minimal DOM node: children, classList, dataset, attributes and the handful of methods the
 // source touches. querySelector/querySelectorAll walk the subtree by class / [data-field].
@@ -113,6 +114,7 @@ function harness() {
     Number, Array, Object, Boolean, String, Math, Date, Set, Intl,
   };
   context.window = context;
+  vm.runInNewContext(AXIS_SOURCE, context);
   vm.runInNewContext(SOURCE, context);
   return { context, byId, chartConfigs };
 }
@@ -165,6 +167,18 @@ test('the Lowest/Highest tiles render when tomorrow is published', () => {
     assert.equal(icon.getAttribute('aria-hidden'), 'true', 'tile icon is decorative');
     assert.ok(icon.textContent.length > 0, 'tile icon names a glyph');
   }
+});
+
+test('the Lowest/Highest times use the market timezone, like the chart, not the browser zone', () => {
+  const h = harness();
+  const zone = 'Pacific/Auckland'; // differs from the browser zone of any CI host
+  const nodes = h.context.renderSpotMarketPreview(previewResult({ timezone: zone }));
+  const whens = flatten(nodes).filter((n) => hasClass(n, 'spot-market-highlight-when')).map((n) => n.textContent);
+  const expected = (iso) => {
+    const date = new Date(iso);
+    return `${date.toLocaleDateString(undefined, { timeZone: zone, day: '2-digit', month: 'short' })} · ${date.toLocaleTimeString(undefined, { timeZone: zone, hour: '2-digit', minute: '2-digit' })}`;
+  };
+  assert.deepEqual(whens, [expected('2026-10-12T03:00:00Z'), expected('2026-10-12T18:00:00Z')]);
 });
 
 test('the tiles still render with real numbers when tomorrow is not yet published', () => {
@@ -428,7 +442,45 @@ test('a DST fall-back day keeps both duplicated-wall-clock intervals instead of 
   const todayPoints = byLabel.Today.data.filter((v) => v !== null);
   assert.equal(todayPoints.length, 2, 'both duplicated-hour intervals are kept, neither overwritten');
   assert.deepEqual(todayPoints, [11, 22], 'both distinct prices survive in input order (ct/kWh)');
-  // Both carry their own 02:00 wall-clock label for the tooltip.
-  assert.deepEqual(byLabel.Today.times.slice(0, 2), ['02:00', '02:00']);
+  // Both sit in their own slot: the first and second occurrence of local 02:00.
+  const labels = h.chartConfigs[0].data.labels;
+  assert.deepEqual([byLabel.Today.data[labels.indexOf('02:00')], byLabel.Today.data[labels.indexOf('02:00 (2)')]], [11, 22]);
   assert.equal(h.chartConfigs[0].options.plugins.legend.display, true);
+});
+
+// Quarter-hour intervals from a UTC start; price = running index so a slot identifies its interval.
+function dstDay(startIso, count) {
+  return Array.from({ length: count }, (_, index) => {
+    const start = Date.parse(startIso) + index * 900_000;
+    return { start: new Date(start).toISOString(), end: new Date(start + 900_000).toISOString(), price_eur_per_kwh: index / 100 };
+  });
+}
+
+function drawSpotDay(intervals) {
+  const h = harness();
+  makeNode('div', h.byId).id = 'spot-market-preview';
+  const canvas = makeNode('canvas', h.byId); canvas.id = 'spot-market-chart';
+  canvas.parentElement = makeNode('div', h.byId);
+  h.context.drawSpotMarketChart(previewResult({ timezone: 'Europe/Berlin', yesterday_intervals: [], today_intervals: intervals, next_day_intervals: [] }));
+  const { labels, datasets } = h.chartConfigs[0].data;
+  return { labels, today: datasets.find((d) => d.label === 'Today').data };
+}
+
+test('DST fall-back day (100 slots): values stay under their real local time', () => {
+  const { labels, today } = drawSpotDay(dstDay('2026-10-24T22:00:00Z', 100));
+  assert.equal(labels.length, 100);
+  assert.deepEqual(labels.slice(8, 16), ['02:00', '02:15', '02:30', '02:45', '02:00 (2)', '02:15 (2)', '02:30 (2)', '02:45 (2)']);
+  // 03:00 local is 02:00Z, the 17th interval (index 16); it must not be drawn under 04:00.
+  assert.equal(today[labels.indexOf('03:00')], 16);
+  assert.equal(today[labels.indexOf('04:00')], 20);
+  assert.equal(today[labels.indexOf('02:00 (2)')], 12);
+  assert.equal(today.filter((v) => v === null).length, 0);
+});
+
+test('DST spring-forward day (92 slots): the skipped hour stays empty and later values keep their time', () => {
+  const { labels, today } = drawSpotDay(dstDay('2026-03-28T23:00:00Z', 92));
+  assert.equal(labels.length, 96);
+  assert.deepEqual(today.slice(labels.indexOf('02:00'), labels.indexOf('03:00')), [null, null, null, null]);
+  assert.equal(today[labels.indexOf('03:00')], 8);
+  assert.equal(today[labels.indexOf('23:45')], 91);
 });

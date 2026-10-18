@@ -116,7 +116,9 @@ class GreedyEnergyOptimizer:
         if not 0 <= cheap_percentile <= 100 or not 0 <= expensive_percentile <= 100:
             raise ValueError("percentiles must be between 0 and 100")
         if cheap_percentile >= expensive_percentile:
-            raise ValueError("cheap_percentile must be smaller than expensive_percentile")
+            raise ValueError(
+                "cheap_percentile must be smaller than expensive_percentile"
+            )
         self._cheap_percentile = cheap_percentile
         self._expensive_percentile = expensive_percentile
         # Same literal form as EnergyManager._window(), so a change to one site diverges visibly
@@ -182,14 +184,22 @@ class GreedyEnergyOptimizer:
                     action=action,
                     target_soc_percent=target,
                     max_power_w=power,
-                    reason=self._reason_for(action, residual_wh, price, cheap, expensive),
+                    reason=self._reason_for(
+                        action, residual_wh, price, cheap, expensive
+                    ),
                 )
             )
 
-        self._assert_post_condition(slots)
-        return EnergyPlan(created_at=now, valid_until=now + planning_input.horizon, slots=tuple(slots))
+        # The CHARGE/DISCHARGE invariants (positive-finite max_power_w and an in-range
+        # target_soc_percent) are now enforced by EnergyPlanSlot.__post_init__ at construction, so
+        # the former defensive post-condition assert here would be redundant and has been removed.
+        return EnergyPlan(
+            created_at=now, valid_until=now + planning_input.horizon, slots=tuple(slots)
+        )
 
-    def _thresholds(self, prices: tuple[Decimal | None, ...]) -> tuple[Decimal | None, Decimal | None]:
+    def _thresholds(
+        self, prices: tuple[Decimal | None, ...]
+    ) -> tuple[Decimal | None, Decimal | None]:
         known = sorted(price for price in prices if price is not None)
         if not known:
             return None, None
@@ -219,12 +229,26 @@ class GreedyEnergyOptimizer:
 
         # Branch 1: PV surplus (solar exceeds load) and there is headroom to store it.
         if residual_wh < 0 and below_top:
-            next_soc = _advance_soc(soc, max_charge_w, slot_hours, capacity_wh, self._window.high, charging=True)
+            next_soc = _advance_soc(
+                soc,
+                max_charge_w,
+                slot_hours,
+                capacity_wh,
+                self._window.high,
+                charging=True,
+            )
             return EnergyAction.CHARGE, charge_target, max_charge_w, next_soc
 
         # Branch 2: cheap grid window and headroom to charge.
         if price is not None and cheap is not None and price <= cheap and below_top:
-            next_soc = _advance_soc(soc, max_charge_w, slot_hours, capacity_wh, self._window.high, charging=True)
+            next_soc = _advance_soc(
+                soc,
+                max_charge_w,
+                slot_hours,
+                capacity_wh,
+                self._window.high,
+                charging=True,
+            )
             return EnergyAction.CHARGE, charge_target, max_charge_w, next_soc
 
         # Branch 3: expensive grid window and energy above the reserve floor to spend. A degenerate
@@ -239,7 +263,14 @@ class GreedyEnergyOptimizer:
             and price >= expensive
             and above_floor
         ):
-            next_soc = _advance_soc(soc, max_discharge_w, slot_hours, capacity_wh, self._window.low, charging=False)
+            next_soc = _advance_soc(
+                soc,
+                max_discharge_w,
+                slot_hours,
+                capacity_wh,
+                self._window.low,
+                charging=False,
+            )
             return EnergyAction.DISCHARGE, discharge_target, max_discharge_w, next_soc
 
         # Branch 4: no actionable price/surplus. IDLE on a price gap, otherwise HOLD.
@@ -257,7 +288,9 @@ class GreedyEnergyOptimizer:
         if action is EnergyAction.CHARGE and residual_wh < 0:
             return _reason(f"PV surplus {round(-residual_wh)} Wh -> charge battery")
         if action is EnergyAction.CHARGE:
-            return _reason(f"spot {_format_price(price)} <= cheap {_format_price(cheap)} -> charge from grid")
+            return _reason(
+                f"spot {_format_price(price)} <= cheap {_format_price(cheap)} -> charge from grid"
+            )
         if action is EnergyAction.DISCHARGE:
             return _reason(
                 f"spot {_format_price(price)} >= expensive {_format_price(expensive)} -> discharge to load"
@@ -267,15 +300,6 @@ class GreedyEnergyOptimizer:
         if price is not None:
             return _reason(f"spot {_format_price(price)} in mid band -> hold")
         return _reason("no actionable signal -> hold")
-
-    @staticmethod
-    def _assert_post_condition(slots: list[EnergyPlanSlot]) -> None:
-        for slot in slots:
-            if slot.action in {EnergyAction.CHARGE, EnergyAction.DISCHARGE}:
-                # The dataclass does not catch a None max_power_w on charge/discharge; the optimizer
-                # must. target_soc_percent presence/range is already guaranteed by the dataclass.
-                assert slot.max_power_w is not None, "charge/discharge slot must carry max_power_w"
-                assert TARGET_SOC_MIN_PERCENT <= slot.target_soc_percent <= TARGET_SOC_MAX_PERCENT
 
 
 def _round_percent(value: float) -> float:
@@ -299,7 +323,9 @@ def _advance_soc(
     consistent; the real device SoC is re-read every recompute. ``power_w`` is the slot power and
     ``capacity_wh`` the operator-declared usable capacity.
     """
-    delta_percent = (power_w * slot_hours) / capacity_wh * 100.0 if capacity_wh > 0 else 0.0
+    delta_percent = (
+        (power_w * slot_hours) / capacity_wh * 100.0 if capacity_wh > 0 else 0.0
+    )
     if charging:
         return min(limit_percent, soc + delta_percent)
     return max(limit_percent, soc - delta_percent)

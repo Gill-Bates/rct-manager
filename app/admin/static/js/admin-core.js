@@ -136,6 +136,36 @@ function confirmAction({ title, message, confirmLabel, danger = false }) {
   });
 }
 
+// Mandatory one-time usage disclaimer. The server (require_admin) is what actually locks the app
+// until acceptance is stored; this only surfaces that state. Called once with the session state on
+// the dashboard. The modal has a static backdrop, no keyboard dismiss and no close/cancel control,
+// so it cannot be dismissed; hiding it in the browser still leaves every API call server-refused.
+function initDisclaimerGate(state) {
+  if (!state || state.disclaimer_required !== true) return;
+  const modalElement = $('disclaimer-modal');
+  const accept = $('disclaimer-accept');
+  if (!modalElement || !accept) return;
+  const modal = window.bootstrap.Modal.getOrCreateInstance(modalElement);
+  const errorBox = $('disclaimer-error');
+  // Blur and dim the dashboard behind the gate (same treatment as the connection-lost modal), so
+  // it reads as a true overlay the page cannot be used past until acceptance succeeds.
+  document.body.classList.add('is-disclaimer-pending');
+  accept.addEventListener('click', async () => {
+    accept.disabled = true; // block a double-click issuing two POSTs
+    if (errorBox) errorBox.hidden = true;
+    try {
+      await api('accept-disclaimer', { method: 'POST' });
+      // The server state is now unlocked; reload so the UI re-fetches it and every page works.
+      location.reload();
+    } catch (error) {
+      // Keep the modal open and show the reason; re-enable so the operator can retry.
+      if (errorBox) { errorBox.textContent = messageFrom(error); errorBox.hidden = false; }
+      accept.disabled = false;
+    }
+  });
+  modal.show();
+}
+
 // navigator.clipboard requires a secure context (HTTPS or localhost) and is undefined on a
 // plain-HTTP LAN deployment, so fall back to the classic textarea + execCommand('copy') trick.
 async function copyToClipboard(text) {
@@ -162,8 +192,57 @@ async function copyToClipboard(text) {
   return copied;
 }
 
+// Rate-limit (HTTP 429) cooldown shared by every background poller of this page: after a 429 they
+// stay quiet for at least Retry-After (doubling on repeats, reset by the next success), so a
+// saturated budget can drain instead of being refilled by retries.
+const RATE_LIMIT_DEFAULT_S = 8;
+const RATE_LIMIT_MAX_S = 120;
+let rateLimitUntil = 0;
+let rateLimitStreak = 0;
+let rateLimitNotedAt = 0;
+
+// Retry-After as seconds (delta-seconds or HTTP-date); missing or invalid falls back to a default.
+function parseRetryAfter(value, now = Date.now()) {
+  const text = String(value ?? '').trim();
+  let seconds = NaN;
+  if (/^\d+$/.test(text)) seconds = Number(text);
+  else if (text) { const at = Date.parse(text); if (Number.isFinite(at)) seconds = Math.ceil((at - now) / 1000); }
+  if (!Number.isFinite(seconds)) return RATE_LIMIT_DEFAULT_S;
+  return Math.min(Math.max(seconds, 1), RATE_LIMIT_MAX_S);
+}
+
+function noteRateLimit(retryAfter, now = Date.now()) {
+  // Several in-flight requests fail together: only the first one after a cooldown counts as a repeat.
+  if (now >= rateLimitUntil) rateLimitStreak += 1;
+  rateLimitNotedAt = now;
+  const seconds = Math.min(retryAfter * 2 ** (rateLimitStreak - 1), RATE_LIMIT_MAX_S);
+  rateLimitUntil = Math.max(rateLimitUntil, now + seconds * 1000);
+}
+
+function rateLimitRemainingMs(now = Date.now()) { return Math.max(0, rateLimitUntil - now); }
+
+// Delay for a poller's next run: its normal period, but not before the cooldown ends (plus jitter,
+// so pollers that were waiting together do not fire together).
+function pollDelay(baseMs, now = Date.now()) {
+  const remaining = rateLimitRemainingMs(now);
+  return remaining > 0 ? Math.max(baseMs, remaining) + Math.round(Math.random() * 1000) : baseMs;
+}
+
+function rateLimitError(retryAfter, message) {
+  const error = new Error(message || 'Too many requests. Retrying shortly.');
+  error.status = 429;
+  error.retryAfter = retryAfter;
+  error.rateLimited = true;
+  return error;
+}
+
+// ``options.background`` marks a poller: during a cooldown it is refused locally, without a request.
 async function api(path, options = {}) {
+  const { background = false, ...fetchOptions } = options;
+  options = fetchOptions;
+  if (background && rateLimitRemainingMs() > 0) throw rateLimitError(Math.ceil(rateLimitRemainingMs() / 1000));
   const method = options.method || 'GET';
+  const startedAt = Date.now();
   let response;
   try {
     response = await fetch(`/admin/api/${path}`, {
@@ -190,6 +269,9 @@ async function api(path, options = {}) {
     }
     throw error;
   }
+  // A success only ends the cooldown if it was sent after the last 429 and no cooldown is running;
+  // a parallel request that was already in flight must not lift it.
+  if (response.ok && rateLimitRemainingMs() === 0 && startedAt >= rateLimitNotedAt) rateLimitStreak = 0;
   if (response.ok && window.RCTReconnect?.isActive()) window.RCTReconnect.stop();
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
@@ -210,6 +292,11 @@ async function api(path, options = {}) {
     }
     const error = new Error(message);
     error.status = response.status; // callers (e.g. the Energy poll) branch on 503 vs transient
+    if (response.status === 429) {
+      error.retryAfter = parseRetryAfter(response.headers?.get?.('Retry-After'));
+      error.rateLimited = true;
+      noteRateLimit(error.retryAfter);
+    }
     // Callers that render per-field validation (e.g. the Weather form) read the raw 422 body: an
     // admin HTTPException carries a {loc, msg} list in `detail`, while the problem-document shape
     // carries per-field entries in `errors` ({parameter, detail}). Expose both; keep `message` as is.
@@ -340,10 +427,8 @@ function preserveFocus(render) {
   }
 }
 
-function toggleTheme() {
-  const next = document.documentElement.getAttribute('data-bs-theme') === 'dark' ? 'light' : 'dark';
-  document.documentElement.setAttribute('data-bs-theme', next);
-  localStorage.setItem('rct-admin-theme', next);
+// Re-colour every chart that reads theme colours; also runs when Auto follows the system.
+function onThemeChanged() {
   syncThemeToggle();
   syncSpotMarketChartTheme();
   syncWeatherChartTheme();
@@ -351,23 +436,35 @@ function toggleTheme() {
   if (typeof syncPlanChartTheme === 'function') syncPlanChartTheme();
 }
 
-// Reflect the active theme on #theme-toggle: aria-pressed reports the state to assistive tech,
-// and the glyph plus the label name the action the button performs next (A11Y-05). Initialised
-// from the data-bs-theme attribute theme.js already applied before paint.
+function toggleTheme() {
+  if (typeof rctThemeState === 'undefined') return;
+  rctThemeState.cycle();
+}
+
+// The button shows the glyph of the CURRENT preference (Auto/Light/Dark); its name states that
+// state and the action. A cycling button has no pressed state, so no aria-pressed.
+const THEME_LABELS = {
+  auto: { icon: 'brightness_auto', name: 'Auto (system)', next: 'Light' },
+  light: { icon: 'light_mode', name: 'Light', next: 'Dark' },
+  dark: { icon: 'dark_mode', name: 'Dark', next: 'Auto (system)' },
+};
+
 function syncThemeToggle() {
   const button = $('theme-toggle');
   if (!button) return;
-  const dark = document.documentElement.getAttribute('data-bs-theme') === 'dark';
-  button.setAttribute('aria-pressed', String(dark));
-  const label = dark ? 'Switch to light mode' : 'Switch to dark mode';
+  const pref = typeof rctThemeState === 'undefined' ? 'auto' : rctThemeState.pref;
+  const info = THEME_LABELS[pref] || THEME_LABELS.auto;
+  const label = `Theme: ${info.name}. Click to switch to ${info.next}`;
+  button.removeAttribute('aria-pressed');
   button.setAttribute('aria-label', label);
   button.title = label;
   const icon = button.querySelector('.material-icons');
-  if (icon) icon.textContent = dark ? 'light_mode' : 'dark_mode';
+  if (icon) icon.textContent = info.icon;
 }
 
 function initShell() {
   $('theme-toggle')?.addEventListener('click', toggleTheme);
+  addEventListener('rct-theme-change', onThemeChanged);
   syncThemeToggle();
   const toggle = $('nav-toggle');
   const setNav = (open) => {

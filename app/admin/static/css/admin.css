@@ -55,6 +55,11 @@
     --bs-primary-rgb: 136, 23, 26;
     /* Focus ring: at least 3:1 against the page and card backgrounds of its theme. */
     --rct-focus-ring: #88171a;
+    /* Charging-plan time-series colours (power / target SoC). Shared by the Energy Manager chart,
+       the dashboard charging-schedule widget and the battery-health chart so one place sets the hue
+       for every plan chart; theme-independent today, defined once to stay that way. */
+    --rct-plan-power: #0d6efd;
+    --rct-plan-soc: #fd7e14;
     --rct-auth-card-shadow: 0 .25rem .75rem rgba(0, 0, 0, .08);
     /* Off-state switch outline and knob: at least 3:1 (WCAG 1.4.11) against page, card and track. */
     --rct-switch-off: #6c757d;
@@ -88,6 +93,9 @@ body {
     flex-direction: column;
     font-family: 'IBM Plex Sans', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
     background: var(--bs-tertiary-bg);
+    /* viewport-fit=cover lets the page run under the notch in landscape; keep the content clear of it. */
+    padding-left: env(safe-area-inset-left);
+    padding-right: env(safe-area-inset-right);
 }
 
 .material-icons {
@@ -148,6 +156,13 @@ body {
 
 :root {
     --rct-footer-height: 2.75rem;
+    /* Effective painted footer height: the fixed .admin-footer adds env(safe-area-inset-bottom) as
+       extra bottom padding, so its real height is --rct-footer-height plus that inset. Everything that
+       RESERVES or POSITIONS against the footer (the .app-shell bottom padding, the footer's own
+       min-height, the toast offset) uses this one value, so the reserved space always matches the
+       painted footer even when the bottom safe-area inset is non-zero. The 420px --rct-footer-height
+       bump below (text-wrap height) composes with it automatically. */
+    --rct-footer-reserve: calc(var(--rct-footer-height) + env(safe-area-inset-bottom));
     /* The one knob for the content scale of every admin page (0.9 = the look of a 90% browser zoom).
        Navbar, sidebar and footer stay at 100%; login and password pages have no #main-content. */
     --content-zoom: .9;
@@ -191,17 +206,16 @@ body {
     }
 }
 
-/* Narrow viewports wrap the footer text to two lines, which grows .admin-footer past 2.75rem while
-   .app-shell still reserves only that much — measured 55.375px of footer against 44px of reserve at
-   320px, leaving the content/footer gap to chance rather than to the reserve. One variable feeds
-   both the reserve and the footer's min-height, so raising it here keeps them in sync by
-   construction. 3.75rem covers the measured wrapped height (56.4px with the build hash); the cost is up to 12px of unused space
-   below the content at widths where the text still fits on one line, which is not visible as
-   anything other than the content stopping slightly earlier above the footer. */
-@media (max-width: 420px) {
-    :root {
-        --rct-footer-height: 3.75rem;
-        /* the build hash made the wrapped footer 56.4px, above 3.5rem */
+/* iOS Safari zooms into any focused control under 16px and never zooms back out. Touch devices of
+   any width need it (iPad included); the content zoom shrinks the rendered font, so inside
+   #main-content the declared size compensates for it. Modals live outside the zoom. */
+@media (pointer: coarse) {
+    #main-content :is(input:not([type=checkbox], [type=radio], [type=range], [type=hidden], [type=submit], [type=button]), select, textarea) {
+        font-size: calc(16px / var(--content-zoom));
+    }
+
+    .modal :is(input:not([type=checkbox], [type=radio], [type=range], [type=hidden], [type=submit], [type=button]), select, textarea) {
+        font-size: 16px;
     }
 }
 
@@ -210,7 +224,7 @@ body {
     /* Fills what the header leaves (body is a column): a hard-coded header height was ~5px short of
        the real one and made short pages scroll. */
     flex: 1 0 auto;
-    padding-bottom: var(--rct-footer-height);
+    padding-bottom: var(--rct-footer-reserve);
 }
 
 /* Below the sticky header (1030) and the toasts (1100); .app-shell reserves its height at the bottom. */
@@ -218,16 +232,28 @@ body {
     position: fixed;
     inset: auto 0 0 0;
     z-index: 1020;
-    min-height: var(--rct-footer-height);
+    /* Reserve the full painted height (text strip + safe-area inset) so .app-shell's matching
+       padding-bottom always clears it; border-box means this min-height includes the inset padding. */
+    min-height: var(--rct-footer-reserve);
     display: flex;
     align-items: center;
     justify-content: center;
     padding: .5rem 1rem calc(.5rem + env(safe-area-inset-bottom));
-    font-size: .8rem;
+    /* Shrinks with the viewport so the line stays single; the ellipsis on the span is the last resort. */
+    font-size: clamp(.6rem, 2.7vw, .8rem);
     color: var(--bs-secondary-color);
     background: var(--bs-body-bg);
     border-top: 1px solid var(--rct-line);
     box-shadow: 0 -2px 8px rgb(0 0 0 / 6%);
+}
+
+.admin-footer>span {
+    min-width: 0;
+    max-width: 100%;
+    overflow: hidden;
+    text-align: center;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 
 .admin-footer a {
@@ -362,10 +388,39 @@ body {
     --bs-btn-color: var(--bs-secondary-color);
 }
 
+/* Bootstrap's #6c757d label is 4.44:1 on the light page background (axe color-contrast). */
+[data-bs-theme="light"] .btn-outline-secondary {
+    --bs-btn-color: var(--bs-secondary-color);
+}
+
 /* Bootstrap's link blue is 4.27:1 on the light tab bar; its own hover blue clears 4.5:1. Only the
    idle tab colour changes: hover, active and focus keep Bootstrap's values. */
 [data-bs-theme="light"] .energy-tabs {
     --bs-nav-link-color: var(--bs-link-hover-color);
+}
+
+/* One swipeable row on phones: no wrapping, hidden scrollbar, tabs snap into place. */
+.energy-tabs {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    overflow-y: hidden;
+    overscroll-behavior-x: contain;
+    scroll-snap-type: x proximity;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+}
+
+.energy-tabs::-webkit-scrollbar {
+    display: none;
+}
+
+.energy-tabs .nav-item {
+    flex: 0 0 auto;
+    scroll-snap-align: center;
+}
+
+.energy-tabs .nav-link {
+    white-space: nowrap;
 }
 
 /* Bootstrap's off-state switch outline (#dee2e6 / #495057) and knob are 1.2-2.3:1 against their
@@ -452,6 +507,50 @@ body {
     white-space: nowrap;
 }
 
+/* Battery health tiles show dates and per-inverter figures in a 2-column tile: compact padding,
+   a smaller figure that may wrap (a wrapped value beats a clipped one; the tile height follows). */
+.kpi-card.battery-tile .card-body {
+    padding: .75rem;
+    gap: .5rem;
+}
+
+.kpi-card.battery-tile .material-icons {
+    font-size: 1.6rem;
+}
+
+.kpi-card.battery-tile strong {
+    display: block;
+    font-size: clamp(.9rem, 4vw, 1.05rem);
+    overflow-wrap: anywhere;
+    white-space: normal;
+}
+
+/* Several inverters: one block per inverter, the name above its figure. The name ellipsizes
+   (the title holds the serial), the figure never clips. */
+.kpi-card strong .battery-tile-row {
+    display: block;
+    min-width: 0;
+}
+
+.kpi-card strong .battery-tile-row+.battery-tile-row {
+    margin-top: .25rem;
+}
+
+.kpi-card strong .battery-tile-label {
+    display: block;
+    overflow: hidden;
+    color: var(--bs-secondary-color);
+    font-size: .8125rem;
+    font-weight: 400;
+    line-height: 1.2;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.kpi-card strong .battery-tile-text {
+    display: block;
+}
+
 /* A text status ("Not configured") may wrap between words, unlike a number with its unit. */
 .kpi-card #tsdb-status-label {
     white-space: normal;
@@ -494,12 +593,12 @@ body {
 
 /* One header row at any width: the title shrinks and wraps its text (h3 has overflow-wrap) so the
    badge and the delete button never drop to a second row on narrow cards. */
-.device-head-main > h3 {
+.device-head-main>h3 {
     flex: 1 1 auto;
     min-width: 0;
 }
 
-.device-head-main > .status-badge {
+.device-head-main>.status-badge {
     flex-shrink: 0;
 }
 
@@ -788,7 +887,11 @@ body {
 .flow-badge-icon {
     font-size: 1.1rem;
     line-height: 1;
-    color: var(--bs-secondary-color);
+    color: var(--flow-idle-color);
+}
+
+.flow-badge.is-active .flow-badge-icon {
+    color: var(--flow-color);
 }
 
 .flow-badge-caption {
@@ -1029,8 +1132,14 @@ body {
     display: none;
 }
 
+/* Mirrors the dashboard .kpi-card layout: the icon sits left and vertically centered next to the
+   label/value column instead of stacking above it. Cells without an icon still align sensibly as
+   the pair is simply the only flex item. */
 .device-metric-card {
     min-width: 0;
+    display: flex;
+    align-items: center;
+    gap: .5rem;
     padding: .45rem .55rem;
     border: 1px solid var(--rct-line);
     border-radius: .45rem;
@@ -1039,10 +1148,15 @@ body {
 }
 
 .device-metric-card-icon {
-    display: block;
-    margin-bottom: .15rem;
-    font-size: .95rem;
+    flex: none;
+    font-size: 1.3rem;
     color: var(--bs-secondary-color);
+}
+
+/* The label/value column must be able to shrink below its longest word so the icon never pushes
+   the readings out of the cell (mirrors .kpi-card .card-body>div). */
+.device-metric-card .device-metric-pair {
+    min-width: 0;
 }
 
 .device-metric-card dt {
@@ -1295,9 +1409,13 @@ body {
 .flow-node-icon {
     font-family: 'Material Icons', sans-serif;
     font-size: 30px;
-    fill: var(--bs-secondary-color);
+    fill: var(--flow-idle-color);
     text-anchor: middle;
     dominant-baseline: central;
+}
+
+.flow-node.is-active .flow-node-icon {
+    fill: var(--flow-color);
 }
 
 .flow-node-label {
@@ -1358,30 +1476,79 @@ body {
    visually distinct from both generation and consumption. */
 .flow-line.flow-pv,
 .flow-line.flow-export,
-.flow-line.flow-discharge {
+.flow-line.flow-discharge,
+.flow-node.flow-pv,
+.flow-node.flow-export,
+.flow-node.flow-discharge,
+.flow-badge.flow-pv,
+.flow-badge.flow-export,
+.flow-badge.flow-discharge {
     --flow-color: #198754;
 }
 
-.flow-line.flow-import {
+.flow-line.flow-import,
+.flow-node.flow-import,
+.flow-badge.flow-import {
     --flow-color: #c2410c;
 }
 
-.flow-line.flow-charge {
+.flow-line.flow-charge,
+.flow-node.flow-charge,
+.flow-badge.flow-charge {
     --flow-color: #0d6efd;
 }
 
 [data-bs-theme="dark"] .flow-line.flow-pv,
 [data-bs-theme="dark"] .flow-line.flow-export,
-[data-bs-theme="dark"] .flow-line.flow-discharge {
+[data-bs-theme="dark"] .flow-line.flow-discharge,
+[data-bs-theme="dark"] .flow-node.flow-pv,
+[data-bs-theme="dark"] .flow-node.flow-export,
+[data-bs-theme="dark"] .flow-node.flow-discharge,
+[data-bs-theme="dark"] .flow-badge.flow-pv,
+[data-bs-theme="dark"] .flow-badge.flow-export,
+[data-bs-theme="dark"] .flow-badge.flow-discharge {
     --flow-color: #4ade80;
 }
 
-[data-bs-theme="dark"] .flow-line.flow-import {
+[data-bs-theme="dark"] .flow-line.flow-import,
+[data-bs-theme="dark"] .flow-node.flow-import,
+[data-bs-theme="dark"] .flow-badge.flow-import {
     --flow-color: #fb923c;
 }
 
-[data-bs-theme="dark"] .flow-line.flow-charge {
+[data-bs-theme="dark"] .flow-line.flow-charge,
+[data-bs-theme="dark"] .flow-node.flow-charge,
+[data-bs-theme="dark"] .flow-badge.flow-charge {
     --flow-color: #60a5fa;
+}
+
+/* Inactive icons share one neutral grey (no hue); the status pill carries the state in text. */
+.flow-node,
+.flow-badge {
+    --flow-idle-color: #6b7280;
+}
+
+[data-bs-theme="dark"] .flow-node,
+[data-bs-theme="dark"] .flow-badge {
+    --flow-idle-color: #9ca3af;
+}
+
+@media (forced-colors: active) {
+    .flow-node-icon {
+        fill: GrayText;
+    }
+
+    .flow-node.is-active .flow-node-icon {
+        fill: CanvasText;
+    }
+
+    .flow-badge-icon {
+        color: GrayText;
+    }
+
+    .flow-badge.is-active .flow-badge-icon {
+        color: CanvasText;
+    }
 }
 
 /* One dash period (14 user units) per cycle; every line runs at the same constant speed. */
@@ -1419,13 +1586,9 @@ body {
     background: var(--bs-warning-bg-subtle);
 }
 
-/* Operate: current mode + one plain sentence (design §8/§10). */
+/* Operate: live-data freshness note, shown only after a failed poll. */
 .energy-mode {
     margin-bottom: 1rem;
-}
-
-.energy-mode .energy-soc {
-    margin-top: .15rem;
 }
 
 .energy-freshness {
@@ -1535,7 +1698,11 @@ body {
     padding: .35rem 0;
 }
 
-.weather-config-tile .setting-row {
+/* The coordinate grid lays Latitude and Longitude side by side, so the shared .setting-row
+   top border paints a stray hairline above the second column (Longitude) only. Drop it here;
+   the grid gap already provides the spacing. */
+.weather-config-tile .setting-row,
+.weather-coordinate-grid .setting-row {
     border-top: 0;
 }
 
@@ -1675,6 +1842,23 @@ body {
 
 .plan-loading {
     min-height: 8rem;
+    justify-content: center;
+}
+
+.plan-loading-icon {
+    font-size: 3rem;
+    line-height: 1;
+}
+
+/* The result column is only 7/12 wide next to the consumption history: while the plan is loading,
+   it spans the whole tile so the spinner sits in the horizontal middle of the card. */
+#energy-plan-result:has(> .plan-loading) {
+    width: 100%;
+}
+
+.col-xl-7:has(> #energy-plan-result > .plan-loading) {
+    flex: 0 0 auto;
+    width: 100%;
 }
 
 .spot-market-chart-box {
@@ -1690,12 +1874,6 @@ body {
 #energy-consumption {
     --consumption-measured: #198754;
     --consumption-history: #0d6efd;
-}
-
-/* Charging schedule: time-series chart colours. */
-#energy-plan-schedule {
-    --plan-power: #0d6efd;
-    --plan-soc: #fd7e14;
 }
 
 /* Title and status badge share one row; the fixed height keeps it from shifting when the badge
@@ -1717,6 +1895,15 @@ body {
 .spot-market-preview-status {
     margin-left: auto;
     min-width: 0;
+    max-width: 100%;
+}
+
+/* Status badges carry long sentences; Bootstrap's nowrap would push them past a 320px viewport. */
+.spot-market-preview-status .badge {
+    white-space: normal;
+    max-width: 100%;
+    overflow-wrap: anywhere;
+    text-align: start;
 }
 
 .spot-market-preview-context {
@@ -1730,7 +1917,7 @@ body {
     font-size: .85rem;
 }
 
-.spot-market-preview > .spot-market-preview-context:first-child {
+.spot-market-preview>.spot-market-preview-context:first-child {
     margin-top: 0;
 }
 
@@ -1744,6 +1931,273 @@ body {
 @media (max-width: 575.98px) {
     .spot-market-highlights {
         grid-template-columns: minmax(0, 1fr);
+    }
+}
+
+/* Charging plan KPI strip: three plan tiles (reuses .spot-market-highlight); 2 on tablet,
+   stacked on phones. Spot Market and Weather keep their own two-column .spot-market-highlights. */
+.energy-plan-highlights {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: .75rem;
+}
+
+@media (max-width: 991.98px) {
+    .energy-plan-highlights {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+}
+
+@media (max-width: 575.98px) {
+    .energy-plan-highlights {
+        grid-template-columns: minmax(0, 1fr);
+    }
+}
+
+.energy-plan-highlights .spot-market-highlight {
+    min-width: 0;
+    align-content: center;
+}
+
+.energy-plan-highlights .spot-market-highlight-value {
+    font-variant-numeric: tabular-nums;
+}
+
+.spot-market-highlight-sub {
+    font-size: .8rem;
+    color: var(--bs-secondary-color);
+    font-variant-numeric: tabular-nums;
+}
+
+/* Charging plan header: title left, inverter select and Expert switch compact on the right on wide
+   screens; the controls wrap below the title on narrow ones. */
+.energy-plan-head {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    /* Title top-left: the taller controls column must not push it down to its baseline. */
+    align-items: flex-start;
+    gap: .75rem 1.5rem;
+}
+
+/* Identity group: stacks the title+badge line over the sub-line and shrinks without overflow when
+   the controls share the header row. */
+.energy-plan-head-title {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+}
+
+/* Current battery state: an input of the plan, so a quiet labelled line instead of a KPI tile. */
+.energy-plan-battery .material-icons {
+    font-size: 1.1rem;
+}
+
+.energy-plan-battery-label {
+    font-weight: 600;
+}
+
+.energy-plan-battery-value {
+    font-variant-numeric: tabular-nums;
+}
+
+/* Title and forecast confidence on one line; wraps only when the viewport is too narrow. */
+.energy-plan-title-row,
+.energy-plan-status {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: .25rem .5rem;
+}
+
+/* Plan sections are separated by a hairline and spacing only, not by further card frames. */
+.energy-plan-section {
+    margin-top: 1.25rem;
+    padding-top: 1rem;
+    border-top: 1px solid var(--rct-line);
+}
+
+.energy-plan-slot-details summary {
+    cursor: pointer;
+    min-height: 2.75rem;
+    display: flex;
+    align-items: center;
+}
+
+.energy-plan-slot-table {
+    font-size: .85rem;
+    font-variant-numeric: tabular-nums;
+}
+
+/* The reason column is free prose; it wraps at word boundaries. The other columns hold short
+   values (time range, action, "162 W", "8 %") that should stay intact, so no anywhere-wrap here. */
+.energy-plan-slot-table td:last-child {
+    overflow-wrap: break-word;
+}
+
+/* Reusable responsive data table: wide semantic tables (API tokens, the charging-schedule slot
+   list) that would otherwise be squeezed below their viable width on a phone. A table opts in with
+   the .data-table-stack class; each cell carries its column name in data-label. Above the phone
+   breakpoint it stays an ordinary table, so the desktop layout is untouched. At <=575.98px every
+   row becomes a readable stacked card: the header row is removed from the flow and each cell shows
+   its label next to the value, reusing the same markup (no duplicate DOM, no duplicate IDs). */
+@media (max-width: 575.98px) {
+
+    .data-table-stack,
+    .data-table-stack tbody,
+    .data-table-stack tr,
+    .data-table-stack td {
+        display: block;
+        width: auto;
+    }
+
+    /* Hide the header row visually but keep it for assistive tech. */
+    .data-table-stack thead {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        margin: -1px;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+        border: 0;
+    }
+
+    .data-table-stack tr {
+        margin-bottom: .75rem;
+        padding: .25rem 0;
+        border: 1px solid var(--rct-line);
+        border-radius: var(--bs-border-radius, .375rem);
+        background: var(--bs-tertiary-bg);
+    }
+
+    .data-table-stack tr:last-child {
+        margin-bottom: 0;
+    }
+
+    /* A cell becomes a label/value row: the label from data-label, the value is the cell content.
+       Hover striping is disabled (rows are cards now), and Bootstrap's cell border is dropped. */
+    .data-table-stack td {
+        display: flex;
+        gap: .75rem;
+        align-items: baseline;
+        justify-content: space-between;
+        padding: .3rem .85rem;
+        border: 0;
+        text-align: left;
+        /* Short values stay intact; genuinely long technical values (a token suffix) get their own
+           break rule on their inner element. */
+        overflow-wrap: break-word;
+    }
+
+    /* text-end cells (power, target SoC) keep their value right of the label like the rest. */
+    .data-table-stack td.text-end {
+        text-align: left;
+    }
+
+    .data-table-stack td::before {
+        content: attr(data-label);
+        flex: 0 0 auto;
+        font-weight: 500;
+        color: var(--bs-secondary-color);
+    }
+
+    /* A cell with no column label (the actions cell) spans the full width without a label gap. */
+    .data-table-stack td[data-label=""]::before,
+    .data-table-stack td:not([data-label])::before {
+        content: none;
+    }
+
+    .data-table-stack td.data-table-stack-actions {
+        justify-content: flex-end;
+        padding-top: .5rem;
+        padding-bottom: .5rem;
+    }
+
+    /* The value side may wrap over several lines (a long reason); keep it readable and left-grown. */
+    .data-table-stack td>.data-table-stack-value,
+    .data-table-stack td.data-table-stack-prose {
+        min-width: 0;
+        text-align: right;
+    }
+
+    .data-table-stack td.data-table-stack-prose {
+        text-align: left;
+    }
+}
+
+/* Average left, history coverage right; wraps below on narrow screens. */
+.energy-consumption-meta {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    gap: .25rem 1rem;
+    margin-bottom: .5rem;
+}
+
+.energy-consumption-legend {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 0 1rem;
+}
+
+.energy-consumption-legend-item {
+    display: inline-flex;
+    align-items: center;
+    gap: .5rem;
+    min-height: 2.75rem;
+    padding: 0 .25rem;
+    border: 0;
+    background: none;
+    color: var(--bs-body-color);
+    font-size: .85rem;
+}
+
+.energy-consumption-legend-item[aria-pressed="false"] {
+    text-decoration: line-through;
+}
+
+.energy-consumption-legend-swatch {
+    width: 2.25rem;
+    height: .75rem;
+    border-radius: 2px;
+}
+
+.energy-consumption-coverage {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0 .75rem;
+    min-width: 0;
+}
+
+.energy-plan-head-controls {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    gap: .75rem 1.25rem;
+    min-width: 0;
+}
+
+.energy-plan-device-field {
+    min-width: min(16rem, 100%);
+}
+
+/* As a flex item the switch input loses its float, so the label would touch it; the gap restores
+   the spacing the block-level #energy-expert-mode switch gets from Bootstrap. */
+.energy-plan-expert-field {
+    display: flex;
+    align-items: center;
+    gap: .5rem;
+    min-height: 2.5rem;
+}
+
+@media (max-width: 575.98px) {
+
+    .energy-plan-head-controls,
+    .energy-plan-device-field {
+        width: 100%;
     }
 }
 
@@ -1813,7 +2267,8 @@ body {
 
 .energy-actions {
     display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    /* auto-fit wraps to two rows on a phone instead of breaking "Discharge" mid-word */
+    grid-template-columns: repeat(auto-fit, minmax(7.5rem, 1fr));
     gap: .5rem;
 }
 
@@ -1830,6 +2285,8 @@ body {
     --bs-btn-disabled-bg: var(--bs-secondary-bg);
     --bs-btn-disabled-border-color: var(--bs-border-color);
     --bs-btn-disabled-opacity: 1;
+    border-style: dashed;
+    box-shadow: none;
 }
 
 .energy-target {
@@ -2189,19 +2646,29 @@ samp,
     user-select: all;
 }
 
-/* Positioned so the absolutely placed .visually-hidden header text cannot widen the page. */
+/* Positioned so the absolutely placed .visually-hidden header text cannot widen the page. The
+   phone layout stacks each row (.data-table-stack), so no desktop columns are squeezed; the
+   overflow-x stays as the escape hatch for the wide desktop table on a mid-width viewport. */
 .token-table-wrap {
     position: relative;
     overflow-x: auto;
 }
 
-.token-table th,
-.token-table td {
-    overflow-wrap: anywhere;
-}
-
 .token-table .token-nowrap {
     white-space: nowrap;
+}
+
+/* In the stacked phone layout the nowrap date/action cells wrap again: they are now their own
+   full-width rows, not squeezed table columns. */
+@media (max-width: 575.98px) {
+    .token-table .token-nowrap {
+        white-space: normal;
+    }
+
+    /* The table no longer needs its own scroller once the rows stack. */
+    .token-table-wrap {
+        overflow-x: visible;
+    }
 }
 
 .token-suffix {
@@ -2214,8 +2681,9 @@ samp,
 .toast-region {
     position: fixed;
     z-index: 1100;
-    /* Bottom right, above the fixed footer, so the header buttons and the mode switcher stay uncovered. */
-    bottom: calc(var(--rct-footer-height) + 1rem + env(safe-area-inset-bottom));
+    /* Bottom right, above the fixed footer, so the header buttons and the mode switcher stay uncovered.
+       --rct-footer-reserve already includes the safe-area inset, so the toast clears the painted footer. */
+    bottom: calc(var(--rct-footer-reserve) + 1rem);
     right: max(1rem, env(safe-area-inset-right));
     max-width: min(23rem, calc(100vw - 2rem - env(safe-area-inset-left) - env(safe-area-inset-right)));
     display: grid;
@@ -2376,68 +2844,103 @@ samp,
 }
 
 /* Change 4 — the Status & Log console fills the viewport down to the footer and tails INTERNALLY,
-   reaching the same full-height bottom boundary as the Inverters param-card. The flex chain from the
-   content area down to the console node (#main-content -> .settings-grid -> console card -> card-body
-   -> console node) is shrinkable (flex + min-height:0), so the console's own overflow:auto absorbs a
-   long tail instead of the page growing. body{min-height:100dvh} is only a MINIMUM, so one viewport
-   bound is still required; it is a definite height on the UNZOOMED .app-shell (the sticky header,
-   min-height 4.1rem, sits above it; its padding-bottom already reserves the footer strip). Putting it
-   on .app-shell rather than the 0.9-zoomed #main-content keeps it free of zoom rounding, so the page
-   never gains even a hairline scrollbar. Scoped to :has(.tsdb-console) so design rule R11 — which only
-   inspects param-* and page-specific selectors — never matches it, and no other page is affected. */
-.app-shell:has(.tsdb-console) {
-    /* Viewport less the sticky header. The small extra margin absorbs the few-pixel difference
-       between 100dvh and the header's measured height (and any dvh rounding) so the document never
-       gains a hairline scrollbar. */
-    height: calc(100dvh - 4.1rem - 0.6rem);
-    min-height: 0;
-    /* The footer is fixed (outside the shell) and the console scrolls internally, so there is nothing
-       meaningful to clip; this just contains any residual sub-pixel spill. */
-    overflow: hidden;
+   reaching the same full-height bottom boundary as the Inverters param-card.
+
+   MOBILE IS THE BASE: the page stays in ordinary document flow — there is no fixed shell height,
+   overflow:hidden, or pinned console. The document scrolls through the settings. The console itself
+   is capped at 18rem on narrow screens so a burst of log lines cannot push Apply changes arbitrarily
+   far down; its own overflow:auto keeps the log tail usable. Scroll input chains back to the document
+   when the console reaches either end.
+
+   AT >=38rem the viewport-pinned desktop layout takes over (media query below): the flex chain
+   from the content area down to the console node (#main-content -> .settings-grid -> console card ->
+   card-body -> console node) is shrinkable (flex + min-height:0) so the console's own overflow:auto
+   absorbs a long tail instead of the page growing. The shell height uses svh (small viewport height)
+   rather than dvh so showing/hiding browser chrome does not resize the pinned shell and jump the
+   layout. body{min-height:100dvh} is only a MINIMUM, so one viewport bound is still required; it is a
+   definite height on the UNZOOMED .app-shell (the sticky header, min-height 4.1rem, sits above it;
+   its padding-bottom already reserves the footer strip). Putting it on .app-shell rather than the
+   0.9-zoomed #main-content keeps it free of zoom rounding, so the page never gains a hairline
+   scrollbar. Scoped to :has(.tsdb-console) so design rule R11 — which only inspects param-* and
+   page-specific selectors — never matches it, and no other page is affected. */
+
+/* The console node keeps a readable minimum everywhere. On narrow screens the max-height rule below
+   caps its inner log region while the document remains in normal flow; at >=38rem flex:1 1 auto lets
+   it fill the pinned shell and tail internally. */
+#tsdb-mini-console {
+    min-height: 6rem;
 }
 
-#main-content:has(.tsdb-console) {
-    display: flex;
-    flex-direction: column;
-    min-height: 0;
-    overflow: auto;
-}
+/* On a phone the document scrolls, so an unbounded console would grow with every log line and push
+   the Apply bar far down; cap it and let only the log tail scroll. Stack each line's fields so the
+   timestamp, logger and message remain readable instead of squeezing the message into a sliver. */
+@media (max-width: 37.99rem) {
+    #tsdb-mini-console {
+        max-height: 18rem;
+    }
 
-#main-content:has(.tsdb-console)>.settings-grid {
-    flex: 1 1 auto;
-    min-height: 0;
-    /* At two or more columns the settings cards occupy two content rows (control+database+connection,
-       then export settings), so the third, full-width console row takes the surplus while the cards
-       keep their natural height. Below ~38rem the grid is a single column (one card per row); there
-       the console just follows in natural flow (single-column fallback below). */
-    grid-template-rows: repeat(2, min-content) minmax(8rem, 1fr);
-}
-
-/* Single column (narrow screens): every card is its own row, so a fixed two-row prefix would grow
-   the wrong card. Fall back to natural row flow. */
-@media (max-width: 38rem) {
-    #main-content:has(.tsdb-console)>.settings-grid {
-        grid-template-rows: none;
+    #tsdb-mini-console .tsdb-console-line {
+        grid-template-columns: minmax(0, 1fr);
+        gap: .15rem;
     }
 }
 
-#main-content:has(.tsdb-console)>.settings-grid>.card-span-all:has(.tsdb-console) {
-    min-height: 0;
-}
+@media (min-width: 38rem) {
+    .app-shell:has(.tsdb-console) {
+        /* Viewport less the sticky header. svh (not dvh) keeps the pinned shell stable while browser
+           chrome shows/hides. The small extra margin absorbs the few-pixel difference between the
+           viewport unit and the header's measured height (and any rounding) so the document never
+           gains a hairline scrollbar. */
+        height: calc(100svh - 4.1rem - 0.6rem);
+        min-height: 0;
+        /* The footer is fixed (outside the shell) and the console scrolls internally, so there is
+           nothing meaningful to clip; this just contains any residual sub-pixel spill. */
+        overflow: hidden;
+    }
 
-#main-content:has(.tsdb-console)>.settings-grid>.card-span-all:has(.tsdb-console)>.card-body {
-    /* A flex column so the console node (not the h2 title) absorbs the card's surplus height. */
-    display: flex;
-    flex-direction: column;
-    min-height: 0;
-}
+    #main-content:has(.tsdb-console) {
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
+        overflow: auto;
+    }
 
-/* The console node fills its card and tails internally: min-height:0 lets it shrink below content so
-   its own overflow:auto scrollbar (not the page) handles a long tail; a modest min-height keeps it
-   usable when space is tight. */
-#tsdb-mini-console {
-    flex: 1 1 auto;
-    min-height: 6rem;
+    #main-content:has(.tsdb-console)>.settings-grid {
+        flex: 1 1 auto;
+        /* Never shrink below the rows plus the console minimum: a shorter grid lets the cards spill
+           over the Apply bar below it, and #main-content scrolls instead. */
+        min-height: min-content;
+        /* At two or more columns the settings cards occupy two content rows (control+database+
+           connection, then export settings), so the third, full-width console row takes the surplus
+           while the cards keep their natural height. Below this breakpoint the grid is a single column
+           and the base natural row flow applies, so there is no overlapping max-width companion. */
+        grid-template-rows: repeat(2, min-content) minmax(8rem, 1fr);
+    }
+
+    #main-content:has(.tsdb-console)>.settings-grid>.card-span-all:has(.tsdb-console) {
+        min-height: 0;
+        /* The full-width console card is the last child; pinning its end to the final grid line puts
+           it on the lone 1fr track whether the cards filled one row or two, so the console always
+           takes the surplus down to the footer and tails internally (TSDB root-cause fix). */
+        grid-row-end: -1;
+    }
+
+    #main-content:has(.tsdb-console)>.settings-grid>.card-span-all:has(.tsdb-console)>.card-body {
+        /* A flex column so the console node (not the h2 title) absorbs the card's surplus height. */
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
+    }
+
+    /* The console node fills its card and tails internally: min-height:0 lets it shrink below content
+       so its own overflow:auto scrollbar (not the page) handles a long tail. */
+    #tsdb-mini-console {
+        flex: 1 1 auto;
+        /* size containment makes the log lines contribute no intrinsic height, so the grid's
+           min-content stays cards + this minimum and the console tails internally; the 6rem base
+           min-height keeps it readable. */
+        contain: size;
+    }
 }
 
 /* Modal Consistency: every modal centres in the viewport by default (ported from wirebuddy's
@@ -2492,6 +2995,22 @@ body.is-reconnecting .sidebar {
 }
 
 body.is-reconnecting .modal-backdrop.show {
+    background-color: rgb(15 23 42 / 60%);
+}
+
+/* Mandatory usage disclaimer: the whole page chrome behind the modal is blurred and dimmed (same
+   treatment as the connection-lost modal, but including the top navbar so the gate covers every
+   edge) so it reads as a true overlay the page cannot be used past. */
+body.is-disclaimer-pending .admin-navbar,
+body.is-disclaimer-pending .main-content,
+body.is-disclaimer-pending .sidebar {
+    opacity: .35;
+    filter: blur(8px) saturate(.8);
+    pointer-events: none;
+    transition: opacity .2s ease, filter .2s ease;
+}
+
+body.is-disclaimer-pending .modal-backdrop.show {
     background-color: rgb(15 23 42 / 60%);
 }
 

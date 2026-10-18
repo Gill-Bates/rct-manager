@@ -34,7 +34,7 @@ one inverter endpoint are serialized inside the process.
 
     ---
 
-    Measurements and opt-in, allow-listed writes over HTTP with personal access tokens, fail-closed by default, and RFC 9457 problem details.
+    Measurements and opt-in, allow-listed writes with personal access tokens, fail-closed by default, RFC 9457 problem details.
 
     [:octicons-arrow-right-24: API Overview](api/overview.md)
 
@@ -42,15 +42,15 @@ one inverter endpoint are serialized inside the process.
 
     ---
 
-    Business actions for the battery (charge, hold, discharge), operating modes per inverter, and a read-only dynamic charging plan preview.
+    Battery actions (charge, hold, discharge), operating modes per inverter, and a read-only charging plan preview (Dry-Run, sends no inverter command).
 
-    [:octicons-arrow-right-24: Energy Manager](energy-manager.md)
+    [:octicons-arrow-right-24: Energy Manager](energy-manager.md) · [:octicons-arrow-right-24: Charging Plan](energy/charging-plan.md)
 
 -   :material-currency-eur:{ .lg .middle } **Spot Market & Solar Forecast**
 
     ---
 
-    Quarter-hour day-ahead prices from Energy-Charts and an Open-Meteo solar forecast, served from the database and fetched once per day.
+    Quarter-hour day-ahead prices (Energy-Charts) and an Open-Meteo solar forecast, served from the database and fetched once per day.
 
     [:octicons-arrow-right-24: Spot Market](energy-manager.md#spot-market)
 
@@ -74,15 +74,13 @@ one inverter endpoint are serialized inside the process.
 
     ---
 
-    Overview, inverters, Energy Manager, time-series database, API tokens and settings in one responsive web interface.
+    Overview, inverters, Energy Manager, time-series database, API tokens and settings in one responsive interface.
 
     [:octicons-arrow-right-24: Quick Start](getting-started/quick-start.md)
 
 </div>
 
 ## Quick Start
-
-Get rct-manager up and running in minutes:
 
 ```sh
 git clone https://github.com/Gill-Bates/rct-manager.git
@@ -123,7 +121,8 @@ python -m app  # or run the container, see Docker
 
 ## Where to go next
 
-- [Environment Variables](configuration/environment.md): start parameters and optional seeds; everything else is set in the GUI.
-- [Operation](operation.md): constraints you must respect in production.
-- [Protocol Specification](reference/protocol.md): the vendor's RCT serial protocol PDF.
-- [Troubleshooting](troubleshooting.md): common problems and fixes.
+- [Environment Variables](configuration/environment.md): start parameters; everything else is set in the GUI.
+- [Operation](operation.md): production constraints.
+- [Hardware Verification](reference/hardware-verification.md): what is verified on real inverters.
+- [Protocol Specification](reference/protocol.md): vendor protocol PDF.
+- [Troubleshooting](troubleshooting.md): common problems.

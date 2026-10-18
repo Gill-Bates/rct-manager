@@ -1,58 +1,102 @@
-## [1.2.1] - 2026-10-16
+## [1.2.2] - 2026-10-18
 
-- ``New`` Configure an Open-Meteo solar forecast in Energy Manager (location search via Photon, production curve preview) with an optional read-only dashboard widget.
-- ``New`` Preview a read-only dynamic charging plan from spot prices, solar forecast, consumption history, battery state, and per-inverter limits. The Dry-Run explains its assumptions and never sends commands to the battery.
-- ``New`` The Charging plan tab shows the last 60 days of household consumption as a bar chart with the daily average, and the schedule as a full-width time-series chart (grid charge power and target SoC, per-slot tooltip, screen-reader summary). The schedule lists the newest slot first, explains each reason in plain words, shows end dates of slots running past midnight, and stays open on refresh.
-- ``New`` The usable battery capacity is verified from the module count and the RCT Power Battery datasheet (1.92 kWh per module, 90 % usable), e.g. 10.37 kWh for a Power Battery 11.5. An Expert override takes precedence; capacity is never estimated from Ah and voltage and stays "unavailable" without a verified source.
-- ``Fix`` The usable battery capacity is now verified on a single-tower system: module serial slots the scan never reads behind an unanswered slot no longer block the calculation, so the charging plan no longer stays on "could not be verified".
-- ``Change`` While the Charging plan waits for an input (battery state, prices, solar forecast, consumption model), a rotating "Please wait …" spinner replaces the status text and checklist (still shown in Expert mode) and the plan is re-requested every 10 s, at most 30 times. Settings that need action, such as a disabled spot market, keep their text. A device change clears the consumption chart immediately instead of leaving the previous one.
-- ``New`` A "Charging schedule" dashboard widget (off by default, added through Edit dashboard) shows the Dry-Run charging plan of the first inverter as a time-series chart of grid charge power and target SoC, with a per-slot tooltip. It refreshes every 5 minutes like the forecast widgets and shows a short text such as "Spot market disabled" while the plan is unavailable.
-- ``Change`` The household consumption section on the Charging plan tab is hidden while there is no data to draw. "Next grid charge" shows Target SoC, Charge power and Total plan grid energy as hero metrics in the Spot Market style.
-- ``Fix`` Battery modules are counted correctly (every populated module serial slot is one module, so a Power Battery 11.5 shows 6), and the dashboard battery tower is drawn true to size for up to 6 modules.
-- ``Fix`` The runtime charging plan no longer waits for consumption history: it falls back to the configured baseline or a median estimate and reports this in the stable `forecast_basis` and `forecast_confidence` enums (shared with the Dry-Run). The preview says "Spot market is disabled" or "Solar forecast is not configured" when an input is off or incomplete.
-- ``Fix`` Spot prices, bidding zones, and solar forecasts refresh in the background and are served from the database, so opening the admin interface or restarting triggers no provider calls. Failed refreshes show a stale-data warning, and an older refresh cannot overwrite concurrent changes. Spot-price previews assign quarter-hour intervals to the correct local day, including daylight-saving transitions.
-- ``Fix`` Connection stability: a single unanswered read keeps the connection for other objects, the same object is re-read on a fresh one (a late answer cannot be mistaken for the retry's answer), and a second unanswered read in a row reconnects; a write after an unanswered read starts on a fresh connection; a single-tower inverter no longer drops its connection over second-tower registers; unsolicited responses are logged as one debug "burst started" line plus a per-minute summary (flood limit and reconnect behaviour unchanged); timeout log lines include the parser state and duplicate responses are logged as such.
-- ``Fix`` Removing an inverter or changing its address clears its cached readings and the dashboard tower's old module count. Live settings or parameter changes are rejected while another device transition is running.
-- ``Fix`` On narrow screens the inverter card header keeps title, status badge, and delete button on one row, and the four energy status tiles stay in one row down to 320 px.
-- ``Security`` Dispatch refuses stale control telemetry before the first setpoint and blocks capability, limit, or policy changes while a restore is pending; direct writes to battery control registers can no longer interleave with an active dispatch command.
-- ``Security`` The inverter's `logger_*_log_ts` history objects are read-only; a write allowlist listing one is rejected at startup with the metric name. Logging out clears cached inverter telemetry from the browser.
+### New
+
+- Optional dashboard widgets now show battery capacity, remaining energy, cycles, calibration and commissioning dates, and degradation history per inverter; unavailable calibration data remains clearly empty.
+- Expert diagnostics show battery calibration history, and the Charging plan reports the battery's current remaining energy.
+- The default Charging schedule now lists only grid-charging windows; **Show all intervals** reveals the full slot history, with action-specific tooltips and readable reason labels.
+- Documentation pages now include a **Print / PDF** control.
+- The consumption chart legend lets you show or hide its data series.
+
+### Fix
+
+- Battery topology reports distinguish absent towers from scans still in progress. Because the Ah readings vary with battery state, automatic usable capacity stays unavailable until a stable calibration can be identified; legacy Ah-ratio rows are no longer treated as degradation history.
+- Charging plans now respect the SoC trajectory at the first future slot, stop at complete 15-minute slots within the requested horizon, and discard stale plans when their inputs change.
+- Consumption forecasts now exclude estimated and thinly covered readings from their learned profile instead of treating them as reliable measurements.
+- Daily consumption backfill now sends logger query boundaries using local device wall-clock fields, so the latest completed local day is not skipped.
+- When every inverter is Off, spot-market and weather refreshes and plan calculation pause while stored data is kept. Control buttons are disabled; the planning tabs appear only while at least one inverter is in Manual mode.
+- A missing battery capacity now shows an immediate explanation while the plan continues checking in the background; genuinely pending price, solar, or consumption inputs show a wait state, while disabled inputs still tell the operator what to enable.
+- Plans without configured power limits use a 3 kW charge and discharge fallback; Expert mode can set per-inverter limits.
+- Spot prices and bidding zones load more reliably, and prices are used only after a full local day is available. Location search no longer takes a timezone or postal code from a nearby or partial match.
+- The **Add widget** dialog now preserves keyboard focus and closes with Escape.
+
+### Security
+
+- The server enforces the one-time usage disclaimer before any admin request, including requests authenticated with personal access tokens.
+- Low-level battery dispatch mutations are refused while the Energy Manager owns the inverter, so dispatch cannot bypass the active control mode.
+- Admin cookie sessions now have a configurable 0–7 day server-side lifetime (1 day by default); logout and password changes invalidate sessions.
+- Admin GUI polling has a separate per-session request budget from API tokens, pauses in hidden tabs, and backs off according to `Retry-After` after a 429 response.
 
 <details markdown="1">
 <summary>Previous versions...</summary>
 
+## [1.2.1] - 2026-10-16
+
+### New
+
+- Configure an Open-Meteo solar forecast with location search and a production-curve preview, plus an optional dashboard widget.
+- Preview a read-only dynamic charging plan built from spot prices, solar, consumption history, battery state and per-inverter limits; it never sends battery commands.
+- The Charging plan combines 60 days of household consumption history with a time-series charging schedule and plain-language slot reasons.
+- Battery capacity can be based on module count and the RCT datasheet, with an Expert override; the plan remains unavailable when neither source is qualified.
+- An optional Charging schedule dashboard widget shows the first inverter's read-only plan and refreshes every five minutes.
+
+### Fix
+
+- Single-tower capacity no longer stays unavailable because an empty module slot did not answer; module counts use populated serial slots.
+- Pending plans retry automatically and distinguish inputs that are still loading from settings that need operator action. The consumption section stays hidden until data is available.
+- Plans fall back to a configured baseline or median forecast when consumption history is insufficient and explain disabled or incomplete inputs.
+- Spot, solar and bidding-zone data refresh in the background, report stale data, and do not let older refreshes overwrite newer settings; spot intervals are assigned to the correct local day.
+- Device changes clear old cached readings, and live settings changes are refused during a device transition.
+
+### Security
+
+- Dispatch refuses stale control telemetry and blocks capability, limit or policy changes while a restore is pending; direct control-register writes cannot interleave with an active dispatch command.
+- Logger history objects are read-only, and logging out clears cached inverter telemetry from the browser.
+
 ## [1.2.0] - 2026-10-13
 
-- ``New`` Configure a Fraunhofer Energy-Charts bidding zone in Energy Manager and preview quarter-hour spot prices for today and tomorrow; the preview updates when settings change and does not control the battery.
-- ``New`` Add optional dashboard widgets for the current spot price, next-day availability, and the day-ahead price curve.
-- ``New`` Dashboard layout changes are saved with "Done"; pressing Escape discards the edit session and restores the last database-backed layout, while "Reset layout" applies defaults without a confirmation dialog.
-- ``New`` An animated dashboard hint points new users to "Add inverter" until their first inverter is configured, with a reduced-motion fallback.
-- ``Fix`` The spot-market preview still shows today's prices when tomorrow's prices are unavailable, along with the reason the next-day data is missing.
-- ``Fix`` Inverters connect more reliably at startup, with fewer dropped connections and less log noise, so your devices become fully available sooner after the service starts.
-- ``Security`` Spot-market requests use fixed provider-owned HTTPS endpoints and reject redirects to other origins, preventing a saved configuration from directing requests to an arbitrary host.
+### New
+
+- Configure a Fraunhofer Energy-Charts bidding zone and preview quarter-hour spot prices for today and tomorrow without controlling the battery.
+- Optional dashboard widgets show the current spot price, next-day availability and the day-ahead price curve.
+- Dashboard layout edits can be saved, cancelled with Escape or reset to defaults.
+
+### Fix
+
+- The spot-market preview keeps today's prices visible when tomorrow's prices are unavailable and explains why next-day data is missing.
+- Inverters connect more reliably at startup, with fewer dropped connections.
+
+### Security
+
+- Spot-market requests use fixed provider-owned HTTPS endpoints and reject redirects to other origins.
 
 ## [1.1.0] - 2026-10-12
 
-- ``New`` The admin interface now formats times and numbers using your browser's locale instead of a fixed British format.
-- ``New`` The time-series database page now has a terminal-style Status & Log console that tails the service's own log live, with timestamps and per-level colours.
-- ``New`` The startup log now shows the container's own IP address when the service runs in Docker, so you can see where to reach it.
-- ``New`` The API tokens table now shows the masked last four characters of each personal access token, so you can tell your tokens apart.
-- ``New`` You can now delete an inverter directly from its dashboard card with a trash icon, after confirming the removal.
-- ``New`` An "Inverter added" confirmation now appears after you add a device and close the inverters dialog.
-- ``New`` When you switch an inverter's Energy Manager to Off, the service now sets and verifies the inverter's Internal SoC strategy before handing control back, and reports an error if that cannot be confirmed; a newly added inverter shows "Not yet managed" with its observed strategy instead of being labelled Off.
-- ``Fix`` The changelog on the About page now renders correctly, with a scrollable history for older releases.
-- ``Fix`` Restoring a battery after dispatch now writes back the exact original power value, so the inverter's charge/discharge direction is reproduced even if the power-sign setting changed in between.
-- ``Fix`` Changing a device's address or network ID in the live device list no longer carries over the previous hardware's connection state or stale failure history.
-- ``Fix`` A device whose last control action was interrupted now recovers on its own instead of staying stuck, and its automatic restore timer runs as expected.
-- ``Fix`` Changing the listen address no longer silently ignores a real port conflict with another program, which could leave the service unable to restart.
-- ``Fix`` A retention period you set yourself on the time-series database is now always kept and never overwritten by the service.
-- ``Fix`` Inverter communication now recovers long device responses whose checksum ends in zero bytes, instead of dropping them, improving reliability on affected hardware.
-- ``Security`` The Prometheus metrics endpoint and the metrics push export are now disabled by default on a fresh install; an operator must opt in before either is active.
-- ``Security`` Battery dispatch can no longer be released onto unverified hardware by tampering with the local database; the released state is now cross-checked against a signed copy.
-- ``Security`` Re-addressing a device now clears the previous hardware's verification evidence, engineering-mode switch, and target policy, so they cannot be inherited by a different device.
-- ``Security`` A persisted control record that is missing the data needed to restore the inverter is now rejected instead of silently skipping the restore.
+### New
+
+- The admin interface formats times and numbers using the browser's locale.
+- The time-series database page has a live Status & Log console, and Docker startup logs show the container's own IP address.
+- The API tokens table shows the masked last four characters so tokens can be distinguished.
+- Inverters can be deleted from their dashboard cards after confirmation, and adding one produces a confirmation message.
+- Switching the Energy Manager to Off verifies the inverter's Internal SoC strategy before handing back control; new inverters are labelled "Not yet managed" until their mode is known.
+
+### Fix
+
+- The About page's changelog is scrollable, and a device keeps its original address and hardware state separate after reconfiguration.
+- Interrupted dispatch operations recover and restore their timer; a failed listen-port bind is reported instead of being silently ignored.
+- User-selected time-series retention is preserved, and long inverter responses with trailing zero checksum bytes are no longer dropped.
+- Restoring a battery after dispatch writes back the exact original power value, even if the power-sign setting changed meanwhile.
+
+### Security
+
+- Prometheus scraping and metrics push export are disabled by default on a fresh install.
+- Dispatch release state is checked against a signed copy, and re-addressing a device clears its verification evidence and control policy.
+- Persisted control records without enough data to restore the inverter are rejected.
 
 ## [1.0.0] - 2026-10-11
 
-- `New` Initial Release
+### New
+
+- Initial release.
 
 </details>
