@@ -1062,40 +1062,63 @@ def _ah_samples(
     }
 
 
-def test_module_count_alone_never_releases_current_usable_capacity() -> None:
+def test_complete_module_count_provides_rated_planning_capacity() -> None:
     runtime = _runtime(_single_tower(6), unanswered=_PLACEHOLDER_SILENT)
     assert _battery_module_report(runtime, "dev", "battery")["module_count"] == 6
-    assert _measured_capacity(runtime) is None
+    assert _measured_capacity(runtime) == pytest.approx(10_368)
+
+
+def test_incomplete_or_invalid_module_inventory_has_no_planning_capacity() -> None:
+    partial = _runtime(_partial_slots("battery", 6), unanswered=_PLACEHOLDER_SILENT)
+    assert _measured_capacity(partial) is None
+    gapped = _single_tower(6)
+    gapped["battery_module_sn_2"] = ""
+    assert _measured_capacity(_runtime(gapped, unanswered=_PLACEHOLDER_SILENT)) is None
+    assert (
+        _measured_capacity(_runtime(_single_tower(1), unanswered=_PLACEHOLDER_SILENT))
+        is None
+    )
 
 
 @pytest.mark.parametrize(
     ("reference", "measured"),
     [(25.0, 23.8531), (16.9251, 8.65005)],
 )
-def test_state_dependent_ah_pairs_do_not_release_capacity(
+def test_state_dependent_ah_pairs_do_not_change_rated_capacity(
     reference: float, measured: float
 ) -> None:
     runtime = _runtime(
-        _single_tower(6), unanswered=_PLACEHOLDER_SILENT,
+        _single_tower(6),
+        unanswered=_PLACEHOLDER_SILENT,
         ah_samples=_ah_samples(reference=reference, measured=measured),
     )
-    assert _measured_capacity(runtime) is None
-    assert MeasuredBatteryCapacity(runtime).calibration_sample(
-        "dev", datetime(2026, 10, 17, tzinfo=UTC)
-    ) is None
+    assert _measured_capacity(runtime) == pytest.approx(10_368)
+    assert (
+        MeasuredBatteryCapacity(runtime).calibration_sample(
+            "dev", datetime(2026, 10, 17, tzinfo=UTC)
+        )
+        is None
+    )
 
 
-def test_capacity_stays_unavailable_as_debounced_topology_changes() -> None:
+def test_planning_capacity_tracks_completed_module_topology() -> None:
     serials = _single_tower(5)
     runtime = _runtime(
         serials, unanswered=_PLACEHOLDER_SILENT, ah_samples=_ah_samples()
     )
     assert _battery_module_report(runtime, "dev", "battery")["module_count"] == 5
-    assert _measured_capacity(runtime) is None
+    assert _measured_capacity(runtime) == pytest.approx(5 * 1920 * 0.9)
     serials.update(_single_tower(6))  # one complete 6-module read: not yet trusted
-    assert _battery_module_report(runtime, "dev", "battery")["module_count"] == 5
-    assert _battery_module_report(runtime, "dev", "battery")["module_count"] == 6
-    assert _measured_capacity(runtime) is None
+    assert _measured_capacity(runtime) == pytest.approx(5 * 1920 * 0.9)
+    assert _measured_capacity(runtime) == pytest.approx(6 * 1920 * 0.9)
+
+
+def test_incomplete_followup_scan_keeps_trusted_planning_capacity() -> None:
+    serials = _single_tower(6)
+    runtime = _runtime(serials, unanswered=_PLACEHOLDER_SILENT)
+    assert _measured_capacity(runtime) == pytest.approx(10_368)
+    del serials["battery_module_sn_5"]
+    assert _measured_capacity(runtime) == pytest.approx(10_368)
 
 
 def test_fresh_cycles_and_ah_do_not_prove_a_completed_calibration() -> None:
@@ -1175,13 +1198,13 @@ def test_bms_ah_cache_remains_fresh_between_daily_background_reads() -> None:
     )
 
 
-def test_measured_ah_above_reference_does_not_release_rated_capacity() -> None:
+def test_measured_ah_above_reference_does_not_raise_rated_capacity() -> None:
     runtime = _runtime(
         _single_tower(6),
         unanswered=_PLACEHOLDER_SILENT,
         ah_samples=_ah_samples(reference=15.0, measured=18.0),
     )
-    assert _measured_capacity(runtime) is None
+    assert _measured_capacity(runtime) == pytest.approx(10_368)
 
 
 @pytest.mark.parametrize(
@@ -1193,11 +1216,13 @@ def test_measured_ah_above_reference_does_not_release_rated_capacity() -> None:
         _ah_samples(measured=float("nan")),
     ],
 )
-def test_missing_stale_or_invalid_ah_fails_closed(bad_samples) -> None:
+def test_missing_stale_or_invalid_ah_does_not_change_rated_capacity(
+    bad_samples,
+) -> None:
     runtime = _runtime(
         _single_tower(6), unanswered=_PLACEHOLDER_SILENT, ah_samples=bad_samples
     )
-    assert _measured_capacity(runtime) is None
+    assert _measured_capacity(runtime) == pytest.approx(10_368)
 
 
 @pytest.mark.parametrize("failure", [None, "battery_ah_capacity", "battery_bms_sn"])
@@ -1258,14 +1283,15 @@ async def test_background_capacity_refresh_reads_both_metrics_and_isolates_failu
     )
 
 
-def test_power_battery_11_5_six_modules_are_reported_as_topology_only() -> None:
+def test_power_battery_11_5_six_modules_provide_rated_capacity() -> None:
     runtime = _runtime(_single_tower(6), unanswered=_PLACEHOLDER_SILENT)
     report = _battery_module_report(runtime, "dev", "battery")
     assert report["module_count_status"] == "ok" and report["module_count"] == 6
+    assert _measured_capacity(runtime) == pytest.approx(10_368)
 
 
 @pytest.mark.parametrize("modules", [4, 5, 6])
-def test_symmetric_two_towers_keep_their_separate_diagnostic_counts(
+def test_symmetric_two_towers_provide_rated_capacity(
     modules: int,
 ) -> None:
     serials = {**_slots("battery", modules), **_slots("battery_placeholder_0", modules)}
@@ -1276,7 +1302,7 @@ def test_symmetric_two_towers_keep_their_separate_diagnostic_counts(
         == modules
     )
     measured = _runtime(serials, ah_samples=_ah_samples(reference=18.0, measured=18.0))
-    assert _measured_capacity(measured) is None
+    assert _measured_capacity(measured) == pytest.approx(2 * modules * 1920 * 0.9)
 
 
 @pytest.mark.parametrize(("primary", "second"), [(6, 5), (3, 3), (4, 5), (2, 2)])

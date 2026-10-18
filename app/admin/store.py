@@ -12,10 +12,8 @@ import hmac
 import json
 import logging
 import math
-import os
 import secrets
 import sqlite3
-import stat
 import string
 import threading
 import time
@@ -37,7 +35,7 @@ from app.security.pat import (
     generate_pat,
     pat_well_formed,
 )
-from app.sqlite_safety import strict_path_enabled
+from app.sqlite_safety import open_hardened_sqlite
 
 log = logging.getLogger(__name__)
 _PASSWORDS = PasswordHasher()
@@ -260,54 +258,13 @@ class AdminStore:
             algorithm=hashes.SHA256(), length=32, salt=None, info=b"rct-admin-auth-v1"
         ).derive(secret.encode())
 
-    def _ensure_secure_parent(self) -> None:
-        """Reject fail-closed unless the database parent is a private, owner-writable directory.
-
-        The parent is created with 0o700 when absent. A parent that already exists and is group- or
-        world-writable, or is not a directory, lets another local principal replace the database
-        path after any check, so the open is refused instead. An existing database that is not a
-        regular file (a symlink, FIFO or directory) is refused too.
-        """
-        parent = self.path.parent
-        parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        # The trust checks below are opt-in (RCT_SQLITE_STRICT_PATH); the parent is still created
-        # with a tight 0o700 mode above, but a group/world-writable or owner-foreign parent is only
-        # rejected in strict mode so the app can run from a developer tree or a path under /opt.
-        if not strict_path_enabled():
-            return
-        parent_st = os.stat(parent, follow_symlinks=False)
-        if not stat.S_ISDIR(parent_st.st_mode) or parent_st.st_mode & (
-            stat.S_IWGRP | stat.S_IWOTH
-        ):
-            raise ValueError(
-                f"admin database parent {parent} must be a directory only its owner can write"
-            )
-        try:
-            file_st = os.stat(self.path, follow_symlinks=False)
-        except FileNotFoundError:
-            return  # created below under the validated parent
-        if not stat.S_ISREG(file_st.st_mode):
-            raise ValueError(f"admin database path {self.path} is not a regular file")
-
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:
-        # Validate the (operator-configurable) parent before opening, fail-closed. O_NOFOLLOW only
-        # guards the descriptor below; sqlite3.connect reopens the path by name, so a path swap
-        # between the two is a TOCTOU window. A parent another local principal can write (group- or
-        # world-writable) is what makes that swap possible, so such a parent is rejected rather than
-        # trusted; an existing database that is not a regular file is rejected too.
-        self._ensure_secure_parent()
-        fd = os.open(self.path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+        # open_hardened_sqlite creates the parent 0o700, opens O_NOFOLLOW, tightens the mode to
+        # 0o600 and connects through the directory-validated path (TOCTOU guard, P2-2), then applies
+        # foreign_keys/busy_timeout; the admin store keeps its own journal-aware synchronous policy.
+        db = open_hardened_sqlite(self.path)
         try:
-            if os.fstat(fd).st_mode & 0o077:
-                os.fchmod(fd, 0o600)  # tighten a database created with a looser umask
-        finally:
-            os.close(fd)
-        db = sqlite3.connect(self.path, timeout=5)
-        try:
-            db.row_factory = sqlite3.Row
-            db.execute("PRAGMA foreign_keys = ON")
-            db.execute("PRAGMA busy_timeout = 5000")
             journal_mode = db.execute("PRAGMA journal_mode").fetchone()[0].lower()
             db.execute(
                 "PRAGMA synchronous = NORMAL"

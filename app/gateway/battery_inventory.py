@@ -34,6 +34,7 @@ CAPACITY_AH_FRESH_SECONDS = 2 * 24 * 60 * 60
 # The device has no module-count register; counting and hardware validation stay separate, see _battery_module_report.
 RCT_MAX_MODULES_PER_TOWER = 6
 RCT_MODULE_SN_SLOTS = 7
+RCT_RATED_USABLE_WH_PER_MODULE = 1920 * 0.9
 # Every populated serial slot is one battery module: a Power Battery 11.5 (6 modules per the RCT
 # datasheet) reports exactly six populated slots, and the BMS serial lives in its own register.
 
@@ -277,7 +278,9 @@ def _log_pending_slots(device_id: str, prefix: str, states: list[str]) -> None:
     )
 
 
-def _battery_module_report(runtime, device_id: str, prefix: str) -> dict:
+def _battery_module_report(
+    runtime, device_id: str, prefix: str, *, include_complete: bool = False
+) -> dict:
     """Trusted module-count report for one tower: captures the current slot-state snapshot (see
     `_battery_module_slot_states`), classifies it (`_raw_battery_module_report`), and runs it
     through the last-known-good stabilizer so neither a mid-scan nor a single flaky complete read
@@ -298,7 +301,7 @@ def _battery_module_report(runtime, device_id: str, prefix: str) -> dict:
             RCT_MODULE_SN_SLOTS,
             RCT_MAX_MODULES_PER_TOWER,
         )
-    return {k: v for k, v in report.items() if k != "_complete"}
+    return report if include_complete else {k: v for k, v in report.items() if k != "_complete"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -318,16 +321,37 @@ class CapacityCalibrationSample:
 
 
 class MeasuredBatteryCapacity:
-    """Fail closed until a completed BMS calibration can be identified reliably.
+    """Provide a rated planning capacity from complete module inventory.
 
-    The Ah registers vary with operating state, so freshness and topology cannot qualify them
-    as a current usable capacity or a permanent degradation measurement.
+    Ah readings cannot establish current capacity or a permanent degradation measurement.
     """
 
     def __init__(self, runtime) -> None:
         self._runtime = runtime
 
     def verified_usable_capacity_wh(self, device_id: str) -> float | None:
+        counts = []
+        for prefix in _BATTERY_TOWER_PREFIXES:
+            report = _battery_module_report(
+                self._runtime, device_id, prefix, include_complete=True
+            )
+            if not report["_complete"]:
+                return None
+            if not _battery_tower_present(
+                self._runtime, device_id, prefix, report["populated_module_slots"]
+            ):
+                if prefix == "battery":
+                    return None
+                continue
+            count = report["module_count"]
+            if report["module_count_status"] != "ok" or count is None:
+                return None
+            counts.append(count)
+
+        if len(counts) == 1 and 2 <= counts[0] <= RCT_MAX_MODULES_PER_TOWER:
+            return counts[0] * RCT_RATED_USABLE_WH_PER_MODULE
+        if len(counts) == 2 and counts[0] == counts[1] and counts[0] in (4, 5, 6):
+            return sum(counts) * RCT_RATED_USABLE_WH_PER_MODULE
         return None
 
     def calibration_sample(

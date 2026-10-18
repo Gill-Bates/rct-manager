@@ -19,7 +19,12 @@ from pathlib import Path
 
 import pytest
 
-from app.sqlite_safety import UnsafeDatabasePath, strict_path_enabled, validated_sqlite_path
+from app.sqlite_safety import (
+    UnsafeDatabasePath,
+    open_hardened_sqlite,
+    strict_path_enabled,
+    validated_sqlite_path,
+)
 
 
 @pytest.fixture
@@ -106,3 +111,41 @@ def test_a_group_or_world_writable_database_file_is_refused(tmp_path: Path, stri
     os.chmod(db_path, 0o666)  # noqa: S103 - a world-writable DB file is exactly what the guard rejects
     with pytest.raises(UnsafeDatabasePath, match="group- or world-writable"):
         validated_sqlite_path(db_path)
+
+
+def test_open_hardened_sqlite_creates_a_private_db_with_base_pragmas(tmp_path: Path) -> None:
+    """The shared open skeleton both stores use: parent 0o700, file 0o600, foreign_keys/busy_timeout
+    on. The per-store synchronous policy is set by the caller, not here."""
+    db_path = tmp_path / "state" / "store.db"
+    db = open_hardened_sqlite(db_path)
+    try:
+        assert stat.S_IMODE(db_path.parent.stat().st_mode) == 0o700
+        assert stat.S_IMODE(db_path.stat().st_mode) == 0o600
+        assert db.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+        assert db.execute("PRAGMA busy_timeout").fetchone()[0] == 5000
+    finally:
+        db.close()
+
+
+def test_open_hardened_sqlite_tightens_a_loosely_created_file(tmp_path: Path) -> None:
+    """A database left over with a loose mode is tightened to 0o600 on open."""
+    db_dir = tmp_path / "state"
+    db_dir.mkdir(mode=0o700)
+    db_path = db_dir / "store.db"
+    db_path.write_bytes(b"")
+    os.chmod(db_path, 0o644)  # intentionally loose; open_hardened_sqlite must tighten it
+    db = open_hardened_sqlite(db_path)
+    try:
+        assert stat.S_IMODE(db_path.stat().st_mode) == 0o600
+    finally:
+        db.close()
+
+
+def test_open_hardened_sqlite_rejects_an_untrusted_parent_in_strict_mode(tmp_path: Path, strict: None) -> None:
+    """Strict mode routes the open through validated_sqlite_path, so an untrusted parent fails
+    closed before sqlite3.connect for both stores alike."""
+    db_dir = tmp_path / "shared"
+    db_dir.mkdir(mode=0o777)
+    os.chmod(db_dir, 0o777)  # noqa: S103 - a world-writable parent is exactly what the guard rejects
+    with pytest.raises(UnsafeDatabasePath):
+        open_hardened_sqlite(db_dir / "store.db")

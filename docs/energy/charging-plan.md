@@ -35,24 +35,23 @@ Open-Meteo request and never queries the inverter. Control stays with the
 
 ## Usable battery capacity
 
-The battery-facts resolver requires an evidence-backed current capacity or a persisted per-device
-Expert override. The cache-only capacity port currently returns unavailable because the inverter has no
-proven signal for a completed, stable BMS capacity calibration. The device list and plan both read
-this port; the plan endpoint never queries the inverter.
+The battery-facts resolver uses a rated usable capacity derived from a complete, supported module
+inventory, or a persisted per-device Expert override. The rated value estimates the capacity of a
+new battery; it does not measure degradation. The device list and plan both read the cache-only
+capacity port; the plan endpoint never queries the inverter.
 
 !!! note "What \"verified\" means in `battery_capacity_source`"
     The capacity source value `verified` (API field `battery_capacity_source`) stays a stable
     contract value for the case where a capacity port does supply an evidence-backed automatic
-    capacity derived from live register evidence. It would never mean the physical usable kWh was
-    hardware-calibrated against an independent charge/discharge measurement. With the default port
-    no register is yet proven to yield usable Wh, so the source is `unavailable` until an Expert
-    override is set; read `verified`, when it appears, as "evidence-backed automatic", not
-    "lab-calibrated".
+    capacity derived from complete module-serial evidence and the battery datasheet. It does not
+    mean the present-day usable kWh was measured or calibrated against an independent
+    charge/discharge cycle. Read `verified` as "rated automatic estimate", not "measured current
+    capacity".
 
 ```mermaid
 flowchart LR
     MOD["Module count<br/>serial slots, stabilized"] --> RATED["Rated usable baseline<br/>modules x 1.92 kWh x 90 %"]
-    RATED --> DIAG["Diagnostic 100% reference only"]
+    RATED --> CAP["Planner capacity"]
     AH["BMS Ah registers"] --> DIAG2["Raw diagnostic observations"]
     OVERRIDE["Expert override"] --> CAP["Planner capacity"]
 ```
@@ -64,8 +63,9 @@ flowchart LR
 | Ah register readings as raw diagnostics                                                                  | The raw `battery_soh` scale (unverified)                                                |
 |                                                                                                          | `battery_stored_energy` and `battery_used_energy` (total energy flow, not a fill level) |
 
-The rated baseline is `modules x 1.92 kWh x 0.9`. It represents 100 % when new, not the
-present-day usable capacity. Ah readings do not qualify as a degradation percentage.
+The rated planning capacity is `modules x 1.92 kWh x 0.9`. It represents 100 % when new, not the
+present-day usable capacity. Ah readings do not qualify as a degradation percentage or alter the
+planning capacity.
 
 Rules for capacity diagnostics:
 
@@ -94,13 +94,13 @@ Rules for capacity diagnostics:
 **Expert override.** Persisted `usable_capacity_wh` values (including seeds from the legacy
 `DISPATCH_USABLE_BATTERY_CAPACITY_WH`) stay effective as Expert overrides. Saving other limits
 without the capacity field keeps the override; an explicit `null` clears it. Without a reliable
-capacity the plan reports `battery_state_unavailable`.
+capacity from either source the plan reports `battery_state_unavailable`.
 
 `GET /admin/api/energy/planning-devices` reports `battery_capacity_source` as `verified`,
 `expert_override` or `unavailable`. Here `verified` is the API label for a value returned by the
-cache-only evidence-backed capacity source; it does not mean that Ah-register semantics or usable
-capacity have been independently calibrated on hardware. The current producer stays unavailable
-until a completed, stable BMS calibration can be identified.
+cache-only module-inventory source; it does not mean that Ah-register semantics or current usable
+capacity have been independently calibrated on hardware. Permanent calibration history remains
+unavailable until a completed, stable BMS calibration can be identified.
 
 ## How the plan is built
 
@@ -308,7 +308,7 @@ preview)"). The result area uses the full card width:
 | ------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Normal                                                                                      | Loads when an inverter is selected, then every 5 minutes and when the browser tab becomes visible; no Refresh button                                                                                                                                              |
 | Input only pending (spot prices, solar forecast, consumption model)                         | Rotating "Please wait ..." spinner; the plan is re-requested every 10 s, at most 30 times per status, then the status text with the readiness checklist stays. A new load, a device change or a hidden tab stops the polling; a changed status restarts the count |
-| Battery state missing or unverifiable                                                       | Not pending: explanation shows at once, also in Basic mode ("Check that the inverter is connected and reports its battery state and capacity"); plan re-requested quietly                                                                                                             |
+| Battery state missing or unverifiable                                                       | Not pending: explanation shows at once, also in Basic mode ("Check that the inverter is connected and reports its battery state and capacity"); plan re-requested quietly                                                                                         |
 | Cannot be fixed by waiting (spot market disabled, solar forecast not configured) and errors | Explanatory text with the readiness checklist (battery capacity, spot prices, solar forecast, consumption model, each with a text state such as "disabled in settings")                                                                                           |
 
 Expert mode also shows the checklist, including "Battery data could not be verified automatically.",
