@@ -1,3 +1,9 @@
+#!/usr/bin/env python3
+#
+# tests/test_battery_calibration_history.py
+# Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
+#
+
 """Permanent local history of BMS usable-capacity calibrations, keyed by inverter serial."""
 
 import sqlite3

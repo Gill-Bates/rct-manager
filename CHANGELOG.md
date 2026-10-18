@@ -1,3 +1,9 @@
+## [1.2.3] - 2026-xx-xx
+
+
+<details markdown="1">
+<summary>Previous versions...</summary>
+
 ## [1.2.2] - 2026-10-18
 
 ### New
@@ -26,9 +32,6 @@
 - Low-level battery dispatch mutations are refused while the Energy Manager owns the inverter, so dispatch cannot bypass the active control mode.
 - Admin cookie sessions now have a configurable 0–7 day server-side lifetime (1 day by default); logout and password changes invalidate sessions.
 - Admin GUI polling has a separate per-session request budget from API tokens, pauses in hidden tabs, and backs off according to `Retry-After` after a 429 response.
-
-<details markdown="1">
-<summary>Previous versions...</summary>
 
 ## [1.2.1] - 2026-10-16
 

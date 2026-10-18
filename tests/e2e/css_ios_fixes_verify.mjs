@@ -1,6 +1,8 @@
 //
 // tests/e2e/css_ios_fixes_verify.mjs
+// Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
 //
+
 // Ad-hoc browser verification for the four CSS/iOS review fixes (footer safe-area reserve,
 // TSDB mobile-first restructure, no 38rem overlap, shared plan-chart tokens). Drives the real
 // admin GUI through the shared harness and reads back computed styles + geometry + screenshots.

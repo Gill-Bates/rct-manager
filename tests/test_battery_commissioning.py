@@ -1,3 +1,9 @@
+#!/usr/bin/env python3
+#
+# tests/test_battery_commissioning.py
+# Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
+#
+
 """Commissioning date derived from the inverter energy loggers, persisted per inverter serial."""
 
 import asyncio

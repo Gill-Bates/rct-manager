@@ -1,3 +1,8 @@
+//
+// docs/javascripts/print-page.js
+// Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
+//
+
 (function () {
     "use strict";
 

@@ -1,3 +1,8 @@
+//
+// docs/javascripts/mermaid-zoom.js
+// Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
+//
+
 /* Click-to-enlarge lightbox for Mermaid diagrams (Material for MkDocs). */
 (function () {
     "use strict";

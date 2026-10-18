@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 #
 # tests/test_energy_verification_concurrency.py
 # Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates

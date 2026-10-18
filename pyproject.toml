@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rct-manager"
-version = "1.2.2"
-description = "Your REST gateway for RCT Power inverters"
+version = "1.2.3"
+description = "Your RCT Power inverter is just one REST call away."
 requires-python = ">=3.13"
 authors = [{ name = "Gill-Bates" }]
 license = "MIT"
