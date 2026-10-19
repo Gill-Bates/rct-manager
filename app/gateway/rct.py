@@ -33,6 +33,7 @@ from app.errors import (
     DeviceUnreachable,
     FreshNotAvailable,
     ProtocolError,
+    QueueFullError,
     QueueTimeout,
     UnknownDevice,
     UnknownMetric,
@@ -99,9 +100,11 @@ REFRESH_FAILURES_CONFIRMED = (
 # This is what stops the connection-churn that a recurring 60 s re-probe of a dead slot caused.
 # A very-slow explicit rediscovery for hardware-change-without-reconfiguration could be added later,
 # but there is deliberately no recurring re-probe timer here.
-INVENTORY_MAX_READS = (
-    16  # upper bound per pass: two towers x seven module_sn slots, plus slack
-)
+INVENTORY_MAX_READS = 16  # upper bound per pass on an idle queue: two towers x seven module_sn slots, plus slack
+# Caller reads normally pre-empt an inventory pass, so steady UI polling could starve discovery
+# forever. After this many consecutive passes that sent nothing because the queue was busy, each
+# further pass sends exactly ONE inventory read past the queue check (ready device only).
+INVENTORY_STARVED_PASSES_BEFORE_FORCED_READ = 2
 # Per-slot settled states (see read_module_inventory); a slot in this map is never re-read on a timer.
 _SLOT_ANSWERED = "answered"
 _SLOT_EMPTY_SETTLED = "empty"
@@ -200,6 +203,8 @@ class RctGateway:
         # the cache (TTL exemption) without any device I/O. Cleared only by replace_devices().
         self._inventory_state: dict[str, dict[str, str]] = {}
         self._inventory_values: dict[str, dict[str, tuple[ScalarValue, datetime]]] = {}
+        # Consecutive inventory passes per device that sent nothing because callers were queued.
+        self._inventory_starved: dict[str, int] = {}
         # Last-known-good battery topology per (device_id, tower prefix), owned by
         # app.gateway.battery_inventory. It is derived from the inventory above and must be dropped
         # with it, otherwise a re-addressed device would keep reporting the old hardware's towers.
@@ -397,8 +402,14 @@ class RctGateway:
         read again on a timer - this is what removes the recurring-re-probe connection churn. The
         scan is topology-aware (per-tower, index order, stops after the first confirmed-empty slot;
         the placeholder tower is proved by its first slot before the rest). Settled knowledge is
-        dropped only by replace_devices(). Returns the number of device reads actually sent (0 once
-        every in-scope slot is settled, or while the device is unreachable).
+        dropped only by replace_devices(). Queued caller reads pre-empt the pass; after
+        INVENTORY_STARVED_PASSES_BEFORE_FORCED_READ consecutive passes that sent nothing for that
+        reason, each further pass sends exactly one read past a busy queue (device OK/DEGRADED and
+        not in maintenance) until a pass makes progress on an idle queue, so discovery cannot be
+        starved by steady caller traffic. A read the serializer rejects (queue full or queue
+        timeout) never reached the device, so it counts neither as sent nor towards EMPTY.
+        Returns the number of device reads actually sent (0 once every in-scope slot is settled,
+        or while the device is unreachable).
         """
         binding = self._device(device_id)
         values = self._inventory_values.setdefault(device_id, {})
@@ -418,17 +429,47 @@ class RctGateway:
         if not plan:
             return 0  # discovery complete; the loop idles (only the warm-value re-put above runs)
         state = self._inventory_state.setdefault(device_id, {})
+        starved = self._inventory_starved.get(device_id, 0)
+        may_force = (
+            starved >= INVENTORY_STARVED_PASSES_BEFORE_FORCED_READ
+            and not binding.endpoint.maintenance()
+            and self.device_status(device_id).state in (DeviceState.OK, DeviceState.DEGRADED)
+        )
         sent = 0
+        # A read sent on an idle queue, not via the starvation override, resets the counter.
+        progressed = False
         for name in plan[:INVENTORY_MAX_READS]:
-            if binding.serializer.queue_length() > 0:
-                break  # caller reads go first; the next pass continues where this one stopped
+            idle = binding.serializer.queue_length() == 0
+            if not idle:
+                if not may_force or sent:
+                    break  # caller reads go first; the next pass continues where this one stopped
+                log.debug(
+                    "Forcing one inventory read on device %s after %d starved pass(es)",
+                    device_id,
+                    starved,
+                )
             entry = self._metric(name)
             key = (device_id, name)
             self._refresh_attempts[key] = self._clock.monotonic()
+            try:
+                value = await self._read_into_cache(
+                    binding,
+                    entry,
+                    key,
+                    TransactionOrigin.SYSTEM_READ,
+                    raise_unadmitted=True,
+                )
+            except (QueueFullError, QueueTimeout) as exc:
+                # Never reached the device: no failure counted, the slot stays unknown.
+                log.debug(
+                    "Inventory read of %s on device %s not admitted (%s)",
+                    name,
+                    device_id,
+                    exc.code,
+                )
+                break
             sent += 1
-            value = await self._read_into_cache(
-                binding, entry, key, TransactionOrigin.SYSTEM_READ
-            )
+            progressed = progressed or idle
             if value is not None:
                 self._refresh_failures.pop(key, None)
                 values[name] = (value[0], self._clock.now())
@@ -447,6 +488,10 @@ class RctGateway:
                         device_id,
                         name,
                     )
+        if progressed:
+            self._inventory_starved.pop(device_id, None)
+        elif not sent:
+            self._inventory_starved[device_id] = starved + 1
         if sent:
             log.debug("Read %d inventory value(s) on device %s", sent, device_id)
         return sent
@@ -506,6 +551,7 @@ class RctGateway:
         # own towers instead of inheriting the old hardware's inventory topology.
         self._inventory_state.clear()
         self._inventory_values.clear()
+        self._inventory_starved.clear()
         self.module_topology_state.clear()
         # The value cache is keyed by (device_id, metric name). The ValueStore port exposes only a
         # per-key invalidate, so drop every catalog metric for each gone/re-addressed device.
@@ -894,8 +940,13 @@ class RctGateway:
         charge: BudgetHandle | None = None,
         *,
         total_timeout_seconds: float | None = None,
+        raise_unadmitted: bool = False,
     ) -> tuple[ScalarValue, bytes] | None:
-        """One uncached read whose result alone repopulates the cache (Requirement 9.13); None on failure."""
+        """One uncached read whose result alone repopulates the cache (Requirement 9.13); None on failure.
+
+        With ``raise_unadmitted`` a QueueFullError/QueueTimeout (the request never reached the
+        device) propagates instead of looking like a device non-response.
+        """
         try:
             request = self._read_request(binding, entry, origin, None)
             request.charge = charge
@@ -904,6 +955,10 @@ class RctGateway:
             if result.error is not None or result.frame is None:
                 return None
             value = self._decode(entry, result.frame.payload)
+        except (QueueFullError, QueueTimeout):
+            if raise_unadmitted:
+                raise
+            return None
         except DeviceApiError:
             return None
         self._cache.put(

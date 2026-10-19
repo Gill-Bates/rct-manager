@@ -22,7 +22,12 @@ from app.config import (
 )
 from app.errors import BudgetExhausted, DeviceApiError, DeviceUnreachable, QueueFullError, QueueTimeout
 from app.gateway.cache import MemoryCache
-from app.gateway.rct import DeviceBinding, RctGateway
+from app.gateway.rct import (
+    INVENTORY_STARVED_PASSES_BEFORE_FORCED_READ,
+    REFRESH_FAILURES_CONFIRMED,
+    DeviceBinding,
+    RctGateway,
+)
 from app.gateway.vendor import SlaveDiscovery
 from app.protocol.frames import Frame
 from app.protocol.types import Command
@@ -693,6 +698,133 @@ def test_inventory_marks_an_unanswered_slot_as_read_failed_for_devices() -> None
     failed, populated_ok = asyncio.run(scenario())
     assert failed is True  # the empty slot is confirmed unanswered
     assert populated_ok is False  # a populated slot is never marked failed
+
+
+def _ready(gateway: RctGateway) -> None:
+    """Give the inventory device a live heartbeat so device_status() reports OK."""
+    gateway._device("inv1").heartbeat = SimpleNamespace(
+        consecutive_failures=0, liveness_source=LivenessSource.HEARTBEAT, unreachable=False
+    )
+
+
+def test_inventory_discovery_completes_under_a_permanently_busy_caller_queue(monkeypatch) -> None:
+    """Steady caller traffic must not starve discovery: after the starvation threshold every pass
+    sends exactly one read past the busy queue until the tower is fully settled."""
+
+    async def scenario():
+        populated = {f"battery_module_sn_{i}": b"SN-%d" % i for i in range(6)}
+        gateway, serializer, _net, _clock = await _inventory_gateway(populated, unanswered={"battery_module_sn_6"})
+        _ready(gateway)
+        monkeypatch.setattr(serializer, "queue_length", lambda: 1)
+        sent = [await gateway.read_module_inventory("inv1", _INVENTORY_NAMES) for _ in range(14)]
+        readings = [gateway.cached_reading("inv1", n) for n in _INVENTORY_NAMES]
+        failed = gateway.read_failed("inv1", "battery_module_sn_6")
+        slot_state = gateway._inventory_state["inv1"].get("battery_module_sn_6")
+        await serializer.stop()
+        return sent, readings, failed, slot_state
+
+    sent, readings, failed, slot_state = asyncio.run(scenario())
+    n = INVENTORY_STARVED_PASSES_BEFORE_FORCED_READ
+    # 6 answered slots + 3 reads to confirm slot 6 empty, one per forced pass, then idle.
+    assert sent == [0] * n + [1] * 9 + [0] * (14 - n - 9)
+    assert [r[0] if r else None for r in readings] == ["SN-0", "SN-1", "SN-2", "SN-3", "SN-4", "SN-5", None]
+    # Three real device non-responses through forced reads still settle the slot as empty.
+    assert failed is True
+    assert slot_state == "empty"
+
+
+@pytest.mark.parametrize("error", [QueueTimeout, QueueFullError])
+def test_unadmitted_forced_inventory_reads_never_settle_a_slot_as_empty(monkeypatch, error) -> None:
+    """A forced read the serializer rejects never reached the device: it must count neither as sent
+    nor as a refresh failure towards EMPTY, and the slot is read normally once the queue frees."""
+
+    async def scenario():
+        populated = {f"battery_module_sn_{i}": b"SN-%d" % i for i in range(7)}
+        gateway, serializer, net, _clock = await _inventory_gateway(populated, unanswered=set())
+        _ready(gateway)
+        busy = {"queue": True}
+        monkeypatch.setattr(serializer, "queue_length", lambda: 1 if busy["queue"] else 0)
+        real_submit = serializer.submit
+
+        async def rejecting_submit(request):
+            if busy["queue"]:
+                raise error()
+            return await real_submit(request)
+
+        monkeypatch.setattr(serializer, "submit", rejecting_submit)
+        frames_before = len(net.frames)
+        passes = INVENTORY_STARVED_PASSES_BEFORE_FORCED_READ + REFRESH_FAILURES_CONFIRMED
+        rejected = [await gateway.read_module_inventory("inv1", _INVENTORY_NAMES) for _ in range(passes)]
+        frames_rejected = len(net.frames) - frames_before
+        slot_state = gateway._inventory_state["inv1"].get("battery_module_sn_0")
+        failures = gateway._refresh_failures.get(("inv1", "battery_module_sn_0"))
+        busy["queue"] = False
+        recovered = await gateway.read_module_inventory("inv1", _INVENTORY_NAMES)
+        reading = gateway.cached_reading("inv1", "battery_module_sn_0")
+        await serializer.stop()
+        return rejected, frames_rejected, slot_state, failures, recovered, reading
+
+    rejected, frames_rejected, slot_state, failures, recovered, reading = asyncio.run(scenario())
+    assert rejected == [0] * (INVENTORY_STARVED_PASSES_BEFORE_FORCED_READ + REFRESH_FAILURES_CONFIRMED)
+    assert frames_rejected == 0
+    assert slot_state is None  # still unknown, not EMPTY
+    assert failures is None
+    assert recovered == 7
+    assert reading is not None and reading[0] == "SN-0"
+
+
+@pytest.mark.parametrize("condition", ["not_ready", "maintenance"])
+def test_inventory_forces_no_read_past_a_busy_queue_unless_the_device_is_ready(monkeypatch, condition) -> None:
+    """The starvation override never pushes a frame at a device that is starting or in maintenance."""
+
+    async def scenario():
+        populated = {f"battery_module_sn_{i}": b"SN-%d" % i for i in range(7)}
+        gateway, serializer, net, _clock = await _inventory_gateway(populated, unanswered=set())
+        if condition == "maintenance":
+            _ready(gateway)
+            endpoint = gateway._device("inv1").endpoint
+            # probe_due keeps the pass past the early maintenance return, so the force gate decides.
+            monkeypatch.setattr(endpoint, "maintenance", lambda: True)
+            monkeypatch.setattr(endpoint, "probe_due", lambda: True)
+        monkeypatch.setattr(serializer, "queue_length", lambda: 1)
+        frames_before = len(net.frames)
+        sent = [await gateway.read_module_inventory("inv1", _INVENTORY_NAMES) for _ in range(6)]
+        frames_after = len(net.frames)
+        await serializer.stop()
+        return sent, frames_before, frames_after
+
+    sent, frames_before, frames_after = asyncio.run(scenario())
+    assert sent == [0] * 6
+    assert frames_after == frames_before
+
+
+def test_inventory_starvation_counter_resets_after_a_pass_on_an_idle_queue(monkeypatch) -> None:
+    """A forced read alone keeps the override armed; a pass that reads on an idle queue resets it,
+    so caller traffic again gets the full threshold of priority before the next forced read."""
+
+    async def scenario():
+        populated = {f"battery_module_sn_{i}": b"SN-%d" % i for i in range(6)}
+        gateway, serializer, _net, _clock = await _inventory_gateway(populated, unanswered={"battery_module_sn_6"})
+        _ready(gateway)
+        busy = {"queue": True}
+        monkeypatch.setattr(serializer, "queue_length", lambda: 1 if busy["queue"] else 0)
+
+        async def passes(count: int) -> list[int]:
+            return [await gateway.read_module_inventory("inv1", _INVENTORY_NAMES) for _ in range(count)]
+
+        before = await passes(INVENTORY_STARVED_PASSES_BEFORE_FORCED_READ + 1)
+        busy["queue"] = False
+        idle = await passes(1)
+        busy["queue"] = True
+        after = await passes(INVENTORY_STARVED_PASSES_BEFORE_FORCED_READ + 1)
+        await serializer.stop()
+        return before, idle, after
+
+    before, idle, after = asyncio.run(scenario())
+    n = INVENTORY_STARVED_PASSES_BEFORE_FORCED_READ
+    assert before == [0] * n + [1]  # slot 0 by the override
+    assert idle == [6]  # slots 1..6 at full speed: the idle-queue path is unchanged
+    assert after == [0] * n + [1]  # counter was reset: full threshold again
 
 
 def test_history_query_is_a_read_through_the_device_serializer_without_write_support(caplog) -> None:
