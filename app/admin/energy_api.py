@@ -284,7 +284,9 @@ class AdminEnergyDeviceStatus(EnergyStatusResponse):
         0  # failed automatic restore attempts since the last clean restore
     )
     next_restore_at: datetime | None = None
-    verification_state: Literal["pending", "checking", "retrying", "blocked", "verified"] = "pending"
+    verification_state: Literal[
+        "pending", "checking", "retrying", "blocked", "verified"
+    ] = "pending"
     verification_detail: str | None = None
     verification_next_retry_at: datetime | None = None
 
@@ -635,11 +637,16 @@ async def delete_hardware_verification(
     async with verification_write_lock(request, device_id):
         store = getattr(request.app.state, "admin_store", None)
         if store is not None:
-            from app.admin.energy_verification import AUTO_PAUSE_KEY_PREFIX, AutomaticVerificationStatus
+            from app.admin.energy_verification import (
+                AUTO_PAUSE_KEY_PREFIX,
+                AutomaticVerificationStatus,
+            )
 
             await asyncio.to_thread(store.put, AUTO_PAUSE_KEY_PREFIX + device_id, True)
-            request.app.state.energy_verification_status[device_id] = AutomaticVerificationStatus(
-                "blocked", "Automatic verification was paused by an Expert."
+            request.app.state.energy_verification_status[device_id] = (
+                AutomaticVerificationStatus(
+                    "blocked", "Automatic verification was paused by an Expert."
+                )
             )
         try:
             await dispatch.set_capabilities(device_id, revoked)
@@ -2206,6 +2213,27 @@ def _plan_slot_views(plan: EnergyPlan) -> list[DryRunPlanSlotView]:
     ]
 
 
+def _split_at_local_midnight(
+    slots: list[DryRunPlanSlotView], zone: ZoneInfo
+) -> list[DryRunPlanSlotView]:
+    """Cut merged runs at local midnight so each day view holds exactly its own part of the plan."""
+    split: list[DryRunPlanSlotView] = []
+    for slot in slots:
+        start = slot.start
+        while True:
+            midnight = datetime.combine(
+                start.astimezone(zone).date() + timedelta(days=1),
+                datetime.min.time(),
+                zone,
+            ).astimezone(UTC)
+            if slot.end <= midnight:
+                split.append(slot.model_copy(update={"start": start}))
+                break
+            split.append(slot.model_copy(update={"start": start, "end": midnight}))
+            start = midnight
+    return split
+
+
 def _plan_flag_fields(plan: EnergyPlan | None) -> dict:
     """The policy, reserve/target flags, power, energy, assumptions and reasons of a plan."""
     if plan is None or plan.power is None or plan.assumptions is None:
@@ -2843,7 +2871,9 @@ async def get_dynamic_plan(
             horizon_hours=0.0,
             timezone=site_zone,
             today=DryRunDayView(date=today_date.isoformat(), status="unavailable"),
-            tomorrow=DryRunDayView(date=tomorrow_date.isoformat(), status="unavailable"),
+            tomorrow=DryRunDayView(
+                date=tomorrow_date.isoformat(), status="unavailable"
+            ),
         )
     store = _admin_store_or_503(request)
 
@@ -2939,12 +2969,21 @@ async def get_dynamic_plan(
     )
 
     plan = result.plan if result.status is PlanStatus.OK else None
-    slot_views = _plan_slot_views(plan) if plan is not None else []
+    # The planner merges equal neighbours into runs; a run across midnight belongs to both days.
+    slot_views = (
+        _split_at_local_midnight(_plan_slot_views(plan), ZoneInfo(site_zone))
+        if plan is not None
+        else []
+    )
     today_slots = [
-        slot for slot in slot_views if slot.start.astimezone(ZoneInfo(site_zone)).date() == today_date
+        slot
+        for slot in slot_views
+        if slot.start.astimezone(ZoneInfo(site_zone)).date() == today_date
     ]
     tomorrow_slots = [
-        slot for slot in slot_views if slot.start.astimezone(ZoneInfo(site_zone)).date() == tomorrow_date
+        slot
+        for slot in slot_views
+        if slot.start.astimezone(ZoneInfo(site_zone)).date() == tomorrow_date
     ]
     tomorrow_end = datetime.combine(
         tomorrow_date + timedelta(days=1), datetime.min.time(), ZoneInfo(site_zone)
@@ -2982,7 +3021,11 @@ async def get_dynamic_plan(
         ),
         tomorrow=DryRunDayView(
             date=tomorrow_date.isoformat(),
-            status="ok" if tomorrow_complete else "pending" if tomorrow_pending else "unavailable",
+            status=(
+                "ok"
+                if tomorrow_complete
+                else "pending" if tomorrow_pending else "unavailable"
+            ),
             slots=tomorrow_slots,
         ),
         forecast_basis=result.forecast_basis,

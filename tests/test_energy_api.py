@@ -3079,6 +3079,18 @@ async def _plan_body(harness, headers) -> dict:
     return response.json()
 
 
+PENDING_PLAN_FIXTURE = ROOT / "tests/fixtures/dynamic_plan_tomorrow_pending.json"
+
+
+def _json_shape(value):
+    # Key structure only: slot counts, figures and nullable fields vary with the pinned time of day.
+    if isinstance(value, dict):
+        return {key: _json_shape(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_json_shape(value[0])] if value else []
+    return None
+
+
 def _assert_one_contiguous_plan(plan: dict) -> None:
     # Today and tomorrow are two views of one optimisation, so the SoC trajectory never restarts.
     assert plan["today"]["slots"] + plan["tomorrow"]["slots"] == plan["slots"]
@@ -3150,7 +3162,10 @@ async def test_fresh_install_plans_today_while_tomorrow_prices_are_unpublished(
             assert service.current_view().plan.slots[-1].end == today_end
 
         await assert_today_only()
-
+        # The JS renderer test replays this response shape, so it cannot drift from the backend.
+        assert _json_shape(await _plan_body(harness, headers)) == _json_shape(
+            json.loads(PENDING_PLAN_FIXTURE.read_text(encoding="utf-8"))
+        )
         # A retrieval after the publication grace that still finds no prices only warns and retries.
         overdue = (
             day_ahead_available_from(today + timedelta(days=1)) + PUBLICATION_GRACE
@@ -3181,6 +3196,62 @@ async def test_fresh_install_plans_today_while_tomorrow_prices_are_unpublished(
         _assert_one_contiguous_plan(plan)
         assert await service.recompute() is not None
         assert service.current_view().plan.slots[-1].end == tomorrow_end
+
+
+async def test_published_tomorrow_becomes_today_after_local_midnight(
+    tmp_path: Path,
+) -> None:
+    clock = _PinnedWallClock(datetime(2026, 3, 10, 23, 40, tzinfo=BERLIN))
+    async with running_app(
+        _module_inventory_settings(tmp_path), clock=clock
+    ) as harness:
+        runtime = harness.runtime
+        store = harness.app.state.admin_store
+        _seed_battery_readings(runtime)
+        spot = SpotMarketConfig.model_validate(_spot_body())
+        weather = WeatherConfig(
+            enabled=True,
+            latitude=48.8,
+            longitude=9.2,
+            timezone="Europe/Berlin",
+            pv_peak_power_wp=10000,
+            tilt_deg=30,
+            azimuth_deg=0,
+        )
+        harness.app.state.spotmarket_config = spot
+        harness.app.state.weather_config = weather
+        runtime.energy._mode_states["main"] = ModeRecord("main", mode=EnergyMode.MANUAL)
+        spot_provider = _DayAheadSpotProvider(clock)
+        spot_provider.tomorrow_published = True
+        assert await refresh_spot_market(store, spot_provider, spot, now=clock.now())
+        assert await refresh_solar_forecast(
+            store, _ThreeDaySolarProvider(), weather, now=clock.now()
+        )
+        headers = await admin_session(harness)
+        before = await _plan_body(harness, headers)
+        assert (before["today"]["status"], before["tomorrow"]["status"]) == ("ok", "ok")
+
+        # Past local midnight (23:20 UTC) the stored "tomorrow" is today; the next day awaits its auction.
+        clock.set(datetime(2026, 3, 11, 0, 20, tzinfo=BERLIN))
+        spot_provider.tomorrow_published = False
+        _seed_battery_readings(runtime)
+        await refresh_spot_market(store, spot_provider, spot, now=clock.now())
+        assert await refresh_solar_forecast(
+            store, _ThreeDaySolarProvider(), weather, now=clock.now()
+        )
+        plan = await _plan_body(harness, headers)
+        assert plan["status"] == "ok", plan
+        assert plan["today"]["date"] == "2026-03-11"
+        assert plan["today"]["status"] == "ok"
+        assert datetime.fromisoformat(
+            plan["today"]["slots"][-1]["end"]
+        ) == _local_midnight(datetime(2026, 3, 12).date())
+        assert plan["tomorrow"] == {
+            "date": "2026-03-12",
+            "status": "pending",
+            "slots": [],
+        }
+        _assert_one_contiguous_plan(plan)
 
 
 async def test_spot_market_config_defaults_then_saves_and_reloads(

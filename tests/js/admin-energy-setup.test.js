@@ -1065,6 +1065,23 @@ test('today stays visible while tomorrow awaits spot prices, then shows its own 
   assert.doesNotMatch(flatten(schedule).map((n) => n.textContent).join(' '), /Waiting for tomorrow’s spot prices/);
 });
 
+test('the backend response for an unpublished tomorrow renders today without the wait card', () => {
+  // Captured from the fresh-install integration test in tests/test_energy_api.py, which checks its shape.
+  const plan = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'fixtures', 'dynamic_plan_tomorrow_pending.json'), 'utf8'));
+  assert.deepEqual([plan.status, plan.today.status, plan.tomorrow.status], ['ok', 'ok', 'pending']);
+  const h = harness();
+  h.context.formatPower = (w) => `${w} W`;
+  const result = h.context.element('div');
+  result.id = 'energy-plan-result';
+  const schedule = h.context.element('div');
+  schedule.id = 'energy-plan-schedule';
+  h.context.renderDryRunPlan(plan);
+  assert.equal(flatten(result).some((n) => String(n.className || '').includes('plan-loading-icon')), false);
+  assert.equal(bodyRows(h.byId.get('energy-plan-charge-schedule')).length, plan.today.slots.length);
+  assert.match(flatten(schedule).map((n) => n.textContent).join(' '), /Waiting for tomorrow’s spot prices/);
+  assert.equal(h.byId.get('energy-plan-charge-schedule-tomorrow'), undefined);
+});
+
 function renderPlan(slots) {
   const h = harness();
   h.context.formatPower = (w) => `${(w / 1000).toFixed(2)} kW`;
