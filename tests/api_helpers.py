@@ -138,9 +138,10 @@ async def running_app(
     behavior=None,
     fail_connects: int = 0,
     authorize: bool = True,
+    clock: SystemClock | None = None,
 ) -> AsyncIterator[Harness]:
     settings = settings or make_settings()
-    clock = SystemClock()
+    clock = clock or SystemClock()
     net = FakeNetwork(clock, fail_connects=fail_connects)
     net.payloads = default_payloads(settings)
     if behavior is not None:
@@ -275,7 +276,11 @@ def dispatch_capabilities(
                     verified_by="integration test",
                     # WRITE_PATH needs non-blank note evidence to read back as VERIFIED (P3-4); a
                     # sign record governs no note and keeps None.
-                    note="integration test" if name is CapabilityName.WRITE_PATH else None,
+                    note=(
+                        "integration test"
+                        if name is CapabilityName.WRITE_PATH
+                        else None
+                    ),
                 )
             )
     return path

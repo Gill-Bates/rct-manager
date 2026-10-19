@@ -122,18 +122,25 @@
       <div class="modal-content">
         <div class="modal-header">
           <h2 id="disclaimer-title" class="modal-title h5 d-flex align-items-center gap-2"><span class="material-icons"
-              aria-hidden="true">gavel</span>Important Usage Notice</h2>
+              aria-hidden="true">gavel</span>Enduser Agreement</h2>
         </div>
-        <div class="modal-body" id="disclaimer-body">
-          <p>Use of RCT Manager is at your own risk.</p>
-          <p>RCT Manager is an independent project and is not affiliated with RCT or RCT Power. In particular, it is
-            not an official application and is not a product provided or supported by RCT.</p>
-          <p>To the extent permitted by law, no liability is accepted for any damage, misconfiguration, data loss, or
-            other consequences arising directly or indirectly from the use of this application.</p>
-          <p>Changes to settings of the inverter, battery storage, energy management, or other components may affect
-            the operation of the system.</p>
-          <p class="mb-0">If you are unsure or in doubt, consult your responsible solar installer or qualified
-            technician.</p>
+        <div class="modal-body disclaimer-body d-flex align-items-stretch gap-3" id="disclaimer-body">
+          {# Decorative full-height warning glyph beside the notice; the heading already conveys the
+          warning, so it is aria-hidden. The glyph is sourced from warning-symbol.svg via a CSS
+          mask (see .disclaimer-mark), so the file is the single geometry source and the shape is
+          still tinted the primary red through the --rct-brand token. #}
+          <span class="disclaimer-mark" aria-hidden="true"></span>
+          <div class="disclaimer-text">
+            <p>Use of RCT Manager is at your own risk.</p>
+            <p>RCT Manager is an independent project and is not affiliated with RCT or RCT Power. In particular, it is
+              not an official application and is not a product provided or supported by RCT.</p>
+            <p>To the extent permitted by law, no liability is accepted for any damage, misconfiguration, data loss, or
+              other consequences arising directly or indirectly from the use of this application.</p>
+            <p>Changes to settings of the inverter, battery storage, energy management, or other components may affect
+              the operation of the system.</p>
+            <p class="mb-0">If you are unsure or in doubt, consult your responsible solar installer or qualified
+              technician.</p>
+          </div>
         </div>
         <div class="modal-footer flex-column align-items-stretch gap-2">
           <div id="disclaimer-error" class="alert alert-danger mb-0" role="alert" hidden></div>

@@ -116,14 +116,21 @@ class StoredDeviceLimitsSource:
         runtime = self._runtime
         if runtime.dispatch is not None:
             return runtime.dispatch.device_limits(device_id)
+        from app.api.app_factory import (
+            _seed_limits,
+        )  # late import: app_factory imports this module
+
         settings = runtime.settings
-        if settings.hmac_secret is None or not settings.dispatch_db_path.exists():
-            return None
-        store = DispatchStore(
-            settings.dispatch_db_path, settings.hmac_secret.get_secret_value()
-        )
-        store.initialize()
-        return store.get_device_configs().get(device_id)
+        stored: dict[str, DeviceLimits] = {}
+        if settings.hmac_secret is not None and settings.dispatch_db_path.exists():
+            store = DispatchStore(
+                settings.dispatch_db_path, settings.hmac_secret.get_secret_value()
+            )
+            store.initialize()
+            stored = store.get_device_configs()
+        # Same seeding as the dynamic-plan preview, so a fresh install without write access plans
+        # from the configured default limits instead of reporting the battery as missing.
+        return _seed_limits(settings, stored).get(device_id)
 
 
 def _device_started(runtime: Runtime, device_id: str) -> bool:

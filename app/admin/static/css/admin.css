@@ -3047,6 +3047,29 @@ body.is-disclaimer-pending .modal-backdrop.show {
     background-color: rgb(15 23 42 / 60%);
 }
 
+/* Disclaimer notice: a full-height warning glyph left of the paragraph block. A fixed-width column
+   (avoids the cyclic sizing of an aspect-ratio column) stretches to the text-block height, and the
+   width matches the glyph's aspect at that height so meet scales the "!" to the paragraphs' full
+   height, undistorted. Tracks the text block, not the modal body or the viewport. */
+.disclaimer-mark {
+    flex: 0 0 5.25rem;
+    align-self: stretch;
+    /* The glyph geometry comes from warning-symbol.svg: the file masks this box and
+       currentColor fills it, so the file is the single source and CSS still drives the tint.
+       mask-size: contain + centre reproduce the SVG's xMidYMid meet (full height, undistorted). */
+    color: var(--rct-brand);
+    background-color: currentColor;
+    mask: url("../img/warning-symbol.svg") center / contain no-repeat;
+    -webkit-mask: url("../img/warning-symbol.svg") center / contain no-repeat;
+    /* Subtle depth on the glyph shape itself (drop-shadow follows the mask, not the bounding box). */
+    filter: drop-shadow(0 2px 3px rgb(0 0 0 / 35%));
+}
+
+.disclaimer-text {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
 #reconnect-modal .modal-dialog {
     max-width: 460px;
 }

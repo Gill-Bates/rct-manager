@@ -2091,7 +2091,9 @@ async def test_automatic_verification_waits_for_conclusive_measurements(
         headers = await assistant_ready(harness)
         harness.app.state.admin_store.delete(AUTO_PAUSE_KEY_PREFIX + "main")
         seed_identity(harness, battery_w=0.0)
-        outcome = await _automatic_attempt(Request({"type": "http", "app": harness.app}), "main")
+        outcome = await _automatic_attempt(
+            Request({"type": "http", "app": harness.app}), "main"
+        )
         assert outcome.state == "retrying"
         assert "balance" in outcome.detail
         assert (await unverified_command_status(harness, headers))[0] != 200
@@ -2824,10 +2826,14 @@ def _seed_solar_forecast(store, config: WeatherConfig, forecast: SolarForecast) 
 async def test_dynamic_plan_uses_real_module_inventory_without_capacity_override(
     tmp_path: Path,
 ) -> None:
-    config = energy_settings(tmp_path, enable_write_support=False, enable_periodic_reads=False)
+    config = energy_settings(
+        tmp_path, enable_write_support=False, enable_periodic_reads=False
+    )
     registry_path = Path(config.object_registry_path)
     registry = json.loads(registry_path.read_text(encoding="utf-8"))
-    production = json.loads((ROOT / "app/catalog/objects.json").read_text(encoding="utf-8"))
+    production = json.loads(
+        (ROOT / "app/catalog/objects.json").read_text(encoding="utf-8")
+    )
     module_names = {
         f"{prefix}_module_sn_{slot}"
         for prefix in ("battery", "battery_placeholder_0")
@@ -2859,7 +2865,9 @@ async def test_dynamic_plan_uses_real_module_inventory_without_capacity_override
                 received_monotonic=runtime.clock.monotonic(),
                 origin="transaction",
             )
-        runtime.gateway._refresh_failures[("main", "battery_placeholder_0_module_sn_0")] = 3
+        runtime.gateway._refresh_failures[
+            ("main", "battery_placeholder_0_module_sn_0")
+        ] = 3
         cache.put(
             ("main", "battery_soc"),
             0.5,
@@ -2900,7 +2908,9 @@ async def test_dynamic_plan_uses_real_module_inventory_without_capacity_override
         runtime.energy._mode_states["main"] = ModeRecord("main", mode=EnergyMode.MANUAL)
         headers = await admin_session(harness)
 
-        listing = await harness.client.get("/admin/api/energy/planning-devices", headers=headers)
+        listing = await harness.client.get(
+            "/admin/api/energy/planning-devices", headers=headers
+        )
         assert listing.status_code == 200, listing.text
         main = next(item for item in listing.json() if item["device_id"] == "main")
         assert main["battery_capacity_source"] == "verified"
@@ -2918,6 +2928,259 @@ async def test_dynamic_plan_uses_real_module_inventory_without_capacity_override
         assert plan["today"]["slots"] + plan["tomorrow"]["slots"] == plan["slots"]
         assert plan["battery"]["usable_capacity_wh"] == pytest.approx(10_368)
         assert plan["battery"]["remaining_energy_wh"] == pytest.approx(5_184)
+
+
+import time as _time
+from datetime import time as _day_start
+
+from app.admin.forecast_refresh import (
+    PUBLICATION_GRACE,
+    day_ahead_available_from,
+    refresh_solar_forecast,
+    refresh_spot_market,
+)
+from app.clock import SystemClock
+from app.spotmarket.base import SpotMarketNotAvailableYet
+
+BERLIN = ZoneInfo("Europe/Berlin")
+
+
+class _PinnedWallClock(SystemClock):
+    """Real timers and monotonic time, but a wall clock pinned to a chosen local instant."""
+
+    def __init__(self, moment: datetime) -> None:
+        self.set(moment)
+
+    def set(self, moment: datetime) -> None:
+        self._anchor, self._base = moment.astimezone(UTC), _time.monotonic()
+
+    def now(self) -> datetime:
+        return self._anchor + timedelta(seconds=_time.monotonic() - self._base)
+
+
+def _local_midnight(day) -> datetime:
+    return datetime.combine(day, _day_start.min, BERLIN)
+
+
+def _local_day_quarters(day) -> list[tuple[datetime, datetime]]:
+    # Quarter-hours of one Berlin calendar day in UTC, so a 23/25 h DST day gets 92/100 slots.
+    cursor, end = _local_midnight(day).astimezone(UTC), _local_midnight(
+        day + timedelta(days=1)
+    )
+    quarters = []
+    while cursor < end:
+        quarters.append((cursor, cursor + timedelta(minutes=15)))
+        cursor += timedelta(minutes=15)
+    return quarters
+
+
+class _DayAheadSpotProvider:
+    """Energy-Charts behaviour: whole local days, tomorrow only once the auction is published."""
+
+    def __init__(self, clock: _PinnedWallClock) -> None:
+        self._clock = clock
+        self.tomorrow_published = False
+
+    def _today(self):
+        return self._clock.now().astimezone(BERLIN).date()
+
+    def _day(self, config, day) -> SpotPriceSnapshot:
+        return SpotPriceSnapshot(
+            SpotMarketProvider.ENERGY_CHARTS,
+            config.bidding_zone,
+            "EUR",
+            self._clock.now(),
+            tuple(
+                SpotPriceInterval(
+                    start, end, Decimal("0.10") + Decimal(index % 8) / 100
+                )
+                for index, (start, end) in enumerate(_local_day_quarters(day))
+            ),
+            timezone="Europe/Berlin",
+        )
+
+    def fetch_today(self, config):
+        return self._day(config, self._today())
+
+    def fetch_current(self, config):
+        return self._day(config, self._today())
+
+    def fetch_yesterday(self, config, timezone):
+        return self._day(config, self._today() - timedelta(days=1))
+
+    def fetch_day_ahead(self, config):
+        if not self.tomorrow_published:
+            raise SpotMarketNotAvailableYet("next-day prices are not published yet")
+        return self._day(config, self._today() + timedelta(days=1))
+
+
+class _ThreeDaySolarProvider:
+    def fetch_preview(self, config, now):
+        today = now.astimezone(BERLIN).date()
+        return SolarForecast(
+            now,
+            tuple(
+                SolarForecastInterval(start, end, 150.0)
+                for offset in (-1, 0, 1)
+                for start, end in _local_day_quarters(today + timedelta(days=offset))
+            ),
+        )
+
+
+def _module_inventory_settings(tmp_path: Path):
+    """Factory settings plus the RCT battery module registers, so capacity comes from the inventory."""
+    config = energy_settings(
+        tmp_path, enable_write_support=False, enable_periodic_reads=False
+    )
+    registry_path = Path(config.object_registry_path)
+    registry = json.loads(registry_path.read_text(encoding="utf-8"))
+    production = json.loads(
+        (ROOT / "app/catalog/objects.json").read_text(encoding="utf-8")
+    )
+    module_names = {
+        f"{prefix}_module_sn_{slot}"
+        for prefix in ("battery", "battery_placeholder_0")
+        for slot in range(7)
+    }
+    present = {entry["name"] for entry in registry["entries"]}
+    registry["entries"].extend(
+        entry
+        for entry in production["entries"]
+        if entry["name"] in module_names - present
+    )
+    registry_path.write_text(json.dumps(registry), encoding="utf-8")
+    return config
+
+
+def _seed_battery_readings(runtime, soc: float = 0.5) -> None:
+    now = runtime.clock.now()
+    cache = runtime.gateway._cache
+    readings = {
+        f"battery_module_sn_{slot}": f"SN-{slot}" if slot < 6 else ""
+        for slot in range(7)
+    }
+    readings["battery_soc"] = soc
+    for name, value in readings.items():
+        cache.put(
+            ("main", name),
+            value,
+            measured_at=now,
+            received_monotonic=runtime.clock.monotonic(),
+            origin="transaction",
+        )
+    runtime.gateway._refresh_failures[("main", "battery_placeholder_0_module_sn_0")] = 3
+
+
+async def _plan_body(harness, headers) -> dict:
+    response = await harness.client.get(
+        "/admin/api/energy/devices/main/dynamic-plan", headers=headers
+    )
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def _assert_one_contiguous_plan(plan: dict) -> None:
+    # Today and tomorrow are two views of one optimisation, so the SoC trajectory never restarts.
+    assert plan["today"]["slots"] + plan["tomorrow"]["slots"] == plan["slots"]
+    for previous, following in zip(plan["slots"], plan["slots"][1:], strict=False):
+        assert previous["end"] == following["start"]
+
+
+@pytest.mark.parametrize(
+    "local_start",
+    [
+        datetime(2026, 3, 10, 10, 7, tzinfo=BERLIN),
+        datetime(2026, 3, 10, 21, 40, tzinfo=BERLIN),
+        datetime(2026, 3, 29, 10, 7, tzinfo=BERLIN),
+        datetime(2026, 10, 25, 10, 7, tzinfo=BERLIN),
+    ],
+    ids=["normal-day", "late-evening", "dst-23h-day", "dst-25h-day"],
+)
+async def test_fresh_install_plans_today_while_tomorrow_prices_are_unpublished(
+    tmp_path: Path, local_start: datetime
+) -> None:
+    clock = _PinnedWallClock(local_start)
+    async with running_app(
+        _module_inventory_settings(tmp_path), clock=clock
+    ) as harness:
+        runtime = harness.runtime
+        store = harness.app.state.admin_store
+        _seed_battery_readings(runtime)
+        spot = SpotMarketConfig.model_validate(_spot_body())
+        weather = WeatherConfig(
+            enabled=True,
+            latitude=48.8,
+            longitude=9.2,
+            timezone="Europe/Berlin",
+            pv_peak_power_wp=10000,
+            tilt_deg=30,
+            azimuth_deg=0,
+        )
+        harness.app.state.spotmarket_config = spot
+        harness.app.state.weather_config = weather
+        runtime.energy._mode_states["main"] = ModeRecord("main", mode=EnergyMode.MANUAL)
+        spot_provider = _DayAheadSpotProvider(clock)
+        today = local_start.date()
+        today_end = _local_midnight(today + timedelta(days=1))
+        tomorrow_end = _local_midnight(today + timedelta(days=2))
+
+        # The real refresh path stores today; tomorrow's absence is reported as not complete yet.
+        await refresh_spot_market(store, spot_provider, spot, now=clock.now())
+        assert await refresh_solar_forecast(
+            store, _ThreeDaySolarProvider(), weather, now=clock.now()
+        )
+        headers = await admin_session(harness)
+        service = harness.app.state.planning_services["main"]
+
+        async def assert_today_only() -> None:
+            plan = await _plan_body(harness, headers)
+            assert plan["status"] == "ok", plan
+            assert plan["timezone"] == "Europe/Berlin"
+            assert plan["today"]["status"] == "ok"
+            assert (
+                datetime.fromisoformat(plan["today"]["slots"][-1]["end"]) == today_end
+            )
+            assert plan["tomorrow"] == {
+                "date": (today + timedelta(days=1)).isoformat(),
+                "status": "pending",
+                "slots": [],
+            }
+            _assert_one_contiguous_plan(plan)
+            assert await service.recompute() is not None
+            assert service.current_view().plan.slots[-1].end == today_end
+
+        await assert_today_only()
+
+        # A retrieval after the publication grace that still finds no prices only warns and retries.
+        overdue = (
+            day_ahead_available_from(today + timedelta(days=1)) + PUBLICATION_GRACE
+        )
+        if clock.now() < overdue:
+            clock.set(overdue + timedelta(minutes=1))
+        assert not await refresh_spot_market(
+            store, spot_provider, spot, now=clock.now()
+        )
+        assert {
+            row["local_date"]
+            for row in store.get_spot_market_intervals(spot_config_key(spot))
+        } >= {today.isoformat()}
+        await assert_today_only()
+
+        spot_provider.tomorrow_published = True
+        assert await refresh_spot_market(store, spot_provider, spot, now=clock.now())
+        plan = await _plan_body(harness, headers)
+        assert plan["status"] == "ok", plan
+        assert plan["today"]["status"] == "ok"
+        assert plan["tomorrow"]["status"] == "ok", (
+            plan["horizon_hours"],
+            plan["window"],
+        )
+        assert (
+            datetime.fromisoformat(plan["tomorrow"]["slots"][-1]["end"]) == tomorrow_end
+        )
+        _assert_one_contiguous_plan(plan)
+        assert await service.recompute() is not None
+        assert service.current_view().plan.slots[-1].end == tomorrow_end
 
 
 async def test_spot_market_config_defaults_then_saves_and_reloads(
