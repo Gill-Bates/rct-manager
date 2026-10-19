@@ -1304,6 +1304,96 @@ async def test_dry_run_planning_data_works_with_write_support_off(
         ).status_code == 503
 
 
+async def test_a_site_timezone_change_reconciles_the_inverter_day_history_at_once(
+    tmp_path: Path,
+) -> None:
+    from unittest.mock import patch
+    from zoneinfo import ZoneInfo
+
+    from app.gateway.history import DailyConsumptionReading
+
+    class _ZoneAwareDayHistory:
+        """The inverter's day totals, dated in whatever site zone the service passes at query time."""
+
+        def __init__(self, gateway, timezone) -> None:
+            self._timezone = timezone
+
+        async def daily_consumption(self, device_id, *, before, limit):
+            cutoff = before.astimezone(ZoneInfo(self._timezone())).date()
+            return [
+                DailyConsumptionReading(cutoff - timedelta(days=age), 9000.0 + age)
+                for age in range(1, limit + 1)
+            ]
+
+    class _SiteZones:
+        def resolve(self, latitude, longitude):
+            return "America/New_York" if longitude < -30 else "Europe/Berlin"
+
+    async def eventually(condition) -> None:
+        # Bounded far below the 900 s readiness check: only a wake-up can make this pass.
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + 5.0
+        while not condition():
+            assert loop.time() < deadline, "the day history was not reconciled"
+            await asyncio.sleep(0.02)
+
+    def stored_zones() -> list[str]:
+        rows = store.get_consumption_daily("main", "2000-01-01", "2100-01-01")
+        return [row["timezone"] for row in rows]
+
+    weather = {
+        "enabled": True,
+        "provider": "open_meteo",
+        "location_name": "Remscheid, North Rhine-Westphalia, Germany",
+        "location_region": "North Rhine-Westphalia, Germany",
+        "latitude": 51.1798,
+        "longitude": 7.1925,
+        "pv_peak_power_wp": 10000.0,
+        "tilt_deg": 35.0,
+        "azimuth_deg": 0.0,
+        "performance_ratio": 0.85,
+    }
+    with (
+        patch(
+            "app.gateway.rct_history.RctDailyConsumptionHistory", _ZoneAwareDayHistory
+        ),
+        patch("app.admin.consumption_backfill.STARTUP_DELAY_SECONDS", 0.0),
+    ):
+        async with running_app(
+            settings(tmp_path, enable_write_support=False)
+        ) as harness:
+            harness.app.state.solar_timezone_resolver = _SiteZones()
+            store = harness.app.state.admin_store
+            headers = await admin_session_headers(
+                harness.client, "replacement-test-password"
+            )
+            # Fresh install: no Weather yet, so the first import is reconciled in UTC.
+            await eventually(lambda: stored_zones() == ["UTC"] * 60)
+
+            for site_zone, longitude in (
+                ("Europe/Berlin", 7.1925),
+                ("America/New_York", -74.0),
+            ):
+                response = await harness.client.put(
+                    "/admin/api/energy/weather/config",
+                    headers=headers,
+                    json={**weather, "longitude": longitude},
+                )
+                assert response.status_code == 200, response.text
+                # Re-read from the inverter under the new zone; the old rows are not just relabelled.
+                await eventually(lambda zone=site_zone: stored_zones() == [zone] * 60)
+                history = (
+                    await harness.client.get(
+                        "/admin/api/energy/devices/main/consumption-history",
+                        headers=headers,
+                    )
+                ).json()
+                assert history["timezone"] == site_zone
+                assert [day["source"] for day in history["days"]] == [
+                    "inverter_history"
+                ] * 60
+
+
 async def test_consumption_history_lists_the_last_60_completed_days_from_the_store(
     tmp_path: Path,
 ) -> None:

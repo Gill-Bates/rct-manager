@@ -40,7 +40,10 @@ def test_store_upserts_accumulate_and_read_back_per_device(tmp_path: Path) -> No
         "coverage_seconds": 300.0,
     }
     store.upsert_consumption_intervals("main", [bucket])
-    store.upsert_consumption_intervals("main", [{**bucket, "energy_wh": 50.0, "sample_count": 2, "coverage_seconds": 300.0}])
+    store.upsert_consumption_intervals(
+        "main",
+        [{**bucket, "energy_wh": 50.0, "sample_count": 2, "coverage_seconds": 300.0}],
+    )
     store.upsert_consumption_intervals("slave1", [bucket])
 
     main = store.get_consumption_intervals("main")
@@ -63,7 +66,9 @@ def test_store_clamps_accumulated_coverage_to_900(tmp_path: Path) -> None:
     }
     store.upsert_consumption_intervals("main", [bucket])
     store.upsert_consumption_intervals("main", [bucket])  # 1600 -> clamped to 900
-    assert store.get_consumption_intervals("main")[0]["coverage_seconds"] == pytest.approx(900.0)
+    assert store.get_consumption_intervals("main")[0][
+        "coverage_seconds"
+    ] == pytest.approx(900.0)
 
 
 def test_retention_prune_drops_old_buckets_only(tmp_path: Path) -> None:
@@ -71,11 +76,18 @@ def test_retention_prune_drops_old_buckets_only(tmp_path: Path) -> None:
     old = BASE - timedelta(days=90)
     recent = BASE
     for start in (old, recent):
-        store.upsert_consumption_intervals("main", [{
-            "interval_start": start.isoformat(),
-            "interval_end": (start + timedelta(minutes=15)).isoformat(),
-            "energy_wh": 10.0, "sample_count": 1, "coverage_seconds": 900.0,
-        }])
+        store.upsert_consumption_intervals(
+            "main",
+            [
+                {
+                    "interval_start": start.isoformat(),
+                    "interval_end": (start + timedelta(minutes=15)).isoformat(),
+                    "energy_wh": 10.0,
+                    "sample_count": 1,
+                    "coverage_seconds": 900.0,
+                }
+            ],
+        )
     store.prune_consumption_intervals((BASE - timedelta(days=60)).isoformat())
     remaining = store.get_consumption_intervals("main")
     assert [row["interval_start"] for row in remaining] == [recent.isoformat()]
@@ -83,16 +95,32 @@ def test_retention_prune_drops_old_buckets_only(tmp_path: Path) -> None:
 
 def test_prune_does_not_touch_price_or_solar_rows(tmp_path: Path) -> None:
     store = _store(tmp_path)
-    store.replace_spot_market_intervals([{
-        "config_key": "k", "local_date": "2026-01-15",
-        "interval_start": BASE.isoformat(), "interval_end": (BASE + timedelta(minutes=15)).isoformat(),
-        "price_eur_per_kwh": 0.2, "timezone": "UTC", "fetched_at": BASE.isoformat(),
-    }])
-    store.replace_solar_forecast_intervals([{
-        "config_key": "k", "local_date": "2026-01-15",
-        "interval_start": BASE.isoformat(), "interval_end": (BASE + timedelta(minutes=15)).isoformat(),
-        "energy_wh": 5.0, "timezone": "UTC", "fetched_at": BASE.isoformat(),
-    }])
+    store.replace_spot_market_intervals(
+        [
+            {
+                "config_key": "k",
+                "local_date": "2026-01-15",
+                "interval_start": BASE.isoformat(),
+                "interval_end": (BASE + timedelta(minutes=15)).isoformat(),
+                "price_eur_per_kwh": 0.2,
+                "timezone": "UTC",
+                "fetched_at": BASE.isoformat(),
+            }
+        ]
+    )
+    store.replace_solar_forecast_intervals(
+        [
+            {
+                "config_key": "k",
+                "local_date": "2026-01-15",
+                "interval_start": BASE.isoformat(),
+                "interval_end": (BASE + timedelta(minutes=15)).isoformat(),
+                "energy_wh": 5.0,
+                "timezone": "UTC",
+                "fetched_at": BASE.isoformat(),
+            }
+        ]
+    )
     store.prune_consumption_intervals((BASE + timedelta(days=1)).isoformat())
     assert store.get_spot_market_intervals("k")
     assert store.get_solar_forecast_intervals("k", "2026-01-15", "2026-01-15")
@@ -100,11 +128,18 @@ def test_prune_does_not_touch_price_or_solar_rows(tmp_path: Path) -> None:
 
 def test_history_survives_a_store_reopen(tmp_path: Path) -> None:
     store = _store(tmp_path)
-    store.upsert_consumption_intervals("main", [{
-        "interval_start": BASE.isoformat(),
-        "interval_end": (BASE + timedelta(minutes=15)).isoformat(),
-        "energy_wh": 42.0, "sample_count": 3, "coverage_seconds": 900.0,
-    }])
+    store.upsert_consumption_intervals(
+        "main",
+        [
+            {
+                "interval_start": BASE.isoformat(),
+                "interval_end": (BASE + timedelta(minutes=15)).isoformat(),
+                "energy_wh": 42.0,
+                "sample_count": 3,
+                "coverage_seconds": 900.0,
+            }
+        ],
+    )
     store.close()
     reopened = AdminStore(tmp_path / "rct.db", SECRET)
     reopened.initialize()
@@ -139,7 +174,12 @@ def test_sink_turns_negative_and_non_finite_values_into_gap_markers() -> None:
 def test_sink_is_bounded_and_drops_oldest_on_overflow() -> None:
     sink = ConsumptionSampleSink(max_buffered=3)
     for minute in range(5):
-        sink.sample("main", "household_load_power", float(minute), BASE + timedelta(minutes=minute))
+        sink.sample(
+            "main",
+            "household_load_power",
+            float(minute),
+            BASE + timedelta(minutes=minute),
+        )
     grouped = sink.drain()
     # Only the three newest survive; the oldest two were dropped fail-safe.
     assert [sample.watts for sample in grouped["main"]] == [2.0, 3.0, 4.0]
@@ -157,7 +197,9 @@ def test_sink_separates_devices() -> None:
 # --- historian drain ---------------------------------------------------------------------------
 
 
-def test_historian_drain_writes_buckets_and_carries_the_last_sample(tmp_path: Path) -> None:
+def test_historian_drain_writes_buckets_and_carries_the_last_sample(
+    tmp_path: Path,
+) -> None:
     from tests.conftest import ManualClock
 
     store = _store(tmp_path)
@@ -165,11 +207,15 @@ def test_historian_drain_writes_buckets_and_carries_the_last_sample(tmp_path: Pa
     historian = ConsumptionHistorian(store, clock)
     # First drain batch: four samples one minute apart, constant 1200 W.
     for minute in range(4):
-        historian.sink.sample("main", "household_load_power", 1200.0, BASE + timedelta(minutes=minute))
+        historian.sink.sample(
+            "main", "household_load_power", 1200.0, BASE + timedelta(minutes=minute)
+        )
     asyncio.run(historian.drain_once())
     # Second batch continues one minute later; the carryover bridges the gap so energy is continuous.
     for minute in range(4, 8):
-        historian.sink.sample("main", "household_load_power", 1200.0, BASE + timedelta(minutes=minute))
+        historian.sink.sample(
+            "main", "household_load_power", 1200.0, BASE + timedelta(minutes=minute)
+        )
     asyncio.run(historian.drain_once())
 
     rows = store.get_consumption_intervals("main")
@@ -208,21 +254,29 @@ def test_aggregation_integrates_a_valid_pair_but_stops_at_the_next_invalid() -> 
         PowerSample(base + timedelta(minutes=4), float("-inf")),
     ]
     accumulator = aggregate_samples(samples)[floor_to_bucket(base)]
-    assert accumulator.coverage_seconds == pytest.approx(120.0)  # only the valid first segment
+    assert accumulator.coverage_seconds == pytest.approx(
+        120.0
+    )  # only the valid first segment
     assert accumulator.energy_wh == pytest.approx(1000.0 * 120.0 / 3600.0)
 
 
 # --- historian: gap markers, shutdown tracking, single counting ---------------------------------
 
 
-def test_a_bad_reading_reaches_the_aggregator_and_breaks_the_segment(tmp_path: Path) -> None:
+def test_a_bad_reading_reaches_the_aggregator_and_breaks_the_segment(
+    tmp_path: Path,
+) -> None:
     from tests.conftest import ManualClock
 
     store = _store(tmp_path)
     historian = ConsumptionHistorian(store, ManualClock())
     historian.sink.sample("main", "household_load_power", 1000.0, BASE)
-    historian.sink.sample("main", "household_load_power", -1.0, BASE + timedelta(minutes=2))
-    historian.sink.sample("main", "household_load_power", 1000.0, BASE + timedelta(minutes=4))
+    historian.sink.sample(
+        "main", "household_load_power", -1.0, BASE + timedelta(minutes=2)
+    )
+    historian.sink.sample(
+        "main", "household_load_power", 1000.0, BASE + timedelta(minutes=4)
+    )
     asyncio.run(historian.drain_once())
     row = store.get_consumption_intervals("main")[0]
     assert row["energy_wh"] == pytest.approx(0.0)
@@ -251,7 +305,9 @@ def test_historian_store_calls_run_in_tracked_store_threads(tmp_path: Path) -> N
     store.prune_consumption_intervals = prune  # type: ignore[method-assign]
     historian = ConsumptionHistorian(store, ManualClock())
     for minute in range(3):
-        historian.sink.sample("main", "household_load_power", 500.0, BASE + timedelta(minutes=minute))
+        historian.sink.sample(
+            "main", "household_load_power", 500.0, BASE + timedelta(minutes=minute)
+        )
 
     async def run() -> None:
         await historian.drain_once()
@@ -269,10 +325,14 @@ def test_a_carried_sample_is_counted_exactly_once_across_drains(tmp_path: Path) 
     store = _store(tmp_path)
     historian = ConsumptionHistorian(store, ManualClock())
     for minute in range(3):
-        historian.sink.sample("main", "household_load_power", 1200.0, BASE + timedelta(minutes=minute))
+        historian.sink.sample(
+            "main", "household_load_power", 1200.0, BASE + timedelta(minutes=minute)
+        )
     asyncio.run(historian.drain_once())
     for minute in range(3, 6):
-        historian.sink.sample("main", "household_load_power", 1200.0, BASE + timedelta(minutes=minute))
+        historian.sink.sample(
+            "main", "household_load_power", 1200.0, BASE + timedelta(minutes=minute)
+        )
     asyncio.run(historian.drain_once())
     rows = store.get_consumption_intervals("main")
     assert sum(row["sample_count"] for row in rows) == 6
@@ -318,20 +378,31 @@ def _clock(now: datetime = datetime(2026, 10, 15, 10, 0, tzinfo=UTC)) -> AutoClo
     return clock
 
 
-def _service(store: AdminStore, provider, clock: AutoClock) -> ConsumptionHistoryBackfillService:
+def _service(
+    store: AdminStore, provider, clock: AutoClock
+) -> ConsumptionHistoryBackfillService:
     return ConsumptionHistoryBackfillService(
-        provider, store, clock, lambda: "Europe/Berlin", lambda: ["main"], lambda _d: True
+        provider,
+        store,
+        clock,
+        lambda: "Europe/Berlin",
+        lambda: ["main"],
+        lambda _d: True,
     )
 
 
-def _fill_local_day(store: AdminStore, day: date, *, share: float = 1.0, wh_per_bucket: float = 100.0) -> float:
+def _fill_local_day(
+    store: AdminStore, day: date, *, share: float = 1.0, wh_per_bucket: float = 100.0
+) -> float:
     start, end = local_day_bounds(day, BERLIN)
     count = int((end - start) / timedelta(minutes=15) * share)
     rows = [
         {
             "interval_start": (start + timedelta(minutes=15 * i)).isoformat(),
             "interval_end": (start + timedelta(minutes=15 * (i + 1))).isoformat(),
-            "energy_wh": wh_per_bucket, "sample_count": 30, "coverage_seconds": 900.0,
+            "energy_wh": wh_per_bucket,
+            "sample_count": 30,
+            "coverage_seconds": 900.0,
         }
         for i in range(count)
     ]
@@ -343,23 +414,45 @@ def _resolve(store: AdminStore, first: date, last: date, now: datetime | None = 
     return {
         d.date: d
         for d in load_daily_consumption(
-            store, "main", first, last, zone_name="Europe/Berlin", now=now or _clock().now()
+            store,
+            "main",
+            first,
+            last,
+            zone_name="Europe/Berlin",
+            now=now or _clock().now(),
         )
     }
 
 
-def test_bootstrap_stores_up_to_sixty_real_days_and_no_quarter_hours(tmp_path: Path) -> None:
+def test_bootstrap_stores_up_to_sixty_real_days_and_no_quarter_hours(
+    tmp_path: Path,
+) -> None:
     store = _store(tmp_path)
-    days = {TODAY - timedelta(days=i): 10000.0 + i for i in range(1, 80)}  # the device holds more than the window
+    days = {
+        TODAY - timedelta(days=i): 10000.0 + i for i in range(1, 80)
+    }  # the device holds more than the window
     provider = _FakeProvider(days)
-    assert asyncio.run(_service(store, provider, _clock()).backfill_device("main")) is True
+    assert (
+        asyncio.run(_service(store, provider, _clock()).backfill_device("main")) is True
+    )
     stored = store.get_consumption_daily("main", "2000-01-01", "2100-01-01")
     assert len(stored) == 60 and {r["source"] for r in stored} == {"inverter_history"}
-    assert store.get_consumption_intervals("main") == [] and store.get_consumption_meter_intervals("main", W0, W1) == []
-    assert rows_to_history(store.get_consumption_intervals("main"), store.get_consumption_meter_intervals("main", W0, W1)) == []
+    assert (
+        store.get_consumption_intervals("main") == []
+        and store.get_consumption_meter_intervals("main", W0, W1) == []
+    )
+    assert (
+        rows_to_history(
+            store.get_consumption_intervals("main"),
+            store.get_consumption_meter_intervals("main", W0, W1),
+        )
+        == []
+    )
 
 
-def test_a_device_with_fewer_days_leaves_the_rest_unavailable_and_backfill_is_idempotent(tmp_path: Path) -> None:
+def test_a_device_with_fewer_days_leaves_the_rest_unavailable_and_backfill_is_idempotent(
+    tmp_path: Path,
+) -> None:
     store = _store(tmp_path)
     provider = _FakeProvider({TODAY - timedelta(days=i): 9000.0 for i in range(1, 26)})
     service = _service(store, provider, _clock())
@@ -370,7 +463,11 @@ def test_a_device_with_fewer_days_leaves_the_rest_unavailable_and_backfill_is_id
     assert len(first) == 25
     resolved = _resolve(store, TODAY - timedelta(days=60), TODAY - timedelta(days=1))
     assert sum(d.source.value == "unavailable" for d in resolved.values()) == 35
-    assert all(d.energy_wh is None for d in resolved.values() if d.source.value == "unavailable")
+    assert all(
+        d.energy_wh is None
+        for d in resolved.values()
+        if d.source.value == "unavailable"
+    )
 
 
 def test_an_outage_gap_is_healed_per_day_and_sums_match(tmp_path: Path) -> None:
@@ -381,48 +478,88 @@ def test_an_outage_gap_is_healed_per_day_and_sums_match(tmp_path: Path) -> None:
     provider = _FakeProvider({oct_(n): 5000.0 + n for n in range(11, 18)})
     asyncio.run(_service(store, provider, _clock(now)).backfill_device("main"))
     resolved = _resolve(store, oct_(1), oct_(17), now)
-    assert [resolved[oct_(n)].source.value for n in (10, 11, 17)] == ["local_measured", "inverter_history", "inverter_history"]
+    assert [resolved[oct_(n)].source.value for n in (10, 11, 17)] == [
+        "local_measured",
+        "inverter_history",
+        "inverter_history",
+    ]
     assert all(resolved[oct_(n)].profile_available is False for n in range(11, 18))
-    assert sum(resolved[oct_(n)].energy_wh for n in range(1, 18)) == pytest.approx(sum(local.values()) + sum(5000.0 + n for n in range(11, 18)))
-    assert len(store.get_consumption_intervals("main")) == 96 * 10  # no bucket created by the daily backfill
+    assert sum(resolved[oct_(n)].energy_wh for n in range(1, 18)) == pytest.approx(
+        sum(local.values()) + sum(5000.0 + n for n in range(11, 18))
+    )
+    assert (
+        len(store.get_consumption_intervals("main")) == 96 * 10
+    )  # no bucket created by the daily backfill
 
 
-def test_complete_local_day_wins_and_an_incomplete_one_uses_the_inverter_total(tmp_path: Path) -> None:
+def test_complete_local_day_wins_and_an_incomplete_one_uses_the_inverter_total(
+    tmp_path: Path,
+) -> None:
     store = _store(tmp_path)
     complete, partial = date(2026, 10, 10), date(2026, 10, 11)
     wh = _fill_local_day(store, complete)
     _fill_local_day(store, partial, share=0.5)
-    store.upsert_consumption_daily("main", [
-        {"local_date": d.isoformat(), "energy_wh": 77777.0, "source": "inverter_history", "timezone": "Europe/Berlin",
-         "fetched_at": "2026-10-15T00:00:00+00:00"} for d in (complete, partial)
-    ])
+    store.upsert_consumption_daily(
+        "main",
+        [
+            {
+                "local_date": d.isoformat(),
+                "energy_wh": 77777.0,
+                "source": "inverter_history",
+                "timezone": "Europe/Berlin",
+                "fetched_at": "2026-10-15T00:00:00+00:00",
+            }
+            for d in (complete, partial)
+        ],
+    )
     resolved = _resolve(store, complete, partial)
-    assert resolved[complete].source.value == "local_measured" and resolved[complete].energy_wh == pytest.approx(wh)
-    assert resolved[complete].profile_available is True and resolved[complete].measured_coverage == pytest.approx(1.0)
-    assert resolved[partial].source.value == "inverter_history" and resolved[partial].energy_wh == 77777.0
-    assert resolved[partial].profile_available is False  # never an addition of local partial + inverter total
+    assert resolved[complete].source.value == "local_measured" and resolved[
+        complete
+    ].energy_wh == pytest.approx(wh)
+    assert resolved[complete].profile_available is True and resolved[
+        complete
+    ].measured_coverage == pytest.approx(1.0)
+    assert (
+        resolved[partial].source.value == "inverter_history"
+        and resolved[partial].energy_wh == 77777.0
+    )
+    assert (
+        resolved[partial].profile_available is False
+    )  # never an addition of local partial + inverter total
 
 
 def test_dst_days_are_one_local_date_each(tmp_path: Path) -> None:
     store = _store(tmp_path)
     short, long_ = date(2026, 3, 29), date(2026, 10, 25)
-    assert (local_day_bounds(short, BERLIN)[1] - local_day_bounds(short, BERLIN)[0]) == timedelta(hours=23)
-    assert (local_day_bounds(long_, BERLIN)[1] - local_day_bounds(long_, BERLIN)[0]) == timedelta(hours=25)
+    assert (
+        local_day_bounds(short, BERLIN)[1] - local_day_bounds(short, BERLIN)[0]
+    ) == timedelta(hours=23)
+    assert (
+        local_day_bounds(long_, BERLIN)[1] - local_day_bounds(long_, BERLIN)[0]
+    ) == timedelta(hours=25)
     wh = {d: _fill_local_day(store, d) for d in (short, long_)}
     now = datetime(2026, 11, 2, 9, 0, tzinfo=UTC)
     for d in (short, long_):
         got = _resolve(store, d, d, now)
         assert list(got) == [d] and got[d].source.value == "local_measured"
-        assert got[d].energy_wh == pytest.approx(wh[d]) and got[d].measured_coverage == pytest.approx(1.0)
+        assert got[d].energy_wh == pytest.approx(wh[d]) and got[
+            d
+        ].measured_coverage == pytest.approx(1.0)
 
 
-def test_a_device_timeout_during_bootstrap_keeps_existing_data_and_does_not_crash(tmp_path: Path) -> None:
+def test_a_device_timeout_during_bootstrap_keeps_existing_data_and_does_not_crash(
+    tmp_path: Path,
+) -> None:
     store = _store(tmp_path)
     wh = _fill_local_day(store, date(2026, 10, 10))
-    service = _service(store, _FakeProvider({}, error=DeviceTimeout("response_timeout")), _clock())
+    service = _service(
+        store, _FakeProvider({}, error=DeviceTimeout("response_timeout")), _clock()
+    )
     assert asyncio.run(service.backfill_device("main")) is False
     assert store.get_consumption_daily("main", "2000-01-01", "2100-01-01") == []
-    assert _resolve(store, date(2026, 10, 10), date(2026, 10, 10))[date(2026, 10, 10)].energy_wh == pytest.approx(wh)
+    assert _resolve(store, date(2026, 10, 10), date(2026, 10, 10))[
+        date(2026, 10, 10)
+    ].energy_wh == pytest.approx(wh)
 
 
 def test_a_failed_run_retries_later_and_a_reconnect_rearms_it(tmp_path: Path) -> None:
@@ -431,7 +568,12 @@ def test_a_failed_run_retries_later_and_a_reconnect_rearms_it(tmp_path: Path) ->
     ready = {"main": True}
     clock = _clock()
     service = ConsumptionHistoryBackfillService(
-        provider, store, clock, lambda: "Europe/Berlin", lambda: ["main"], lambda d: ready[d]
+        provider,
+        store,
+        clock,
+        lambda: "Europe/Berlin",
+        lambda: ["main"],
+        lambda d: ready[d],
     )
 
     async def scenario() -> list[int]:
@@ -450,43 +592,118 @@ def test_a_failed_run_retries_later_and_a_reconnect_rearms_it(tmp_path: Path) ->
     assert asyncio.run(scenario()) == [1, 1, 2]
 
 
-def test_a_stored_day_is_bound_to_the_zone_its_local_date_was_interpreted_in(tmp_path: Path) -> None:
+def test_a_site_zone_change_overrides_the_daily_schedule_and_refetches(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    provider = _FakeProvider(
+        {TODAY - timedelta(days=i): 8000.0 + i for i in range(1, 70)}
+    )
+    zone = {"name": "UTC"}
+    service = ConsumptionHistoryBackfillService(
+        provider,
+        store,
+        _clock(),
+        lambda: zone["name"],
+        lambda: ["main"],
+        lambda _d: True,
+    )
+
+    def zones() -> set[str]:
+        return {
+            r["timezone"]
+            for r in store.get_consumption_daily("main", "2000-01-01", "2100-01-01")
+        }
+
+    async def scenario() -> None:
+        await service.run_due_once()
+        calls = provider.calls
+        await service.run_due_once()  # a successful run is not repeated within the day
+        assert (provider.calls, zones()) == (calls, {"UTC"})
+        for name in ("Europe/Berlin", "America/New_York"):
+            zone["name"] = name
+            await service.run_due_once()
+            assert provider.calls > calls and zones() == {name}
+            calls = provider.calls
+
+    asyncio.run(scenario())
+
+
+def test_a_stored_day_is_bound_to_the_zone_its_local_date_was_interpreted_in(
+    tmp_path: Path,
+) -> None:
     # A daily total stored under Europe/Berlin must not be silently reused when the active site zone
     # changed: the same local_date read under another zone resolves to UNAVAILABLE (so a future
     # backfill re-reconciles it), while the matching zone still yields the inverter history value.
     store = _store(tmp_path)
     day = date(2026, 10, 11)
-    store.upsert_consumption_daily("main", [
-        {"local_date": day.isoformat(), "energy_wh": 54321.0, "source": "inverter_history",
-         "timezone": "Europe/Berlin", "fetched_at": "2026-10-15T00:00:00+00:00"}
-    ])
+    store.upsert_consumption_daily(
+        "main",
+        [
+            {
+                "local_date": day.isoformat(),
+                "energy_wh": 54321.0,
+                "source": "inverter_history",
+                "timezone": "Europe/Berlin",
+                "fetched_at": "2026-10-15T00:00:00+00:00",
+            }
+        ],
+    )
     now = _clock().now()
     same_zone = {
         d.date: d
-        for d in load_daily_consumption(store, "main", day, day, zone_name="Europe/Berlin", now=now)
+        for d in load_daily_consumption(
+            store, "main", day, day, zone_name="Europe/Berlin", now=now
+        )
     }
     assert same_zone[day].source is DailySource.INVERTER_HISTORY
     assert same_zone[day].energy_wh == 54321.0
     other_zone = {
         d.date: d
-        for d in load_daily_consumption(store, "main", day, day, zone_name="America/New_York", now=now)
+        for d in load_daily_consumption(
+            store, "main", day, day, zone_name="America/New_York", now=now
+        )
     }
     assert other_zone[day].source is DailySource.UNAVAILABLE
     assert other_zone[day].energy_wh is None
 
 
-def test_daily_values_never_enter_the_forecast_history_or_the_pruned_window(tmp_path: Path) -> None:
+def test_daily_values_never_enter_the_forecast_history_or_the_pruned_window(
+    tmp_path: Path,
+) -> None:
     store = _store(tmp_path)
-    before = rows_to_history(store.get_consumption_intervals("main"), store.get_consumption_meter_intervals("main", W0, W1))
-    asyncio.run(_service(store, _FakeProvider({TODAY - timedelta(days=1): 12000.0}), _clock()).backfill_device("main"))
-    after = rows_to_history(store.get_consumption_intervals("main"), store.get_consumption_meter_intervals("main", W0, W1))
+    before = rows_to_history(
+        store.get_consumption_intervals("main"),
+        store.get_consumption_meter_intervals("main", W0, W1),
+    )
+    asyncio.run(
+        _service(
+            store, _FakeProvider({TODAY - timedelta(days=1): 12000.0}), _clock()
+        ).backfill_device("main")
+    )
+    after = rows_to_history(
+        store.get_consumption_intervals("main"),
+        store.get_consumption_meter_intervals("main", W0, W1),
+    )
     assert before == after == []
-    store.upsert_consumption_daily("main", [
-        {"local_date": "2026-07-01", "energy_wh": 1.0, "source": "inverter_history", "timezone": "UTC", "fetched_at": "x"}
-    ])
+    store.upsert_consumption_daily(
+        "main",
+        [
+            {
+                "local_date": "2026-07-01",
+                "energy_wh": 1.0,
+                "source": "inverter_history",
+                "timezone": "UTC",
+                "fetched_at": "x",
+            }
+        ],
+    )
     historian = ConsumptionHistorian(store, _clock(), timezone=lambda: "Europe/Berlin")
     asyncio.run(historian._maybe_prune())
-    kept = [r["local_date"] for r in store.get_consumption_daily("main", "2000-01-01", "2100-01-01")]
+    kept = [
+        r["local_date"]
+        for r in store.get_consumption_daily("main", "2000-01-01", "2100-01-01")
+    ]
     assert kept == ["2026-10-14"]
 
 
@@ -507,7 +724,9 @@ async def test_daily_backfill_always_starts_without_a_switch(tmp_path) -> None:
     # The import is not optional: no settings switch exists to turn it off.
     assert not hasattr(settings, "consumption_daily_backfill_enabled")
     # The service is built synchronously during lifespan startup, so a settled app proves it was.
-    with patch("app.admin.consumption_backfill.ConsumptionHistoryBackfillService") as service:
+    with patch(
+        "app.admin.consumption_backfill.ConsumptionHistoryBackfillService"
+    ) as service:
         service.return_value.run = AsyncMock()
         async with running_app(settings):
             pass
@@ -535,7 +754,9 @@ def _read_days(history):
     return {r.local_date.day: r.energy_wh for r in readings}
 
 
-def test_refinement_points_of_one_day_pick_the_largest_without_a_warning(caplog) -> None:
+def test_refinement_points_of_one_day_pick_the_largest_without_a_warning(
+    caplog,
+) -> None:
     # Real device shape: the same 23:59:59 stamp repeated with sub-Wh jitter, last not the max.
     history = _day_history(
         [(14, 20103.80078125), (14, 20104.0), (14, 20103.66), (13, 300.0)]
@@ -553,7 +774,9 @@ def test_identical_repeated_points_are_a_silent_duplicate(caplog) -> None:
     assert not [r for r in caplog.records if r.levelname == "WARNING"]
 
 
-def test_conflicting_points_warn_once_with_both_values_and_keep_the_largest(caplog) -> None:
+def test_conflicting_points_warn_once_with_both_values_and_keep_the_largest(
+    caplog,
+) -> None:
     history = _day_history([(14, 100.0), (14, 200.0), (13, 300.0)])
     with caplog.at_level("WARNING", logger="app.gateway.rct_history"):
         assert _read_days(history) == {14: 200.0, 13: 300.0}
@@ -576,8 +799,12 @@ def test_day_logger_uses_wall_clock_date_at_local_midnight_boundary() -> None:
         async def query_history_series(self, device_id, name, before):
             self.query_before = before
             return (
-                TimeSeriesPoint(datetime(2026, 10, 16, 23, 59, 59, tzinfo=UTC), 19_000.0),
-                TimeSeriesPoint(datetime(2026, 10, 15, 23, 59, 59, tzinfo=UTC), 18_018.7),
+                TimeSeriesPoint(
+                    datetime(2026, 10, 16, 23, 59, 59, tzinfo=UTC), 19_000.0
+                ),
+                TimeSeriesPoint(
+                    datetime(2026, 10, 15, 23, 59, 59, tzinfo=UTC), 18_018.7
+                ),
             )
 
     gateway = _Gateway()
@@ -599,11 +826,20 @@ def test_day_logger_discards_invalid_and_implausible_values() -> None:
         async def query_history_series(self, device_id, name, before):
             return tuple(
                 TimeSeriesPoint(datetime(2026, 10, day, 23, 59, 59, tzinfo=UTC), value)
-                for day, value in ((14, float("nan")), (13, -5.0), (12, 5e9), (11, 9_000.0))
+                for day, value in (
+                    (14, float("nan")),
+                    (13, -5.0),
+                    (12, 5e9),
+                    (11, 9_000.0),
+                )
             )
 
     history = RctDailyConsumptionHistory(_Gateway(), lambda: "Europe/Berlin")
-    readings = asyncio.run(history.daily_consumption("main", before=datetime(2026, 10, 16, tzinfo=UTC), limit=10))
+    readings = asyncio.run(
+        history.daily_consumption(
+            "main", before=datetime(2026, 10, 16, tzinfo=UTC), limit=10
+        )
+    )
     assert [(r.local_date.day, r.energy_wh) for r in readings] == [(11, 9_000.0)]
 
 
@@ -612,7 +848,12 @@ def test_day_logger_discards_invalid_and_implausible_values() -> None:
 
 def _index_names(store: AdminStore) -> set[str]:
     with store.connect() as db:
-        return {row["name"] for row in db.execute("SELECT name FROM sqlite_schema WHERE type='index'").fetchall()}
+        return {
+            row["name"]
+            for row in db.execute(
+                "SELECT name FROM sqlite_schema WHERE type='index'"
+            ).fetchall()
+        }
 
 
 def test_init_creates_the_batch_time_prune_index(tmp_path: Path) -> None:
@@ -649,7 +890,9 @@ def test_counter_buffer_is_bounded_and_counts_and_logs_its_drops(caplog) -> None
 
     drained = sink.drain_counters()["main"][TOTAL_COUNTER]
     assert len(drained) == MAX_BUFFERED_COUNTER_READINGS  # never exceeds the bound
-    assert sink.dropped_counters == overflow  # every reading past the bound is accounted
+    assert (
+        sink.dropped_counters == overflow
+    )  # every reading past the bound is accounted
     assert drained[0][1] == pytest.approx(float(overflow))  # oldest-first eviction
 
     # Sparse logging mirrors the power buffer: the 1st drop and every 1000th -> {1, 1000} = 2 records.
@@ -662,7 +905,13 @@ def test_restore_counters_trim_also_counts_drops() -> None:
     from app.optimizer.meter import TOTAL_COUNTER
 
     sink = ConsumptionSampleSink()
-    series = [(BASE + timedelta(seconds=i), float(i)) for i in range(MAX_BUFFERED_COUNTER_READINGS + 5)]
+    series = [
+        (BASE + timedelta(seconds=i), float(i))
+        for i in range(MAX_BUFFERED_COUNTER_READINGS + 5)
+    ]
     sink.restore_counters("main", {TOTAL_COUNTER: series})
     assert sink.dropped_counters == 5
-    assert len(sink.drain_counters()["main"][TOTAL_COUNTER]) == MAX_BUFFERED_COUNTER_READINGS
+    assert (
+        len(sink.drain_counters()["main"][TOTAL_COUNTER])
+        == MAX_BUFFERED_COUNTER_READINGS
+    )
