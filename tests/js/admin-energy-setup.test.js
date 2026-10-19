@@ -302,6 +302,23 @@ function buildPanel(h, { apiImplOverride } = {}) {
   };
 }
 
+test('Basic hardware step reports background progress without a verification action', () => {
+  const h = harness();
+  const panel = h.context.energyAdvanced('dev-1', () => device(), () => {});
+  const hardware = panel.step('hardware');
+  for (const [state, expected] of [
+    ['pending', 'Waiting for a safe time'],
+    ['checking', 'Checking this inverter now'],
+    ['retrying', 'The automatic check will retry'],
+    ['blocked', 'Automatic verification cannot complete'],
+  ]) {
+    panel.update(device({ verification_state: state, verification_detail: 'Measurement unavailable.' }), false);
+    assert.match(flatten(hardware).map((node) => node.textContent).join(' '), new RegExp(expected));
+    assert.match(flatten(hardware).map((node) => node.textContent).join(' '), /Measurement unavailable/);
+  }
+  assert.equal(flatten(hardware).filter((node) => node.tagName === 'button').length, 0);
+});
+
 test('Finding 1: a second submit is refused and all four forms lock while a save is in flight', async () => {
   const h = harness();
   let putCalls = 0;

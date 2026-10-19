@@ -104,7 +104,7 @@ becomes quarter-hour data and never trains the forecast. Details:
 | ---------------------------- | -------------------------------------------------------------------------------- |
 | 1. **Write access**          | Inverters page, global; choosing a mode never turns it on                        |
 | 2. **Operating mode**        | Off / Manual / External, per inverter                                            |
-| 3. **Hardware verification** | Per-device capabilities, verified by an operator; nothing is verified by default |
+| 3. **Hardware verification** | Per-device capabilities verified automatically in the background; an Expert override remains available |
 | 4. **Dispatch**              | Charge power clamped to the configured limit, commands expire after one hour     |
 
 !!! warning "Battery control is off until you enable and verify it"

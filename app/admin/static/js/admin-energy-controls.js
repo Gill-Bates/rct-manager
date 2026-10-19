@@ -625,10 +625,17 @@
       setupList.replaceChildren();
       for (const [key, label] of SETUP_ROWS) {
         const met = checklist[key];
+        const verification = key === 'hardwareVerified' ? device.verification_state : null;
+        const stateLabel = verification === 'checking' ? ' · checking automatically'
+          : verification === 'retrying' ? ' · retry scheduled'
+            : verification === 'blocked' ? ' · needs attention'
+              : verification === 'pending' ? ' · waiting for a safe time' : '';
         const row = element('li', `energy-setup-item ${met ? 'is-met' : 'is-unmet'}`);
-        const icon = element('span', 'material-icons', met ? 'check_circle' : 'radio_button_unchecked');
+        const icon = element('span', 'material-icons', met ? 'check_circle'
+          : verification === 'checking' || verification === 'retrying' || verification === 'pending'
+            ? 'hourglass_empty' : 'radio_button_unchecked');
         icon.setAttribute('aria-hidden', 'true');
-        row.append(icon, element('span', null, label));
+        row.append(icon, element('span', null, `${label}${stateLabel}`));
         setupList.append(row);
       }
       if (advanced.busy()) return; // a save is running; the step moves on once it finished
@@ -689,7 +696,9 @@
       setupLead.hidden = !pendingSetup;
       if (pendingSetup) {
         const modeLabel = ENERGY_MODES.find(([value]) => value === shownMode)[1];
-        setupLead.textContent = `${modeLabel} is selected but not active yet. Battery control stays locked until every step below is done.`;
+        setupLead.textContent = readyState.firstUnmet === 'hardware'
+          ? `${modeLabel} is selected. Hardware verification runs in the background; battery control unlocks when it completes.`
+          : `${modeLabel} is selected but not active yet. Battery control stays locked until every step below is done.`;
       }
 
       statusBox.className = `energy-status ${readyState.ready ? 'is-ready' : 'is-blocked'}`;

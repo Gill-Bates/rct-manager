@@ -249,6 +249,13 @@ _VERIFIED_CAPABILITIES = (
 )
 
 
+def verification_write_lock(request: Request, device_id: str) -> asyncio.Lock:
+    locks = getattr(request.app.state, "energy_verification_write_locks", None)
+    if locks is None:
+        locks = request.app.state.energy_verification_write_locks = {}
+    return locks.setdefault(device_id, asyncio.Lock())
+
+
 class AdminEnergyDeviceStatus(EnergyStatusResponse):
     """The public status plus the admin-only blocks the GUI needs (design 2.8)."""
 
@@ -277,6 +284,9 @@ class AdminEnergyDeviceStatus(EnergyStatusResponse):
         0  # failed automatic restore attempts since the last clean restore
     )
     next_restore_at: datetime | None = None
+    verification_state: Literal["pending", "checking", "retrying", "blocked", "verified"] = "pending"
+    verification_detail: str | None = None
+    verification_next_retry_at: datetime | None = None
 
 
 class HardwareStrategyView(BaseModel):
@@ -347,6 +357,8 @@ def _require_connected(request: Request, device_id: str) -> None:
 
 
 async def _admin_status(request: Request, device_id: str) -> AdminEnergyDeviceStatus:
+    from app.admin.energy_verification import automatic_status
+
     energy = _energy_or_503(request)
     dispatch = _dispatch_or_503(request)
     public = EnergyStatusResponse.from_domain(await energy.status(device_id))
@@ -358,6 +370,7 @@ async def _admin_status(request: Request, device_id: str) -> AdminEnergyDeviceSt
     if device is None:  # removed by a reconfiguration while this request was awaiting
         raise HTTPException(404, "Unknown device")
     state = runtime.gateway.device_status(device_id).state
+    verification = automatic_status(request.app, device_id)
     return AdminEnergyDeviceStatus(
         **public.model_dump(),
         mode_recorded=energy.mode_recorded(device_id),
@@ -415,6 +428,9 @@ async def _admin_status(request: Request, device_id: str) -> AdminEnergyDeviceSt
         mode_changed_by=record.changed_by,
         restore_attempts=restore_attempts,
         next_restore_at=next_restore_at,
+        verification_state=verification.state,
+        verification_detail=verification.detail,
+        verification_next_retry_at=verification.next_retry_at,
     )
 
 
@@ -576,13 +592,19 @@ async def put_hardware_verification(
             400, f"missing evidence for write_path_convention: {', '.join(missing)}"
         )
     now = request.app.state.runtime.clock.now()
-    try:
-        records = verification_records(dispatch, device_id, body, now)
-        await dispatch.set_capabilities(device_id, records)
-    except CapabilityConflict as exc:
-        raise _conflict(exc) from exc
-    except ValueError as exc:
-        raise HTTPException(422, str(exc)) from exc
+    async with verification_write_lock(request, device_id):
+        try:
+            records = verification_records(dispatch, device_id, body, now)
+            await dispatch.set_capabilities(device_id, records)
+            store = getattr(request.app.state, "admin_store", None)
+            if store is not None:
+                from app.admin.energy_verification import AUTO_PAUSE_KEY_PREFIX
+
+                await asyncio.to_thread(store.delete, AUTO_PAUSE_KEY_PREFIX + device_id)
+        except CapabilityConflict as exc:
+            raise _conflict(exc) from exc
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
     log.warning(
         "Energy hardware verification saved: device=%s model=%s firmware=%s admin=%s",
         device_id, body.verified_device_model, body.verified_firmware, _ADMIN_ACTOR,
@@ -610,10 +632,19 @@ async def delete_hardware_verification(
         )
         for name in _VERIFIED_CAPABILITIES
     ]
-    try:
-        await dispatch.set_capabilities(device_id, revoked)
-    except CapabilityConflict as exc:
-        raise _conflict(exc) from exc
+    async with verification_write_lock(request, device_id):
+        store = getattr(request.app.state, "admin_store", None)
+        if store is not None:
+            from app.admin.energy_verification import AUTO_PAUSE_KEY_PREFIX, AutomaticVerificationStatus
+
+            await asyncio.to_thread(store.put, AUTO_PAUSE_KEY_PREFIX + device_id, True)
+            request.app.state.energy_verification_status[device_id] = AutomaticVerificationStatus(
+                "blocked", "Automatic verification was paused by an Expert."
+            )
+        try:
+            await dispatch.set_capabilities(device_id, revoked)
+        except CapabilityConflict as exc:
+            raise _conflict(exc) from exc
     log.warning(
         "Energy hardware verification revoked: device=%s admin=%s",
         device_id,

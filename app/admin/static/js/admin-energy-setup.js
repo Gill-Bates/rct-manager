@@ -10,243 +10,9 @@ function formatKwh(wh) {
   return Number.isFinite(wh) ? String(Number((wh / 1000).toFixed(3))) : '';
 }
 
-// Starting verification consents to the bounded hold and automatic save. The inverter's
-// readings establish each direction whenever possible; only unclear readings need an answer.
-function openVerificationAssistant({ id, deviceName, onDone, opener }) {
-  const base = `energy/devices/${encodeURIComponent(id)}/verification-assistant`;
-  const post = (action, body) => api(`${base}/${action}`, { method: 'POST', body: JSON.stringify(body || {}) });
-  const uid = `energy-assistant-${++deviceCardCount}`;
-  let state = null;
-  let running = false;
-  let problem = null;
-  let finished = false;
-  let testAttempted = false;
-  let saveAttempted = false;
-  const POLL_MS = 3000;
-  let pollTimer = null;
-  let epoch = 0;
-  let renderedStage = -1;
-  let liveNode = null;
-  let renderedKey = '';
-  const assistantError = (error) => error?.status === 404
-    ? 'The verification service is unavailable. Reload this page and start the check again. The inverter may still be online.'
-    : messageFrom(error);
-  const power = (value) => (Number.isFinite(value) ? `${Math.round(Math.abs(value)).toLocaleString(undefined)} W` : 'unknown');
-
-  const modalEl = element('div', 'modal fade energy-assistant');
-  modalEl.tabIndex = -1;
-  modalEl.setAttribute('aria-labelledby', `${uid}-title`);
-  modalEl.dataset.bsBackdrop = 'static';
-  modalEl.dataset.bsKeyboard = 'false';
-  const content = element('div', 'modal-content');
-  modalEl.append(element('div', 'modal-dialog modal-dialog-centered modal-dialog-scrollable'));
-  modalEl.firstChild.append(content);
-  const header = element('div', 'modal-header');
-  const title = element('h2', 'modal-title h5', `Verify hardware: ${deviceName}`);
-  title.id = `${uid}-title`;
-  header.append(title);
-  const body = element('div', 'modal-body');
-  body.setAttribute('aria-live', 'polite');
-  const footer = element('div', 'modal-footer');
-  content.append(header, body, footer);
-  document.body.append(modalEl);
-  const modal = window.bootstrap.Modal.getOrCreateInstance(modalEl);
-
-  const stageOf = () => {
-    if (!state || !state.started || state.blockers.length) return 0;
-    const [battery, grid, test] = state.steps;
-    if (battery.status !== 'done') return 1;
-    if (test.status !== 'done') return 3;
-    if (grid.status !== 'done') return 2;
-    return 4;
-  };
-  const button = (label, className, onClick) => {
-    const node = element('button', `btn ${className}`, label);
-    node.type = 'button';
-    node.addEventListener('click', onClick);
-    return node;
-  };
-  const guarded = (task) => async () => {
-    problem = null;
-    running = true;
-    epoch += 1;
-    render();
-    try { await task(); } catch (error) { problem = assistantError(error); } finally { running = false; render(); }
-  };
-  const note = (text, kind) => { const n = element('div', `alert alert-${kind} small`, text); n.setAttribute('role', kind === 'danger' ? 'alert' : 'status'); return n; };
-  // 'wait' while the quantity is (almost) zero or unreadable, 'ask' when it moves but the balance
-  // could not prove the direction. Nothing is stored while waiting.
-  const KINDS = [
-    { kind: 'battery', subject: 'battery', field: 'battery_power_w' },
-    { kind: 'grid', subject: 'grid', field: 'grid_power_w' },
-  ];
-  const directionMode = (index) => {
-    const value = state && state.readings ? state.readings[KINDS[index].field] : null;
-    return Number.isFinite(value) && Math.abs(value) >= state.min_direction_w ? 'ask' : 'wait';
-  };
-  const liveText = (index) => {
-    const value = state && state.readings ? state.readings[KINDS[index].field] : null;
-    return Number.isFinite(value) ? `Checking automatically · about ${power(value)}.` : 'Checking automatically · waiting for a reading.';
-  };
-  const choice = (index) => {
-    const kind = KINDS[index].kind;
-    const options = index === 0
-      ? [['discharging', 'The battery is discharging (supplying the house)'], ['charging', 'The battery is charging (taking power in)'], ['idle', 'The battery is idle (neither charging nor discharging)']]
-      : [['importing', 'The house is taking power from the grid (import)'], ['exporting', 'The house is feeding power into the grid (export)'], ['idle', 'No power flows to or from the grid (idle)']];
-    const wrap = element('div', 'd-grid gap-2');
-    wrap.append(element('p', 'mb-1', index === 0 ? 'Right now, the battery is:' : 'Right now, the house is:'));
-    for (const [answer, label] of options) wrap.append(button(label, 'btn-primary', guarded(async () => { state = await post('direction', { kind, answer }); })));
-    return wrap;
-  };
-  const waiting = (index) => {
-    const box = element('div', 'alert alert-info small energy-assistant-waiting');
-    box.setAttribute('role', 'status');
-    const spin = element('span', 'spinner-border spinner-border-sm me-2'); spin.setAttribute('aria-hidden', 'true');
-    liveNode = element('span', null, liveText(index));
-    const line = element('p', 'mb-0'); line.append(spin, liveNode);
-    box.append(line);
-    return box;
-  };
-  const viewKey = () => {
-    if (!state) return '';
-    const parts = state.steps.map((step) => `${step.status}|${step.method}|${step.message}`);
-    const stage = stageOf();
-    return [stage, ...(stage === 1 || stage === 2 ? [directionMode(stage - 1)] : []), ...parts].join('#');
-  };
-  const save = guarded(async () => {
-    const status = await post('commit', { confirm: true });
-    finished = true;
-    running = false; // hide.bs.modal refuses to close while a step runs
-    onDone(status);
-    modal.hide();
-    toast('Hardware verified. Manual battery control is available.');
-  });
-  const runTest = guarded(async () => { state = await post('control-test', { confirm: true }); });
-  const schedulePoll = () => {
-    clearTimeout(pollTimer);
-    pollTimer = null;
-    const stage = stageOf();
-    if (running || finished || problem) return;
-    if (stage === 4 && !saveAttempted) {
-      saveAttempted = true;
-      pollTimer = setTimeout(save, 0);
-    } else if (stage === 3 && !testAttempted && Number.isFinite(state.readings?.battery_power_w)
-      && Math.abs(state.readings.battery_power_w) >= state.min_baseline_w) {
-      testAttempted = true;
-      pollTimer = setTimeout(runTest, 0);
-    } else if (stage === 1 || stage === 2 || (stage === 3 && !testAttempted)) {
-      pollTimer = setTimeout(poll, POLL_MS);
-    }
-  };
-  async function poll() {
-    pollTimer = null;
-    if (running || finished || !modalEl.isConnected) return;
-    const mine = epoch;
-    try {
-      const next = await post('auto-check');
-      if (mine !== epoch || running || !modalEl.isConnected) return;
-      state = next;
-      if (viewKey() !== renderedKey) render();
-      else { if (liveNode) liveNode.textContent = liveText(stageOf() === 3 ? 0 : stageOf() - 1); schedulePoll(); }
-    } catch (error) {
-      if (mine !== epoch || !modalEl.isConnected) return;
-      if (error?.status === 409) {
-        state = null;
-        testAttempted = false;
-        saveAttempted = false;
-        problem = 'The check timed out. Start verification again when power is flowing.';
-        render();
-        return;
-      }
-      problem = assistantError(error);
-      render();
-    }
-  }
-
-  function render() {
-    const stage = stageOf();
-    liveNode = null;
-    const main = element('div');
-    const heading = (text) => { const h = element('h3', 'h6', text); h.tabIndex = -1; return h; };
-    const stepMessage = (index) => (state && state.steps[index].message ? note(state.steps[index].message, 'warning') : null);
-    const footerButtons = [];
-    const cancel = button(finished ? 'Close' : 'Cancel', 'btn-outline-secondary', () => modal.hide());
-    cancel.disabled = running;
-    if (state && state.blockers.length) {
-      main.append(heading('Verification cannot start'), element('p', 'small', 'Resolve these items, then retry:'));
-      const list = element('ul', 'small');
-      for (const text of state.blockers) list.append(element('li', null, text));
-      main.append(list);
-      footerButtons.push(button('Retry', 'btn-primary', guarded(async () => {
-        state = await post('start');
-        if (state.started && !state.blockers.length) state = await post('auto-check');
-      })));
-    } else if (stage === 0 && !(state && state.started)) {
-      main.append(heading('Automatic verification'),
-        element('p', 'small', 'Reads live values, briefly holds the battery at 0 W for up to 30 seconds, restores it and saves the result. The house may briefly draw power from the grid. Watch the first charge or discharge: this test only checks 0 W.'));
-      footerButtons.push(button('Start verification', 'btn-primary', guarded(async () => {
-        state = await post('start');
-        if (state.started && !state.blockers.length) state = await post('auto-check');
-      })));
-    } else if (stage === 1 || stage === 2) {
-      const index = stage - 1;
-      const asking = directionMode(index) === 'ask';
-      const titles = [['Battery direction?', 'Waiting for battery power'], ['Grid direction?', 'Waiting for grid power']];
-      main.append(heading(titles[index][asking ? 0 : 1]), stepMessage(index) || '');
-      if (asking) {
-        main.append(element('p', 'small', 'The readings are unclear. Check the inverter display or app:'), choice(index));
-      } else {
-        if (stage === 2) main.append(element('p', 'small mb-2', 'Battery test passed. Waiting for measurable grid power.'));
-        main.append(waiting(index));
-      }
-    } else if (stage === 3) {
-      const ready = Number.isFinite(state.readings?.battery_power_w)
-        && Math.abs(state.readings.battery_power_w) >= state.min_baseline_w;
-      main.append(heading(testAttempted || ready ? 'Testing battery control' : 'Waiting for battery power'), stepMessage(2) || '');
-      if (!testAttempted) main.append(waiting(0));
-      if (testAttempted && state.steps[2].status === 'failed') footerButtons.push(button('Retry test', 'btn-primary', runTest));
-    } else {
-      main.append(heading('Saving verification'));
-      if (problem) footerButtons.push(button('Retry save', 'btn-primary', () => { problem = null; save(); }));
-    }
-    if (running) {
-      const progress = element('p', 'small text-secondary d-flex align-items-center gap-2 mb-0 energy-assistant-progress');
-      const spinner = element('span', 'spinner-border spinner-border-sm');
-      spinner.setAttribute('aria-hidden', 'true');
-      progress.append(spinner, 'Checking…');
-      main.append(progress);
-    }
-    if (problem) main.append(note(problem, 'danger'));
-    if (problem && stage === 3 && testAttempted && !footerButtons.length)
-      footerButtons.push(button('Retry test', 'btn-primary', () => { problem = null; runTest(); }));
-    if (problem && (stage === 1 || stage === 2 || (stage === 3 && !testAttempted)) && !footerButtons.length)
-      footerButtons.push(button('Retry', 'btn-primary', guarded(async () => { state = await post('auto-check'); })));
-    for (const node of footerButtons) node.disabled = node.disabled || running;
-    body.replaceChildren(main);
-    footer.replaceChildren(cancel, ...footerButtons);
-    renderedKey = viewKey();
-    if (stage !== renderedStage) { renderedStage = stage; main.querySelector('h3')?.focus(); }
-    schedulePoll();
-  }
-
-  modalEl.addEventListener('hide.bs.modal', (event) => { if (running) event.preventDefault(); });
-  modalEl.addEventListener('keydown', (event) => { if (event.key === 'Escape' && !running) modal.hide(); });
-  modalEl.addEventListener('shown.bs.modal', () => body.querySelector('h3')?.focus());
-  modalEl.addEventListener('hidden.bs.modal', () => {
-    clearTimeout(pollTimer);
-    epoch += 1;
-    if (!finished) api(base, { method: 'DELETE' }).catch(() => { });
-    modal.dispose();
-    modalEl.remove();
-    opener?.focus();
-  });
-  render();
-  modal.show();
-}
-
 // Expert mode is a page-wide display switch, never persisted and never a backend setting. The
-// required setup steps (write access, power limits, hardware verification) live in the guided
-// Setup block; this function builds their editors plus the Expert-only section. The Expert section
+// required setup steps (write access and power limits) live in the guided
+// Setup block; hardware verification runs in the background. The Expert section
 // is attached to the page only while Expert mode is on; it holds the full hardware verification,
 // engineering mode, the SoC-target policy and Diagnostics (the ONLY place raw reject_detail,
 // capability names and write approvals appear). Raw register names are fine on this admin surface.
@@ -391,11 +157,10 @@ function energyAdvanced(id, getDevice, onChange) {
   const pollStamp = element('p', 'small text-secondary mb-0', 'Updated –');
   freshSection.append(freshHost, pollStamp);
 
-  // 3. Hardware verification: one form that lives in the Expert section only. The Setup step of a
-  // Basic user just points to it (strategy code and byte widths are protocol detail), and never
-  // switches Expert mode on by itself. Never prefilled with guessed hardware values.
-  const verifySection = section(expertInner, 'Hardware verification',
-    'Enter what you measured on this inverter. The server stamps who verified it and when; a verification applies to this device only.');
+  // 3. The Expert form is an explicit override for a measured exception. Automatic verification
+  // owns the normal path; values here are never prefilled with guesses.
+  const verifySection = section(expertInner, 'Hardware verification override',
+    'Use only for a measured exception. Enter values verified on this inverter; the override applies to this device only.');
   const verifyExpertSlot = element('div');
   const verifyForm = element('form', 'row g-2 align-items-end');
   const model = textInput(128);
@@ -596,26 +361,21 @@ function energyAdvanced(id, getDevice, onChange) {
     connection: stepNode('Inverter connection', 'The inverter is not connected. Check its connection settings.', inverterLink('Manage inverters', '/ui/dashboard?manage=inverters')),
     write_access: stepNode('Write access', '', inverterLink('Open Inverters page', '/ui/inverters')),
     limits: stepNode('Power limits', 'The most power the battery may be charged and discharged with, in kW.', limitSetupSlot),
-    hardware: stepNode('Hardware verification', ''),
+    hardware: stepNode('Hardware verification', 'The application checks this inverter automatically in the background.'),
   };
   // Names what is missing; the global write switch is not part of the device payload, so it is
   // only reported when the poll answered 503 (write support disabled).
   const writeAccessText = steps.write_access.querySelector('p');
-  // The values come from a real hardware and firmware verification, so the form is Expert-only; the
-  // Basic step says so and never guesses or pre-fills them.
+  // The application supplies only measured evidence. The Basic step is status-only; a Power User
+  // can enter a targeted override in Expert mode.
   const hardwareText = steps.hardware.querySelector('p');
-  // Opens the guided check on an explicit click only; nothing is written by the setup step itself.
-  const openVerifyButton = element('button', 'btn btn-primary energy-step-link', 'Verify hardware');
-  openVerifyButton.type = 'button';
-  hardwareText.after(openVerifyButton);
-  openVerifyButton.addEventListener('click', () => {
-    openVerificationAssistant({ id, deviceName: getDevice().device_name, onDone: onChange, opener: openVerifyButton });
-  });
-  const renderHardwareText = (expertOn) => {
-    hardwareText.textContent = expertOn
-      ? 'Verify this inverter to unlock manual control. Use the guided check or enter measured values below.'
-      : 'Verify this inverter to unlock manual control. The check runs automatically and asks only when a measurement is unclear.';
-    openVerifyButton.hidden = false;
+  const renderHardwareText = (device) => {
+    const state = device.verification_state;
+    const message = state === 'checking' ? 'Checking this inverter now.'
+      : state === 'retrying' ? 'The automatic check will retry.'
+        : state === 'blocked' ? 'Automatic verification cannot complete with the current readings.'
+          : 'Waiting for a safe time to verify this inverter automatically.';
+    hardwareText.textContent = [message, device.verification_detail].filter(Boolean).join(' ');
   };
   // Plain wording first; the raw register names stay one click away for people who need them.
   const technicalNames = element('details', 'small mb-2');
@@ -677,7 +437,7 @@ function energyAdvanced(id, getDevice, onChange) {
     capacityField.hidden = !expertOn;
     revokeButton.hidden = !energyChecklist(device).hardwareVerified;
     renderWriteAccessText(device, writeSupportOff);
-    renderHardwareText(expertOn);
+    renderHardwareText(device);
     refill(device);
     if (!expertOn) return; // the Expert section is not on the page; build its tables when it is
     gateHost.replaceChildren(simpleTable(

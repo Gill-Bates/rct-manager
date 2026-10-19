@@ -3207,11 +3207,3 @@ body.is-reconnecting #reconnect-modal.show .reconnect-pulse {
     }
 }
 
-/* Guided hardware verification dialog (Energy page, Basic mode) */
-@media (prefers-reduced-motion: reduce) {
-
-    .energy-assistant-progress .spinner-border,
-    .energy-assistant-waiting .spinner-border {
-        animation: none;
-    }
-}

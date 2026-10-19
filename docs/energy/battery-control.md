@@ -22,8 +22,8 @@ flowchart LR
 | ------------------------- | -------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Write access**          | Inverters page (global)          | Allows the service to write to inverters at all. It also opens the generic `PUT /api/v1/devices/{id}/metrics` routes, so it stays a deliberate, separate switch: choosing a mode never turns it on.        |
 | **Mode** per inverter     | Energy Manager page              | **Off**, **Manual** or **External**: who may command this inverter. Selecting Off hands back an active Manager command and verifies the inverter's Internal SoC strategy before disabling Manager control. |
-| **Hardware verification** | Energy Manager page, Expert mode | Per-device capabilities; an unverified required capability blocks the dispatch mode it guards. See [Hardware Verification](../reference/hardware-verification.md).                                         |
-| **Expert mode**           | Energy Manager page              | A display switch only: it shows hardware verification, limits and diagnostics. It changes no behaviour.                                                                                                    |
+| **Hardware verification** | Background service             | Per-device capabilities; an unverified required capability blocks the dispatch mode it guards. See [Hardware Verification](../reference/hardware-verification.md).                                         |
+| **Expert mode**           | Energy Manager page             | A display switch only: it shows a measured verification override, limits and diagnostics. It changes no behaviour.                                                                                       |
 
 ## Operating modes
 
@@ -218,7 +218,7 @@ evidence field from exactly one capability, so `GET .../capabilities` reports it
   interpretable together with `note`, so setting `write_path_convention` to `verified` is refused with
   `400` unless the `PUT` supplies a non-empty `note` (hardware model, firmware, what was observed).
 
-## Hardware verification form (admin API)
+## Expert hardware verification override (admin API)
 
 The form uses two session-guarded admin endpoints (CSRF header required, not part of the public API):
 
@@ -239,7 +239,9 @@ carried over unchanged, because this form has no input field for it. The form co
 and both sign conventions only; `export_limit_convention` cannot be set there and matters only with
 `limit_export_during_discharge`, which is off by default.
 
-Verification is entered by an operator with measured evidence; nothing is verified by default. The
+The application verifies each inverter in the background when the required measurements and safe
+conditions are available. It retries an inconclusive check without granting an unverified capability.
+The Expert form is a targeted override with measured evidence, not a step in normal setup. The
 operator's internal hardware verification plan and filled-in sheets are not part of this site.
 
 ## Hold status
@@ -276,8 +278,8 @@ The page is layered by in-page progressive disclosure:
 | Layer                                           | Content                                                                                                                                                                                                                                                                                                                                         |
 | ----------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Operate** (always shown)                      | Device name and connection, the mode control, the current mode sentence, SoC, the actions **Charge battery / Keep battery idle / Discharge battery** with a contextual target-SoC slider and a primary button (for example "Charge battery to 80 %"). Normal cache age is not shown; a transient polling failure shows "Live data unavailable." |
-| **Setup** (only when a prerequisite is missing) | A readiness checklist (Inverter connected / Write access / Power limits / Hardware verification) that opens the editor of the first unmet step: a link to the inverter dialog or the Inverters page, the power-limit form, or a **Verify hardware** button. Power limits are shown in **kW**.                                                   |
-| **Expert**                                      | The page-wide **Expert mode** switch next to the heading (off on every page load, never stored), behind a warning: hardware verification form (re-verify and **Revoke verification**), kW power limits, engineering mode and the SoC target policy.                                                                                             |
+| **Setup** (only when a prerequisite is missing) | A readiness checklist (Inverter connected / Write access / Power limits / Hardware verification). Hardware verification displays background progress or the reason it cannot complete. Power limits are shown in **kW**.                                                                                   |
+| **Expert**                                      | The page-wide **Expert mode** switch next to the heading (off on every page load, never stored): measured hardware verification override and **Revoke verification**, kW power limits, engineering mode and the SoC target policy.                                                                   |
 | **Diagnostics** (collapsed, inside Expert)      | The gate table (the only place raw `reject_detail` and capability names appear), the capability table, the approved and added write names, per-reading age and staleness, and the poll timestamp.                                                                                                                                               |
 
 Details of the Setup checklist:
@@ -289,9 +291,9 @@ Details of the Setup checklist:
 - The first time **Write access** is switched on, these four registers are approved automatically
   (add-only, applied once). Clearing one later is respected: a later off/on toggle does not approve it
   again, the actions answer `write_not_permitted`, and the checklist step shows it missing.
-- The hardware verification form itself is Expert-only; Basic mode never shows strategy code or byte
-  widths, and Expert mode is switched on only by the **Verify hardware** click or by the switch. While
-  the Setup block shows the power-limit step, that form sits in the Setup block instead.
+- The hardware verification override is Expert-only. Basic mode shows progress and any blocker but
+  never asks for strategy code, byte widths or a verification button. While the Setup block shows
+  the power-limit step, that form sits in the Setup block instead.
 
 The action relabels are presentation-only: the REST action names on the wire are unchanged (`charge`,
 `discharge`, `hold`, `auto`). If write support is disabled, the Operate poll answers 503 and the page

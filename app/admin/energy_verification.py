@@ -31,7 +31,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, StrictBool
 
 from app.admin.dispatch_api import (
@@ -48,9 +48,10 @@ from app.admin.energy_api import (
     _energy_or_503,
     _is_connected,
     verification_records,
+    verification_write_lock,
 )
 from app.catalog.registry import RegistryCatalog
-from app.dispatch.capabilities import CapabilityName
+from app.dispatch.capabilities import CapabilityName, CapabilityStatus
 from app.dispatch.controller import CapabilityConflict
 from app.dispatch.models import DispatchCommand, DispatchMode, DispatchState
 from app.errors import DeviceApiError
@@ -86,6 +87,10 @@ BALANCE_NOISE_W = (
 )
 BALANCE_SAMPLES = 2
 BALANCE_GAP_S = 1.0
+AUTO_RETRY_INITIAL_S = 30.0
+AUTO_RETRY_MAX_S = 900.0
+AUTO_IDENTITY_CHECK_S = 60.0
+AUTO_PAUSE_KEY_PREFIX = "energy_auto_verification_paused:"
 
 _RESTORE_REGISTERS = (
     RctDispatchGateway.REQUIRED_WRITES
@@ -244,6 +249,43 @@ class AssistantState(BaseModel):
     expires_at: datetime | None
     min_direction_w: float = MIN_DIRECTION_W
     min_baseline_w: float = MIN_BASELINE_W
+
+
+@dataclass(frozen=True, slots=True)
+class AutomaticVerificationStatus:
+    state: Literal["pending", "checking", "retrying", "blocked", "verified"]
+    detail: str | None = None
+    next_retry_at: datetime | None = None
+
+
+def automatic_status(app: FastAPI, device_id: str) -> AutomaticVerificationStatus:
+    dispatch = app.state.runtime.dispatch
+    if dispatch is not None and {
+        record.name
+        for record in dispatch.capabilities(device_id)
+        if record.status is CapabilityStatus.VERIFIED
+        and record.name in (
+            CapabilityName.WRITE_PATH,
+            CapabilityName.BATTERY_POWER_SIGN,
+            CapabilityName.GRID_POWER_SIGN,
+        )
+    } == {
+        CapabilityName.WRITE_PATH,
+        CapabilityName.BATTERY_POWER_SIGN,
+        CapabilityName.GRID_POWER_SIGN,
+    }:
+        return AutomaticVerificationStatus("verified")
+    return getattr(app.state, "energy_verification_status", {}).get(
+        device_id, AutomaticVerificationStatus("pending")
+    )
+
+
+async def _automatic_paused(app: FastAPI, device_id: str) -> bool:
+    store = getattr(app.state, "admin_store", None)
+    return bool(
+        store is not None
+        and await asyncio.to_thread(store.get, AUTO_PAUSE_KEY_PREFIX + device_id)
+    )
 
 
 class DirectionBody(BaseModel):
@@ -950,3 +992,115 @@ async def commit(
             device_id, model, firmware, _ADMIN_ACTOR,
         )  # fmt: skip
         return await _admin_status(request, device_id)
+
+
+async def _automatic_attempt(request: Request, device_id: str) -> AutomaticVerificationStatus:
+    """Collect a complete proof without operator input; incomplete evidence never opens the gate."""
+    runtime = request.app.state.runtime
+    dispatch = runtime.dispatch
+    if dispatch is None:
+        return AutomaticVerificationStatus("blocked", "Battery control is not available.")
+    if await _automatic_paused(request.app, device_id):
+        return AutomaticVerificationStatus("blocked", "Automatic verification was paused by an Expert.")
+    if _sessions(request).get(device_id) is not None:
+        return AutomaticVerificationStatus("retrying", "An interactive verification is running.")
+    blockers = await _preflight(request, device_id)
+    if blockers:
+        configuration = any(
+            text.startswith(("Write access", "The battery power control parameters", "The power limits"))
+            for text in blockers
+        )
+        return AutomaticVerificationStatus("blocked" if configuration else "retrying", blockers[0])
+    try:
+        model = await _text(request, device_id, "android_description", 128)
+        firmware = await _text(request, device_id, "svnversion", 64)
+        unit = RctDispatchGateway.soc_target_unit(
+            await _number(request, device_id, RctDispatchGateway.SOC_TARGET_REGISTER)
+        )
+        if unit is None:
+            raise _Blocked("The battery target unit is ambiguous at 0 % or 100 %.")
+        proof, sample = await _balance_proof(request, device_id)
+        if sample is None or proof.battery_discharge_positive is None:
+            raise _Blocked("Waiting for a conclusive battery power balance.")
+        code, evidence, grid_result = await _run_hold_test(
+            request, device_id, prove_grid=proof.grid_import_positive is None
+        )
+        grid_sign = proof.grid_import_positive
+        grid_evidence = f"power balance ({sample.grid_w:+.0f} W)"
+        if grid_sign is None and grid_result is not None:
+            grid_sign, grid_raw = grid_result
+            grid_evidence = f"power balance during hold ({grid_raw:+.0f} W)"
+        if grid_sign is None:
+            raise _Blocked("Waiting for a conclusive grid power balance.")
+        if (model, firmware) != (
+            await _text(request, device_id, "android_description", 128),
+            await _text(request, device_id, "svnversion", 64),
+        ):
+            raise _Blocked("The inverter identity changed during verification.")
+        catalog = RegistryCatalog.from_file(runtime.settings.object_registry_path)
+        enum_entry = catalog.object_entry("power_mng_soc_strategy")
+        bool_entry = catalog.object_entry("power_mng_use_grid_power_enable")
+        body = HardwareVerificationBody(
+            verified_device_model=model,
+            verified_firmware=firmware,
+            note=(
+                f"Automatic: battery sign by power balance ({sample.battery_w:+.0f} W); "
+                f"grid sign by {grid_evidence}; {evidence}"
+            )[:200],
+            soc_strategy_external_code=code,
+            enum_byte_width=enum_entry.byte_width or DEFAULT_WIDTHS[enum_entry.data_type],
+            bool_byte_width=bool_entry.byte_width or DEFAULT_WIDTHS[bool_entry.data_type],
+            write_frame_layout_verified=True,
+            apply_sequence_verified=True,
+            battery_discharge_positive=proof.battery_discharge_positive,
+            grid_import_positive=grid_sign,
+            soc_target_unit=unit,
+        )
+        async with verification_write_lock(request, device_id):
+            if await _automatic_paused(request.app, device_id):
+                return AutomaticVerificationStatus("blocked", "Automatic verification was paused by an Expert.")
+            if automatic_status(request.app, device_id).state == "verified":
+                return AutomaticVerificationStatus("verified")
+            records = [
+                replace(record, verified_by="automatic")
+                for record in verification_records(dispatch, device_id, body, runtime.clock.now())
+            ]
+            await dispatch.set_capabilities(device_id, records)
+        log.info("Automatic hardware verification completed: device=%s model=%s firmware=%s", device_id, model, firmware)
+        return AutomaticVerificationStatus("verified")
+    except _Blocked as exc:
+        return AutomaticVerificationStatus("retrying", str(exc))
+    except CapabilityConflict:
+        return AutomaticVerificationStatus("retrying", "Battery control is busy.")
+
+
+async def run_automatic_verification(app: FastAPI, device_id: str) -> None:
+    """Retry safe verification independently of the admin page and other devices."""
+    runtime = app.state.runtime
+    statuses = app.state.energy_verification_status
+    request = Request({"type": "http", "app": app})
+    delay = AUTO_RETRY_INITIAL_S
+    statuses[device_id] = AutomaticVerificationStatus("pending")
+    await runtime.clock.sleep(5.0)
+    while device_id in runtime.devices and not runtime.shutting_down():
+        if automatic_status(app, device_id).state == "verified":
+            statuses[device_id] = AutomaticVerificationStatus("verified")
+            await runtime.clock.sleep(AUTO_IDENTITY_CHECK_S)
+            continue
+        statuses[device_id] = AutomaticVerificationStatus("checking")
+        try:
+            outcome = await _automatic_attempt(request, device_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("Automatic hardware verification failed: device=%s", device_id)
+            outcome = AutomaticVerificationStatus("retrying", "The verification could not complete.")
+        if outcome.state == "verified":
+            delay = AUTO_RETRY_INITIAL_S
+            statuses[device_id] = outcome
+            continue
+        statuses[device_id] = replace(
+            outcome, next_retry_at=runtime.clock.now() + timedelta(seconds=delay)
+        )
+        await runtime.clock.sleep(delay)
+        delay = min(delay * 2, AUTO_RETRY_MAX_S)

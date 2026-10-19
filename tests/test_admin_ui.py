@@ -1516,13 +1516,13 @@ def test_dates_follow_the_browser_locale():
     assert "'en-GB'" not in block and "toLocaleDateString" not in block
 
 
-def test_time_and_power_helpers_follow_the_browser_locale():
+def test_time_and_energy_helpers_follow_the_browser_locale():
     js = _admin_js()
     hhmm = js[js.index("const hhmm") : js.index("function element(")]
     assert "toLocaleTimeString(undefined" in hhmm and "'en-GB'" not in hhmm
-    power_start = js.index("const power = (value)")
-    power = js[power_start : js.index("const modalEl", power_start)]
-    assert "toLocaleString(undefined" in power and "'en-GB'" not in power
+    energy_start = js.index("function planKwh(wh)")
+    energy = js[energy_start : js.index("function planFlagLine", energy_start)]
+    assert "toLocaleString(undefined" in energy and "'en-GB'" not in energy
 
 
 def test_shipped_admin_js_pins_no_region_locale():
@@ -1900,42 +1900,20 @@ def test_token_copy_button_is_icon_only_and_done_waits_for_a_successful_copy():
     assert tokens.index("setCopied(true)") > tokens.index("await copyToClipboard")
 
 
-def test_hardware_verification_form_is_expert_only_and_the_basic_step_only_points_to_it():
+def test_hardware_verification_is_background_status_with_expert_override():
     js = _admin_js()
     advanced = js[
         js.index("function energyAdvanced(") : js.index(
             "// Shows one status paragraph in the list"
         )
     ]
-    # The form lives in the Expert section; no Setup slot hosts it, so Basic mode never shows
-    # strategy code or byte widths.
+    # The measured override stays in Expert mode; Basic mode has no action that starts a probe.
     assert "verifyExpertSlot.append(verifyForm)" in advanced
     assert "verifySetupSlot" not in advanced and "place(verifyForm" not in advanced
-    # The Basic step offers a button that opens the guided assistant; it never switches Expert mode on.
-    button = advanced[
-        advanced.index("const openVerifyButton") : advanced.index(
-            "const renderHardwareText"
-        )
-    ]
-    assert "'Verify hardware'" in button and "addEventListener('click'" in button
-    assert (
-        "openVerificationAssistant(" in button
-        and "expertSwitch" not in button
-        and "setExpert(true)" not in advanced
-    )
-    # One start action authorizes the bounded test and save; server endpoints keep the gates.
-    assistant = js[
-        js.index("function openVerificationAssistant(") : js.index(
-            "function energyAdvanced("
-        )
-    ]
-    assert "'Start verification'" in assistant
-    assert "'Yes, continue'" not in assistant and "'Save verification'" not in assistant
-    assert (
-        "post('control-test', { confirm: true })" in assistant
-        and "post('commit', { confirm: true })" in assistant
-    )
-    assert "innerHTML" not in assistant and "hardware-verification" not in assistant
+    assert "openVerificationAssistant(" not in js
+    assert "Verify hardware'" not in advanced
+    assert "device.verification_state" in advanced
+    assert "device.verification_detail" in advanced
 
 
 @pytest.mark.parametrize(
@@ -1972,25 +1950,11 @@ def test_manual_mode_toast_does_not_promise_control_while_the_setup_is_incomplet
     assert "wanted === 'manual' && energyNeedsSetup(energyChecklist(device))" in js
 
 
-def test_hardware_step_text_names_the_guided_check_and_the_expert_path():
+def test_hardware_step_text_describes_automatic_check():
     js = _admin_js()
-    assert (
-        "The check runs automatically and asks only when a measurement is unclear" in js
-    )
-    assert "Use the guided check or enter measured values below" in js
-
-
-def test_verification_assistant_explains_a_missing_route_without_calling_the_inverter_missing():
-    js = _admin_js()
-    assistant = js[
-        js.index("function openVerificationAssistant(") : js.index(
-            "function energyAdvanced("
-        )
-    ]
-    assert "error?.status === 404" in assistant
-    assert "The verification service is unavailable" in assistant
-    assert "The inverter may still be online" in assistant
-    assert assistant.count("assistantError(error)") >= 2
+    assert "The application checks this inverter automatically in the background." in js
+    assert "The automatic check will retry." in js
+    assert "Use only for a measured exception." in js
 
 
 def test_about_page_keeps_the_inline_code_style():

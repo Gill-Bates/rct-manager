@@ -37,6 +37,7 @@ from app.admin.api import router as admin_router
 from app.admin.dispatch_api import router as admin_dispatch_router
 from app.admin.energy_api import router as admin_energy_router
 from app.admin.energy_verification import router as admin_energy_verification_router
+from app.admin.energy_verification import run_automatic_verification
 from app.admin.forecast_refresh import (
     drain_store_threads,
     run_solar_refresh_loop,
@@ -996,6 +997,11 @@ def _lifespan(
                 task = asyncio.create_task(runtime.dispatch.run(device_id))
                 dispatch_tasks.append(task)
                 tasks.append(task)
+                verification_task = asyncio.create_task(
+                    run_automatic_verification(app, device_id)
+                )
+                dispatch_tasks.append(verification_task)
+                tasks.append(verification_task)
 
         def start_connections() -> None:
             # Connecting never blocks the start: an unreachable device leaves the service up (Requirement 7.8).
@@ -1605,6 +1611,7 @@ def _lifespan(
                 return pending
 
         app.state.enable_dispatch = enable_dispatch
+        app.state.energy_verification_status = {}
         app.state.disable_dispatch = disable_dispatch
         app.state.restart_export = restart_export
         app.state.reconfigure_devices = reconfigure_devices

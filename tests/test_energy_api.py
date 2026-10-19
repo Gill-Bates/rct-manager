@@ -23,8 +23,10 @@ import pytest
 from starlette.requests import Request
 
 from app.admin.energy_verification import (
+    AUTO_PAUSE_KEY_PREFIX,
     BalanceProof,
     BalanceSample,
+    _automatic_attempt,
     prove_signs_from_balance,
 )
 from app.admin.store import AdminStore
@@ -2057,6 +2059,42 @@ async def test_off_write_failure_does_not_record_an_initial_choice(
 
 
 ASSIST = "/admin/api/energy/devices/main/verification-assistant"
+
+
+async def test_automatic_verification_opens_the_gate_from_live_proof(
+    tmp_path: Path, fast_probe: None
+) -> None:
+    async with running_app(energy_settings(tmp_path)) as harness:
+        headers = await assistant_ready(harness)
+        harness.app.state.admin_store.delete(AUTO_PAUSE_KEY_PREFIX + "main")
+        request = Request({"type": "http", "app": harness.app})
+        stop = asyncio.Event()
+        follower = asyncio.create_task(follow_the_setpoint(harness, stop))
+        try:
+            outcome = await _automatic_attempt(request, "main")
+        finally:
+            stop.set()
+            await follower
+        assert outcome.state == "verified", outcome.detail
+        status = (
+            await harness.client.get("/admin/api/energy/devices", headers=headers)
+        ).json()[0]
+        assert status["verification_state"] == "verified"
+        assert status["verification_detail"] is None
+        assert (await unverified_command_status(harness, headers))[0] == 200
+
+
+async def test_automatic_verification_waits_for_conclusive_measurements(
+    tmp_path: Path, fast_probe: None
+) -> None:
+    async with running_app(energy_settings(tmp_path)) as harness:
+        headers = await assistant_ready(harness)
+        harness.app.state.admin_store.delete(AUTO_PAUSE_KEY_PREFIX + "main")
+        seed_identity(harness, battery_w=0.0)
+        outcome = await _automatic_attempt(Request({"type": "http", "app": harness.app}), "main")
+        assert outcome.state == "retrying"
+        assert "balance" in outcome.detail
+        assert (await unverified_command_status(harness, headers))[0] != 200
 
 
 def seed_identity(

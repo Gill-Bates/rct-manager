@@ -7,7 +7,7 @@ repeating it.
 | Status          | Meaning                                                                              |
 | --------------- | ------------------------------------------------------------------------------------ |
 | **Verified**    | Confirmed by a measurement on a real inverter. The service relies on it.             |
-| **Per-device**  | Verified by an operator per inverter in the admin GUI; blocked until then.           |
+| **Per-device**  | Verified for one inverter by the background service or a measured Expert override.   |
 | **Observed**    | Seen on hardware and handled defensively, but not a guaranteed contract.             |
 | **Assumed**     | A documented working assumption; the service behaves conservatively.                 |
 | **Unverified**  | No hardware evidence. The dependent feature is off, blocked or marked as unverified. |
@@ -156,8 +156,9 @@ read-only tool does not send. The working hypothesis about persisting subscripti
 
 ## Verifying a device
 
-- **Dispatch capabilities:** per device in the admin GUI (Expert mode), with measured evidence and a
-  note; see [Battery Control](../energy/battery-control.md#hardware-verification-form-admin-api).
+- **Dispatch capabilities:** the service verifies each device in the background when evidence is
+  sufficient. Expert mode permits a measured override with a note; see
+  [Battery Control](../energy/battery-control.md#expert-hardware-verification-override-admin-api).
   Verifying one device never releases another.
 - **Logger history:** run the read-only probe with the application stopped:
   `python tools/probe_consumption_history.py --host <DEVICE_HOST> --port 8899 --pages 8`. It sends
