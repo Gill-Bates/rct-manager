@@ -17,18 +17,18 @@ repeating it.
 
 ### Consumption history
 
-| Feature or assumption                                                                                           | Status      | Evidence and consequence                                                                                              |
-| --------------------------------------------------------------------------------------------------------------- | ----------- | --------------------------------------------------------------------------------------------------------------------- |
-| `logger_day_eload_log_ts` unit and day mapping                                                                  | Verified    | Wh per local calendar day (A/B measurement below). The daily backfill is always on.                                   |
-| Day-point timestamps                                                                                            | Verified    | Local wall-clock fields, labelled UTC.                                                                                |
+| Feature or assumption                                                                                           | Status      | Evidence and consequence                                                                                                                                                  |
+| --------------------------------------------------------------------------------------------------------------- | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `logger_day_eload_log_ts` unit and day mapping                                                                  | Verified    | Wh per local calendar day (A/B measurement below). The daily backfill is always on.                                                                                       |
+| Day-point timestamps                                                                                            | Verified    | Local wall-clock fields, labelled UTC.                                                                                                                                    |
 | `before=` query boundary                                                                                        | Observed    | A/B on the tested inverter (2026-10-18) returned the boundary point only for local wall-clock fields encoded as UTC; do not generalize to other devices without checking. |
-| Repeated 23:59:59 logger points                                                                                 | Observed    | The logger may repeat one day's last point 8 to 16 times with values differing by under 1 Wh; the largest value wins. |
-| Other logger registers (for example `logger_minutes_eload_log_ts`)                                              | Unverified  | Grid and unit not clarified; not used anywhere.                                                                       |
-| Year and month history (`logger_year_eac_log_ts`, `logger_month_eac_log_ts`) for the battery commissioning date | Unverified  | Query contract not confirmed on hardware. Automatic derivation stays disabled; an operator-entered date always works. |
-| Event tables (`logger_error_log_time_stamp`)                                                                    | Unsupported | Classified read-only; the wire format is not decoded and neither unit nor timestamp semantics are verified.           |
-| Day counter reset instant and time zone                                                                         | Unverified  | Only "non-decreasing between resets" is assumed.                                                                      |
-| Total counter reset or overflow behaviour (`energy_e_load_total`)                                               | Unverified  | Resets, deltas above 50 kW, stalled counters and gaps over 24 h are rejected and counted.                             |
-| Whether the load counter includes external power                                                                | Unverified  | Not assumed either way.                                                                                               |
+| Repeated 23:59:59 logger points                                                                                 | Observed    | The logger may repeat one day's last point 8 to 16 times with values differing by under 1 Wh; the largest value wins.                                                     |
+| Other logger registers (for example `logger_minutes_eload_log_ts`)                                              | Unverified  | Grid and unit not clarified; not used anywhere.                                                                                                                           |
+| Year and month history (`logger_year_eac_log_ts`, `logger_month_eac_log_ts`) for the battery commissioning date | Unverified  | Query contract not confirmed on hardware. Automatic derivation stays disabled; an operator-entered date always works.                                                     |
+| Event tables (`logger_error_log_time_stamp`)                                                                    | Unsupported | Classified read-only; the wire format is not decoded and neither unit nor timestamp semantics are verified.                                                               |
+| Day counter reset instant and time zone                                                                         | Unverified  | Only "non-decreasing between resets" is assumed.                                                                                                                          |
+| Total counter reset or overflow behaviour (`energy_e_load_total`)                                               | Unverified  | Resets, deltas above 50 kW, stalled counters and gaps over 24 h are rejected and counted.                                                                                 |
+| Whether the load counter includes external power                                                                | Unverified  | Not assumed either way.                                                                                                                                                   |
 
 ### Battery dispatch
 
@@ -44,16 +44,17 @@ repeating it.
 
 ### Battery capacity
 
-| Feature or assumption                                                                                   | Status      | Evidence and consequence                                                                                         |
-| ------------------------------------------------------------------------------------------------------- | ----------- | ---------------------------------------------------------------------------------------------------------------- |
-| Capacity ratio `power_mng_amp_hours_measured` / `battery_ah_capacity`                                   | Unsupported | Hardware reads varied from 25.0/23.8531 Ah at 79–87 % SoC to 16.9251/8.65005 Ah near 2.5 % SoC. No automatic current capacity or calibration point is released. |
-| Ah register readability on RCT DC 10.0, firmware 2.3.5689                                              | Observed    | Both registers returned values during the 2026-10-17 characterization run. This does not validate their usable-Wh semantics. |
-| Per-tower versus device-wide meaning of `battery_placeholder_0_ah_capacity` and other battery registers | Unverified  | Unsupported tower combinations stay unavailable.                                                                 |
-| Lifetime Wh counters `battery_stored_energy` / `battery_used_energy` and `battery_efficiency`            | Observed    | Their ratio matches the efficiency of the official RCT installer app on the tested inverter (see [Installer-app counter comparison](#installer-app-counter-comparison-this-device)). Throughput, not capacity. |
-| Lifetime throughput as current usable capacity (Wh per cycle, stored minus used energy)                 | Unsupported | Lifetime throughput is not present usable capacity. No capacity is derived from it.                              |
-| `battery_soh` scale and conversion                                                                      | Unverified  | The protocol names it State of Health (`battery.soh`); scale and conversion to usable Wh are not verified. Recorded, not used. |
-| Calibration registers (`power_mng_calib_charge_power`, `power_mng_bat_calib_*`, `bat_mng_struct_bat_calib_soc_thresh*`) | Unverified  | Named in the protocol; none is verified as "last calibrated usable capacity". Recorded read-only, not used.      |
-| `power_mng_battery_type` codes                                                                          | Unsupported | Not used.                                                                                                        |
+| Feature or assumption                                                                                                   | Status      | Evidence and consequence                                                                                                                                                                                       |
+| ----------------------------------------------------------------------------------------------------------------------- | ----------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Capacity ratio `power_mng_amp_hours_measured` / `battery_ah_capacity`                                                   | Unsupported | Hardware reads varied from 25.0/23.8531 Ah at 79–87 % SoC to 16.9251/8.65005 Ah near 2.5 % SoC. No automatic current capacity or calibration point is released.                                                |
+| Ah register readability on RCT DC 10.0, firmware 2.3.5689                                                               | Observed    | Both registers returned values during the 2026-10-17 characterization run. This does not validate their usable-Wh semantics.                                                                                   |
+| Per-tower versus device-wide meaning of `battery_placeholder_0_ah_capacity` and other battery registers                 | Unverified  | Unsupported tower combinations stay unavailable.                                                                                                                                                               |
+| Lifetime Wh counters `battery_stored_energy` / `battery_used_energy` and `battery_efficiency`                           | Observed    | Their ratio matches the efficiency of the official RCT installer app on the tested inverter (see [Installer-app counter comparison](#installer-app-counter-comparison-this-device)). Throughput, not capacity. |
+| Lifetime throughput as current usable capacity (Wh per cycle, stored minus used energy)                                 | Unsupported | Lifetime throughput is not present usable capacity. No capacity is derived from it.                                                                                                                            |
+| `battery_soh` scale and conversion                                                                                      | Unverified  | The protocol names it State of Health (`battery.soh`); scale and conversion to usable Wh are not verified. Recorded, not used.                                                                                 |
+| `battery_status` and `battery_bat_status` as calibration indicators                                                     | Unverified  | Both are recorded as additional BMS-state evidence, but no calibration meaning has been established.                                                                                                           |
+| Calibration registers (`power_mng_calib_charge_power`, `power_mng_bat_calib_*`, `bat_mng_struct_bat_calib_soc_thresh*`) | Unverified  | Named in the protocol; none is verified as "last calibrated usable capacity". Recorded read-only, not used.                                                                                                    |
+| `power_mng_battery_type` codes                                                                                          | Unsupported | Not used.                                                                                                                                                                                                      |
 
 ### Protocol
 
@@ -67,15 +68,15 @@ repeating it.
 
 Device: RCT DC 10.0 Steiner, firmware 2.3.5689. These observations apply to this device and run.
 
-| Observation | Status | Evidence and limit |
-| ----------- | ------ | ------------------ |
-| Primary tower topology | Observed | Three inventory passes found six populated module serial slots (0–5); slot 6 was empty. |
-| Second tower | Observed | Classified absent during this run. |
-| `power_mng_n_batteries` | Observed | Read as `1`, consistent with the observed single tower. |
-| Ah registers | Observed | `power_mng_amp_hours_measured` read as 23.8530769348 Ah and `battery_ah_capacity` as 25.0 Ah. Both reads succeeded; later readings at low SoC differed, so their ratio is not an established usable-capacity health factor. |
-| Normal reads | Observed | `battery_soc_target` and `household_load_power` succeeded at approximately T+5, T+30, T+60 and T+300 seconds: eight successful reads without a reconnect. No instability was reproduced in this five-minute run. |
-| `READ_PERIODICALLY` registration | Not exercised in these runs | The probe ran read-only (`invasive = false`, `registration_probes` empty, "No periodic registration was made"), so no registration was attempted; this run neither confirms nor denies a registration failure. |
-| Periodic push delivery and subscription persistence | Unverified | The probe did not write `pas.period`, observe subsequent push cycles or test a reconnect. |
+| Observation                                         | Status                      | Evidence and limit                                                                                                                                                                                                          |
+| --------------------------------------------------- | --------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Primary tower topology                              | Observed                    | Three inventory passes found six populated module serial slots (0–5); slot 6 was empty.                                                                                                                                     |
+| Second tower                                        | Observed                    | Classified absent during this run.                                                                                                                                                                                          |
+| `power_mng_n_batteries`                             | Observed                    | Read as `1`, consistent with the observed single tower.                                                                                                                                                                     |
+| Ah registers                                        | Observed                    | `power_mng_amp_hours_measured` read as 23.8530769348 Ah and `battery_ah_capacity` as 25.0 Ah. Both reads succeeded; later readings at low SoC differed, so their ratio is not an established usable-capacity health factor. |
+| Normal reads                                        | Observed                    | `battery_soc_target` and `household_load_power` succeeded at approximately T+5, T+30, T+60 and T+300 seconds: eight successful reads without a reconnect. No instability was reproduced in this five-minute run.            |
+| `READ_PERIODICALLY` registration                    | Not exercised in these runs | The probe ran read-only (`invasive = false`, `registration_probes` empty, "No periodic registration was made"), so no registration was attempted; this run neither confirms nor denies a registration failure.              |
+| Periodic push delivery and subscription persistence | Unverified                  | The probe did not write `pas.period`, observe subsequent push cycles or test a reconnect.                                                                                                                                   |
 
 The 23.8530769348/25.0 Ah ratio would make the six-module rated baseline approximately 9.89 kWh
 if used as a health factor. That calculation alone is not an independent charge/discharge capacity
@@ -108,12 +109,12 @@ it does not generalize to every RCT DC 10.0 or every firmware.
 
 ### Battery topology (this device)
 
-| Observation                                                       | Status                      |
-| ----------------------------------------------------------------- | --------------------------- |
-| Primary tower present with six populated module serial slots (0–5) | Observed on this device     |
-| Primary tower slot 6 empty; three inventory passes                | Observed on this device     |
-| Placeholder tower absent (no populated module serials)            | Observed on this device     |
-| `power_mng_n_batteries = 1`                                       | Consistent with the observed topology |
+| Observation                                                        | Status                                |
+| ------------------------------------------------------------------ | ------------------------------------- |
+| Primary tower present with six populated module serial slots (0–5) | Observed on this device               |
+| Primary tower slot 6 empty; three inventory passes                 | Observed on this device               |
+| Placeholder tower absent (no populated module serials)             | Observed on this device               |
+| `power_mng_n_batteries = 1`                                        | Consistent with the observed topology |
 
 The placeholder tower reports `present = false` with `module_count = null` and
 `module_count_status = pending`; `present` is the authoritative signal here. `pending` on an absent
@@ -137,20 +138,24 @@ to the admin database (UTC days; finished days are gzip-compressed, files older 
 deleted). Each line has a `type`, a UTC `timestamp`, a `monotonic` time, the device, inverter and
 BMS identity and the rated capacity of the settled module inventory:
 
-| `type`              | Content                                                                                                  |
-| ------------------- | -------------------------------------------------------------------------------------------------------- |
-| `periodic_fast`     | Every 15 s from the cache, no extra device read: `battery_soc`, `battery_power`, `battery_status2`        |
-| `periodic_counters` | Every minute, read fresh: `battery_stored_energy`, `battery_used_energy`, `battery_charged_amp_hours`, `battery_discharged_amp_hours`, `battery_efficiency` |
-| `periodic_slow`     | Every 5 minutes, read fresh: both Ah registers, `power_mng_amp_hours`, `battery_soh`, `battery_cycles`, `battery_status2`, `power_mng_bat_next_calib_date`, `power_mng_calib_charge_power`, `power_mng_bat_calib_reqularity`, `power_mng_bat_calib_days_in_advance`, `bat_mng_struct_bat_calib_soc_thresh`, `bat_mng_struct_bat_calib_soc_threshold`, `battery_bms_sn` |
-| `status_transition` | When the cached `battery_status2` changes: all counter and slow values, with the status before and after |
-| `candidate_change`  | A fresh read of `power_mng_bat_next_calib_date`, `power_mng_calib_charge_power`, `battery_soh`, `power_mng_amp_hours_measured` or `battery_ah_capacity` differs from the previous fresh read: `register`, `before`, `after` |
-| `calibration_window_hint` | A `battery_status2` transition where either side has a community-observed "Calibrating" bit (`0x008`, `0x400`) |
+| `type`                    | Content                                                                                                                                                                                                                                                                              |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `periodic_fast`           | Every 15 s from the cache, no extra device read: `battery_soc`, `battery_power`, `battery_status2`                                                                                                                                                                                   |
+| `periodic_counters`       | Every minute, read fresh: the four cumulative Wh/Ah counters (`battery_stored_energy`, `battery_used_energy`, `battery_charged_amp_hours`, `battery_discharged_amp_hours`)                                                                                                           |
+| `periodic_slow`           | Every 5 minutes, read fresh: both Ah capacity candidates, `power_mng_amp_hours`, `battery_soh`, `battery_cycles`, `battery_status2`, `battery_status`, `battery_bat_status`, `power_mng_bat_next_calib_date`, `power_mng_calib_charge_power`, `battery_efficiency`, `battery_bms_sn` |
+| `periodic_config`         | On the first recorder tick for each inverter and then every 24 hours, read fresh: `power_mng_bat_calib_reqularity`, `power_mng_bat_calib_days_in_advance`, `bat_mng_struct_bat_calib_soc_thresh`, `bat_mng_struct_bat_calib_soc_threshold`                                           |
+| `status_transition`       | When the cached `battery_status2` changes: all counter, slow and calibration-configuration values, with the status before and after                                                                                                                                                  |
+| `candidate_change`        | A fresh `power_mng_bat_next_calib_date` differs from its previous fresh value: `register`, `before`, `after`                                                                                                                                                                         |
+| `calibration_window_hint` | A `battery_status2` transition where either side has a community-observed "Calibrating" bit (`0x008`, `0x400`)                                                                                                                                                                       |
 
 Cached values carry `status`, `age_seconds`, `sample_monotonic` and `sample_measured_at`; fresh
 reads carry `status` and `measured_at`. Every value carries a status (`fresh`, `stale`, `missing`,
 `error`, `skipped_busy` while the device queue is busy, `not_in_catalog`); gaps are never filled in
-or interpolated. `candidate_change` and `calibration_window_hint` are marked `evidence_only: true`
-and `verified: false`: they say where to look, not that a calibration finished or what it measured.
+or interpolated. `battery_status` and `battery_bat_status` are additional BMS-state evidence; their
+calibration meaning is unverified. The SoC-dependent Ah values and `battery_soh` remain in the raw
+`periodic_slow` records without change events or a float threshold. `candidate_change` and
+`calibration_window_hint` are marked `evidence_only: true` and `verified: false`: they say where to
+look, not that a calibration finished or what it measured.
 The recording changes nothing the service plans or reports: neither the planner, Battery Health nor
 `calibration_sample()` reads it, and no register is written.
 
@@ -162,14 +167,14 @@ become a calibration sample, in a separate change.
 
 The official RCT installer app showed on the tested inverter:
 
-| Value                      | Installer app  |
-| -------------------------- | -------------- |
-| Stored (charged) energy    | 9,814,451 Wh   |
-| Used (discharged) energy   | 9,162,862 Wh   |
-| Battery efficiency         | 0.93           |
-| Cycles                     | 1101           |
-| Charged Ah                 | ~19,016.32 Ah  |
-| Discharged Ah              | 18,233.95 Ah   |
+| Value                    | Installer app |
+| ------------------------ | ------------- |
+| Stored (charged) energy  | 9,814,451 Wh  |
+| Used (discharged) energy | 9,162,862 Wh  |
+| Battery efficiency       | 0.93          |
+| Cycles                   | 1101          |
+| Charged Ah               | ~19,016.32 Ah |
+| Discharged Ah            | 18,233.95 Ah  |
 
 Topology: six modules, rated usable capacity 10.368 kWh.
 
@@ -207,11 +212,11 @@ executed registration. These runs therefore establish only stable normal reads (
 exercise `READ_PERIODICALLY` registration, and periodic behaviour is explicitly "not tested in this
 mode".
 
-| Behaviour                                                                 | Status                         |
-| ------------------------------------------------------------------------- | ------------------------------ |
-| `READ_PERIODICALLY` registration for the two probed objects               | Not exercised in these runs    |
-| Actual periodic pushes after setting `pas.period`                         | Unverified                     |
-| Persistence of a subscription across reconnect or session                 | Unverified                     |
+| Behaviour                                                   | Status                      |
+| ----------------------------------------------------------- | --------------------------- |
+| `READ_PERIODICALLY` registration for the two probed objects | Not exercised in these runs |
+| Actual periodic pushes after setting `pas.period`           | Unverified                  |
+| Persistence of a subscription across reconnect or session   | Unverified                  |
 
 Actual periodic push delivery was never exercised: it needs a `pas.period` write, which the
 read-only tool does not send. The working hypothesis about persisting subscriptions stays open; see

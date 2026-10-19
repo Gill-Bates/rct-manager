@@ -40,6 +40,7 @@ FILE_PREFIX = "battery-diagnostics-"
 FAST_INTERVAL_SECONDS = 15.0
 COUNTER_INTERVAL_SECONDS = 60.0
 SLOW_INTERVAL_SECONDS = 300.0
+CONFIG_INTERVAL_SECONDS = 86400.0
 RETENTION_DAYS = 60
 # Startup belongs to discovery and the first live reads; the recorder joins after it.
 STARTUP_DELAY_SECONDS = 60.0
@@ -52,10 +53,8 @@ COUNTER_NAMES = (
     "battery_used_energy",
     "battery_charged_amp_hours",
     "battery_discharged_amp_hours",
-    "battery_efficiency",
 )
-# Slow-moving calibration candidates and settings, read fresh every five minutes and on a status
-# change. Only reads: the settings registers are writable on the device but never written here.
+# Slow-moving calibration candidates and BMS status, read fresh every five minutes.
 SLOW_NAMES = (
     "battery_ah_capacity",
     "power_mng_amp_hours_measured",
@@ -63,24 +62,25 @@ SLOW_NAMES = (
     "battery_soh",
     "battery_cycles",
     "battery_status2",
+    "battery_status",
+    "battery_bat_status",
+    "battery_efficiency",
     "power_mng_bat_next_calib_date",
     "power_mng_calib_charge_power",
+    "battery_bms_sn",
+)
+# Configuration is read at the first tick, every 24 hours, and on status transitions.
+# These settings are writable on the device; the recorder only reads them.
+CONFIG_NAMES = (
     "power_mng_bat_calib_reqularity",
     "power_mng_bat_calib_days_in_advance",
     "bat_mng_struct_bat_calib_soc_thresh",
     "bat_mng_struct_bat_calib_soc_threshold",
-    "battery_bms_sn",
 )
 STATUS_NAME = "battery_status2"
 BMS_NAME = "battery_bms_sn"
 # A change between two fresh reads of these is written as an unverified candidate_change.
-CANDIDATE_NAMES = (
-    "power_mng_bat_next_calib_date",
-    "power_mng_calib_charge_power",
-    "battery_soh",
-    "power_mng_amp_hours_measured",
-    "battery_ah_capacity",
-)
+CANDIDATE_NAMES = ("power_mng_bat_next_calib_date",)
 # Community-observed "Calibrating" bits of battery_status2 (see app.admin.api); not RCT-documented.
 CALIBRATING_STATUS_BITS = 0x008 | 0x400
 
@@ -118,6 +118,7 @@ class BatteryDiagnosticsRecorder:
         self._capacity = capacity_source
         self._next_counters: dict[str, float] = {}
         self._next_slow: dict[str, float] = {}
+        self._next_config: dict[str, float] = {}
         self._last_status: dict[str, object] = {}
         self._last_candidates: dict[tuple[str, str], dict] = {}
         self._failing: set[tuple[str, str]] = set()
@@ -150,7 +151,9 @@ class BatteryDiagnosticsRecorder:
         if status is not None:
             self._last_status[device_id] = status
         if status is not None and previous is not None and status != previous:
-            snapshot = await self._fresh(device_id, (*COUNTER_NAMES, *SLOW_NAMES))
+            snapshot = await self._fresh(
+                device_id, (*COUNTER_NAMES, *SLOW_NAMES, *CONFIG_NAMES)
+            )
             records.append(
                 self._record(
                     "status_transition",
@@ -191,6 +194,10 @@ class BatteryDiagnosticsRecorder:
             records.extend(
                 self._candidates(device_id, values, "periodic_slow", topology)
             )
+        if monotonic >= self._next_config.get(device_id, monotonic):
+            self._next_config[device_id] = monotonic + CONFIG_INTERVAL_SECONDS
+            values = await self._fresh(device_id, CONFIG_NAMES)
+            records.append(self._record("periodic_config", device_id, values, topology))
         await asyncio.to_thread(self._write, records)
 
     def _candidates(
