@@ -1962,11 +1962,11 @@ body {
     }
 }
 
-/* Charging plan KPI strip: three plan tiles (reuses .spot-market-highlight); 2 on tablet,
+/* Charging plan KPI strip: four plan tiles (reuses .spot-market-highlight); 2 on tablet,
    stacked on phones. Spot Market and Weather keep their own two-column .spot-market-highlights. */
 .energy-plan-highlights {
     display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-columns: repeat(4, minmax(0, 1fr));
     gap: .75rem;
 }
 

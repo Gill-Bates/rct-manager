@@ -992,10 +992,6 @@ function planSchedule(plan, detailsOpen = false) {
   section.append(title);
   if (!plan.slots.length) {
     section.append(element('p', 'text-secondary small mt-2', 'No scheduled slots.'));
-    if (plan.today && plan.tomorrow) {
-      section.append(planDailySchedule('Today', plan.today, 'energy-plan-charge-schedule'));
-      section.append(planDailySchedule('Tomorrow', plan.tomorrow, 'energy-plan-charge-schedule-tomorrow'));
-    }
     return { section, canvas: null };
   }
   let canvas = null;
@@ -1009,27 +1005,18 @@ function planSchedule(plan, detailsOpen = false) {
   } else {
     section.append(element('p', 'text-danger small', 'Chart library could not be loaded.'));
   }
-  if (plan.today && plan.tomorrow) {
-    section.append(planDailySchedule('Today', plan.today, 'energy-plan-charge-schedule'));
-    section.append(planDailySchedule('Tomorrow', plan.tomorrow, 'energy-plan-charge-schedule-tomorrow'));
-  } else {
-    section.append(planChargeSchedule(plan.slots));
-  }
+  section.append(planChargeSchedule(plan.slots));
   section.append(planScheduleDetails(plan.slots, detailsOpen));
   return { section, canvas };
 }
 
-function planDailySchedule(label, day, id) {
-  const section = element('section', 'mt-3');
-  section.append(element('h4', 'h6 mb-1', `${label} · ${day.date}`));
-  if (day.status === 'pending') {
-    section.append(element('p', 'text-secondary small mb-0', 'Waiting for tomorrow’s spot prices. Today’s plan remains available.'));
-  } else if (day.status !== 'ok') {
-    section.append(element('p', 'text-secondary small mb-0', 'No plan available for this day yet.'));
-  } else {
-    section.append(planChargeSchedule(day.slots || [], id));
-  }
-  return section;
+// One KPI line per calendar day: the day views share one plan, so only their state differs.
+function planDayLabel(day) {
+  if (!day || day.status === 'unavailable') return 'Not available yet';
+  if (day.status === 'pending') return 'Waiting for spot prices';
+  const windows = planSlotRuns((day.slots || []).filter((slot) => slot.action === 'charge')).length;
+  if (!windows) return 'No grid charging';
+  return windows === 1 ? '1 charging window' : `${windows} charging windows`;
 }
 
 // Stacked-card tables (data-table-stack, admin.css): every cell carries its column name in data-label.
@@ -1141,8 +1128,9 @@ function planTechnicalDetails(plan) {
 }
 
 const PLAN_CONFIDENCE_LABELS = { low: 'Low confidence', normal: 'Normal confidence' };
-// Every ForecastBasis value (app/optimizer/models.py) except the baseline shows its confidence.
-const PLAN_CONFIDENCE_BASES = new Set(['adaptive_history', 'history_fallback']);
+// Every ForecastBasis value (app/optimizer/models.py) is listed; a plan on the configured
+// baseline deliberately shows no chip.
+const PLAN_CONFIDENCE_BASES = { adaptive_history: true, history_fallback: true, bootstrap_baseline: false };
 
 // Forecast confidence next to the execution state, from forecast_basis / forecast_confidence only;
 // a missing field hides the part instead of inventing a state.
@@ -1150,12 +1138,11 @@ function renderPlanConfidence(plan) {
   const label = $('energy-plan-confidence');
   if (!label) return;
   const ok = plan.status === 'ok';
-  const text = !ok ? '' : plan.forecast_basis === 'bootstrap_baseline' ? 'Baseline forecast'
-    : PLAN_CONFIDENCE_BASES.has(plan.forecast_basis) ? (PLAN_CONFIDENCE_LABELS[plan.forecast_confidence] || '') : '';
+  const text = ok && PLAN_CONFIDENCE_BASES[plan.forecast_basis] === true
+    ? (PLAN_CONFIDENCE_LABELS[plan.forecast_confidence] || '') : '';
   label.hidden = !text;
   label.textContent = text;
-  const explanation = text === 'Low confidence' ? 'Limited consumption history'
-    : text === 'Baseline forecast' ? 'Conservative household baseline while consumption history is collected' : '';
+  const explanation = text === 'Low confidence' ? 'Limited consumption history' : '';
   if (explanation) {
     label.title = explanation;
     label.setAttribute('aria-label', `${text}: ${explanation}`);
@@ -1209,6 +1196,9 @@ function renderDryRunPlan(plan) {
   add('Target SoC', next && known(next.target_soc_percent) ? `${Math.round(next.target_soc_percent)} %` : '—', 'battery_charging_full');
   add('Charge power', next && known(next.max_power_w) ? formatPower(next.max_power_w) : '—', 'bolt');
   add('Total plan grid energy', known(plan.energy?.grid_charge_energy_wh) ? planKwh(plan.energy.grid_charge_energy_wh) : '—', 'electric_meter');
+  if (plan.today && plan.tomorrow) {
+    add('Grid charging by day', `Today: ${planDayLabel(plan.today)}`, 'calendar_month', `Tomorrow: ${planDayLabel(plan.tomorrow)}`);
+  }
   card.append(summary);
   // The battery is an input of the plan, not an output: a quiet labelled line, not another KPI.
   const batteryLine = element('p', 'energy-plan-battery d-flex flex-wrap align-items-center gap-2 small text-secondary mt-3 mb-0');

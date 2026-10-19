@@ -3013,6 +3013,9 @@ class _DayAheadSpotProvider:
             raise SpotMarketNotAvailableYet("next-day prices are not published yet")
         return self._day(config, self._today() + timedelta(days=1))
 
+    def fetch_bidding_zones(self):
+        raise SpotMarketConnectionError("bidding zones are not part of this fake")
+
 
 class _ThreeDaySolarProvider:
     def fetch_preview(self, config, now):
@@ -3252,6 +3255,101 @@ async def test_published_tomorrow_becomes_today_after_local_midnight(
             "slots": [],
         }
         _assert_one_contiguous_plan(plan)
+
+
+async def _eventually(condition, timeout: float = 5.0) -> None:
+    """Await background work well inside the 300 s planning tick; fail instead of outwaiting it."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while not condition():
+        assert loop.time() < deadline, "the background planner did not react"
+        await asyncio.sleep(0.02)
+
+
+async def test_stored_forecast_data_wakes_the_background_planner(
+    tmp_path: Path,
+) -> None:
+    from unittest.mock import patch
+
+    clock = _PinnedWallClock(datetime(2026, 3, 10, 10, 7, tzinfo=BERLIN))
+    spot_provider = _DayAheadSpotProvider(clock)
+    with (
+        patch("app.api.app_factory.EnergyChartsProvider", return_value=spot_provider),
+        patch(
+            "app.api.app_factory.OpenMeteoProvider",
+            return_value=_ThreeDaySolarProvider(),
+        ),
+    ):
+        async with running_app(
+            _module_inventory_settings(tmp_path), clock=clock
+        ) as harness:
+            runtime = harness.runtime
+            _stub_weather_timezone(harness)
+            _seed_battery_readings(runtime)
+            service = harness.app.state.planning_services["main"]
+            # Observe, never drive: every background recompute result is recorded here.
+            results: list = []
+            recompute_once = service._recompute_once
+
+            async def observed():
+                plan = await recompute_once()
+                results.append(plan)
+                return plan
+
+            service._recompute_once = observed
+            today = datetime(2026, 3, 10).date()
+            today_end = _local_midnight(today + timedelta(days=1))
+            tomorrow_end = _local_midnight(today + timedelta(days=2))
+
+            # Manual without forecasts: the planner finds nothing and goes back to its long tick.
+            await arm(harness, mode="manual")
+            await _eventually(lambda: results and results[-1] is None)
+            headers = await admin_session(harness)
+            for path, body in (
+                (SPOT_CONFIG, _spot_body()),
+                (WEATHER_CONFIG, _weather_body()),
+            ):
+                response = await harness.client.put(path, headers=headers, json=body)
+                assert response.status_code == 200, response.text
+
+            # The background refreshes store today and wake the planner; no recompute() call here.
+            await _eventually(lambda: service.current_view() is not None)
+            assert service.current_view().plan.slots[-1].end == today_end
+            plan = await _plan_body(harness, headers)
+            assert (
+                plan["status"],
+                plan["today"]["status"],
+                plan["tomorrow"]["status"],
+            ) == (
+                "ok",
+                "ok",
+                "pending",
+            )
+
+            # After the publication grace an unpublished auction is a failed refresh, not a lost plan.
+            # Setting the refresh event stands in for the loop's own wake-up at the pinned time.
+            clock.set(
+                day_ahead_available_from(today + timedelta(days=1)) + PUBLICATION_GRACE
+            )
+            _seed_battery_readings(runtime)
+            computed = len(results)
+            harness.app.state.spotmarket_refresh_event.set()
+            await _eventually(
+                lambda: "not published"
+                in str(harness.app.state.admin_store.get("spot_refresh_status") or "")
+            )
+            service.request_recompute()
+            await _eventually(lambda: len(results) > computed)
+            assert service.current_view().plan.slots[-1].end == today_end
+
+            spot_provider.tomorrow_published = True
+            harness.app.state.spotmarket_refresh_event.set()
+            await _eventually(
+                lambda: service.current_view() is not None
+                and service.current_view().plan.slots[-1].end == tomorrow_end
+            )
+            plan = await _plan_body(harness, headers)
+            assert (plan["today"]["status"], plan["tomorrow"]["status"]) == ("ok", "ok")
 
 
 async def test_spot_market_config_defaults_then_saves_and_reloads(

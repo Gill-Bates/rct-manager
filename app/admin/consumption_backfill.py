@@ -100,8 +100,10 @@ class ConsumptionHistoryBackfillService:
         timezone: Callable[[], str],
         device_ids: Callable[[], Sequence[str]],
         is_ready: Callable[[str], bool],
+        wake: asyncio.Event | None = None,
     ) -> None:
         self._provider = provider
+        self._wake = wake
         self._store = store
         self._clock = clock
         self._timezone = timezone
@@ -109,19 +111,36 @@ class ConsumptionHistoryBackfillService:
         self._is_ready = is_ready
         self._next_run: dict[str, datetime] = {}
         self._was_ready: dict[str, bool] = {}
+        # Daily totals are bound to the zone they were reconciled in, so a new zone is due at once.
+        self._run_zone: dict[str, str] = {}
 
     async def run(self) -> None:
         """Check readiness periodically and backfill when due; never raises except on cancellation."""
-        await self._clock.sleep(STARTUP_DELAY_SECONDS)
+        await self._pause(STARTUP_DELAY_SECONDS)
         while True:
             try:
                 await self.run_due_once()
             except Exception:
                 log.exception("Daily consumption backfill cycle failed")
-            await self._clock.sleep(CHECK_INTERVAL_SECONDS)
+            await self._pause(CHECK_INTERVAL_SECONDS)
+
+    async def _pause(self, seconds: float) -> None:
+        """Sleep until the next check, or less when ``wake`` is set; several wakes collapse to one."""
+        if self._wake is None:
+            await self._clock.sleep(seconds)
+            return
+        sleeper = asyncio.ensure_future(self._clock.sleep(seconds))
+        waiter = asyncio.ensure_future(self._wake.wait())
+        try:
+            await asyncio.wait({sleeper, waiter}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            for task in (sleeper, waiter):
+                task.cancel()
+            self._wake.clear()
 
     async def run_due_once(self) -> None:
         now = self._clock.now()
+        zone_name = self._timezone() or "UTC"
         for device_id in sorted(self._device_ids()):
             ready = self._is_ready(device_id)
             reconnected = ready and self._was_ready.get(device_id) is False
@@ -129,8 +148,10 @@ class ConsumptionHistoryBackfillService:
             if not ready:
                 continue
             due = self._next_run.get(device_id)
-            if due is not None and now < due and not reconnected:
+            zone_changed = self._run_zone.get(device_id, zone_name) != zone_name
+            if due is not None and now < due and not reconnected and not zone_changed:
                 continue
+            self._run_zone[device_id] = zone_name
             ok = await self.backfill_device(device_id)
             self._next_run[device_id] = self._clock.now() + (
                 SUCCESS_INTERVAL if ok else RETRY_INTERVAL

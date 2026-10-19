@@ -893,7 +893,7 @@ test('Charging plan shows forecast confidence from the plan fields and explains 
     [{ forecast_basis: 'adaptive_history', forecast_confidence: 'normal' }, 'Normal confidence', ''],
     [{ forecast_basis: 'history_fallback', forecast_confidence: 'low' }, 'Low confidence', 'Limited consumption history'],
     [{ forecast_basis: 'history_fallback', forecast_confidence: 'normal' }, 'Normal confidence', ''],
-    [{ forecast_basis: 'bootstrap_baseline', forecast_confidence: 'low' }, 'Baseline forecast', 'Conservative household baseline while consumption history is collected'],
+    [{ forecast_basis: 'bootstrap_baseline', forecast_confidence: 'low' }, '', ''],
     [{ forecast_basis: 'adaptive_history', forecast_confidence: 'unknown' }, '', ''],
     [{ forecast_basis: 'unknown', forecast_confidence: 'low' }, '', ''],
     [{}, '', ''],
@@ -1042,27 +1042,22 @@ test('Charging schedule details stay open across a plan refresh', () => {
   assert.equal(h.byId.get('energy-plan-schedule-details').open, true, 'opened details survive the re-render');
 });
 
-test('today stays visible while tomorrow awaits spot prices, then shows its own schedule', () => {
-  const h = harness();
-  h.context.formatPower = (w) => `${w} W`;
-  h.context.element('div').id = 'energy-plan-result';
-  const schedule = h.context.element('div');
-  schedule.id = 'energy-plan-schedule';
+const dayTile = (plan) => planTiles(plan).find((tile) => tile.caption === 'Grid charging by day');
+
+test('the day KPI tile shows today and a pending tomorrow, then tomorrow’s own windows', () => {
   const todaySlot = { start: '2026-01-01T10:00:00Z', end: '2026-01-01T10:15:00Z', action: 'charge', max_power_w: 2000, target_soc_percent: 80, reason: 'forecast deficit, charged as late as permitted' };
   const tomorrowSlot = { ...todaySlot, start: '2026-01-02T10:00:00Z', end: '2026-01-02T10:15:00Z' };
-  const base = { status: 'ok', horizon_hours: 14, energy: {}, window: {}, slots: [todaySlot],
+  const base = { slots: [todaySlot],
     today: { date: '2026-01-01', status: 'ok', slots: [todaySlot] },
     tomorrow: { date: '2026-01-02', status: 'pending', slots: [] } };
-  h.context.renderDryRunPlan(base);
-  assert.equal(bodyRows(h.byId.get('energy-plan-charge-schedule')).length, 1);
-  assert.match(flatten(schedule).map((n) => n.textContent).join(' '), /Waiting for tomorrow’s spot prices/);
-  assert.equal(h.byId.get('energy-plan-charge-schedule-tomorrow'), undefined);
-
-  h.context.renderDryRunPlan({ ...base, slots: [todaySlot, tomorrowSlot], horizon_hours: 38,
-    tomorrow: { date: '2026-01-02', status: 'ok', slots: [tomorrowSlot] } });
-  assert.equal(bodyRows(h.byId.get('energy-plan-charge-schedule')).length, 1);
-  assert.equal(bodyRows(h.byId.get('energy-plan-charge-schedule-tomorrow')).length, 1);
-  assert.doesNotMatch(flatten(schedule).map((n) => n.textContent).join(' '), /Waiting for tomorrow’s spot prices/);
+  assert.equal(planTiles(base).length, 4);
+  assert.deepEqual(dayTile(base), { caption: 'Grid charging by day', value: 'Today: 1 charging window', sub: 'Tomorrow: Waiting for spot prices' });
+  assert.deepEqual(dayTile({ ...base, slots: [todaySlot, tomorrowSlot],
+    tomorrow: { date: '2026-01-02', status: 'ok', slots: [tomorrowSlot] } }).sub, 'Tomorrow: 1 charging window');
+  assert.equal(dayTile({ ...base, today: { date: '2026-01-01', status: 'ok', slots: [] },
+    tomorrow: { date: '2026-01-02', status: 'unavailable', slots: [] } }).value, 'Today: No grid charging');
+  // Without day views (an older backend) the strip keeps its three plan tiles.
+  assert.equal(planTiles({ slots: [todaySlot] }).length, 3);
 });
 
 test('the backend response for an unpublished tomorrow renders today without the wait card', () => {
@@ -1077,9 +1072,9 @@ test('the backend response for an unpublished tomorrow renders today without the
   schedule.id = 'energy-plan-schedule';
   h.context.renderDryRunPlan(plan);
   assert.equal(flatten(result).some((n) => String(n.className || '').includes('plan-loading-icon')), false);
-  assert.equal(bodyRows(h.byId.get('energy-plan-charge-schedule')).length, plan.today.slots.length);
-  assert.match(flatten(schedule).map((n) => n.textContent).join(' '), /Waiting for tomorrow’s spot prices/);
-  assert.equal(h.byId.get('energy-plan-charge-schedule-tomorrow'), undefined);
+  assert.deepEqual(dayTile(plan), { caption: 'Grid charging by day', value: 'Today: No grid charging', sub: 'Tomorrow: Waiting for spot prices' });
+  // The day state lives in the KPI strip only; the schedule below no longer repeats it per day.
+  assert.doesNotMatch(flatten(schedule).map((n) => n.textContent).join(' '), /Today ·|Tomorrow ·|Waiting for/);
 });
 
 function renderPlan(slots) {

@@ -1876,6 +1876,9 @@ async def put_weather_config(
             return previous, identity_changed
 
     previous, identity_changed = await asyncio.to_thread(_save_weather)
+    if (previous.timezone if previous is not None else None) != config.timezone:
+        # Stored daily totals belong to the old site zone; reconcile them under the new one now.
+        _signal_forecast_refresh(request, "consumption_backfill_event")
     if config.is_forecastable() and (
         identity_changed
         or (previous is not None and previous.enabled != config.enabled)

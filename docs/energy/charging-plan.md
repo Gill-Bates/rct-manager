@@ -285,10 +285,13 @@ provider query is made.
 Basic mode shows the capacity source and the read-only preview ("Dynamic charging plan (Dry-Run
 preview)"). The result area uses the full card width:
 
-- Header: title with the forecast confidence (for adaptive history and the stored-history fallback) or "Baseline forecast" when the plan uses the configured baseline, when available on one line, preview note, Inverter select, Expert switch.
-- Three equal KPI tiles (three columns on desktop, 2 + 1 on tablets, stacked on phones): Target SoC,
-  Charge power and total plan grid energy. Current battery state is a separate, quieter line below
-  them: SoC and remaining/usable energy (or "Not available" without a battery snapshot).
+- Header: title with the forecast confidence (for adaptive history and the stored-history fallback; a plan on the configured baseline shows none), when available on one line, preview note, Inverter select, Expert switch.
+- Four equal KPI tiles (four columns on desktop, 2 + 2 on tablets, stacked on phones): Target SoC,
+  Charge power, total plan grid energy and **Grid charging by day**. The day tile has one line for
+  today and one for tomorrow: the number of charging windows, "No grid charging", "Waiting for spot
+  prices" while tomorrow's auction is unpublished, or "Not available yet". Current battery state is
+  a separate, quieter line below them: SoC and remaining/usable energy (or "Not available" without a
+  battery snapshot).
 - The schedule as a time-series chart (the temporal overview): grid charge power (kW, idle slots at
   0) and target SoC (%, second axis) on a real time axis, so slots of uneven length keep their
   length. The tooltip shows only what applies: an idle slot reads "No grid charging" plus the

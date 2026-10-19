@@ -1217,6 +1217,7 @@ def _lifespan(
                             lambda: list(runtime.devices),
                             lambda device_id: gateway.device_status(device_id).state
                             in READY_STATES,
+                            wake=getattr(app.state, "consumption_backfill_event", None),
                         ).run()
                     )
                 )
@@ -1622,6 +1623,7 @@ def _lifespan(
         if store is not None:
             app.state.spotmarket_refresh_event = asyncio.Event()
             app.state.weather_refresh_event = asyncio.Event()
+            app.state.consumption_backfill_event = asyncio.Event()
 
         # Capture this app's own TSDB-relevant log records as ``tsdb.log`` events on the hub. Additive:
         # the stdout handler from setup_logging stays untouched. Bind the running loop so a record
