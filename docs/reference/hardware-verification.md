@@ -120,10 +120,29 @@ absent towers out, so it never shows a scan state for one.
 
 `power_mng_amp_hours_measured ≈ 23.853 Ah` and `battery_ah_capacity = 25.0 Ah` were both read
 successfully. One read of `power_mng_amp_hours_measured` later in the same run timed out; the
-cache freshness and retry handling absorb such a single timeout. With six modules the derived usable
-energy is `6 × 1.92 kWh × 0.9 × min(1, 23.853 / 25) ≈ 9.89 kWh`, which matches the value the service
-shows. This confirms the registers are readable and the formula is applied correctly on this device;
-it is not an independent capacity calibration.
+cache freshness and retry handling absorb such a single timeout. At the time of this run the service
+still scaled the rated capacity by the Ah ratio (`6 × 1.92 kWh × 0.9 × 23.853 / 25 ≈ 9.89 kWh`).
+That is historical: the ratio proved SoC-dependent (see above), so the service now uses the rated
+usable capacity of the module topology only, `6 × 1.92 kWh × 0.9 ≈ 10.37 kWh`.
+
+### Calibration evidence recording
+
+To find out which register proves a completed BMS calibration, the service records read-only
+evidence per inverter in daily files `battery-diagnostics/battery-diagnostics-YYYY-MM-DD.jsonl` next
+to the admin database (UTC days; finished days are gzip-compressed, files older than 60 days are
+deleted). Each line has a `type`, a UTC `timestamp`, a `monotonic` time, the device, inverter and
+BMS identity and the rated capacity of the settled module inventory:
+
+| `type`              | Content                                                                                                  |
+| ------------------- | -------------------------------------------------------------------------------------------------------- |
+| `periodic_fast`     | Every 15 s from the cache, no extra device read: `battery_soc`, `battery_power`, `battery_status2`        |
+| `periodic_counters` | Every minute, read fresh: `battery_stored_energy`, `battery_used_energy`                                  |
+| `periodic_slow`     | Every 5 minutes, read fresh: both Ah registers, `power_mng_amp_hours`, `battery_soh`, `battery_cycles`, `battery_status2`, `power_mng_bat_next_calib_date`, `battery_bms_sn` |
+| `status_transition` | When the cached `battery_status2` changes: all values above, with the status before and after           |
+
+Every value carries a status (`fresh`, `stale`, `missing`, `error`, `skipped_busy` while the device
+queue is busy, `not_in_catalog`); gaps are never filled in. The recording changes nothing the
+service plans or reports: neither the planner, Battery Health nor `calibration_sample()` reads it.
 
 ### Normal reads (this device)
 

@@ -1298,6 +1298,19 @@ class RctGateway:
             return None
         return cached.value, age_seconds(cached, self._clock.monotonic()), freshness
 
+    def cached_entry(
+        self, device_id: str, name: str
+    ) -> tuple[CacheEntry, CacheFreshness] | None:
+        """The unexpired cache entry with its original measurement time; cache only, no transaction."""
+        key = (device_id, name)
+        cached = self._cache.get(key)
+        if cached is None:
+            return None
+        freshness = self._classify(key, cached)
+        if freshness is CacheFreshness.EXPIRED:
+            return None
+        return cached, freshness
+
     def device_status(self, device_id: str) -> DeviceStatus:
         binding = self._device(device_id)
         counters = binding.endpoint.counters_for(binding.entry.key)

@@ -1113,7 +1113,9 @@ def _lifespan(
                         manager=runtime.energy,
                         enable_automatic_dispatch=enabled,
                     )
-                    task = asyncio.create_task(run_plan_handoff(device_id, service, handoff, enabled))
+                    task = asyncio.create_task(
+                        run_plan_handoff(device_id, service, handoff, enabled)
+                    )
                     planning_tasks.append(task)
                     tasks.append(task)
 
@@ -1139,7 +1141,9 @@ def _lifespan(
                         try:
                             await handoff.offer(device_id, None)
                         except Exception:
-                            log.exception("Plan handback failed for device %s", device_id)
+                            log.exception(
+                                "Plan handback failed for device %s", device_id
+                            )
                 await runtime.clock.sleep(_PLAN_HANDOFF_POLL_SECONDS)
 
         async def _recover_dispatch() -> None:
@@ -1227,6 +1231,25 @@ def _lifespan(
                             lambda device_id: gateway.device_status(device_id).state
                             in READY_STATES,
                             wake=getattr(app.state, "consumption_backfill_event", None),
+                        ).run()
+                    )
+                )
+            if store is not None:
+                # Read-only calibration evidence; it feeds no planner, health value or sample.
+                from app.admin.battery_diagnostics import (
+                    DIRECTORY_NAME,
+                    BatteryDiagnosticsRecorder,
+                )
+
+                tasks.append(
+                    asyncio.create_task(
+                        BatteryDiagnosticsRecorder(
+                            gateway,
+                            runtime.clock,
+                            runtime.settings.admin_db_path.parent / DIRECTORY_NAME,
+                            lambda: list(runtime.devices),
+                            runtime.catalog.exists,
+                            getattr(runtime, "battery_capacity", None),
                         ).run()
                     )
                 )
@@ -1416,7 +1439,9 @@ def _lifespan(
                 )
                 raise
 
-        async def _swap_graph(graph: _DeviceGraph, target: Settings, reset_ids: set[str]) -> None:
+        async def _swap_graph(
+            graph: _DeviceGraph, target: Settings, reset_ids: set[str]
+        ) -> None:
             old_tasks = [
                 *connect_tasks,
                 *startup_tasks,

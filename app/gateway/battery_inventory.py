@@ -337,6 +337,17 @@ class MeasuredBatteryCapacity:
         self._runtime = runtime
 
     def verified_usable_capacity_wh(self, device_id: str) -> float | None:
+        counts = self.module_counts(device_id)
+        if counts is None:
+            return None
+        if len(counts) == 1 and 2 <= counts[0] <= RCT_MAX_MODULES_PER_TOWER:
+            return counts[0] * RCT_RATED_USABLE_WH_PER_MODULE
+        if len(counts) == 2 and counts[0] == counts[1] and counts[0] in (4, 5, 6):
+            return sum(counts) * RCT_RATED_USABLE_WH_PER_MODULE
+        return None
+
+    def module_counts(self, device_id: str) -> tuple[int, ...] | None:
+        """Settled module count per present tower, or ``None`` while it is not known; no device I/O."""
         counts = []
         for prefix in _BATTERY_TOWER_PREFIXES:
             report = _battery_module_report(
@@ -354,12 +365,7 @@ class MeasuredBatteryCapacity:
             if report["module_count_status"] != "ok" or count is None:
                 return None
             counts.append(count)
-
-        if len(counts) == 1 and 2 <= counts[0] <= RCT_MAX_MODULES_PER_TOWER:
-            return counts[0] * RCT_RATED_USABLE_WH_PER_MODULE
-        if len(counts) == 2 and counts[0] == counts[1] and counts[0] in (4, 5, 6):
-            return sum(counts) * RCT_RATED_USABLE_WH_PER_MODULE
-        return None
+        return tuple(counts)
 
     def is_settling(self, device_id: str) -> bool:
         """True while the module topology that decides the capacity can still change on its own.
