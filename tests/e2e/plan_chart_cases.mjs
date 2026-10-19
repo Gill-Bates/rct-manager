@@ -138,7 +138,7 @@ try {
   check(`DST day (25 h fall-back) renders with a > 24 h time axis (${THEME})`, state !== null && state.spanHours > 24 && state.spanHours <= 26, JSON.stringify(state));
   check(`DST chart does not cause horizontal page overflow (${THEME})`, overflow === 0, `overflow=${overflow}px`);
 
-  // The charge-window table and the opened all-intervals table stay inside the page at phone widths.
+  // The opened all-intervals table stays inside the page at phone widths.
   await page.locator('#energy-plan-schedule details summary').click();
   for (const width of [320, 375, 390, 768]) {
     await page.setViewportSize({ width, height: 844 });
@@ -150,7 +150,7 @@ try {
       const prose = [...document.querySelectorAll('#energy-plan-schedule td.data-table-stack-prose')];
       return {
         overflow: Math.max(0, document.documentElement.scrollWidth - vw),
-        rows: document.querySelectorAll('#energy-plan-charge-schedule tbody tr').length,
+        rows: document.querySelectorAll('#energy-plan-schedule details tbody tr').length,
         cellsOutside: cells.filter((c) => c.getBoundingClientRect().right > vw + 0.5).length,
         proseOverflowing: prose.filter((c) => c.scrollWidth > c.clientWidth + 1).length,
         proseCells: prose.length,
@@ -158,7 +158,7 @@ try {
     });
     check(`charging schedule tables fit at ${width}px (${THEME})`,
       fit.overflow === 0 && fit.rows >= 1 && fit.cellsOutside === 0 && fit.proseCells > 0 && fit.proseOverflowing === 0, JSON.stringify(fit));
-    await page.locator('#energy-plan-charge-schedule').screenshot({ path: path.join(OUT, `plan-schedule-${width}-${THEME}.png`) });
+    await page.locator('#energy-plan-schedule').screenshot({ path: path.join(OUT, `plan-schedule-${width}-${THEME}.png`) });
   }
   await page.setViewportSize({ width: 1280, height: 844 });
 

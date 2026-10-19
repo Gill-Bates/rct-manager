@@ -982,7 +982,7 @@ function planChartSummary(slots) {
   return `Charging schedule ${span}: ${charge.length} grid charge slot${charge.length === 1 ? '' : 's'} of ${slots.length}`;
 }
 
-// The chart is the time overview; the charging schedule table below it is its text alternative.
+// The chart is the time overview; the "Show all intervals" table below it is its text alternative.
 // No aria-describedby to that table: a screen reader would read the whole table twice.
 function planSchedule(plan, detailsOpen = false) {
   const section = element('section', 'energy-plan-section');
@@ -1005,7 +1005,6 @@ function planSchedule(plan, detailsOpen = false) {
   } else {
     section.append(element('p', 'text-danger small', 'Chart library could not be loaded.'));
   }
-  section.append(planChargeSchedule(plan.slots));
   section.append(planScheduleDetails(plan.slots, detailsOpen));
   return { section, canvas };
 }
@@ -1043,29 +1042,6 @@ function planTable(className, captionText, columns, rows) {
 }
 
 // Default view: only the planned grid-charging windows. Idle slots are hidden here, not removed from the plan.
-function planChargeSchedule(slots, id = 'energy-plan-charge-schedule') {
-  const wrap = element('div', 'mt-2');
-  wrap.id = id;
-  const charge = planSlotRuns(slots.filter((slot) => slot.action === 'charge'));
-  if (!charge.length) {
-    wrap.append(element('p', 'text-secondary small mb-0', 'No grid charging planned.'));
-    return wrap;
-  }
-  const columns = [['Time'], ['Power', true], ['Target SoC', true], ['Purpose']];
-  const rows = charge.map((slot) => {
-    const watts = planNumber(slot.max_power_w);
-    const target = planNumber(slot.target_soc_percent);
-    return [
-      element('td', '', planSlotTime(slot)),
-      element('td', 'text-end', Number.isFinite(watts) ? formatPower(watts) : NOT_AVAILABLE),
-      element('td', 'text-end', Number.isFinite(target) ? `${Math.round(target)} %` : NOT_AVAILABLE),
-      element('td', 'data-table-stack-prose', planPurposeLabel(slot.reason)),
-    ];
-  });
-  wrap.append(planTable('mb-0', 'Planned grid charging windows', columns, rows));
-  return wrap;
-}
-
 // Only directly adjacent slots with the same action, power, target and reason merge; a gap or any change starts a new row.
 function planSlotRuns(slots) {
   const runs = [];

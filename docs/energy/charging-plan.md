@@ -296,13 +296,9 @@ preview)"). The result area uses the full card width:
   0) and target SoC (%, second axis) on a real time axis, so slots of uneven length keep their
   length. The tooltip shows only what applies: an idle slot reads "No grid charging" plus the
   plain-language reason; a charge slot reads "Grid charging" with power, target SoC and the reason.
-  The canvas has a short text summary; the "Charging schedule" table directly below it is the text
-  alternative and is not repeated as a canvas description.
-- **Charging schedule**, directly under the chart: only the planned active grid-charging windows,
-  with Time, Power, Target SoC and Purpose. Directly adjacent charge slots merge only when power,
-  target SoC and reason are identical; a change or an idle slot in between starts a new row. Without
-  charge slots it reads "No grid charging planned." Narrow screens stack each row into labelled
-  key-value pairs.
+  The canvas has a short text summary; the "Show all intervals" table below it is the text
+  alternative and is not repeated as a canvas description. There is no separate table of charging
+  windows; the **Grid charging by day** tile summarises them per day.
 - **Show all intervals** (a native disclosure): the complete technical slot history with Time,
   Action, Power, Target SoC and Reason for every interval; directly adjacent intervals merge only
   when action, power, target SoC and reason are identical. The action reads "Grid charging" or "No

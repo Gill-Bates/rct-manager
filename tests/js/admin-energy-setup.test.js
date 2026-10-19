@@ -1124,7 +1124,7 @@ test('Plan tooltip shows only relevant fields per action', () => {
   assert.match(charge, /protect the battery reserve/);
 });
 
-test('Charging schedule lists only charge windows; Show all intervals lists every interval', () => {
+test('the schedule shows no separate charge-window table; Show all intervals lists every interval', () => {
   const { nodes } = renderPlan([
     planSlot('2026-01-01T01:00:00Z', '2026-01-01T01:15:00Z', 'charge', 1510),
     planSlot('2026-01-01T01:15:00Z', '2026-01-01T01:30:00Z', 'idle', null, 'battery reserve covers demand'),
@@ -1132,44 +1132,10 @@ test('Charging schedule lists only charge windows; Show all intervals lists ever
     planSlot('2026-01-01T01:45:00Z', '2026-01-01T02:00:00Z', 'idle', null, 'battery reserve covers demand'),
   ]);
   const details = nodes.find((n) => n.tagName === 'details');
-  const main = nodes.find((n) => n.id === 'energy-plan-charge-schedule');
-  const mainRows = bodyRows(main);
-  assert.equal(mainRows.length, 2, 'idle gap keeps two charging events');
-  assert.deepEqual(rowText(mainRows[0]).slice(1), ['1.51 kW', '95 %', 'Protect battery reserve']);
-  assert.equal(flatten(main).filter((n) => n.tagName === 'th').map((n) => n.textContent).join(','), 'Time,Power,Target SoC,Purpose');
+  assert.equal(nodes.filter((n) => n.tagName === 'table').length, 1, 'only the all-intervals table');
+  assert.ok(!nodes.some((n) => n.id === 'energy-plan-charge-schedule'));
   assert.equal(bodyRows(details).length, 4);
   assert.equal(flatten(details).filter((n) => n.tagName === 'th').map((n) => n.textContent).join(','), 'Time,Action,Power,Target SoC,Reason');
-});
-
-test('Charging schedule merges only identical adjacent charge slots', () => {
-  const merged = renderPlan([
-    planSlot('2026-01-01T01:00:00Z', '2026-01-01T01:15:00Z', 'charge', 1510),
-    planSlot('2026-01-01T01:15:00Z', '2026-01-01T01:30:00Z', 'charge', 1510),
-  ]);
-  assert.equal(bodyRows(merged.nodes.find((n) => n.id === 'energy-plan-charge-schedule')).length, 1);
-  const power = renderPlan([
-    planSlot('2026-01-01T01:00:00Z', '2026-01-01T01:15:00Z', 'charge', 1510),
-    planSlot('2026-01-01T01:15:00Z', '2026-01-01T01:30:00Z', 'charge', 2500),
-  ]);
-  assert.equal(bodyRows(power.nodes.find((n) => n.id === 'energy-plan-charge-schedule')).length, 2);
-  const target = renderPlan([
-    planSlot('2026-01-01T01:00:00Z', '2026-01-01T01:15:00Z', 'charge', 1510, REASON_CHARGE, 90),
-    planSlot('2026-01-01T01:15:00Z', '2026-01-01T01:30:00Z', 'charge', 1510, REASON_CHARGE, 95),
-  ]);
-  assert.equal(bodyRows(target.nodes.find((n) => n.id === 'energy-plan-charge-schedule')).length, 2, 'target SoC change splits');
-  const reason = renderPlan([
-    planSlot('2026-01-01T01:00:00Z', '2026-01-01T01:15:00Z', 'charge', 1510),
-    planSlot('2026-01-01T01:15:00Z', '2026-01-01T01:30:00Z', 'charge', 1510, 'charge as late as permitted for target SoC'),
-  ]);
-  assert.equal(bodyRows(reason.nodes.find((n) => n.id === 'energy-plan-charge-schedule')).length, 2, 'reason change splits');
-  // Identical charge slots around an idle slot, and a time gap between them, never merge.
-  const gaps = renderPlan([
-    planSlot('2026-01-01T01:00:00Z', '2026-01-01T01:15:00Z', 'charge', 1510),
-    planSlot('2026-01-01T01:15:00Z', '2026-01-01T01:30:00Z', 'idle', null, 'battery reserve covers demand', null),
-    planSlot('2026-01-01T01:30:00Z', '2026-01-01T01:45:00Z', 'charge', 1510),
-    planSlot('2026-01-01T02:00:00Z', '2026-01-01T02:15:00Z', 'charge', 1510),
-  ]);
-  assert.equal(bodyRows(gaps.nodes.find((n) => n.id === 'energy-plan-charge-schedule')).length, 3);
 });
 
 test('an ok plan without charge slots shows the plan KPIs without a status headline', () => {
@@ -1177,11 +1143,6 @@ test('an ok plan without charge slots shows the plan KPIs without a status headl
   const texts = flatten(h.byId.get('energy-plan-result')).map((n) => n.textContent);
   assert.ok(texts.includes('Target SoC'));
   assert.ok(!texts.some((t) => /No grid charg|does not schedule grid charging/.test(t || '')));
-});
-
-test('Charging schedule without charge slots says so', () => {
-  const { nodes } = renderPlan([planSlot('2026-01-01T01:00:00Z', '2026-01-01T01:15:00Z', 'idle', null, 'battery reserve covers demand')]);
-  assert.ok(flatten(nodes.find((n) => n.id === 'energy-plan-charge-schedule')).some((n) => n.textContent === 'No grid charging planned.'));
 });
 
 // Product rule: the Charging plan, Spot Market and Weather tabs are shown together only while at

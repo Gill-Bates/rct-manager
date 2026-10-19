@@ -2625,7 +2625,9 @@ def test_energy_page_wires_the_read_only_dry_run_plan_preview():
     # The GUI removes the read-only disclaimer entirely; the plan remains a preview feature.
     assert 'id="energy-plan-readonly-note"' not in plan_pane
     assert 'id="energy-plan-readonly-detail"' not in plan_pane
-    assert "Read-only preview" not in plan_pane and "No inverter commands" not in plan_pane
+    assert (
+        "Read-only preview" not in plan_pane and "No inverter commands" not in plan_pane
+    )
     assert "Preview only" not in plan_pane
     assert "Preliminary plan" not in js
     assert "energy-plan-confidence-note" not in plan_pane + js
@@ -2763,10 +2765,11 @@ def test_dry_run_plan_renderer_shows_idle_and_null_slots_with_horizon_and_window
     assert (
         len(out["rows"]) == 3
     )  # forecast window rows; the schedule is a chart, not a table
-    assert out["items"][1:3] == [
+    assert out["items"][1:4] == [
+        "Grid charging",
         "3000 W",
         "80 %",
-    ]  # first row of the charge-window table
+    ]  # first row of the all-intervals table; there is no separate charge-window table
     assert [point["y"] for point in out["series"]["power"]] == [
         3.0,
         3.0,

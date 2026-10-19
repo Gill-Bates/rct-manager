@@ -2684,10 +2684,10 @@ try {
           check(`plan header has no horizontal overflow at ${width}px`, headOverflow <= 1, String(headOverflow));
         }
         await ep.setViewportSize({ width: 1280, height: 844 });
-        check('plan schedule is the chart, the charge-window table and collapsed all-intervals details',
+        check('plan schedule is the chart and collapsed all-intervals details, without a charge-window table',
           (await ep.locator('#energy-plan-schedule details:not([open]) summary').innerText()) === 'Show all intervals'
           && !(await ep.locator('#energy-plan-schedule details table').first().isVisible())
-          && (await ep.locator('#energy-plan-charge-schedule tbody tr').count()) === 2);
+          && (await ep.locator('#energy-plan-charge-schedule').count()) === 0);
         await ep.locator('#energy-plan-schedule details summary').click();
         check('schedule details open to a table with right-aligned numbers',
           (await ep.locator('#energy-plan-schedule details table tbody tr').count()) >= 1
