@@ -16,7 +16,7 @@ import json
 import math
 import re
 import struct
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 import pytest
@@ -3248,7 +3248,7 @@ async def test_published_tomorrow_becomes_today_after_local_midnight(
         assert plan["today"]["status"] == "ok"
         assert datetime.fromisoformat(
             plan["today"]["slots"][-1]["end"]
-        ) == _local_midnight(datetime(2026, 3, 12).date())
+        ) == _local_midnight(date(2026, 3, 12))
         assert plan["tomorrow"] == {
             "date": "2026-03-12",
             "status": "pending",
@@ -3298,7 +3298,7 @@ async def test_stored_forecast_data_wakes_the_background_planner(
                 return plan
 
             service._recompute_once = observed
-            today = datetime(2026, 3, 10).date()
+            today = date(2026, 3, 10)
             today_end = _local_midnight(today + timedelta(days=1))
             tomorrow_end = _local_midnight(today + timedelta(days=2))
 
