@@ -329,6 +329,7 @@ async def refresh_spot_market(
     *,
     now: datetime | None = None,
     zone_cache=None,
+    on_stored: Callable[[], None] | None = None,
 ) -> bool:
     """Retrieve only the spot days that are due (see :func:`spot_refresh_plan`) and store them.
 
@@ -389,6 +390,8 @@ async def refresh_spot_market(
             "Spot-market configuration changed during the refresh; discarding its result"
         )
         return False
+    if snapshots and on_stored is not None:
+        on_stored()  # new rows are stored even when tomorrow is still missing
 
     after = spot_refresh_plan(rows, now)
     if error is None and not after.complete:
@@ -422,6 +425,7 @@ async def refresh_solar_forecast(
     is_current: Callable[[], bool] | None = None,
     *,
     now: datetime | None = None,
+    on_stored: Callable[[], None] | None = None,
 ) -> bool:
     """Retrieve yesterday, today and tomorrow's solar forecast in one request and store it.
 
@@ -472,6 +476,8 @@ async def refresh_solar_forecast(
             "Weather configuration changed during the refresh; discarding its result"
         )
         return False
+    if on_stored is not None:
+        on_stored()
     await _record(store, SOLAR_STATUS_KEY, key, True)
     return True
 
@@ -485,6 +491,7 @@ async def spot_refresh_tick(
     is_current: Callable[[], bool] | None = None,
     zone_cache=None,
     active: Callable[[], bool] | None = None,
+    on_stored: Callable[[], None] | None = None,
 ) -> timedelta:
     """One evaluation of the stored spot rows: retrieve if due, return how long to wait."""
     if not config.enabled:
@@ -499,7 +506,13 @@ async def spot_refresh_tick(
         backoff,
         now,
         lambda: refresh_spot_market(
-            store, provider, config, is_current, now=now, zone_cache=zone_cache
+            store,
+            provider,
+            config,
+            is_current,
+            now=now,
+            zone_cache=zone_cache,
+            on_stored=on_stored,
         ),
         active,
     )
@@ -513,6 +526,7 @@ async def solar_refresh_tick(
     backoff: RetryBackoff,
     is_current: Callable[[], bool] | None = None,
     active: Callable[[], bool] | None = None,
+    on_stored: Callable[[], None] | None = None,
 ) -> timedelta:
     """One evaluation of the stored solar rows: retrieve if due, return how long to wait."""
     if not config.is_forecastable():
@@ -533,7 +547,9 @@ async def solar_refresh_tick(
         solar_refresh_plan(rows, now, config.timezone),
         backoff,
         now,
-        lambda: refresh_solar_forecast(store, provider, config, is_current, now=now),
+        lambda: refresh_solar_forecast(
+            store, provider, config, is_current, now=now, on_stored=on_stored
+        ),
         active,
     )
 
@@ -579,7 +595,9 @@ async def run_spot_market_refresh_loop(
     event: asyncio.Event,
     clock: Clock | None = None,
     activity: EnergyActivity | None = None,
+    on_stored: Callable[[], None] | None = None,
 ) -> None:
+    """``on_stored`` is told whenever new rows were stored; it must only signal, never block."""
     clock = clock or SystemClock()
 
     def tick(config, backoff):
@@ -593,6 +611,7 @@ async def run_spot_market_refresh_loop(
             lambda: spot_config_key(app.state.spotmarket_config) == key,
             getattr(app.state, "spotmarket_zone_cache", None),
             activity.any_manual_active if activity is not None else None,
+            on_stored,
         )
 
     await _run_loop(
@@ -613,7 +632,9 @@ async def run_solar_refresh_loop(
     event: asyncio.Event,
     clock: Clock | None = None,
     activity: EnergyActivity | None = None,
+    on_stored: Callable[[], None] | None = None,
 ) -> None:
+    """``on_stored`` is told whenever new rows were stored; it must only signal, never block."""
     clock = clock or SystemClock()
 
     def tick(config, backoff):
@@ -626,6 +647,7 @@ async def run_solar_refresh_loop(
             backoff,
             lambda: solar_config_key(app.state.weather_config) == key,
             activity.any_manual_active if activity is not None else None,
+            on_stored,
         )
 
     await _run_loop(

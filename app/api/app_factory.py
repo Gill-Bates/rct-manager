@@ -1163,6 +1163,11 @@ def _lifespan(
             dispatch_recovered.set()
             start_dispatch_tasks(runtime.devices)
 
+        def wake_planning() -> None:
+            # New forecast rows are new plan input; each service's own loop and single-flight decide.
+            for service in getattr(app.state, "planning_services", {}).values():
+                service.request_recompute()
+
         def start_device_jobs() -> None:
             if is_closing():
                 return  # a late password change must not re-register periodic reads after their teardown
@@ -1175,7 +1180,9 @@ def _lifespan(
                             app.state.spotmarket_provider,
                             app,
                             app.state.spotmarket_refresh_event,
+                            clock=runtime.clock,
                             activity=runtime.energy.activity,
+                            on_stored=wake_planning,
                         )
                     )
                 )
@@ -1186,7 +1193,9 @@ def _lifespan(
                             app.state.solar_forecast_provider,
                             app,
                             app.state.weather_refresh_event,
+                            clock=runtime.clock,
                             activity=runtime.energy.activity,
+                            on_stored=wake_planning,
                         )
                     )
                 )

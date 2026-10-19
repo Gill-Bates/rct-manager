@@ -3030,10 +3030,10 @@ class _ThreeDaySolarProvider:
         )
 
 
-def _module_inventory_settings(tmp_path: Path):
+def _module_inventory_settings(tmp_path: Path, *, enable_write_support: bool = False):
     """Factory settings plus the RCT battery module registers, so capacity comes from the inventory."""
     config = energy_settings(
-        tmp_path, enable_write_support=False, enable_periodic_reads=False
+        tmp_path, enable_write_support=enable_write_support, enable_periodic_reads=False
     )
     registry_path = Path(config.object_registry_path)
     registry = json.loads(registry_path.read_text(encoding="utf-8"))
@@ -3280,8 +3280,9 @@ async def test_stored_forecast_data_wakes_the_background_planner(
             return_value=_ThreeDaySolarProvider(),
         ),
     ):
+        # Manual mode needs write access; a fresh install switches it on before choosing Manual.
         async with running_app(
-            _module_inventory_settings(tmp_path), clock=clock
+            _module_inventory_settings(tmp_path, enable_write_support=True), clock=clock
         ) as harness:
             runtime = harness.runtime
             _stub_weather_timezone(harness)
