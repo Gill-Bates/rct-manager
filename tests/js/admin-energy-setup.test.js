@@ -1120,11 +1120,11 @@ test('Charging schedule merges only identical adjacent charge slots', () => {
   assert.equal(bodyRows(gaps.nodes.find((n) => n.id === 'energy-plan-charge-schedule')).length, 3);
 });
 
-test('an ok plan without charge slots titles its status card "No grid charging planned"', () => {
+test('an ok plan without charge slots shows the plan KPIs without a status headline', () => {
   const { h } = renderPlan([planSlot('2026-01-01T01:00:00Z', '2026-01-01T01:15:00Z', 'idle', null, 'battery reserve covers demand', null)]);
   const texts = flatten(h.byId.get('energy-plan-result')).map((n) => n.textContent);
-  assert.ok(texts.includes('No grid charging planned'));
-  assert.ok(!texts.some((t) => /No grid charge\b/.test(t || '')));
+  assert.ok(texts.includes('Target SoC'));
+  assert.ok(!texts.some((t) => /No grid charg|does not schedule grid charging/.test(t || '')));
 });
 
 test('Charging schedule without charge slots says so', () => {

@@ -1408,7 +1408,7 @@ function renderDryRunPlan(plan) {
   const next = nextGridCharge(plan.slots || []);
   const card = next
     ? planStatusCard('Next grid charge', `${planDateTime(next.start)} – ${planDateTime(next.end)}`)
-    : planStatusCard('No grid charging planned', 'The current plan does not schedule grid charging.');
+    : element('section');
   // Three plan-KPI tiles (plan outputs) built from the plan's own snapshot (no second data source).
   // Battery remaining is a live device state, so it renders as a weaker tertiary line below the grid.
   const summary = element('div', 'spot-market-highlights energy-plan-highlights mt-3');

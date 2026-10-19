@@ -194,7 +194,10 @@ _BATTERY_MODULE_STATE_ATTR = "module_topology_state"
 
 
 def _battery_report_signature(report: dict) -> tuple:
+    # Completeness is part of the topology: a mid-scan empty snapshot must not equal a finished
+    # empty scan, or an early incomplete trusted state is never replaced.
     return (
+        report["_complete"],
         report["module_count_status"],
         report["module_count"],
         tuple(report["populated_module_slots"]),

@@ -2203,12 +2203,16 @@ body {
 .energy-plan-head-controls {
     display: flex;
     flex-wrap: wrap;
-    align-items: flex-end;
+    align-items: center;
     gap: .75rem 1.25rem;
     min-width: 0;
 }
 
+/* Label beside the select keeps the whole header on the title's line. */
 .energy-plan-device-field {
+    display: flex;
+    align-items: center;
+    gap: .5rem;
     min-width: min(16rem, 100%);
 }
 

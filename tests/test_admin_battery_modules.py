@@ -1143,6 +1143,21 @@ def test_startup_scan_settles_only_once_the_completed_topology_is_trusted() -> N
     assert capacity.is_settling("dev") is False
 
 
+def test_startup_scan_settles_when_the_second_tower_slots_read_back_blank() -> None:
+    # Hardware startup: the dashboard samples both towers before any inventory read, then every
+    # placeholder slot answers blank. A finished empty scan must replace the mid-scan empty state.
+    serials: dict[str, str] = {}
+    runtime = _runtime(serials)
+    capacity = MeasuredBatteryCapacity(runtime)
+    for prefix in ("battery", "battery_placeholder_0"):
+        _report(runtime, prefix)
+    serials.update({**_single_tower(6), **_slots("battery_placeholder_0", 0)})
+    for _ in range(3):
+        capacity.verified_usable_capacity_wh("dev")
+    assert capacity.verified_usable_capacity_wh("dev") == pytest.approx(10_368)
+    assert capacity.is_settling("dev") is False
+
+
 def test_stable_unsupported_topology_is_settled_without_capacity() -> None:
     three_and_three = _runtime(
         {**_slots("battery", 3), **_slots("battery_placeholder_0", 3)}
