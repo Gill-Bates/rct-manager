@@ -2874,6 +2874,10 @@ async def test_dynamic_plan_uses_real_module_inventory_without_capacity_override
         assert response.status_code == 200, response.text
         plan = response.json()
         assert plan["status"] == "ok", plan
+        assert plan["timezone"] == "UTC"
+        assert plan["today"]["date"] == now.date().isoformat()
+        assert plan["tomorrow"]["date"] == (now.date() + timedelta(days=1)).isoformat()
+        assert plan["today"]["slots"] + plan["tomorrow"]["slots"] == plan["slots"]
         assert plan["battery"]["usable_capacity_wh"] == pytest.approx(10_368)
         assert plan["battery"]["remaining_energy_wh"] == pytest.approx(5_184)
 

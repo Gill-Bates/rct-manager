@@ -177,6 +177,8 @@ def build_runtime_planning_service(
             capacity_pending=capacity_pending,
         ),
         horizon=timedelta(hours=settings.plan_horizon_hours),
+        include_next_day=True,
+        calendar_timezone=lambda: weather_config().timezone or "UTC",
         plan_ttl=timedelta(seconds=settings.plan_ttl_seconds),
         recompute_interval_seconds=settings.plan_recompute_interval_seconds,
         spot_max_age_seconds=settings.spot_max_age_seconds,

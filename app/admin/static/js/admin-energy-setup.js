@@ -1232,6 +1232,10 @@ function planSchedule(plan, detailsOpen = false) {
   section.append(title);
   if (!plan.slots.length) {
     section.append(element('p', 'text-secondary small mt-2', 'No scheduled slots.'));
+    if (plan.today && plan.tomorrow) {
+      section.append(planDailySchedule('Today', plan.today, 'energy-plan-charge-schedule'));
+      section.append(planDailySchedule('Tomorrow', plan.tomorrow, 'energy-plan-charge-schedule-tomorrow'));
+    }
     return { section, canvas: null };
   }
   let canvas = null;
@@ -1245,8 +1249,27 @@ function planSchedule(plan, detailsOpen = false) {
   } else {
     section.append(element('p', 'text-danger small', 'Chart library could not be loaded.'));
   }
-  section.append(planChargeSchedule(plan.slots), planScheduleDetails(plan.slots, detailsOpen));
+  if (plan.today && plan.tomorrow) {
+    section.append(planDailySchedule('Today', plan.today, 'energy-plan-charge-schedule'));
+    section.append(planDailySchedule('Tomorrow', plan.tomorrow, 'energy-plan-charge-schedule-tomorrow'));
+  } else {
+    section.append(planChargeSchedule(plan.slots));
+  }
+  section.append(planScheduleDetails(plan.slots, detailsOpen));
   return { section, canvas };
+}
+
+function planDailySchedule(label, day, id) {
+  const section = element('section', 'mt-3');
+  section.append(element('h4', 'h6 mb-1', `${label} · ${day.date}`));
+  if (day.status === 'pending') {
+    section.append(element('p', 'text-secondary small mb-0', 'Waiting for tomorrow’s spot prices. Today’s plan remains available.'));
+  } else if (day.status !== 'ok') {
+    section.append(element('p', 'text-secondary small mb-0', 'No plan available for this day yet.'));
+  } else {
+    section.append(planChargeSchedule(day.slots || [], id));
+  }
+  return section;
 }
 
 // Stacked-card tables (data-table-stack, admin.css): every cell carries its column name in data-label.
@@ -1273,9 +1296,9 @@ function planTable(className, captionText, columns, rows) {
 }
 
 // Default view: only the planned grid-charging windows. Idle slots are hidden here, not removed from the plan.
-function planChargeSchedule(slots) {
+function planChargeSchedule(slots, id = 'energy-plan-charge-schedule') {
   const wrap = element('div', 'mt-2');
-  wrap.id = 'energy-plan-charge-schedule';
+  wrap.id = id;
   const charge = planSlotRuns(slots.filter((slot) => slot.action === 'charge'));
   if (!charge.length) {
     wrap.append(element('p', 'text-secondary small mb-0', 'No grid charging planned.'));

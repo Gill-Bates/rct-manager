@@ -23,6 +23,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
+from zoneinfo import ZoneInfo
 
 from app.clock import Clock
 from app.optimizer.adaptive import (
@@ -53,9 +54,8 @@ from app.spotmarket.models import SpotMarketConfig, SpotPriceInterval, SpotPrice
 
 log = logging.getLogger(__name__)
 
-# Dry-Run horizon: enough to use the published day-ahead curve (which reaches to the end of
-# tomorrow) without claiming more than the forecasts can back. 24..36 hours; 30 h is the default.
-DEFAULT_HORIZON = timedelta(hours=30)
+# Dry-Run horizon can reach the end of tomorrow, including a 25-hour DST day.
+DEFAULT_HORIZON = timedelta(hours=49)
 # Below this many well-covered buckets, the preview marks a history forecast as low confidence.
 MIN_HISTORY_BUCKETS = MIN_PRIMARY_SAMPLES
 # How much consumption history to read back for the forecast. Matches the forecaster's own lookback.
@@ -370,7 +370,15 @@ _COVERAGE_TOLERANCE = timedelta(seconds=1)
 # cover in common, capped at MAX_PLANNING_HORIZON, and only refuse when that common span is shorter
 # than MIN_PLANNING_HORIZON. This never zero-fills: slots beyond the common coverage are not planned.
 MIN_PLANNING_HORIZON = timedelta(hours=6)
-MAX_PLANNING_HORIZON = timedelta(hours=36)
+MAX_PLANNING_HORIZON = timedelta(hours=49)
+
+
+def local_day_end(now: datetime, timezone: str) -> datetime:
+    """Return the next local midnight as an instant, including DST transitions."""
+    local = now.astimezone(ZoneInfo(timezone))
+    return datetime.combine(
+        local.date() + timedelta(days=1), datetime.min.time(), ZoneInfo(timezone)
+    )
 
 
 def _covers_horizon(intervals: Sequence, now: datetime, horizon: timedelta) -> bool:
@@ -520,6 +528,7 @@ def build_dry_run_plan(
     inputs: DryRunInputs,
     baseline_household_load_w: float,
     horizon: timedelta = MAX_PLANNING_HORIZON,
+    timezone: str | None = None,
     parameters: PlanParameters | None = None,
     optimizer: DynamicChargeOptimizer | None = None,
 ) -> DryRunResult:
@@ -591,6 +600,8 @@ def build_dry_run_plan(
     # The caller's requested horizon and the product MAX both cap the span.
     requested = min(horizon, MAX_PLANNING_HORIZON)
     start = planning_start(now)
+    zone_name = timezone or inputs.prices.timezone or "UTC"
+    next_day_end = local_day_end(local_day_end(now, zone_name), zone_name)
     prices_until = _coverage_end(inputs.prices.intervals, start)
     solar_until = _coverage_end(inputs.solar.intervals, start)
     # Prices and solar are the hard per-slot inputs: the planner reads a missing one as zero, so the
@@ -599,15 +610,19 @@ def build_dry_run_plan(
     # conservative whole-history median. Trimming to the first consumption gap would demand
     # 100 % contiguous per-slot history and defeat that fallback.
     # Cap the common reach at the requested span measured from the planner's start boundary.
-    available_until = min(prices_until, solar_until, start + requested)
+    available_until = min(prices_until, solar_until, start + requested, next_day_end)
     # ``plannable_span`` is the span of slots the planner can actually fill, from its start boundary
     # to the common coverage end; it drives the MIN gate and is the horizon reported to the preview.
     # The MIN comparison carries the same _COVERAGE_TOLERANCE as the internal gap check (P3-1), so a
     # sub-second shortfall at the 6 h boundary does not flip the decision while an internal gap is
     # tolerated to the same precision.
     plannable_span = available_until - start
-    if plannable_span < MIN_PLANNING_HORIZON - _COVERAGE_TOLERANCE:
-        min_hours = MIN_PLANNING_HORIZON.total_seconds() / 3600.0
+    # A published current-day curve remains useful late in the day, even when fewer than six
+    # hours remain before tomorrow's auction data exists. Other short/gapped curves still fail.
+    day_remaining = local_day_end(start, zone_name) - start
+    minimum = min(MIN_PLANNING_HORIZON, day_remaining)
+    if plannable_span < minimum - _COVERAGE_TOLERANCE:
+        min_hours = minimum.total_seconds() / 3600.0
         if prices_until <= solar_until:
             status, source = PlanStatus.SPOT_PRICES_UNAVAILABLE, "spot prices"
         else:

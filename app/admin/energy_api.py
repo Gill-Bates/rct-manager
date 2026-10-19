@@ -2099,6 +2099,12 @@ def _battery_view(state) -> DryRunBatteryView | None:
     )
 
 
+class DryRunDayView(BaseModel):
+    date: str
+    status: Literal["ok", "pending", "unavailable"]
+    slots: list[DryRunPlanSlotView] = Field(default_factory=list)
+
+
 class DryRunPlanView(BaseModel):
     """The Dry-Run plan preview for one device.
 
@@ -2121,6 +2127,9 @@ class DryRunPlanView(BaseModel):
     created_at: datetime | None = None
     valid_until: datetime | None = None
     horizon_hours: float
+    timezone: str = "UTC"
+    today: DryRunDayView | None = None
+    tomorrow: DryRunDayView | None = None
     forecast_basis: ForecastBasis | None = None
     consumption_history_available: bool | None = None
     forecast_confidence: ForecastConfidence | None = None
@@ -2787,6 +2796,13 @@ async def get_dynamic_plan(
     if target_time is not None and target_time.tzinfo is None:
         raise HTTPException(422, "target_time must include a UTC offset")
     runtime = request.app.state.runtime
+    now = runtime.clock.now()
+    site_zone = (
+        getattr(getattr(request.app.state, "weather_config", None), "timezone", None)
+        or "UTC"
+    )
+    today_date = now.astimezone(ZoneInfo(site_zone)).date()
+    tomorrow_date = today_date + timedelta(days=1)
     if runtime.energy is None or not runtime.energy.device_energy_active(device_id):
         # Off (also: no stored mode) is operational rest: read no input and run no optimizer.
         return DryRunPlanView(
@@ -2794,9 +2810,11 @@ async def get_dynamic_plan(
             status=PlanStatus.ENERGY_MANAGER_OFF.value,
             detail="Energy Manager is off for this inverter; the charging plan is inactive.",
             horizon_hours=0.0,
+            timezone=site_zone,
+            today=DryRunDayView(date=today_date.isoformat(), status="unavailable"),
+            tomorrow=DryRunDayView(date=tomorrow_date.isoformat(), status="unavailable"),
         )
     store = _admin_store_or_503(request)
-    now = runtime.clock.now()
 
     # Spot prices and solar forecast from the rolling SQLite tables; no provider call is made here.
     spot_config = (
@@ -2886,9 +2904,38 @@ async def get_dynamic_plan(
             solar_configurable=weather_config.is_forecastable(),
         ),
         parameters=parameters,
+        timezone=site_zone,
     )
 
     plan = result.plan if result.status is PlanStatus.OK else None
+    slot_views = _plan_slot_views(plan) if plan is not None else []
+    today_slots = [
+        slot for slot in slot_views if slot.start.astimezone(ZoneInfo(site_zone)).date() == today_date
+    ]
+    tomorrow_slots = [
+        slot for slot in slot_views if slot.start.astimezone(ZoneInfo(site_zone)).date() == tomorrow_date
+    ]
+    tomorrow_end = datetime.combine(
+        tomorrow_date + timedelta(days=1), datetime.min.time(), ZoneInfo(site_zone)
+    )
+    today_end = datetime.combine(
+        tomorrow_date, datetime.min.time(), ZoneInfo(site_zone)
+    )
+    today_complete = bool(today_slots) and today_slots[-1].end >= today_end
+    tomorrow_complete = bool(tomorrow_slots) and tomorrow_slots[-1].end >= tomorrow_end
+    tomorrow_pending = (
+        result.status is PlanStatus.OK
+        and spot_config.enabled
+        and weather_config.is_forecastable()
+        and solar is not None
+        and bool(solar.intervals)
+        and solar.intervals[-1].end >= tomorrow_end
+        and (
+            prices is None
+            or not prices.intervals
+            or prices.intervals[-1].end < tomorrow_end
+        )
+    )
     return DryRunPlanView(
         device_id=device_id,
         status=result.status.value,
@@ -2896,11 +2943,22 @@ async def get_dynamic_plan(
         created_at=plan.created_at if plan is not None else None,
         valid_until=plan.valid_until if plan is not None else None,
         horizon_hours=result.horizon.total_seconds() / 3600.0,
+        timezone=site_zone,
+        today=DryRunDayView(
+            date=today_date.isoformat(),
+            status="ok" if today_complete else "unavailable",
+            slots=today_slots,
+        ),
+        tomorrow=DryRunDayView(
+            date=tomorrow_date.isoformat(),
+            status="ok" if tomorrow_complete else "pending" if tomorrow_pending else "unavailable",
+            slots=tomorrow_slots,
+        ),
         forecast_basis=result.forecast_basis,
         consumption_history_available=result.consumption_history_available,
         forecast_confidence=result.forecast_confidence,
         battery=_battery_view(result.battery_state),
-        slots=_plan_slot_views(plan) if plan is not None else [],
+        slots=slot_views,
         window=DryRunForecastWindowView(
             consumption_from=result.window.consumption_from,
             consumption_until=result.window.consumption_until,

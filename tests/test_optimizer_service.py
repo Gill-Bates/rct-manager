@@ -252,6 +252,53 @@ async def test_recompute_builds_and_stores_a_plan_with_data_age() -> None:
     assert plan.valid_until == now + timedelta(seconds=300)
 
 
+async def test_runtime_plans_today_then_extends_through_published_tomorrow() -> None:
+    clock = ManualClock()
+    clock._wall = datetime(2026, 1, 15, 20, 0, tzinfo=UTC)
+    now = clock.now()
+    start = planning_start(now)
+
+    def prices(count: int) -> SpotPriceSnapshot:
+        return replace(
+            _prices(now),
+            intervals=tuple(
+                SpotPriceInterval(
+                    start + timedelta(minutes=15 * index),
+                    start + timedelta(minutes=15 * (index + 1)),
+                    Decimal("0.20"),
+                )
+                for index in range(count)
+            ),
+        )
+
+    solar = replace(
+        _solar(now),
+        intervals=tuple(
+            SolarForecastInterval(
+                start + timedelta(minutes=15 * index),
+                start + timedelta(minutes=15 * (index + 1)),
+                100.0,
+            )
+            for index in range(112)
+        ),
+    )
+    source = _PricesSource(prices(16))
+    service = _service(
+        clock, source, _SolarSource(solar), _BatterySource(_battery(now)),
+        include_next_day=True,
+        horizon=timedelta(hours=24),
+    )
+
+    today = await service.recompute()
+    assert today is not None
+    assert today.slots[-1].end == datetime(2026, 1, 16, 0, 0, tzinfo=UTC)
+
+    source.snapshot_value = prices(112)
+    tomorrow = await service.recompute()
+    assert tomorrow is not None
+    assert tomorrow.slots[-1].end == datetime(2026, 1, 17, 0, 0, tzinfo=UTC)
+
+
 async def test_with_expiry_preserves_all_plan_metadata() -> None:
     # Clamping valid_until must not reset the optimizer's plan metadata (policy, reserve_*, target_*,
     # power, energy, assumptions, limiting_reasons, basis) back to defaults; it is a copy-with-one-

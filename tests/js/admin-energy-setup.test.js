@@ -1025,6 +1025,29 @@ test('Charging schedule details stay open across a plan refresh', () => {
   assert.equal(h.byId.get('energy-plan-schedule-details').open, true, 'opened details survive the re-render');
 });
 
+test('today stays visible while tomorrow awaits spot prices, then shows its own schedule', () => {
+  const h = harness();
+  h.context.formatPower = (w) => `${w} W`;
+  h.context.element('div').id = 'energy-plan-result';
+  const schedule = h.context.element('div');
+  schedule.id = 'energy-plan-schedule';
+  const todaySlot = { start: '2026-01-01T10:00:00Z', end: '2026-01-01T10:15:00Z', action: 'charge', max_power_w: 2000, target_soc_percent: 80, reason: 'forecast deficit, charged as late as permitted' };
+  const tomorrowSlot = { ...todaySlot, start: '2026-01-02T10:00:00Z', end: '2026-01-02T10:15:00Z' };
+  const base = { status: 'ok', horizon_hours: 14, energy: {}, window: {}, slots: [todaySlot],
+    today: { date: '2026-01-01', status: 'ok', slots: [todaySlot] },
+    tomorrow: { date: '2026-01-02', status: 'pending', slots: [] } };
+  h.context.renderDryRunPlan(base);
+  assert.equal(bodyRows(h.byId.get('energy-plan-charge-schedule')).length, 1);
+  assert.match(flatten(schedule).map((n) => n.textContent).join(' '), /Waiting for tomorrow’s spot prices/);
+  assert.equal(h.byId.get('energy-plan-charge-schedule-tomorrow'), undefined);
+
+  h.context.renderDryRunPlan({ ...base, slots: [todaySlot, tomorrowSlot], horizon_hours: 38,
+    tomorrow: { date: '2026-01-02', status: 'ok', slots: [tomorrowSlot] } });
+  assert.equal(bodyRows(h.byId.get('energy-plan-charge-schedule')).length, 1);
+  assert.equal(bodyRows(h.byId.get('energy-plan-charge-schedule-tomorrow')).length, 1);
+  assert.doesNotMatch(flatten(schedule).map((n) => n.textContent).join(' '), /Waiting for tomorrow’s spot prices/);
+});
+
 function renderPlan(slots) {
   const h = harness();
   h.context.formatPower = (w) => `${(w / 1000).toFixed(2)} kW`;

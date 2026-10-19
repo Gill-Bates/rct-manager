@@ -27,6 +27,7 @@ from app.optimizer.adapters import (
     EnergyReadingsBatteryStateProvider,
     PlanStatus,
     build_dry_run_plan,
+    local_day_end,
 )
 from app.optimizer.models import (
     ConsumptionForecast,
@@ -300,9 +301,63 @@ def test_finding_4_horizon_trims_to_common_coverage() -> None:
     assert result.plan is not None and result.plan.slots
 
 
+def test_current_day_plan_survives_unpublished_tomorrow_prices() -> None:
+    now = datetime(2026, 1, 15, 20, 0, tzinfo=UTC)
+    prices = _prices(4.0, start=now)
+    solar = _solar(30.0, start=now)
+    result = build_dry_run_plan(
+        now=now,
+        battery_provider=_BatteryProvider(),
+        consumption_provider=_ConsumptionProvider(well_covered=0, coverage=0.0),
+        inputs=DryRunInputs(
+            prices=prices, solar=solar, spot_enabled=True, solar_configurable=True
+        ),
+        baseline_household_load_w=620.0,
+    )
+    assert result.status is PlanStatus.OK
+    assert result.plan is not None
+    assert result.plan.slots[-1].end == now + timedelta(hours=4)
+
+
+def test_published_tomorrow_prices_extend_plan_through_tomorrow() -> None:
+    now = datetime(2026, 1, 15, 8, 0, tzinfo=UTC)
+    result = build_dry_run_plan(
+        now=now,
+        battery_provider=_BatteryProvider(),
+        consumption_provider=_ConsumptionProvider(well_covered=0, coverage=0.0),
+        inputs=DryRunInputs(
+            prices=_prices(40.0, start=now),
+            solar=_solar(40.0, start=now),
+            spot_enabled=True,
+            solar_configurable=True,
+        ),
+        baseline_household_load_w=620.0,
+    )
+    assert result.status is PlanStatus.OK
+    assert result.plan is not None
+    assert result.plan.slots[-1].end == datetime(2026, 1, 17, 0, 0, tzinfo=UTC)
+
+
+@pytest.mark.parametrize(
+    ("now", "expected_hours"),
+    [
+        (datetime(2026, 3, 28, 23, 0, tzinfo=UTC), 23),
+        (datetime(2026, 10, 24, 22, 0, tzinfo=UTC), 25),
+    ],
+)
+def test_local_day_end_respects_dst(now: datetime, expected_hours: int) -> None:
+    end = local_day_end(now, "Europe/Berlin")
+    assert (end.astimezone(UTC) - now).total_seconds() / 3600 == expected_hours
+
+
 def test_finding_4_capped_at_max_planning_horizon() -> None:
-    # Every input reaches well past 36 h: the horizon is capped at MAX_PLANNING_HORIZON (36 h).
-    result = _build(prices=_prices(48.0), solar=_solar(48.0), coverage_hours=48.0)
+    # Even with a longer request and data, this calendar-day preview ends after tomorrow.
+    result = _build(
+        prices=_prices(60.0),
+        solar=_solar(60.0),
+        coverage_hours=60.0,
+        horizon=timedelta(hours=60),
+    )
     assert result.status is PlanStatus.OK
     assert result.horizon == timedelta(hours=36)
 

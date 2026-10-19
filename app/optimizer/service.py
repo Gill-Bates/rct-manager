@@ -42,7 +42,7 @@ from app.dispatch.battery_facts import (
 from app.dispatch.models import DeviceLimits
 from app.energy.activity import EnergyActivity
 from app.energy.readings import EnergyReadingsPort
-from app.optimizer.adapters import FORECAST_BASIS
+from app.optimizer.adapters import FORECAST_BASIS, _coverage_end, local_day_end
 from app.optimizer.base import (
     ConsumptionForecastProvider,
     EnergyOptimizer,
@@ -251,6 +251,8 @@ class PlanningService:
         device_ready: Callable[[str], bool] | None = None,
         activity: EnergyActivity | None = None,
         capacity_pending: Callable[[str], bool] | None = None,
+        include_next_day: bool = False,
+        calendar_timezone: Callable[[], str] | None = None,
     ) -> None:
         if horizon <= timedelta():
             raise ValueError("horizon must be a positive timedelta")
@@ -267,6 +269,8 @@ class PlanningService:
         self._consumption = consumption
         self._battery = battery
         self._horizon = horizon
+        self._include_next_day = include_next_day
+        self._calendar_timezone = calendar_timezone
         self._plan_ttl = plan_ttl
         self._interval = recompute_interval_seconds
         self._spot_max_age = spot_max_age_seconds
@@ -341,8 +345,17 @@ class PlanningService:
             )
             return None
         start = planning_start(now)
+        prices = await asyncio.to_thread(self._prices.snapshot)
+        timezone = (
+            self._calendar_timezone()
+            if self._calendar_timezone is not None
+            else prices.timezone if prices is not None and prices.timezone else "UTC"
+        )
+        target_end = now + self._horizon
+        if self._include_next_day:
+            target_end = max(target_end, local_day_end(local_day_end(now, timezone), timezone))
         end = start
-        while end < now + self._horizon:
+        while end < target_end:
             end += SLOT
         if end == start:
             log.info(
@@ -352,7 +365,6 @@ class PlanningService:
             self._invalidate()
             return None
         forecast_horizon = end - now
-        prices = await asyncio.to_thread(self._prices.snapshot)
         solar = await asyncio.to_thread(self._solar.forecast, now, forecast_horizon)
         consumption = await asyncio.to_thread(
             self._consumption.forecast, now, forecast_horizon
@@ -376,6 +388,15 @@ class PlanningService:
         # Ages are computed locally and only ever published together with a successful plan, so a
         # surviving old plan can never be paired with a newer failed recompute's data ages.
         ages = self._ages(now, prices, solar, consumption, battery)
+
+        if prices is not None and solar is not None:
+            price_end = _coverage_end(prices.intervals, start)
+            solar_end = _coverage_end(solar.intervals, start)
+            available_end = min(end, price_end, solar_end)
+            day_end = local_day_end(start, timezone)
+            minimum = min(self._horizon, timedelta(hours=6), day_end - start)
+            if available_end - start >= minimum:
+                end = available_end
 
         missing = self._stale_or_missing(
             now, start, end, prices, solar, consumption, battery
@@ -423,7 +444,7 @@ class PlanningService:
                 prices=prices,
                 solar_forecast=solar,
                 consumption_forecast=consumption,
-                horizon=self._horizon,
+                horizon=end - now,
                 forecast_basis=(
                     resolution.description if resolution is not None else FORECAST_BASIS
                 ),

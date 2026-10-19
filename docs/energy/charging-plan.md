@@ -104,10 +104,17 @@ unavailable until a completed, stable BMS calibration can be identified.
 
 ## How the plan is built
 
-Over a dynamic horizon of 6 to 36 hours at 15-minute resolution the optimizer first simulates the
+Over a dynamic horizon of up to 49 hours at 15-minute resolution the optimizer first simulates the
 battery trajectory without grid charging. It then places only the grid energy needed to avoid
 undercutting the reserve into the **latest permitted slots**, regardless of earlier cheaper slots,
 never exceeding the maximum SoC or the charge-power limit.
+
+The plan covers the remainder of today and, once the required forecasts and spot prices are
+available, all of tomorrow in the site's local timezone. The two daily schedules share one battery
+trajectory, so tomorrow starts from today's planned state. If tomorrow's spot prices have not been
+published, planning stops at the end of today's available data and today's schedule remains visible.
+The local-day boundary handles 23-hour and 25-hour daylight-saving days. A missing forecast interval
+still ends the usable horizon; the planner never treats missing prices or solar data as zero.
 
 - Reserve and maximum SoC are the Energy Manager's effective target window (configured minimum and
   maximum SoC narrowed to the hard product window), so the plan never proposes a target the Energy
@@ -224,7 +231,10 @@ triggers fires. Triggers and thresholds are returned in the `replan` field of th
 The preview route accepts `policy`, and the pair `target_soc_percent` / `target_time` (with UTC
 offset), as query parameters. The response carries plan status, `created_at`, `valid_until`, forecast
 basis and confidence, horizon, slots (action, target SoC, power, reason), the underlying forecast time
-ranges and a preview-only note.
+ranges and a preview-only note. It also reports `timezone` and `today` / `tomorrow` objects, each
+with a local `date`, `status` (`ok`, `pending`, or `unavailable`) and that day's `slots`. When today's
+plan and tomorrow's weather forecast are ready, an unpublished or incomplete tomorrow price curve
+gives tomorrow `pending` while today remains `ok`.
 
 ### Planner status codes
 
