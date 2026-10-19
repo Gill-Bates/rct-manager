@@ -1775,6 +1775,7 @@ _DASHBOARD_WIDGETS = frozenset(
         "battery-last-calibration",
         "battery-commissioning-date",
         "battery-degradation",
+        "battery-health",
     }
 )
 # The dashboard grid's vertical bound in rows, mirroring MAX_Y in dashboard.js. A widget must fit

@@ -59,6 +59,7 @@
     Object.freeze({ id: 'battery-last-calibration', label: 'Last battery calibration', kind: 'kpi', defaultSize: Object.freeze({ w: 2, h: 2 }), defaultVisible: false, defaultX: 6, defaultY: 10 }),
     Object.freeze({ id: 'battery-commissioning-date', label: 'Commissioning date', kind: 'kpi', defaultSize: Object.freeze({ w: 2, h: 2 }), defaultVisible: false, defaultX: 8, defaultY: 10 }),
     Object.freeze({ id: 'battery-degradation', label: 'Battery degradation', kind: 'chart', defaultSize: Object.freeze({ w: 6, h: 4 }), defaultVisible: false, defaultX: 0, defaultY: 13 }),
+    Object.freeze({ id: 'battery-health', label: 'Battery health', kind: 'kpi', defaultSize: Object.freeze({ w: 2, h: 2 }), defaultVisible: false, defaultX: 10, defaultY: 10 }),
   ]);
 
   // Browser path: expose the frozen registry as a global, consumed by dashboard.js (loaded after

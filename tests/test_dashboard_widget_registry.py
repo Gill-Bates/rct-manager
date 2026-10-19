@@ -30,11 +30,11 @@ def _load_widget_ids() -> list[str]:
 
 
 def test_widget_ids_json_is_well_formed():
-    """The shared id source parses to all twenty-two available ids, with no duplicates."""
+    """The shared id source parses to all twenty-three available ids, with no duplicates."""
     ids = _load_widget_ids()
     assert isinstance(ids, list)
     assert all(isinstance(widget_id, str) for widget_id in ids)
-    assert len(ids) == 22
+    assert len(ids) == 23
     assert len(set(ids)) == len(ids)
 
 

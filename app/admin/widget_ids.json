@@ -20,5 +20,6 @@
   "battery-cycles",
   "battery-last-calibration",
   "battery-commissioning-date",
-  "battery-degradation"
+  "battery-degradation",
+  "battery-health"
 ]

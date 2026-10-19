@@ -386,3 +386,10 @@ the tiles *Usable capacity*, *Capacity vs datasheet*, *Battery cycles*, *Last ca
 inverter serial, starting at the commissioning date when it is known). Without data they show "Serial
 unknown", "No data yet" or "No inverter available". A commissioning date derived from the logs is
 labelled "derived, unverified".
+
+The *Battery Health* tile combines both: the stored remaining capacity of the latest calibration
+point in % (one decimal, not clamped at 100 %) and its basis, current / datasheet usable capacity in
+kWh (for example "94.7 %" and "9.82 / 10.37 kWh"). With several inverters it shows one row per
+inverter, never an average. Without a calibration point it reads "n/a" with "Awaiting battery
+calibration", or "Battery capacity unavailable" when not even the datasheet capacity is known; a
+known datasheet capacity alone is the 100 % reference, not a health value.

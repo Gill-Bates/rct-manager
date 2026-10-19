@@ -4,7 +4,7 @@
 //
 
 // Battery health dashboard widgets: five tiles (usable kWh, remaining % vs datasheet, cycles, last
-// calibration, commissioning date) and the degradation chart. All read the local calibration
+// calibration, commissioning date), the Battery Health hero and the degradation chart. All read the local calibration
 // history per inverter serial (energy/devices/{id}/battery-calibration-history), which is recorded
 // whether or not the Energy Manager is enabled. The commissioning date derived from the inverter
 // logs is not verified on hardware; the tile says so.
@@ -15,7 +15,8 @@
   const TILES = ['battery-usable-kwh', 'battery-remaining-percent', 'battery-cycles',
     'battery-last-calibration', 'battery-commissioning-date'];
   const CHART = 'battery-degradation';
-  const IDS = [...TILES, CHART];
+  const HEALTH = 'battery-health';
+  const IDS = [...TILES, HEALTH, CHART];
   const REFRESH_MS = 5 * 60 * 1000;
   const MAX_DEVICES = 8;
   const NO_DATA = 'No data yet';
@@ -29,6 +30,8 @@
   const anyVisible = () => IDS.some(visible);
   const dayText = (value) => new Date(value).toLocaleDateString();
   const fixed = (value, digits) => Number(value).toLocaleString(undefined, { maximumFractionDigits: digits });
+  const exact = (value, digits) => Number(value).toLocaleString(undefined, { minimumFractionDigits: digits, maximumFractionDigits: digits });
+  const positive = (value) => typeof value === 'number' && Number.isFinite(value) && value > 0;
 
   // One inverter's figures, or null with the reason why there is nothing to show.
   function facts(view) {
@@ -97,6 +100,29 @@
         lines.map((line) => ({ label: line.label, text: line.text, title: line.name === line.label ? line.name : `${line.label} (${line.name})` })),
         lines.map((l) => l.note).filter(Boolean).join(' · '));
     }
+  }
+
+  // Health comes only from a recorded calibration point: a known rated capacity alone is the 100 %
+  // reference, never a 100 % health value. The percent is shown as stored, not clamped.
+  function healthOf({ view, f, capacitySource }) {
+    if (!view.inverter_serial) return { text: 'n/a', detail: 'Inverter serial not known yet' };
+    const last = f.last;
+    if (last && Number.isFinite(last.remaining_capacity_percent)) {
+      const basis = positive(last.current_usable_capacity_wh) && positive(last.rated_usable_capacity_wh)
+        ? `${exact(last.current_usable_capacity_wh / 1000, 2)} / ${exact(last.rated_usable_capacity_wh / 1000, 2)} kWh` : '';
+      return { text: `${exact(last.remaining_capacity_percent, 1)} %`, detail: basis };
+    }
+    if (capacitySource === 'unavailable') return { text: 'n/a', detail: 'Battery capacity unavailable' };
+    return { text: 'n/a', detail: 'Awaiting battery calibration' };
+  }
+
+  function renderHealth(entries) {
+    if (!entries.length) { setTile(HEALTH, 'n/a', 'No inverter available'); return; }
+    const rows = entries.map((entry) => ({ label: entry.label, ...healthOf(entry) }));
+    if (rows.length === 1) { setTile(HEALTH, rows[0].text, rows[0].detail); return; }
+    // One row per battery and no average: different batteries have different references.
+    setTile(HEALTH, rows.map((row) => ({ label: row.label, text: row.text, title: row.detail })),
+      rows.map((row) => row.detail).join(' · '));
   }
 
   function destroy() {
@@ -193,7 +219,7 @@
       const name = view.inverter_serial || device.device_name || device.device_id;
       // device_name falls back to the device id when no display name is set; the serial reads better then.
       const named = device.device_name && device.device_name !== device.device_id ? device.device_name : '';
-      entries.push({ view, f: facts(view), name, label: named || name });
+      entries.push({ view, f: facts(view), name, label: named || name, capacitySource: device.battery_capacity_source });
     }
     return entries;
   }
@@ -206,6 +232,7 @@
       const entries = await load(controller.signal);
       if (generation !== mine || !anyVisible()) return;
       renderTiles(entries);
+      if (visible(HEALTH)) renderHealth(entries);
       if (!visible(CHART)) { destroy(); return; }
       const withData = entries.filter(({ view }) => seriesRows(view).length);
       destroy();
@@ -230,6 +257,7 @@
       const message = window.RCTAdmin.messageFrom(error) || 'Battery data unavailable';
       node(`${CHART}-state`).textContent = message;
       for (const id of TILES) if (visible(id)) setTile(id, 'Data unavailable', message);
+      if (visible(HEALTH)) setTile(HEALTH, 'n/a', message);
     } finally {
       if (generation === mine) controller = null;
     }

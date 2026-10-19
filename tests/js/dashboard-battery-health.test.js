@@ -211,3 +211,80 @@ test('hidden widgets trigger no requests, and a tile-only dashboard draws no cha
   assert.equal(h.element('battery-cycles-value').textContent, '128');
   assert.equal(h.configs.length, 0); // only the tile is on the dashboard: no chart is drawn
 });
+
+// Battery Health hero: the latest recorded calibration point against the datasheet (100 %) capacity.
+const healthOf = (h) => [h.element('battery-health-value').textContent, h.element('battery-health-detail').textContent];
+const HEALTH_POINT = point('2026-10-16T12:00:00Z', 128, 9820, (9820 / 10368) * 100);
+
+test('Battery Health shows the stored remaining percent with its kWh basis', async () => {
+  const h = harness({ a: { ...VIEW_A, points: [HEALTH_POINT] } }, { visibleIds: ['battery-health'] });
+  h.api.sync();
+  await h.pump();
+  const [value, detail] = healthOf(h);
+  assert.match(value, /^94[.,]7 %$/);
+  assert.match(detail, /^9[.,]82 \/ 10[.,]37 kWh$/);
+  // The display carries the stored percent; recomputing it from the Wh basis only checks consistency.
+  assert.ok(Math.abs(HEALTH_POINT.remaining_capacity_percent - (9820 / 10368) * 100) < 1e-9);
+  assert.equal(h.configs.length, 0, 'the hero alone draws no chart');
+});
+
+test('Battery Health keeps a measured value above 100 % instead of clamping it', async () => {
+  const h = harness({ a: { ...VIEW_A, points: [point('2026-10-16T12:00:00Z', 3, 10492, 101.2)] } }, { visibleIds: ['battery-health'] });
+  h.api.sync();
+  await h.pump();
+  assert.match(healthOf(h)[0], /^101[.,]2 %$/);
+});
+
+test('Battery Health without a calibration point is n/a, never 100 %', async () => {
+  for (const [source, detail] of [['verified', 'Awaiting battery calibration'], ['expert_override', 'Awaiting battery calibration'],
+    [undefined, 'Awaiting battery calibration'], ['unavailable', 'Battery capacity unavailable']]) {
+    const h = harness({ a: { ...VIEW_A, points: [], baseline: null } },
+      { devices: [{ device_id: 'a', device_name: 'a', battery_capacity_source: source }], visibleIds: ['battery-health'] });
+    h.api.sync();
+    await h.pump();
+    assert.deepEqual(healthOf(h), ['n/a', detail], String(source));
+  }
+  // A commissioning baseline is the 100 % reference of the chart, not a measurement for the hero.
+  const h = harness({ a: { ...VIEW_A, points: [] } }, { visibleIds: ['battery-health'] });
+  h.api.sync();
+  await h.pump();
+  assert.doesNotMatch(healthOf(h).join(' '), /100/);
+});
+
+test('Battery Health lists each inverter on its own row without averaging', async () => {
+  const other = { ...VIEW_A, inverter_serial: 'SN-B', points: [point('2026-10-01T12:00:00Z', 50, 8750, 91.2)] };
+  const devices = [{ device_id: 'a', device_name: 'Steiner' }, { device_id: 'b', device_name: 'Garage' }];
+  const h = harness({ a: { ...VIEW_A, points: [HEALTH_POINT] }, b: { ...other, points: [{ ...other.points[0], rated_usable_capacity_wh: 9600 }] } },
+    { devices, visibleIds: ['battery-health'] });
+  h.api.sync();
+  await h.pump();
+  const rows = rowsOf(h.element('battery-health-value'));
+  assert.equal(rows.length, 2);
+  assert.deepEqual(rows.map((r) => r[1]), ['Steiner:', 'Garage:']);
+  assert.match(rows[0][2], /^94[.,]7 %$/);
+  assert.match(rows[1][2], /^91[.,]2 %$/);
+  assert.match(rows[0][0], /^9[.,]82 \/ 10[.,]37 kWh$/);
+  assert.match(rows[1][0], /^8[.,]75 \/ 9[.,]60 kWh$/);
+});
+
+test('Battery Health with an unknown serial or no inverter is an understandable n/a', async () => {
+  let h = harness({ a: { inverter_serial: null, points: [], baseline: null, commissioning: null } }, { visibleIds: ['battery-health'] });
+  h.api.sync();
+  await h.pump();
+  assert.deepEqual(healthOf(h), ['n/a', 'Inverter serial not known yet']);
+  h = harness({}, { devices: [], visibleIds: ['battery-health'] });
+  h.api.sync();
+  await h.pump();
+  assert.deepEqual(healthOf(h), ['n/a', 'No inverter available']);
+});
+
+test('the Battery Health hero leaves the five tiles and the chart as they were', async () => {
+  const h = harness({ a: VIEW_A });
+  h.api.sync();
+  await h.pump();
+  assert.deepEqual(h.paths, ['energy/planning-devices', 'energy/devices/a/battery-calibration-history'], 'one shared load');
+  assert.match(h.element('battery-usable-kwh-value').textContent, /8[.,]54 kWh/);
+  assert.equal(h.element('battery-cycles-value').textContent, '128');
+  assert.equal(h.configs.length, 1);
+  assert.match(healthOf(h)[0], /^82[.,][34] %$/);
+});

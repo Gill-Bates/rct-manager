@@ -42,7 +42,7 @@ const EXPECTED_ID_ORDER = [
   'spot-price-current', 'spot-market-status', 'spot-price-curve',
   'solar-forecast-status', 'pv-forecast-curve', 'charging-schedule',
   'battery-usable-kwh', 'battery-remaining-percent', 'battery-cycles', 'battery-last-calibration',
-  'battery-commissioning-date', 'battery-degradation',
+  'battery-commissioning-date', 'battery-degradation', 'battery-health',
 ];
 
 // --- Production layout helpers -------------------------------------------------------------------
@@ -175,7 +175,7 @@ test('battery widgets start directly below the inverter overview, not in a far-o
   const devices = DEFAULT_LAYOUT.find((entry) => entry.id === 'devices');
   const factoryBottom = devices.y + devices.h;
   const battery = DEFAULT_LAYOUT.filter((entry) => entry.id.startsWith('battery-') && entry.id !== 'battery-soc');
-  assert.equal(battery.length, 6);
+  assert.equal(battery.length, 7);
   for (const entry of battery) {
     // The chart sits a few rows lower so tiles that grow with content (one row per inverter) do not collide with it.
     const slack = entry.id === 'battery-degradation' ? 4 : 2;
@@ -367,4 +367,20 @@ test('a second never-placed widget stacks below the first auto-placed one', () =
   const second = h.widgetState.get('pv-forecast-curve');
   assert.deepEqual({ x: first.x, y: first.y }, { x: 0, y: 10 });
   assert.deepEqual({ x: second.x, y: second.y }, { x: 6, y: 10 });
+});
+
+test('Battery Health is opt-in, can be added and removed, and keeps its place across a stored layout', () => {
+  assert.equal(registry.find((entry) => entry.id === 'battery-health').defaultVisible, false);
+  assert.equal(DEFAULT_LAYOUT.find((entry) => entry.id === 'battery-health').visible, false);
+  const h = toggleHarness(FACTORY_VISIBLE);
+  h.toggle('battery-health', true);
+  const added = h.widgetState.get('battery-health');
+  assert.equal(added.visible, true);
+  assert.ok([...h.grid.nodes.values()].some((n) => n.x === added.x && n.y === added.y && n.w === 2 && n.h === 2));
+  h.toggle('battery-health', false);
+  assert.equal(h.widgetState.get('battery-health').visible, false);
+  // What Done saves is what a reload restores.
+  const stored = { version: 1, widgets: [{ ...added, visible: true, placed: true }] };
+  const restored = mergeWithDefault(stored).find((entry) => entry.id === 'battery-health');
+  assert.deepEqual({ x: restored.x, y: restored.y, visible: restored.visible }, { x: added.x, y: added.y, visible: true });
 });
