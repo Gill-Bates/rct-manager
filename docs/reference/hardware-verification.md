@@ -49,7 +49,11 @@ repeating it.
 | Capacity ratio `power_mng_amp_hours_measured` / `battery_ah_capacity`                                   | Unsupported | Hardware reads varied from 25.0/23.8531 Ah at 79–87 % SoC to 16.9251/8.65005 Ah near 2.5 % SoC. No automatic current capacity or calibration point is released. |
 | Ah register readability on RCT DC 10.0, firmware 2.3.5689                                              | Observed    | Both registers returned values during the 2026-10-17 characterization run. This does not validate their usable-Wh semantics. |
 | Per-tower versus device-wide meaning of `battery_placeholder_0_ah_capacity` and other battery registers | Unverified  | Unsupported tower combinations stay unavailable.                                                                 |
-| `battery_soh` scale and `power_mng_battery_type` codes                                                  | Unsupported | Not used.                                                                                                        |
+| Lifetime Wh counters `battery_stored_energy` / `battery_used_energy` and `battery_efficiency`            | Observed    | Their ratio matches the efficiency of the official RCT installer app on the tested inverter (see [Installer-app counter comparison](#installer-app-counter-comparison-this-device)). Throughput, not capacity. |
+| Lifetime throughput as current usable capacity (Wh per cycle, stored minus used energy)                 | Unsupported | Lifetime throughput is not present usable capacity. No capacity is derived from it.                              |
+| `battery_soh` scale and conversion                                                                      | Unverified  | The protocol names it State of Health (`battery.soh`); scale and conversion to usable Wh are not verified. Recorded, not used. |
+| Calibration registers (`power_mng_calib_charge_power`, `power_mng_bat_calib_*`, `bat_mng_struct_bat_calib_soc_thresh*`) | Unverified  | Named in the protocol; none is verified as "last calibrated usable capacity". Recorded read-only, not used.      |
+| `power_mng_battery_type` codes                                                                          | Unsupported | Not used.                                                                                                        |
 
 ### Protocol
 
@@ -136,13 +140,53 @@ BMS identity and the rated capacity of the settled module inventory:
 | `type`              | Content                                                                                                  |
 | ------------------- | -------------------------------------------------------------------------------------------------------- |
 | `periodic_fast`     | Every 15 s from the cache, no extra device read: `battery_soc`, `battery_power`, `battery_status2`        |
-| `periodic_counters` | Every minute, read fresh: `battery_stored_energy`, `battery_used_energy`                                  |
-| `periodic_slow`     | Every 5 minutes, read fresh: both Ah registers, `power_mng_amp_hours`, `battery_soh`, `battery_cycles`, `battery_status2`, `power_mng_bat_next_calib_date`, `battery_bms_sn` |
-| `status_transition` | When the cached `battery_status2` changes: all values above, with the status before and after           |
+| `periodic_counters` | Every minute, read fresh: `battery_stored_energy`, `battery_used_energy`, `battery_charged_amp_hours`, `battery_discharged_amp_hours`, `battery_efficiency` |
+| `periodic_slow`     | Every 5 minutes, read fresh: both Ah registers, `power_mng_amp_hours`, `battery_soh`, `battery_cycles`, `battery_status2`, `power_mng_bat_next_calib_date`, `power_mng_calib_charge_power`, `power_mng_bat_calib_reqularity`, `power_mng_bat_calib_days_in_advance`, `bat_mng_struct_bat_calib_soc_thresh`, `bat_mng_struct_bat_calib_soc_threshold`, `battery_bms_sn` |
+| `status_transition` | When the cached `battery_status2` changes: all counter and slow values, with the status before and after |
+| `candidate_change`  | A fresh read of `power_mng_bat_next_calib_date`, `power_mng_calib_charge_power`, `battery_soh`, `power_mng_amp_hours_measured` or `battery_ah_capacity` differs from the previous fresh read: `register`, `before`, `after` |
+| `calibration_window_hint` | A `battery_status2` transition where either side has a community-observed "Calibrating" bit (`0x008`, `0x400`) |
 
-Every value carries a status (`fresh`, `stale`, `missing`, `error`, `skipped_busy` while the device
-queue is busy, `not_in_catalog`); gaps are never filled in. The recording changes nothing the
-service plans or reports: neither the planner, Battery Health nor `calibration_sample()` reads it.
+Cached values carry `status`, `age_seconds`, `sample_monotonic` and `sample_measured_at`; fresh
+reads carry `status` and `measured_at`. Every value carries a status (`fresh`, `stale`, `missing`,
+`error`, `skipped_busy` while the device queue is busy, `not_in_catalog`); gaps are never filled in
+or interpolated. `candidate_change` and `calibration_window_hint` are marked `evidence_only: true`
+and `verified: false`: they say where to look, not that a calibration finished or what it measured.
+The recording changes nothing the service plans or reports: neither the planner, Battery Health nor
+`calibration_sample()` reads it, and no register is written.
+
+The open question for the next regular BMS calibration: which value changes reproducibly at the
+calibration event and then stays stable across different SoC? Only a value with that evidence can
+become a calibration sample, in a separate change.
+
+### Installer-app counter comparison (this device)
+
+The official RCT installer app showed on the tested inverter:
+
+| Value                      | Installer app  |
+| -------------------------- | -------------- |
+| Stored (charged) energy    | 9,814,451 Wh   |
+| Used (discharged) energy   | 9,162,862 Wh   |
+| Battery efficiency         | 0.93           |
+| Cycles                     | 1101           |
+| Charged Ah                 | ~19,016.32 Ah  |
+| Discharged Ah              | 18,233.95 Ah   |
+
+Topology: six modules, rated usable capacity 10.368 kWh.
+
+```text
+9,162,862 / 9,814,451 = 0.9336
+```
+
+This strongly supports the current mapping of the cumulative Wh counters and battery efficiency
+on this tested inverter. It does not prove present usable battery capacity.
+
+- Lifetime energy throughput is not present usable capacity, and neither is Wh per cycle.
+- `battery_stored_energy - battery_used_energy` is not a capacity either.
+- The Ah ratio `power_mng_amp_hours_measured / battery_ah_capacity` stays Unsupported: it is
+  SoC-dependent.
+- `battery_soh` is officially named State of Health, but its scale and conversion are unverified.
+- The calibration registers are officially named, but no register is verified yet as the last
+  calibrated usable capacity.
 
 ### Normal reads (this device)
 

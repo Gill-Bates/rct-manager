@@ -13,6 +13,9 @@ here feeds the planner, Battery Health or the calibration samples; it only reads
 Missing or failed values are written as such and never filled in. A cached value carries its own
 sample identity (``sample_monotonic``), so an energy integration over ``battery_power`` counts each
 measurement once, however many records repeat it.
+
+``candidate_change`` and ``calibration_window_hint`` records are marked ``evidence_only`` and
+``verified: false``: they flag where to look, not that a calibration happened or what it measured.
 """
 
 import asyncio
@@ -43,9 +46,16 @@ STARTUP_DELAY_SECONDS = 60.0
 
 # Already read periodically for the dashboard and the Energy Manager: taken from the cache only.
 CACHED_NAMES = ("battery_soc", "battery_power", "battery_status2")
-# Energy throughput counters, read fresh once a minute.
-COUNTER_NAMES = ("battery_stored_energy", "battery_used_energy")
-# Slow-moving calibration candidates, read fresh every five minutes and on a status change.
+# Lifetime throughput counters, read fresh once a minute.
+COUNTER_NAMES = (
+    "battery_stored_energy",
+    "battery_used_energy",
+    "battery_charged_amp_hours",
+    "battery_discharged_amp_hours",
+    "battery_efficiency",
+)
+# Slow-moving calibration candidates and settings, read fresh every five minutes and on a status
+# change. Only reads: the settings registers are writable on the device but never written here.
 SLOW_NAMES = (
     "battery_ah_capacity",
     "power_mng_amp_hours_measured",
@@ -54,10 +64,25 @@ SLOW_NAMES = (
     "battery_cycles",
     "battery_status2",
     "power_mng_bat_next_calib_date",
+    "power_mng_calib_charge_power",
+    "power_mng_bat_calib_reqularity",
+    "power_mng_bat_calib_days_in_advance",
+    "bat_mng_struct_bat_calib_soc_thresh",
+    "bat_mng_struct_bat_calib_soc_threshold",
     "battery_bms_sn",
 )
 STATUS_NAME = "battery_status2"
 BMS_NAME = "battery_bms_sn"
+# A change between two fresh reads of these is written as an unverified candidate_change.
+CANDIDATE_NAMES = (
+    "power_mng_bat_next_calib_date",
+    "power_mng_calib_charge_power",
+    "battery_soh",
+    "power_mng_amp_hours_measured",
+    "battery_ah_capacity",
+)
+# Community-observed "Calibrating" bits of battery_status2 (see app.admin.api); not RCT-documented.
+CALIBRATING_STATUS_BITS = 0x008 | 0x400
 
 
 def _plain(value):
@@ -65,6 +90,14 @@ def _plain(value):
     if isinstance(value, float) and not math.isfinite(value):
         return None
     return value
+
+
+def _calibrating(status) -> bool:
+    return (
+        isinstance(status, int)
+        and status > 0
+        and bool(status & CALIBRATING_STATUS_BITS)
+    )
 
 
 class BatteryDiagnosticsRecorder:
@@ -86,6 +119,7 @@ class BatteryDiagnosticsRecorder:
         self._next_counters: dict[str, float] = {}
         self._next_slow: dict[str, float] = {}
         self._last_status: dict[str, object] = {}
+        self._last_candidates: dict[tuple[str, str], dict] = {}
         self._failing: set[tuple[str, str]] = set()
         self._housekept: date | None = None
         self._write_failed = False
@@ -127,6 +161,23 @@ class BatteryDiagnosticsRecorder:
                     battery_status2_after=status,
                 )
             )
+            if any(_calibrating(value) for value in (previous, status)):
+                records.append(
+                    self._record(
+                        "calibration_window_hint",
+                        device_id,
+                        {},
+                        topology,
+                        evidence_only=True,
+                        verified=False,
+                        basis="community_status2_calibrating_bits",
+                        battery_status2_before=previous,
+                        battery_status2_after=status,
+                    )
+                )
+            records.extend(
+                self._candidates(device_id, snapshot, "status_transition", topology)
+            )
         if monotonic >= self._next_counters.get(device_id, monotonic):
             self._next_counters[device_id] = monotonic + COUNTER_INTERVAL_SECONDS
             values = await self._fresh(device_id, COUNTER_NAMES)
@@ -137,7 +188,39 @@ class BatteryDiagnosticsRecorder:
             self._next_slow[device_id] = monotonic + SLOW_INTERVAL_SECONDS
             values = await self._fresh(device_id, SLOW_NAMES)
             records.append(self._record("periodic_slow", device_id, values, topology))
+            records.extend(
+                self._candidates(device_id, values, "periodic_slow", topology)
+            )
         await asyncio.to_thread(self._write, records)
+
+    def _candidates(
+        self, device_id: str, values: dict, trigger: str, topology: dict
+    ) -> list[dict]:
+        """Unverified change records between two fresh reads; no meaning is attached to them."""
+        records = []
+        for name in CANDIDATE_NAMES:
+            after = values.get(name)
+            if after is None or after["status"] != "fresh" or after["value"] is None:
+                continue  # a gap is no change: compare only measured values
+            before = self._last_candidates.get((device_id, name))
+            self._last_candidates[(device_id, name)] = after
+            if before is None or before["value"] == after["value"]:
+                continue
+            records.append(
+                self._record(
+                    "candidate_change",
+                    device_id,
+                    {},
+                    topology,
+                    evidence_only=True,
+                    verified=False,
+                    register=name,
+                    trigger=trigger,
+                    before=before,
+                    after=after,
+                )
+            )
+        return records
 
     def _topology(self, device_id: str) -> dict:
         """The settled module inventory as the service already holds it; never a device rescan."""

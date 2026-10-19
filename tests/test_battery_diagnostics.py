@@ -34,6 +34,9 @@ class _Gateway:
         self.fresh: dict[str, object] = {
             "battery_stored_energy": 812345.0,
             "battery_used_energy": 790001.0,
+            "battery_charged_amp_hours": 19016.32,
+            "battery_discharged_amp_hours": 18233.95,
+            "battery_efficiency": 0.93,
             "battery_ah_capacity": 25.0,
             "power_mng_amp_hours_measured": 23.85,
             "power_mng_amp_hours": 11.2,
@@ -41,6 +44,11 @@ class _Gateway:
             "battery_cycles": 128,
             "battery_status2": 0,
             "power_mng_bat_next_calib_date": 1793750400,
+            "power_mng_calib_charge_power": 3000.0,
+            "power_mng_bat_calib_reqularity": 30,
+            "power_mng_bat_calib_days_in_advance": 3,
+            "bat_mng_struct_bat_calib_soc_thresh": 0.5,
+            "bat_mng_struct_bat_calib_soc_threshold": 0.97,
             "battery_bms_sn": "BMS-1",
         }
         self.errors: dict[str, Exception] = {}
@@ -182,7 +190,7 @@ def test_the_raster_follows_a_monotonic_deadline_and_skips_slots_of_a_slow_cycle
 ):
     clock = _clock(kind=AutoClock)
     gateway = _Gateway(clock)
-    gateway.read_seconds = 1.0  # the first tick reads ten registers: 10 s
+    gateway.read_seconds = 0.5  # the first tick reads eighteen registers: 9 s
     recorder = _recorder(tmp_path, gateway)
     starts: list[float] = []
     original = recorder.tick
@@ -231,7 +239,12 @@ def test_a_status_change_in_the_cache_writes_a_full_snapshot_in_addition_to_the_
         *diag.COUNTER_NAMES,
         *diag.SLOW_NAMES,
     }
-    assert snapshot["values"]["battery_stored_energy"]["status"] == "fresh"
+    assert {
+        name: snapshot["values"][name]["status"]
+        for name in (*diag.COUNTER_NAMES, *diag.SLOW_NAMES)
+    } == dict.fromkeys((*diag.COUNTER_NAMES, *diag.SLOW_NAMES), "fresh")
+    assert snapshot["values"]["battery_discharged_amp_hours"]["value"] == 18233.95
+    assert snapshot["values"]["bat_mng_struct_bat_calib_soc_threshold"]["measured_at"]
 
 
 def test_missing_stale_failed_and_busy_values_are_recorded_as_such_never_filled_in(
@@ -242,9 +255,9 @@ def test_missing_stale_failed_and_busy_values_are_recorded_as_such_never_filled_
     gateway.put("battery_power", float("nan"), CacheFreshness.GRACE, age=40.0)
     gateway.errors["battery_used_energy"] = DeviceTimeout("response_timeout")
     gateway.errors["battery_soh"] = RuntimeError("decoder broke")
-    recorder = _recorder(
-        tmp_path, gateway, exists=lambda name: name != "power_mng_amp_hours"
-    )
+    gateway.errors["power_mng_calib_charge_power"] = RuntimeError("decoder broke")
+    absent = {"power_mng_amp_hours", "battery_efficiency"}
+    recorder = _recorder(tmp_path, gateway, exists=lambda name: name not in absent)
     asyncio.run(recorder.tick("main"))
     gateway.queue_length = 2
     gateway.clock.advance(60)
@@ -260,6 +273,11 @@ def test_missing_stale_failed_and_busy_values_are_recorded_as_such_never_filled_
         "error": "response_timeout",
     }
     assert counters["values"]["battery_stored_energy"]["value"] == 812345.0
+    assert counters["values"]["battery_efficiency"] == {
+        "value": None,
+        "status": "not_in_catalog",
+    }
+    assert counters["values"]["battery_charged_amp_hours"]["value"] == 19016.32
     # An unexpected failure is isolated to its register; the rest of the tick is still written.
     assert slow["values"]["battery_soh"] == {
         "value": None,
@@ -267,12 +285,16 @@ def test_missing_stale_failed_and_busy_values_are_recorded_as_such_never_filled_
         "error": "RuntimeError",
     }
     assert slow["values"]["battery_cycles"]["value"] == 128
+    assert slow["values"]["power_mng_calib_charge_power"]["status"] == "error"
+    assert slow["values"]["power_mng_bat_calib_reqularity"]["value"] == 30
     assert slow["values"]["power_mng_amp_hours"] == {
         "value": None,
         "status": "not_in_catalog",
     }
     busy = next(r for r in records[3:] if r["type"] == "periodic_counters")
-    assert {v["status"] for v in busy["values"].values()} == {"skipped_busy"}
+    assert {
+        name: v["status"] for name, v in busy["values"].items() if name not in absent
+    } == dict.fromkeys(set(diag.COUNTER_NAMES) - absent, "skipped_busy")
 
 
 def test_a_failed_bms_read_falls_back_to_the_cached_serial(tmp_path):
@@ -349,4 +371,128 @@ def test_the_recorder_reaches_no_planning_capacity_or_calibration_path():
     assert (
         ".record_battery_calibration(" not in source
         and ".calibration_sample(" not in source
+        and "source_contract" not in source
     )
+    assert not [line for line in imports if "battery_inventory" in line], imports
+
+
+def test_calibration_registers_follow_the_five_minute_cadence_without_topology_io(
+    tmp_path,
+):
+    gateway = _Gateway(_clock())
+    capacity = _Capacity()
+    recorder = BatteryDiagnosticsRecorder(
+        gateway,
+        gateway.clock,
+        tmp_path / "battery-diagnostics",
+        lambda: ["main"],
+        lambda _n: True,
+        capacity,
+    )
+    reads_per_tick: list[list[str]] = []
+
+    async def scenario():
+        for _ in range(21):  # 0 s .. 300 s on the 15 s raster
+            before = len(gateway.reads)
+            await recorder.tick("main")
+            reads_per_tick.append(gateway.reads[before:])
+            gateway.clock.advance(15)
+
+    asyncio.run(scenario())
+    calibration = {
+        "power_mng_calib_charge_power",
+        "power_mng_bat_calib_reqularity",
+        "power_mng_bat_calib_days_in_advance",
+        "bat_mng_struct_bat_calib_soc_thresh",
+        "bat_mng_struct_bat_calib_soc_threshold",
+    }
+    assert calibration <= set(diag.SLOW_NAMES)
+    assert {
+        "battery_charged_amp_hours",
+        "battery_discharged_amp_hours",
+        "battery_efficiency",
+    } <= set(diag.COUNTER_NAMES)
+    slow_ticks = [
+        i for i, reads in enumerate(reads_per_tick) if calibration & set(reads)
+    ]
+    counter_ticks = [i for i, reads in enumerate(reads_per_tick) if reads]
+    assert slow_ticks == [0, 20]
+    assert counter_ticks == [0, 4, 8, 12, 16, 20]
+    assert reads_per_tick[20] == [*diag.COUNTER_NAMES, *diag.SLOW_NAMES]
+    # Topology comes from the settled inventory only: every record has it, no read serves it.
+    fast = [r for r in _records(tmp_path) if r["type"] == "periodic_fast"]
+    assert len(fast) == 21 and {tuple(r["module_counts"]) for r in fast} == {(6,)}
+    assert all(
+        name in (*diag.COUNTER_NAMES, *diag.SLOW_NAMES) for name in gateway.reads
+    )
+
+
+def test_candidate_changes_are_flagged_as_unverified_evidence_only(tmp_path):
+    gateway = _Gateway(_clock())
+    recorder = _recorder(tmp_path, gateway)
+
+    async def scenario():
+        await recorder.tick("main")  # first fresh read: a baseline, no change
+        gateway.fresh["power_mng_amp_hours_measured"] = 24.1
+        gateway.fresh["power_mng_bat_next_calib_date"] = 1796342400
+        gateway.errors["battery_soh"] = DeviceTimeout("response_timeout")
+        gateway.clock.advance(300)
+        await recorder.tick("main")
+        del gateway.errors["battery_soh"]  # the same value again after a gap: no change
+        gateway.clock.advance(300)
+        await recorder.tick("main")
+
+    asyncio.run(scenario())
+    changes = [r for r in _records(tmp_path) if r["type"] == "candidate_change"]
+    assert sorted(r["register"] for r in changes) == [
+        "power_mng_amp_hours_measured",
+        "power_mng_bat_next_calib_date",
+    ]
+    for change in changes:
+        assert (change["evidence_only"], change["verified"]) == (True, False)
+        assert change["trigger"] == "periodic_slow" and change["values"] == {}
+        assert change["before"]["status"] == change["after"]["status"] == "fresh"
+    measured = next(
+        r for r in changes if r["register"] == "power_mng_amp_hours_measured"
+    )
+    assert (measured["before"]["value"], measured["after"]["value"]) == (23.85, 24.1)
+
+
+def test_a_transition_into_a_calibrating_status_adds_an_unverified_hint(tmp_path):
+    gateway = _Gateway(_clock())
+    recorder = _recorder(tmp_path, gateway)
+
+    async def scenario():
+        await recorder.tick("main")
+        gateway.clock.advance(15)
+        gateway.put("battery_status2", 0x400, age=1.0)
+        await recorder.tick("main")
+        gateway.clock.advance(15)
+        gateway.put("battery_status2", 0x100, age=1.0)  # balancing only: still a hint
+        await recorder.tick("main")
+        gateway.clock.advance(15)
+        gateway.put(
+            "battery_status2", 0x800, age=1.0
+        )  # no calibrating bit on either side
+        await recorder.tick("main")
+
+    asyncio.run(scenario())
+    records = _records(tmp_path)
+    hints = [r for r in records if r["type"] == "calibration_window_hint"]
+    assert [
+        (h["battery_status2_before"], h["battery_status2_after"]) for h in hints
+    ] == [
+        (0, 0x400),
+        (0x400, 0x100),
+    ]
+    assert all((h["evidence_only"], h["verified"]) == (True, False) for h in hints)
+    assert len([r for r in records if r["type"] == "status_transition"]) == 3
+
+
+def test_the_documented_installer_app_efficiency_matches_the_lifetime_wh_counters():
+    # Evidence for the counter mapping only; no health or capacity value is derived from it.
+    assert round(9162862 / 9814451, 4) == 0.9336
+    doc = (
+        Path(__file__).parents[1] / "docs" / "reference" / "hardware-verification.md"
+    ).read_text(encoding="utf-8")
+    assert "9,162,862 / 9,814,451 = 0.9336" in doc
