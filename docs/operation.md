@@ -70,6 +70,9 @@ into `rct.db` on a clean shutdown.
 
 - Back up while the service is stopped (copy all existing `rct.db*` files together) or online with
   `sqlite3 data/rct.db ".backup backup.db"`. Never copy only `rct.db` of a running service.
+- Battery calibration evidence is written next to the database in `battery-diagnostics/` (daily JSONL
+  files, 60 days retained); it is optional diagnostic data, see
+  [Hardware Verification](reference/hardware-verification.md#calibration-evidence-recording).
 - Keep the directory on a local file system. WAL does not work on NFS or SMB shares.
 - The directory must be writable (in Docker the `rct-data` volume), because SQLite creates the `-wal`
   and `-shm` files there.

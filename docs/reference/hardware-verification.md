@@ -156,6 +156,8 @@ calibration meaning is unverified. The SoC-dependent Ah values and `battery_soh`
 `periodic_slow` records without change events or a float threshold. `candidate_change` and
 `calibration_window_hint` are marked `evidence_only: true` and `verified: false`: they say where to
 look, not that a calibration finished or what it measured.
+When an inverter is re-addressed in the settings, its schedule and last-seen comparison state are
+reset, and reads still in flight for the old address are discarded, so records never mix two devices.
 The recording changes nothing the service plans or reports: neither the planner, Battery Health nor
 `calibration_sample()` reads it, and no register is written.
 
@@ -173,8 +175,8 @@ The official RCT installer app showed on the tested inverter:
 | Used (discharged) energy | 9,162,862 Wh  |
 | Battery efficiency       | 0.93          |
 | Cycles                   | 1101          |
-| Charged Ah               | ~19,016.32 Ah |
-| Discharged Ah            | 18,233.95 Ah  |
+| Preceding Ah counter (label cropped in the screenshot; likely charged Ah) | ~19,016.32 Ah |
+| From-battery Ah (labelled "Gesamtladefluss von der Batterie")             | 18,233.95 Ah  |
 
 Topology: six modules, rated usable capacity 10.368 kWh.
 

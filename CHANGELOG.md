@@ -4,10 +4,13 @@
 
 - Spot-market prices and solar forecasts now follow the Energy Manager mode automatically; separate enable switches are no longer needed, and refreshes run only in Manual mode.
 
+- Read-only battery calibration evidence is now recorded per inverter in daily files next to the admin database (60 days retained). It does not affect planning or reported capacity.
+- The Charging plan's **Grid charging by day** tile is now **Next grid charge** and shows the next charge window; the separate charge-window table is gone, and **Show all intervals** lists every slot.
+
 ### Fix
 
 - Slow sequential telemetry reads now retain their true age, so stale measurements cannot pass the dispatch safety check.
-- Re-addressing an inverter clears learned PV-string history, and hidden dashboard widgets keep their saved positions after reload.
+- Re-addressing an inverter clears learned PV-string history and restarts its battery evidence recording, and hidden dashboard widgets keep their saved positions after reload.
 - Battery-health charts now update their colors immediately when the dashboard theme changes; verification sessions also expire reliably despite system-clock adjustments.
 
 ### Security

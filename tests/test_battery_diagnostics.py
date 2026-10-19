@@ -487,6 +487,64 @@ def test_config_is_read_on_first_tick_and_again_after_24_hours(tmp_path):
     assert all(name in reads[3] for name in diag.CONFIG_NAMES)
 
 
+def test_reset_device_starts_a_new_evidence_chain_for_the_same_id(tmp_path):
+    gateway = _Gateway(_clock())
+    recorder = _recorder(tmp_path, gateway)
+
+    async def scenario():
+        await recorder.tick("main")
+        gateway.clock.advance(300)
+        gateway.fresh["power_mng_bat_next_calib_date"] = 1796342400
+        await recorder.tick("main")
+        gateway.clock.advance(15)
+        gateway.put("battery_status2", 0x400)
+        gateway.fresh["power_mng_bat_next_calib_date"] = 1798934400
+        recorder.reset_device("main")
+        before = len(gateway.reads)
+        await recorder.tick("main")
+        return gateway.reads[before:]
+
+    new_reads = asyncio.run(scenario())
+    assert new_reads == [*diag.COUNTER_NAMES, *diag.SLOW_NAMES, *diag.CONFIG_NAMES]
+    records = _records(tmp_path)
+    assert len([r for r in records if r["type"] == "periodic_config"]) == 2
+    assert not [r for r in records if r["type"] == "status_transition"]
+    assert len([r for r in records if r["type"] == "candidate_change"]) == 1
+
+
+def test_reset_discards_an_inflight_tick_from_the_old_device(tmp_path):
+    gateway = _Gateway(_clock())
+    recorder = _recorder(tmp_path, gateway)
+
+    async def scenario():
+        started = asyncio.Event()
+        resume = asyncio.Event()
+        read_system = gateway.read_system
+
+        async def blocked_read(device_id, name):
+            started.set()
+            await resume.wait()
+            return await read_system(device_id, name)
+
+        gateway.read_system = blocked_read
+        old_tick = asyncio.create_task(recorder.tick("main"))
+        await asyncio.wait_for(started.wait(), 1)
+        recorder.reset_device("main")
+        resume.set()
+        await asyncio.wait_for(old_tick, 1)
+        gateway.read_system = read_system
+        await recorder.tick("main")
+
+    asyncio.run(scenario())
+    records = _records(tmp_path)
+    assert [r["type"] for r in records] == [
+        "periodic_fast",
+        "periodic_counters",
+        "periodic_slow",
+        "periodic_config",
+    ]
+
+
 def test_only_discrete_candidate_changes_are_flagged_as_unverified_evidence_only(
     tmp_path,
 ):

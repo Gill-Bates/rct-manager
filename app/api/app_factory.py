@@ -1172,7 +1172,10 @@ def _lifespan(
             for service in getattr(app.state, "planning_services", {}).values():
                 service.request_recompute()
 
+        battery_diagnostics_recorder = None
+
         def start_device_jobs() -> None:
+            nonlocal battery_diagnostics_recorder
             if is_closing():
                 return  # a late password change must not re-register periodic reads after their teardown
             if store is not None and runtime.energy is not None:
@@ -1241,18 +1244,15 @@ def _lifespan(
                     BatteryDiagnosticsRecorder,
                 )
 
-                tasks.append(
-                    asyncio.create_task(
-                        BatteryDiagnosticsRecorder(
-                            gateway,
-                            runtime.clock,
-                            runtime.settings.admin_db_path.parent / DIRECTORY_NAME,
-                            lambda: list(runtime.devices),
-                            runtime.catalog.exists,
-                            getattr(runtime, "battery_capacity", None),
-                        ).run()
-                    )
+                battery_diagnostics_recorder = BatteryDiagnosticsRecorder(
+                    gateway,
+                    runtime.clock,
+                    runtime.settings.admin_db_path.parent / DIRECTORY_NAME,
+                    lambda: list(runtime.devices),
+                    runtime.catalog.exists,
+                    getattr(runtime, "battery_capacity", None),
                 )
+                tasks.append(asyncio.create_task(battery_diagnostics_recorder.run()))
             if (
                 store is not None
                 and runtime.settings.battery_commissioning_derivation_enabled
@@ -1501,6 +1501,9 @@ def _lifespan(
                 return  # shutdown began while tearing down: start nothing, the shutdown cleans up
 
             gateway.replace_devices(graph.bindings)
+            if battery_diagnostics_recorder is not None:
+                for device_id in reset_ids:
+                    battery_diagnostics_recorder.reset_device(device_id)
             runtime.energy_readings.reset_devices(list(reset_ids))
 
             parts.adopt(graph)

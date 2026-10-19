@@ -122,6 +122,7 @@ class BatteryDiagnosticsRecorder:
         self._last_status: dict[str, object] = {}
         self._last_candidates: dict[tuple[str, str], dict] = {}
         self._failing: set[tuple[str, str]] = set()
+        self._generation: dict[str, int] = {}
         self._housekept: date | None = None
         self._write_failed = False
 
@@ -141,6 +142,7 @@ class BatteryDiagnosticsRecorder:
             await self._clock.sleep(deadline - self._clock.monotonic())
 
     async def tick(self, device_id: str) -> None:
+        generation = self._generation.get(device_id, 0)
         monotonic = self._clock.monotonic()
         topology = self._topology(device_id)
         cached = {name: self._cached(device_id, name) for name in CACHED_NAMES}
@@ -154,6 +156,8 @@ class BatteryDiagnosticsRecorder:
             snapshot = await self._fresh(
                 device_id, (*COUNTER_NAMES, *SLOW_NAMES, *CONFIG_NAMES)
             )
+            if generation != self._generation.get(device_id, 0):
+                return
             records.append(
                 self._record(
                     "status_transition",
@@ -184,12 +188,16 @@ class BatteryDiagnosticsRecorder:
         if monotonic >= self._next_counters.get(device_id, monotonic):
             self._next_counters[device_id] = monotonic + COUNTER_INTERVAL_SECONDS
             values = await self._fresh(device_id, COUNTER_NAMES)
+            if generation != self._generation.get(device_id, 0):
+                return
             records.append(
                 self._record("periodic_counters", device_id, values, topology)
             )
         if monotonic >= self._next_slow.get(device_id, monotonic):
             self._next_slow[device_id] = monotonic + SLOW_INTERVAL_SECONDS
             values = await self._fresh(device_id, SLOW_NAMES)
+            if generation != self._generation.get(device_id, 0):
+                return
             records.append(self._record("periodic_slow", device_id, values, topology))
             records.extend(
                 self._candidates(device_id, values, "periodic_slow", topology)
@@ -197,8 +205,21 @@ class BatteryDiagnosticsRecorder:
         if monotonic >= self._next_config.get(device_id, monotonic):
             self._next_config[device_id] = monotonic + CONFIG_INTERVAL_SECONDS
             values = await self._fresh(device_id, CONFIG_NAMES)
+            if generation != self._generation.get(device_id, 0):
+                return
             records.append(self._record("periodic_config", device_id, values, topology))
         await asyncio.to_thread(self._write, records)
+
+    def reset_device(self, device_id: str) -> None:
+        """Forget scheduled reads and comparisons when an ID changes hardware identity."""
+        self._generation[device_id] = self._generation.get(device_id, 0) + 1
+        self._next_counters.pop(device_id, None)
+        self._next_slow.pop(device_id, None)
+        self._next_config.pop(device_id, None)
+        self._last_status.pop(device_id, None)
+        for key in [key for key in self._last_candidates if key[0] == device_id]:
+            del self._last_candidates[key]
+        self._failing = {key for key in self._failing if key[0] != device_id}
 
     def _candidates(
         self, device_id: str, values: dict, trigger: str, topology: dict

@@ -15,6 +15,7 @@ from unittest.mock import patch
 
 import pytest
 
+from app.admin.battery_diagnostics import BatteryDiagnosticsRecorder
 from app.admin.store import AdminStore
 from app.config import DeviceEntry
 from app.errors import UnknownDevice
@@ -162,12 +163,15 @@ async def test_readdressed_device_relearns_available_pv_strings(tmp_path):
         current = (await h.client.get("/admin/api/settings", headers=headers)).json()[
             "settings"
         ]["devices"]
-        response = await h.client.put(
-            "/admin/api/settings",
-            headers=headers,
-            json={"devices": [{**current[0], "host": NEW_HOST, "port": NEW_PORT}]},
-        )
+        reset = BatteryDiagnosticsRecorder.reset_device
+        with patch.object(BatteryDiagnosticsRecorder, "reset_device", autospec=True, side_effect=reset) as reset_spy:
+            response = await h.client.put(
+                "/admin/api/settings",
+                headers=headers,
+                json={"devices": [{**current[0], "host": NEW_HOST, "port": NEW_PORT}]},
+            )
         assert response.status_code == 200, response.text
+        assert [call.args[1] for call in reset_spy.call_args_list] == ["main"]
         sample("solar_a_power", 1200.0)
         pv = h.runtime.energy_readings.readings("main").pv_power_w
         assert pv.value == 1200.0
