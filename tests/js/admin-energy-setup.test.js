@@ -777,15 +777,15 @@ function planBatteryLine(plan) {
   const text = textSpan ? textSpan.textContent : null;
   return { text, inGrid, isTile: line ? (line.className || '').split(/\s+/).includes('spot-market-highlight') : false };
 }
-test('Charging plan shows three plan KPI tiles with Battery remaining as a separate tertiary line', () => {
+test('Charging plan shows four plan KPI tiles with Battery remaining as a separate tertiary line', () => {
   const plan = {
     battery: { soc_percent: 33, usable_capacity_wh: 10370, remaining_energy_wh: 3422.1 },
     energy: { grid_charge_energy_wh: 4000 },
     slots: [{ action: 'charge', start: '2026-01-01T10:00:00Z', end: '2026-01-01T10:15:00Z', max_power_w: 2000, target_soc_percent: 80 }],
   };
   const tiles = planTiles(plan);
-  assert.equal(tiles.length, 3);
-  assert.deepEqual(tiles.map((t) => t.caption), ['Target SoC', 'Charge power', 'Total plan grid energy']);
+  assert.equal(tiles.length, 4);
+  assert.deepEqual(tiles.map((t) => t.caption), ['Target SoC', 'Charge power', 'Total plan grid energy', 'Next grid charge']);
   const battery = planBatteryLine(plan);
   assert.equal(battery.inGrid, false, 'Battery remaining must not live inside the plan-KPI grid');
   assert.equal(battery.isTile, false, 'Battery remaining must not be a .spot-market-highlight tile');
@@ -795,7 +795,7 @@ test('Charging plan shows three plan KPI tiles with Battery remaining as a separ
 test('Battery remaining shows a dash, never NaN or undefined, without a snapshot', () => {
   for (const battery of [undefined, null, { soc_percent: null }]) {
     const tiles = planTiles({ battery });
-    assert.equal(tiles.length, 3, 'the plan-KPI grid keeps its three tiles');
+    assert.equal(tiles.length, 4, 'the plan-KPI grid keeps its four tiles');
     const line = planBatteryLine({ battery });
     assert.equal(line.text, 'Not available');
     assert.ok(!/NaN|undefined|null/.test(line.text));
@@ -1042,22 +1042,35 @@ test('Charging schedule details stay open across a plan refresh', () => {
   assert.equal(h.byId.get('energy-plan-schedule-details').open, true, 'opened details survive the re-render');
 });
 
-const dayTile = (plan) => planTiles(plan).find((tile) => tile.caption === 'Grid charging by day');
+const dayTile = (plan) => planTiles(plan).find((tile) => tile.caption === 'Next grid charge');
 
-test('the day KPI tile shows today and a pending tomorrow, then tomorrow’s own windows', () => {
+test('the fourth KPI tile shows the next grid charge with today and tomorrow below it', () => {
   const todaySlot = { start: '2026-01-01T10:00:00Z', end: '2026-01-01T10:15:00Z', action: 'charge', max_power_w: 2000, target_soc_percent: 80, reason: 'forecast deficit, charged as late as permitted' };
   const tomorrowSlot = { ...todaySlot, start: '2026-01-02T10:00:00Z', end: '2026-01-02T10:15:00Z' };
   const base = { slots: [todaySlot],
     today: { date: '2026-01-01', status: 'ok', slots: [todaySlot] },
     tomorrow: { date: '2026-01-02', status: 'pending', slots: [] } };
+  const h = harness();
+  const window = h.context.planSlotTime(todaySlot);
   assert.equal(planTiles(base).length, 4);
-  assert.deepEqual(dayTile(base), { caption: 'Grid charging by day', value: 'Today: 1 charging window', sub: 'Tomorrow: Waiting for spot prices' });
-  assert.deepEqual(dayTile({ ...base, slots: [todaySlot, tomorrowSlot],
-    tomorrow: { date: '2026-01-02', status: 'ok', slots: [tomorrowSlot] } }).sub, 'Tomorrow: 1 charging window');
-  assert.equal(dayTile({ ...base, today: { date: '2026-01-01', status: 'ok', slots: [] },
-    tomorrow: { date: '2026-01-02', status: 'unavailable', slots: [] } }).value, 'Today: No grid charging');
-  // Without day views (an older backend) the strip keeps its three plan tiles.
-  assert.equal(planTiles({ slots: [todaySlot] }).length, 3);
+  assert.deepEqual(dayTile(base), { caption: 'Next grid charge', value: window, sub: 'Today: 1 charging window · Tomorrow: Waiting for spot prices' });
+  assert.equal(dayTile({ ...base, slots: [todaySlot, tomorrowSlot],
+    tomorrow: { date: '2026-01-02', status: 'ok', slots: [tomorrowSlot] } }).sub, 'Today: 1 charging window · Tomorrow: 1 charging window');
+  assert.deepEqual(dayTile({ slots: [], today: { date: '2026-01-01', status: 'ok', slots: [] },
+    tomorrow: { date: '2026-01-02', status: 'unavailable', slots: [] } }),
+    { caption: 'Next grid charge', value: 'No grid charging', sub: 'Today: No grid charging · Tomorrow: Not available yet' });
+  // Without day views (an older backend) the tile keeps the next window and drops the day line.
+  assert.deepEqual(dayTile({ slots: [todaySlot] }), { caption: 'Next grid charge', value: window });
+});
+
+test('the next grid charge is no longer a separate headline above the KPI tiles', () => {
+  const h = harness();
+  h.context.formatPower = (w) => `${w} W`;
+  const host = h.context.element('div');
+  host.id = 'energy-plan-result';
+  h.context.renderDryRunPlan({ status: 'ok', horizon_hours: 24, energy: {}, window: {},
+    slots: [{ start: '2026-01-01T10:00:00Z', end: '2026-01-01T10:15:00Z', action: 'charge', max_power_w: 2000, target_soc_percent: 80, reason: 'x' }] });
+  assert.ok(!flatten(host).some((n) => n.tagName === 'h3'));
 });
 
 test('the backend response for an unpublished tomorrow renders today without the wait card', () => {
@@ -1072,7 +1085,7 @@ test('the backend response for an unpublished tomorrow renders today without the
   schedule.id = 'energy-plan-schedule';
   h.context.renderDryRunPlan(plan);
   assert.equal(flatten(result).some((n) => String(n.className || '').includes('plan-loading-icon')), false);
-  assert.deepEqual(dayTile(plan), { caption: 'Grid charging by day', value: 'Today: No grid charging', sub: 'Tomorrow: Waiting for spot prices' });
+  assert.deepEqual(dayTile(plan), { caption: 'Next grid charge', value: 'No grid charging', sub: 'Today: No grid charging · Tomorrow: Waiting for spot prices' });
   // The day state lives in the KPI strip only; the schedule below no longer repeats it per day.
   assert.doesNotMatch(flatten(schedule).map((n) => n.textContent).join(' '), /Today ·|Tomorrow ·|Waiting for/);
 });
@@ -1142,7 +1155,9 @@ test('an ok plan without charge slots shows the plan KPIs without a status headl
   const { h } = renderPlan([planSlot('2026-01-01T01:00:00Z', '2026-01-01T01:15:00Z', 'idle', null, 'battery reserve covers demand', null)]);
   const texts = flatten(h.byId.get('energy-plan-result')).map((n) => n.textContent);
   assert.ok(texts.includes('Target SoC'));
-  assert.ok(!texts.some((t) => /No grid charg|does not schedule grid charging/.test(t || '')));
+  // The empty state lives in the Next grid charge tile, not in a headline above the tiles.
+  assert.ok(!flatten(h.byId.get('energy-plan-result')).some((n) => n.tagName === 'h3'));
+  assert.ok(texts.includes('No grid charging'));
 });
 
 // Product rule: the Charging plan, Spot Market and Weather tabs are shown together only while at

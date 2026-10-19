@@ -2721,7 +2721,7 @@ try {
           (await ep.locator('#energy-plan-confidence').innerText()).trim() === 'Normal confidence');
         const hero = await ep.locator('#energy-plan-result .energy-plan-highlights .spot-market-highlight-caption').allInnerTexts();
         check('plan summary shows four plan KPI tiles in the pinned order',
-          hero.map((t) => t.toLowerCase()).join('|') === 'target soc|charge power|total plan grid energy|grid charging by day', hero.join('|'));
+          hero.map((t) => t.toLowerCase()).join('|') === 'target soc|charge power|total plan grid energy|next grid charge', hero.join('|'));
         const batteryLine = await ep.locator('#energy-plan-result .energy-plan-battery').first().innerText();
         check('Current battery state shows SoC, remaining and usable kWh as a separate input line',
           /Current battery state/.test(batteryLine) && /33 % SoC · 3[.,]42 kWh remaining \/ 10[.,]37 kWh usable/.test(batteryLine), batteryLine);

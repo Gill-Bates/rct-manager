@@ -760,12 +760,6 @@ function planWaitState(weatherSetupRequired = false) {
 const PLAN_PENDING_STATUSES = new Set(['insufficient_history', 'spot_prices_unavailable', 'solar_forecast_unavailable']);
 const PLAN_RETRY_STATUSES = new Set([...PLAN_PENDING_STATUSES, 'battery_state_unavailable']);
 
-function planStatusCard(title, message) {
-  const card = element('section', 'mb-3');
-  card.append(element('h3', 'h5 mb-2', title), element('p', 'mb-0', message));
-  return card;
-}
-
 function nextGridCharge(slots) {
   const first = slots.findIndex((slot) => slot.action === 'charge');
   if (first < 0) return null;
@@ -1152,10 +1146,8 @@ function renderDryRunPlan(plan) {
     return;
   }
   const next = nextGridCharge(plan.slots || []);
-  const card = next
-    ? planStatusCard('Next grid charge', `${planDateTime(next.start)} – ${planDateTime(next.end)}`)
-    : element('section');
-  // Three plan-KPI tiles (plan outputs) built from the plan's own snapshot (no second data source).
+  const card = element('section');
+  // Four plan-KPI tiles (plan outputs) built from the plan's own snapshot (no second data source).
   // Battery remaining is a live device state, so it renders as a weaker tertiary line below the grid.
   const summary = element('div', 'spot-market-highlights energy-plan-highlights mt-3');
   const add = (caption, value, icon, sub) => {
@@ -1172,9 +1164,10 @@ function renderDryRunPlan(plan) {
   add('Target SoC', next && known(next.target_soc_percent) ? `${Math.round(next.target_soc_percent)} %` : '—', 'battery_charging_full');
   add('Charge power', next && known(next.max_power_w) ? formatPower(next.max_power_w) : '—', 'bolt');
   add('Total plan grid energy', known(plan.energy?.grid_charge_energy_wh) ? planKwh(plan.energy.grid_charge_energy_wh) : '—', 'electric_meter');
-  if (plan.today && plan.tomorrow) {
-    add('Grid charging by day', `Today: ${planDayLabel(plan.today)}`, 'calendar_month', `Tomorrow: ${planDayLabel(plan.tomorrow)}`);
-  }
+  // The next charge window leads; the per-day summary below it needs the backend's day views.
+  const days = plan.today && plan.tomorrow
+    ? `Today: ${planDayLabel(plan.today)} · Tomorrow: ${planDayLabel(plan.tomorrow)}` : '';
+  add('Next grid charge', next ? planSlotTime(next) : 'No grid charging', 'calendar_month', days);
   card.append(summary);
   // The battery is an input of the plan, not an output: a quiet labelled line, not another KPI.
   const batteryLine = element('p', 'energy-plan-battery d-flex flex-wrap align-items-center gap-2 small text-secondary mt-3 mb-0');

@@ -287,9 +287,10 @@ preview)"). The result area uses the full card width:
 
 - Header: title with the forecast confidence (for adaptive history and the stored-history fallback; a plan on the configured baseline shows none), when available on one line, preview note, Inverter select, Expert switch.
 - Four equal KPI tiles (four columns on desktop, 2 + 2 on tablets, stacked on phones): Target SoC,
-  Charge power, total plan grid energy and **Grid charging by day**. The day tile has one line for
-  today and one for tomorrow: the number of charging windows, "No grid charging", "Waiting for spot
-  prices" while tomorrow's auction is unpublished, or "Not available yet". Current battery state is
+  Charge power, total plan grid energy and **Next grid charge**. The last tile shows the next charge
+  window (or "No grid charging") and below it one line for today and tomorrow: the number of
+  charging windows, "No grid charging", "Waiting for spot prices" while tomorrow's auction is
+  unpublished, or "Not available yet". Current battery state is
   a separate, quieter line below them: SoC and remaining/usable energy (or "Not available" without a
   battery snapshot).
 - The schedule as a time-series chart (the temporal overview): grid charge power (kW, idle slots at
@@ -298,7 +299,7 @@ preview)"). The result area uses the full card width:
   plain-language reason; a charge slot reads "Grid charging" with power, target SoC and the reason.
   The canvas has a short text summary; the "Show all intervals" table below it is the text
   alternative and is not repeated as a canvas description. There is no separate table of charging
-  windows; the **Grid charging by day** tile summarises them per day.
+  windows; the **Next grid charge** tile summarises them per day.
 - **Show all intervals** (a native disclosure): the complete technical slot history with Time,
   Action, Power, Target SoC and Reason for every interval; directly adjacent intervals merge only
   when action, power, target SoC and reason are identical. The action reads "Grid charging" or "No
@@ -309,7 +310,7 @@ preview)"). The result area uses the full card width:
   reason is shown as the original text. The planner reasons themselves are unchanged.
 - Below it, the consumption bar chart ([Consumption](consumption.md#daily-consumption-api)).
 - The forecast windows (consumption, solar, price) and the note that prices are raw day-ahead prices
-  only. The "Next grid charge" hero metrics sit in one row (stacked on narrow screens).
+  only. The plan KPI tiles sit in one row (stacked on narrow screens).
 
 ### Loading behaviour
 
