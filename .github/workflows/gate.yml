@@ -83,6 +83,31 @@ jobs:
           pip install actionlint-py
           actionlint
 
+  source-scan:
+    name: Source tree scan
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Complements the image CVE scan in release.yml: committed secrets and
+      # Dockerfile/workflow misconfiguration are invisible to it.
+      - name: Trivy source scan
+        # Pinned to an immutable commit SHA, not a mutable ref (GHSA-69fq-xp46-6x23).
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          scanners: 'secret,misconfig'
+          trivyignores: '.trivyignore'
+          format: 'table'
+          exit-code: '1'
+          severity: 'CRITICAL,HIGH'
+          timeout: '5m'
+
   container:
     name: Dockerfile + build script
     runs-on: ubuntu-26.04
