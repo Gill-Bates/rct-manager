@@ -51,7 +51,7 @@ from app.admin.energy_api import (
     verification_write_lock,
 )
 from app.catalog.registry import RegistryCatalog
-from app.dispatch.capabilities import CapabilityName, CapabilityStatus
+from app.dispatch.capabilities import CapabilityName
 from app.dispatch.controller import CapabilityConflict
 from app.dispatch.models import DispatchCommand, DispatchMode, DispatchState
 from app.errors import DeviceApiError
@@ -263,7 +263,7 @@ def automatic_status(app: FastAPI, device_id: str) -> AutomaticVerificationStatu
     if dispatch is not None and {
         record.name
         for record in dispatch.capabilities(device_id)
-        if record.status is CapabilityStatus.VERIFIED
+        if record.is_verified
         and record.name in (
             CapabilityName.WRITE_PATH,
             CapabilityName.BATTERY_POWER_SIGN,
