@@ -35,9 +35,12 @@ on:
 permissions:
   contents: read
 
+# The weekly scan runs on the default branch like a deployment does, so it gets
+# its own group: sharing one would let a starting scan cancel a running deploy.
+# Only PR runs are cancellable; a deploy already underway is left to finish.
 concurrency:
-  group: docs-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: docs-${{ github.workflow }}-${{ github.event_name == 'schedule' && 'scan' || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   build:

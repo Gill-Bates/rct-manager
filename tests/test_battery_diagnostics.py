@@ -1,7 +1,9 @@
+#!/usr/bin/env python3
 #
 # tests/test_battery_diagnostics.py
 # Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
 #
+
 """The battery calibration evidence recorder: raster, sample identity, transitions, gaps and files."""
 
 import asyncio

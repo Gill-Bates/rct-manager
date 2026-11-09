@@ -54,7 +54,8 @@ mkdocs build -f docs/mkdocs.yml --strict -d /tmp/rct-site
 
 | Workflow | Purpose |
 | --- | --- |
-| `.github/workflows/ci.yml` | ruff, pytest, actionlint, `docker build --check`, manifest checks |
+| `.github/workflows/ci.yml` | ruff, pytest, actionlint, shellcheck, `docker build --check`, manifest checks |
+| `.github/workflows/security.yml` | weekly Trivy rescan of the published `giiibates/rct-manager:latest` image, per platform, read-only |
 | `.github/workflows/docs-build.yml` | strict docs build, link check, Trivy scan, deploy to GitHub Pages from `main` |
 | `.github/workflows/release.yml` | tag-driven: validates the tag against `pyproject.toml`, builds native `linux/amd64` + `linux/arm64` images, smoke-tests and scans each, publishes a multi-arch manifest to Docker Hub (`giiibates/rct-manager`) with an SBOM and provenance attestation, and creates the GitHub Release |
 

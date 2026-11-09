@@ -1,8 +1,8 @@
 # .github/workflows/gate.yml
 # Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
 #
-# Reusable: Ruff, pytest, Node unit tests, workflow lint, Dockerfile check and manifest
-# invariants. Called by ci.yml for every push/PR and by release.yml before a
+# Reusable: Ruff, pytest, Node unit tests, workflow lint, shellcheck, Dockerfile check and
+# manifest invariants. Called by ci.yml for every push/PR and by release.yml before a
 # tag is allowed to publish, so a release can prove the exact commit it
 # builds passed this gate - not merely that the commit is reachable from
 # main, which says nothing about whether its own CI run passed or is still
@@ -74,6 +74,14 @@ jobs:
         with:
           python-version: '3.13'
 
+      # actionlint only checks the run: blocks when shellcheck is on PATH; if a
+      # runner image drops it, that check would silently disappear.
+      - name: shellcheck is available
+        run: |
+          set -euo pipefail
+          command -v shellcheck
+          shellcheck --version
+
       # actionlint-py wraps the actionlint binary; .github/actionlint.yaml is
       # picked up automatically.
       - name: actionlint
@@ -122,6 +130,11 @@ jobs:
       # invisible until then. -n parses without executing.
       - name: Build script syntax
         run: bash -n docker/build.sh
+
+      # The entrypoint starts as root and drops privileges via gosu, so it gets
+      # a real lint, not only a syntax check.
+      - name: Shell scripts
+        run: shellcheck docker/entrypoint.sh docker/build.sh
 
       # BuildKit's linter resolves stages, ARG/ENV and COPY --from targets
       # without running a build step. Context is the repository root, as in

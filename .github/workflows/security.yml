@@ -1,0 +1,128 @@
+# .github/workflows/security.yml
+# Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
+#
+# Weekly rescan of the already published image. release.yml scans only at
+# release time, so a CVE disclosed later would go unnoticed in `latest`. The
+# workflow is read-only: no registry login, no push, no tag. A red run means
+# a new release is needed. Related: release.yml, gate.yml.
+
+name: Security rescan
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '23 4 * * 1'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-rescan
+  cancel-in-progress: false
+
+env:
+  IMAGE_NAME: giiibates/rct-manager
+  # Must match the platforms built in release.yml.
+  EXPECTED_ARCHS: 'amd64 arm64'
+
+jobs:
+  resolve:
+    name: Resolve published digests
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    outputs:
+      matrix: ${{ steps.resolve.outputs.matrix }}
+    steps:
+      - name: Resolve per-platform digests of latest
+        id: resolve
+        run: |
+          set -euo pipefail
+          index_digest="$(docker buildx imagetools inspect "${IMAGE_NAME}:latest" --format '{{.Manifest.Digest}}')"
+          case "$index_digest" in
+            sha256:*) ;;
+            *) echo "::error::Unexpected index digest: ${index_digest}"; exit 1 ;;
+          esac
+          docker buildx imagetools inspect --raw "${IMAGE_NAME}@${index_digest}" > index.json
+
+          # Attestation entries (unknown/unknown) drop out of the selection. A
+          # missing platform is an error, never a silently shorter matrix.
+          entries='[]'
+          for arch in ${EXPECTED_ARCHS}; do
+            digest="$(jq -r --arg a "$arch" \
+              '[.manifests[] | select(.platform.os == "linux" and .platform.architecture == $a) | .digest][0] // empty' \
+              index.json)"
+            case "$digest" in
+              sha256:*) ;;
+              *) echo "::error::No linux/${arch} manifest in ${IMAGE_NAME}@${index_digest}"; exit 1 ;;
+            esac
+            entries="$(jq -c --arg a "$arch" --arg d "$digest" '. + [{arch: $a, digest: $d}]' <<< "$entries")"
+          done
+
+          echo "matrix=$(jq -nc --argjson e "$entries" '{include: $e}')" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Published image"
+            echo
+            echo "\`${IMAGE_NAME}:latest\` -> \`${index_digest}\`"
+            jq -r '.[] | "- `\(.arch)`: `\(.digest)`"' <<< "$entries"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  scan:
+    name: Trivy rescan (${{ matrix.arch }})
+    needs: resolve
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.resolve.outputs.matrix) }}
+    steps:
+      # Only for .trivyignore.
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Secrets and misconfiguration are owned by the source scan in gate.yml;
+      # this gate only looks at known vulnerabilities in the shipped image.
+      - name: Trivy image scan
+        id: trivy
+        # Pinned to an immutable commit SHA, not a mutable ref (GHSA-69fq-xp46-6x23).
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: docker.io/giiibates/rct-manager@${{ matrix.digest }}
+          scanners: 'vuln'
+          trivyignores: '.trivyignore'
+          format: 'json'
+          output: trivy-${{ matrix.arch }}.json
+          exit-code: '1'
+          ignore-unfixed: true
+          severity: 'CRITICAL,HIGH'
+          timeout: '10m'
+
+      - name: Scan summary
+        if: ${{ !cancelled() && steps.trivy.conclusion != 'skipped' }}
+        env:
+          ARCH: ${{ matrix.arch }}
+          DIGEST: ${{ matrix.digest }}
+        run: |
+          set -euo pipefail
+          report="trivy-${ARCH}.json"
+          if [ ! -s "$report" ]; then
+            echo "### Rescan ${ARCH}: scanner error (no result file)" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          critical="$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "CRITICAL")] | length' "$report")"
+          high="$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "HIGH")] | length' "$report")"
+          {
+            echo "### Rescan ${ARCH}"
+            echo
+            echo "\`${DIGEST}\`: CRITICAL ${critical}, HIGH ${high} (fixable, after .trivyignore)"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload findings
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: trivy-rescan-${{ matrix.arch }}
+          path: trivy-${{ matrix.arch }}.json
+          retention-days: 30
+          if-no-files-found: warn

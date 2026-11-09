@@ -1,11 +1,12 @@
 # .github/workflows/ci.yml
 # Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
 #
-# The PR gate: calls gate.yml (ruff, pytest, workflow lint, Dockerfile check,
-# manifest invariants) for every push and pull request. release.yml calls the
+# The PR gate: calls gate.yml (ruff, pytest, workflow lint, shellcheck,
+# Dockerfile check, manifest invariants) for every push and pull request. release.yml calls the
 # same reusable workflow before a tag is allowed to publish, so both run
 # identical checks against identical code - see gate.yml for why that matters.
-# Related: docs-build.yml (documentation). docker/build.sh stays the manual
+# Related: docs-build.yml (documentation), security.yml (weekly rescan of the
+# published image). docker/build.sh stays the manual
 # local-build path.
 
 name: CI

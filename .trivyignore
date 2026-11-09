@@ -1,7 +1,7 @@
 # .trivyignore
 #
 # Findings accepted for the Trivy scans in
-# .github/workflows/docs-build.yml, gate.yml and release.yml. Format: `<id> exp:YYYY-MM-DD`, with the
+# .github/workflows/docs-build.yml, gate.yml, release.yml and security.yml. Format: `<id> exp:YYYY-MM-DD`, with the
 # reason in a comment above each entry.
 #
 # Accepted exceptions are listed below.
