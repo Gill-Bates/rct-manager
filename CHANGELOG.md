@@ -1,34 +1,12 @@
-## [1.2.3] - 2026-10-18
-
-### New
-
-- Spot-market prices and solar forecasts now follow the Energy Manager mode automatically; separate enable switches are no longer needed, and refreshes run only in Manual mode.
-
-- Read-only battery calibration evidence is now recorded per inverter in daily files next to the admin database (60 days retained). It does not affect planning or reported capacity.
-- The Charging plan's **Grid charging by day** tile is now **Next grid charge** and shows the next charge window; the separate charge-window table is gone, and **Show all intervals** lists every slot.
-
-### Fix
-
-- Slow sequential telemetry reads now retain their true age, so stale measurements cannot pass the dispatch safety check.
-- Re-addressing an inverter clears learned PV-string history and restarts its battery evidence recording, and hidden dashboard widgets keep their saved positions after reload.
-- Battery-health charts now update their colors immediately when the dashboard theme changes; verification sessions also expire reliably despite system-clock adjustments.
-
-### Security
-
-- Optional strict SQLite path checks reject unsafe database paths when enabled; update checks block cross-origin redirects and oversized responses, and API request bodies are size-limited.
-- Dispatch apply and restore sequences now complete safely if the requesting task is cancelled, avoiding partially applied inverter control.
-
-
-<details markdown="1">
-<summary>Previous versions...</summary>
-
 ## [1.2.2] - 2026-10-18
 
 ### New
 
 - Optional dashboard widgets now show battery capacity, remaining energy, cycles, calibration and commissioning dates, and degradation history per inverter; unavailable calibration data remains clearly empty.
 - Expert diagnostics show battery calibration history, and the Charging plan reports the battery's current remaining energy.
-- The default Charging schedule now lists only grid-charging windows; **Show all intervals** reveals the full slot history, with action-specific tooltips and readable reason labels.
+- Read-only battery calibration evidence is now recorded per inverter in daily files next to the admin database (60 days retained). It does not affect planning or reported capacity.
+- Spot-market prices and solar forecasts now follow the Energy Manager mode automatically; separate enable switches are no longer needed, and refreshes run only in Manual mode.
+- The Charging plan's **Next grid charge** tile shows the next charge window; the default schedule lists only grid-charging windows, and **Show all intervals** lists every slot with action-specific tooltips and readable reason labels.
 - Documentation pages now include a **Print / PDF** control.
 - The consumption chart legend lets you show or hide its data series.
 
@@ -42,14 +20,22 @@
 - A missing battery capacity now shows an immediate explanation while the plan continues checking in the background; genuinely pending price, solar, or consumption inputs show a wait state, while disabled inputs still tell the operator what to enable.
 - Plans without configured power limits use a 3 kW charge and discharge fallback; Expert mode can set per-inverter limits.
 - Spot prices and bidding zones load more reliably, and prices are used only after a full local day is available. Location search no longer takes a timezone or postal code from a nearby or partial match.
+- Slow sequential telemetry reads now retain their true age, so stale measurements cannot pass the dispatch safety check.
+- Re-addressing an inverter clears learned PV-string history and restarts its battery evidence recording, and hidden dashboard widgets keep their saved positions after reload.
+- Battery-health charts now update their colors immediately when the dashboard theme changes; verification sessions also expire reliably despite system-clock adjustments.
 - The **Add widget** dialog now preserves keyboard focus and closes with Escape.
 
 ### Security
 
 - The server enforces the one-time usage disclaimer before any admin request, including requests authenticated with personal access tokens.
 - Low-level battery dispatch mutations are refused while the Energy Manager owns the inverter, so dispatch cannot bypass the active control mode.
+- Dispatch apply and restore sequences now complete safely if the requesting task is cancelled, avoiding partially applied inverter control.
 - Admin cookie sessions now have a configurable 0–7 day server-side lifetime (1 day by default); logout and password changes invalidate sessions.
 - Admin GUI polling has a separate per-session request budget from API tokens, pauses in hidden tabs, and backs off according to `Retry-After` after a 429 response.
+- Optional strict SQLite path checks reject unsafe database paths when enabled; update checks block cross-origin redirects and oversized responses, and API request bodies are size-limited.
+
+<details markdown="1">
+<summary>Previous versions...</summary>
 
 ## [1.2.1] - 2026-10-16
 
