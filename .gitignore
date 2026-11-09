@@ -36,3 +36,9 @@ data/
 # uv is not this project's dependency workflow (pip + pyproject.toml / Docker resolve deps).
 # Do not commit a uv lockfile: it would be a second, unused dependency resolution.
 uv.lock
+
+# Node tooling and Playwright output
+node_modules/
+test-results/
+playwright-report/
+artifacts/

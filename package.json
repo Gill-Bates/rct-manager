@@ -1,0 +1,18 @@
+{
+  "name": "rct-manager-frontend-tooling",
+  "private": true,
+  "description": "Test tooling for the admin frontend and the browser E2E suite; nothing here is shipped in the image.",
+  "scripts": {
+    "test": "node --test tests/js/*.test.js",
+    "test:local": "node tools/run-node-tests.mjs",
+    "test:e2e": "playwright test --config tests/e2e/playwright.config.mjs",
+    "test:e2e:list": "playwright test --config tests/e2e/playwright.config.mjs --list"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "devDependencies": {
+    "@axe-core/playwright": "4.14.0",
+    "@playwright/test": "1.64.1"
+  }
+}

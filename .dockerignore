@@ -22,6 +22,7 @@
 **/*.egg-info/
 **/data/
 **/*.zip
+**/node_modules/
 
 # Not needed by the runtime image
 docs/
@@ -29,7 +30,11 @@ tests/
 docker/
 !docker/entrypoint.sh
 .github/
+tools/
+package.json
+package-lock.json
 site/
 **/build/
 **/dist/
 **/*.pdf
+**/node_modules/

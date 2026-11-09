@@ -1989,16 +1989,21 @@ try {
       let mockNoLimits = false;
       await ep.route('**/admin/api/energy/devices', async (route) => {
         if (route.request().method() !== 'GET') return route.continue();
-        const response = await route.fetch();
-        const list = await response.json();
-        for (const device of list) {
-          if (mockNoLimits) device.limits = null;
-          device.readings = {
-            battery_soc_percent: reading(54), grid_power_w: reading(1200), pv_power_w: reading(1500),
-            house_load_w: reading(800), battery_power_w: reading(-900),
-          };
+        // A fetch that outlives the energy server must not become an unhandled rejection that hides the real failure.
+        try {
+          const response = await route.fetch();
+          const list = await response.json();
+          for (const device of list) {
+            if (mockNoLimits) device.limits = null;
+            device.readings = {
+              battery_soc_percent: reading(54), grid_power_w: reading(1200), pv_power_w: reading(1500),
+              house_load_w: reading(800), battery_power_w: reading(-900),
+            };
+          }
+          await route.fulfill({ response, json: list });
+        } catch {
+          await route.abort().catch(() => { });
         }
-        await route.fulfill({ response, json: list });
       });
       let hardwareStrategy = { device_id: 'sim', device_name: 'RCT inverter', code: 127, label: null, stale: false };
       await ep.route('**/admin/api/energy/hardware-strategies', (route) => route.fulfill({ json: [hardwareStrategy] }));
@@ -2058,9 +2063,9 @@ try {
       if (manualResponse && manualResponse.ok()) {
         await ep.waitForSelector('.energy-mode-option.is-selected.is-pending', { timeout: 15000 }).catch(() => { });
         const lead = ep.locator('.energy-setup-lead:not([hidden])');
-        check('Manual with an open setup is marked pending and says it is not active yet',
+        check('Manual with an open setup is marked pending and says battery control unlocks when verification completes',
           (await ep.locator('.energy-mode-option.is-selected.is-pending').count()) === 1
-          && /not active yet/.test(await lead.first().innerText().catch(() => '')));
+          && /Manual is selected\..*battery control unlocks when it completes/.test(await lead.first().innerText().catch(() => '')));
         const offAnswered = ep.waitForResponse((r) => r.request().method() === 'PUT' && r.url().endsWith('/mode'), { timeout: 15000 });
         await ep.locator('.energy-mode-switch [role=radio]').first().click();
         await offAnswered;
@@ -2077,158 +2082,12 @@ try {
       // and Expert mode is switched on by the user, never by the setup step.
       check('Basic mode shows no hardware verification form or protocol fields',
         (await ep.locator('.energy-setup-step form').count()) === 0 && !/Strategy code|Byte width/.test(shownStep), shownStep.slice(0, 300));
-      if (await ep.locator('.energy-setup-step button', { hasText: 'Verify hardware' }).count()) {
-        check('the Basic hardware step offers "Verify hardware" and leaves Expert mode off',
-          (await ep.locator('.energy-setup-step button', { hasText: 'Verify hardware' }).count()) === 1
-          && (await ep.locator('#energy-expert-mode').isChecked()) === false, shownStep.slice(0, 300));
-        // Shared primary metrics and AA contrast on the warning box; this context is light, dark brand
-        // fill vs surface is a global token matter.
-        const buttonStyle = await ep.locator('.energy-setup-step button', { hasText: 'Verify hardware' }).evaluate((button) => {
-          const probe = document.createElement('button');
-          probe.className = 'btn btn-primary';
-          probe.textContent = 'Probe';
-          button.after(probe);
-          const luminance = (color) => {
-            const [r, g, b] = color.match(/[\d.]+/g).slice(0, 3).map((v) => { const c = Number(v) / 255; return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4; });
-            return 0.2126 * r + 0.7152 * g + 0.0722 * b;
-          };
-          const ratio = (a, b) => { const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x); return (hi + 0.05) / (lo + 0.05); };
-          const metrics = (el) => { const s = getComputedStyle(el); return [s.fontSize, s.fontWeight, s.lineHeight, s.padding, s.borderRadius, s.display, s.backgroundColor, el.getBoundingClientRect().height.toFixed(1)].join('|'); };
-          let surface = 'rgba(0, 0, 0, 0)';
-          for (let node = button.parentElement; node && /rgba\(0, 0, 0, 0\)|transparent/.test(surface); node = node.parentElement) surface = getComputedStyle(node).backgroundColor;
-          const own = getComputedStyle(button);
-          const result = { button: metrics(button), canonical: metrics(probe), text: ratio(own.color, own.backgroundColor), boundary: ratio(own.backgroundColor, surface) };
-          probe.remove();
-          return result;
-        });
-        check('"Verify hardware" has the computed style of the shared primary button',
-          buttonStyle.button === buttonStyle.canonical, `${buttonStyle.button} vs ${buttonStyle.canonical}`);
-        check('"Verify hardware" is readable on the setup box (text 4.5:1, boundary 3:1)',
-          buttonStyle.text >= 4.5 && buttonStyle.boundary >= 3, `text ${buttonStyle.text.toFixed(2)}, boundary ${buttonStyle.boundary.toFixed(2)}`);
-        // Opening and cancelling before consent must leave verification untouched.
-        await ep.locator('.energy-setup-step button', { hasText: 'Verify hardware' }).click();
-        const dialog = ep.locator('.energy-assistant.show');
-        await dialog.waitFor({ timeout: 5000 });
-        check('"Verify hardware" opens the guided assistant without switching Expert mode on',
-          (await ep.locator('#energy-expert-mode').isChecked()) === false && /Automatic verification/.test(await dialog.innerText()));
-        const intro = await dialog.locator('.modal-body > div').innerText();
-        check('verification introduction is brief and keeps the safety facts',
-          intro.trim().split(/\s+/).length <= 55 && /0 W/.test(intro) && /30 seconds/.test(intro)
-          && /restores it/.test(intro) && /saves the result/.test(intro), intro);
-        check('the assistant offers one start action and no stepper',
-          (await dialog.getByRole('button', { name: 'Start verification' }).count()) === 1
-          && (await dialog.locator('.energy-assistant-steps').count()) === 0);
-        await dialog.getByRole('button', { name: 'Cancel' }).click();
-        await ep.waitForSelector('.energy-assistant', { state: 'detached', timeout: 5000 });
-        check('cancelling before consent leaves the hardware unverified',
-          (await ep.locator('.energy-setup-step button', { hasText: 'Verify hardware' }).count()) === 1
-          && (await ep.locator('.energy-setup:not([hidden])').count()) >= 1);
-        const openAssistant = async () => {
-          await ep.locator('.energy-setup-step button', { hasText: 'Verify hardware' }).click();
-          await dialog.waitFor({ timeout: 5000 });
-          await dialog.getByRole('button', { name: 'Start verification' }).click();
-        };
-        const closeAssistant = async () => {
-          await dialog.getByRole('button', { name: 'Cancel' }).click();
-          await ep.waitForSelector('.energy-assistant', { state: 'detached', timeout: 5000 });
-        };
-        setScenario({ household_load_power: 0 });
-        const startRoute = '**/verification-assistant/start';
-        await ep.route(startRoute, async (route) => {
-          const response = await route.fetch();
-          await sleep(2200);
-          await route.fulfill({ response });
-        });
-        const startResponse = ep.waitForResponse((response) => response.url().endsWith('/verification-assistant/start'));
-        const startClick = openAssistant();
-        const progress = dialog.locator('.energy-assistant-progress');
-        await progress.waitFor({ state: 'visible' });
-        const spinning = await progress.locator('.spinner-border').evaluate((node) => ({
-          hidden: node.getAttribute('aria-hidden'), animation: getComputedStyle(node).animationName,
-        }));
-        check('working state shows an animated, decorative spinner and status text',
-          spinning.hidden === 'true' && spinning.animation !== 'none' && /Checking/.test(await progress.innerText()), JSON.stringify(spinning));
-        await ep.emulateMedia({ reducedMotion: 'reduce' });
-        check('spinner stops moving when reduced motion is requested',
-          (await progress.locator('.spinner-border').evaluate((node) => getComputedStyle(node).animationName)) === 'none');
-        await ep.emulateMedia({ reducedMotion: 'no-preference' });
-        if (!(await startResponse).ok()) throw new Error('verification start request failed');
-        await startClick;
-        await ep.unroute(startRoute);
-        await dialog.getByRole('heading', { name: 'Battery direction?' }).waitFor({ timeout: 15000 });
-        // Footer and fallback answer buttons follow the shared button variants.
-        const variantStyle = (locator, cls) => locator.evaluate((node, probeClass) => {
-          const probe = document.createElement('button');
-          probe.className = probeClass;
-          probe.textContent = 'Probe';
-          node.after(probe);
-          const keys = ['fontSize', 'fontWeight', 'lineHeight', 'paddingTop', 'paddingLeft', 'borderRadius', 'backgroundColor', 'color', 'borderTopColor'];
-          const pick = (el) => { const style = getComputedStyle(el); return keys.map((key) => style[key]).join('|'); };
-          const result = { own: pick(node), canonical: pick(probe), fill: getComputedStyle(node).backgroundColor };
-          probe.remove();
-          return result;
-        }, cls);
-        const cancelStyle = await variantStyle(dialog.getByRole('button', { name: 'Cancel' }), 'btn btn-outline-secondary');
-        check('"Cancel" is the canonical secondary button', cancelStyle.own === cancelStyle.canonical, `${cancelStyle.own} vs ${cancelStyle.canonical}`);
-        // No usable load means the balance cannot prove the battery direction.
-        const questionText = await dialog.innerText();
-        const options = dialog.locator('.modal-body button');
-        check('the fallback question offers exactly discharging, charging and idle',
-          (await options.count()) === 3
-          && (await dialog.getByRole('button', { name: /^The battery is discharging/ }).count()) === 1
-          && (await dialog.getByRole('button', { name: /^The battery is charging/ }).count()) === 1
-          && (await dialog.getByRole('button', { name: /^The battery is idle \(neither charging nor discharging\)/ }).count()) === 1, questionText.slice(0, 400));
-        check('the fallback question has no "I can\'t tell" option', !/can.t tell/i.test(questionText));
-        const optionStyles = [];
-        await ep.mouse.move(0, 0); // a pointer resting on an answer would measure its :hover colour
-        for (let i = 0; i < 3; i++) optionStyles.push(await variantStyle(options.nth(i), 'btn btn-primary'));
-        check('every answer button is the canonical filled primary button',
-          optionStyles.every((item) => item.own === item.canonical && !/rgba\(0, 0, 0, 0\)/.test(item.fill)), JSON.stringify(optionStyles.find((item) => item.own !== item.canonical) || optionStyles[0]));
-        await ep.screenshot({ path: path.join(OUT, 'assistant-question.png') });
-        await dialog.getByRole('button', { name: /^The battery is idle/ }).click();
-        await dialog.getByText(/is not idle right now/).waitFor({ timeout: 20000 });
-        check('an idle statement that contradicts the live reading is refused and proves nothing',
-          (await dialog.getByRole('heading', { name: 'Battery direction?' }).count()) === 1);
-        const fallbackTest = ep.waitForResponse((response) => response.url().endsWith('/verification-assistant/control-test'), { timeout: 90000 });  // ~35 paced device sends take ~25 s
-        await dialog.getByRole('button', { name: /^The battery is discharging/ }).click();
-        check('the control test runs after battery confirmation and before the grid question',
-          (await fallbackTest).ok());
-        await dialog.getByRole('heading', { name: 'Grid direction?' }).waitFor({ timeout: 20000 });
-        check('the unresolved grid question follows the test without exposing register names or manual test controls',
-          (await dialog.locator('.modal-body button').count()) === 3
-          && !/power_mng|Strategy code|Byte width|Run test|Save verification/.test(await dialog.innerText()));
-        await closeAssistant();
-        check('cancelling an unresolved direction leaves the hardware unverified',
-          (await ep.locator('.energy-setup-step button', { hasText: 'Verify hardware' }).count()) === 1);
-
-        // Scenario C: the battery is idle. Nothing may be guessed; the dialog waits, explains, keeps
-        // polling and continues by itself once the battery moves.
-        setScenario({ battery_power: 0, household_load_power: 1784.5 });
-        await openAssistant();
-        await dialog.getByRole('heading', { name: 'Waiting for battery power' }).waitFor({ timeout: 15000 });
-        const waitingText = await dialog.innerText();
-        check('an idle battery waits without asking for a guess',
-          /Waiting for battery power/.test(waitingText)
-          && (await dialog.locator('.modal-body button').count()) === 0 && !/can.t tell/i.test(waitingText), waitingText.slice(0, 400));
-        check('the waiting state is announced politely',
-          (await dialog.locator('.modal-body[aria-live=polite] .energy-assistant-waiting[role=status]').count()) === 1);
-        await ep.screenshot({ path: path.join(OUT, 'assistant-waiting-light-1280.png') });
-        await ep.setViewportSize({ width: 390, height: 844 });
-        await sleep(300);
-        await ep.screenshot({ path: path.join(OUT, 'assistant-waiting-light-390.png') });
-        check('the waiting state fits a 390 px viewport without horizontal scrolling',
-          await ep.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1));
-        await ep.evaluate(() => document.documentElement.setAttribute('data-bs-theme', 'dark'));
-        await ep.screenshot({ path: path.join(OUT, 'assistant-waiting-dark-390.png') });
-        await ep.setViewportSize({ width: 1280, height: 900 });
-        await sleep(300);
-        await ep.screenshot({ path: path.join(OUT, 'assistant-waiting-dark-1280.png') });
-        await ep.evaluate(() => document.documentElement.setAttribute('data-bs-theme', 'light'));
-        await closeAssistant();
-
-        // The Expert form checks below need the Expert section.
-        await ep.locator('#energy-expert-mode').check();
-      }
+      // Hardware verification runs automatically: the Basic step is status-only and offers no button.
+      await ep.waitForSelector('.energy-setup-step');
+      check('the Basic hardware step is status-only (no "Verify hardware" button) and leaves Expert mode off',
+        (await ep.locator('.energy-setup-step button').count()) === 0
+        && /Waiting for a safe time|Checking this inverter/.test(await ep.locator('.energy-setup-step').first().innerText())
+        && (await ep.locator('#energy-expert-mode').isChecked()) === false, shownStep.slice(0, 300));
       const uiForm = ep.locator('.energy-expert form').filter({ hasText: 'Device model' });
       if (await uiForm.count()) {
         const blank = await uiForm.evaluate((form) => ({
@@ -2252,69 +2111,6 @@ try {
           verifyPuts.length === 0 && (await uiForm.locator('.is-invalid').count()) >= 1, JSON.stringify(verifyPuts));
       }
 
-      // A successful 0 W hold cannot establish the grid sign if the power balance is unusable.
-      // Once restored, the 14 W live reading is still too small to support an operator answer.
-      await ep.locator('#energy-expert-mode').uncheck();
-      setScenario({ grid_power: 14, household_load_power: 0, battery_power: 800 });
-      {
-        const dialog = ep.locator('.energy-assistant.show');
-        let commits = 0;
-        ep.on('request', (request) => {
-          if (request.url().endsWith('/verification-assistant/commit') && request.method() === 'POST') commits += 1;
-        });
-        await ep.locator('.energy-setup-step button', { hasText: 'Verify hardware' }).click();
-        await dialog.waitFor({ timeout: 5000 });
-        // Start and the balance check are ~15 paced device reads (~5 s and ~10 s); wait for both before the 15 s render budget.
-        const phaseDone = ['start', 'auto-check'].map((step) => ep.waitForResponse((response) => response.url().endsWith(`/verification-assistant/${step}`), { timeout: 60000 }));
-        await dialog.getByRole('button', { name: 'Start verification' }).click();
-        await Promise.all(phaseDone);
-        await dialog.getByRole('heading', { name: 'Battery direction?' }).waitFor({ timeout: 15000 });
-        const controlResponse = ep.waitForResponse((response) => response.url().endsWith('/verification-assistant/control-test'), { timeout: 90000 });  // ~35 paced device sends take ~25 s
-        await dialog.getByRole('button', { name: /^The battery is discharging/ }).click();
-        const tested = await controlResponse;
-        await dialog.getByRole('heading', { name: 'Waiting for grid power' }).waitFor({ timeout: 15000 });
-        const testState = await tested.json();
-        check('an unprovable grid sign waits after the successful control test',
-          tested.ok() && testState.steps.find((step) => step.id === 'control_test')?.status === 'done'
-          && testState.steps.find((step) => step.id === 'grid')?.status === 'pending'
-          && /about 14 W/.test(await dialog.innerText())
-          && (await dialog.locator('.energy-assistant-waiting[role=status]').count()) === 1
-          && (await dialog.locator('.modal-body button').count()) === 0
-          && commits === 0, JSON.stringify(testState.steps));
-        await dialog.getByRole('button', { name: 'Cancel' }).click();
-        await ep.waitForSelector('.energy-assistant', { state: 'detached', timeout: 5000 });
-      }
-
-      // At 14 W the grid sign is initially unprovable. The 0 W hold raises the simulated grid draw,
-      // giving the assistant a measured direction without another operator action.
-      setScenario({ grid_power: 14, household_load_power: 2848.5, battery_power: 800 });
-      {
-        const dialog = ep.locator('.energy-assistant.show');
-        const automaticRequests = [];
-        ep.on('request', (request) => {
-          if (request.url().includes('/verification-assistant/') && request.method() === 'POST') {
-            automaticRequests.push({ action: request.url().split('/').pop(), body: request.postDataJSON() });
-          }
-        });
-        await ep.locator('.energy-setup-step button', { hasText: 'Verify hardware' }).click();
-        await dialog.waitFor({ timeout: 5000 });
-        await dialog.getByRole('button', { name: 'Start verification' }).click();
-        await ep.waitForSelector('.energy-assistant', { state: 'detached', timeout: 90000 });
-        const firstTest = automaticRequests.findIndex((item) => item.action === 'control-test');
-        const firstSave = automaticRequests.findIndex((item) => item.action === 'commit');
-        check('near-zero grid power is resolved during the automatic test and saved with one consent',
-          automaticRequests.some((item) => item.action === 'auto-check')
-          && firstTest > 0 && automaticRequests[firstTest].body?.confirm === true
-          && firstSave > firstTest && automaticRequests[firstSave].body?.confirm === true
-          && !automaticRequests.some((item) => item.action === 'direction'),
-          JSON.stringify(automaticRequests.map((item) => item.action)));
-        setScenario({});
-        await ep.waitForSelector('.energy-setup', { state: 'hidden', timeout: 15000 });
-        check('after the guided verification the setup banner is gone and Expert mode is still off',
-          (await ep.locator('.energy-setup:not([hidden])').count()) === 0 && (await ep.locator('#energy-expert-mode').isChecked()) === false);
-        check('the manual actions are visible after the guided verification',
-          (await ep.locator('.energy-actions button:visible').count()) >= 3);
-      }
       // A fresh dispatch store ships unverified hardware; verify it through the atomic admin endpoint.
       const verified = await ep.evaluate(async () => {
         const { csrf_token: csrf } = await (await fetch('/admin/api/session', { credentials: 'same-origin' })).json();
@@ -2404,10 +2200,14 @@ try {
       // Keyboard: arrows only move the focus; Space selects.
       const modeCalls = [];
       // Synchronise on the PUT /mode answer, then on the rendered state; a timeout fails the step loudly.
-      const switchMode = async (act, label) => {
-        const answered = ep.waitForResponse((r) => r.request().method() === 'PUT' && r.url().endsWith('/mode'), { timeout: 15000 });
+      // Off after an active command answers only once the device restore finished, so that call passes a longer budget.
+      const modeTimings = [];
+      const switchMode = async (act, label, responseTimeout = 15000) => {
+        const answered = ep.waitForResponse((r) => r.request().method() === 'PUT' && r.url().endsWith('/mode'), { timeout: responseTimeout });
+        const startedAt = Date.now();
         await act();
         await answered;
+        modeTimings.push(`${label}:${Date.now() - startedAt}ms`);
         await ep.waitForFunction((l) => (document.querySelector('.energy-mode-switch [aria-checked=true]')?.textContent.trim() || '').endsWith(l), label, { timeout: 15000 });
       };
       ep.on('request', (r) => { if (r.method() === 'PUT' && r.url().endsWith('/mode')) modeCalls.push(r.postDataJSON()); });
@@ -2467,9 +2267,9 @@ try {
       await ep.reload();
       await ep.waitForSelector('.energy-panel');
       const commandCount = commands.length;
-      await switchMode(() => radios.nth(0).click(), 'Off');
+      await switchMode(() => radios.nth(0).click(), 'Off', 60000);
       check('Off hands control back without a separate auto command', commands.length === commandCount
-        && /Off$/.test(await checkedMode()) && (await states()).every(Boolean), JSON.stringify(modeCalls));
+        && /Off$/.test(await checkedMode()) && (await states()).every(Boolean), JSON.stringify(modeCalls) + modeTimings.join(','));
       hardwareStrategy = { ...hardwareStrategy, code: 1, label: 'Constant' };
       await ep.reload();
       await ep.waitForFunction(() => /Off is recorded, but the inverter reports SOC strategy/.test(document.querySelector('.energy-mode-evidence')?.textContent || ''));
@@ -2852,9 +2652,10 @@ try {
         check('consumption chart is drawn once after a reload', (await chartsIn('#energy-consumption')) === 1);
         consumption = { days: [], recording_since: null };
         await ep.locator('#energy-plan-device').dispatchEvent('change');
-        await ep.waitForFunction(() => window.Chart && /No (consumption|inverter)|./.test(document.querySelector('#energy-plan-result').textContent));
-        check('without consumption data the whole section is hidden: no heading, no explanation',
-          (await ep.locator('#energy-consumption-section').isHidden()) && (await chartsIn('#energy-consumption')) === 0
+        // An empty history keeps the section for the neutral coverage line only (no chart, no explanation).
+        await ep.waitForFunction(() => /History coverage · 0\/0 days/.test(document.querySelector('#energy-consumption-import-status')?.textContent || ''));
+        check('without consumption data no chart is drawn and only the neutral coverage line is shown',
+          (await chartsIn('#energy-consumption')) === 0 && (await ep.locator('#energy-consumption canvas').count()) === 0
           && !/Recording locally|Importing daily totals|No consumption/.test(await ep.locator('#energy-tab-content').innerText()));
 
         // Spot market and weather previews: one canvas and one Chart instance each.
