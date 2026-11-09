@@ -1,3 +1,11 @@
+## [1.2.3] - 2026-xx-xx
+
+
+
+<details markdown="1">
+<summary>Previous versions...</summary>
+
+
 ## [1.2.2] - 2026-11-09
 
 - `New` Optional dashboard widgets now show battery capacity, remaining energy, cycles, calibration and commissioning dates, and degradation history per inverter; unavailable calibration data remains clearly empty.
@@ -25,9 +33,6 @@
 - `Security` Admin cookie sessions now have a configurable 0–7 day server-side lifetime (1 day by default); logout and password changes invalidate sessions.
 - `Security` Admin GUI polling has a separate per-session request budget from API tokens, pauses in hidden tabs, and backs off according to `Retry-After` after a 429 response.
 - `Security` Optional strict SQLite path checks reject unsafe database paths when enabled; update checks block cross-origin redirects and oversized responses, and API request bodies are size-limited.
-
-<details markdown="1">
-<summary>Previous versions...</summary>
 
 ## [1.2.1] - 2026-10-16
 

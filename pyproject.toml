@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rct-manager"
-version = "1.2.2"
+version = "1.2.3"
 description = "Your RCT Power inverter is just one REST call away."
 requires-python = ">=3.13"
 authors = [{ name = "Gill-Bates" }]
@@ -29,6 +29,7 @@ dev = [
     "hypothesis>=6.156",
     "pytest>=8.3",
     "pytest-asyncio>=1.4",
+    "pytest-xdist>=3.6",
     "ruff>=0.17",
 ]
 docs = [

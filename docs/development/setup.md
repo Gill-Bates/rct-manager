@@ -11,7 +11,7 @@ python -m pip install -e '.[dev]'
 
 ```sh
 ruff check .
-python -m pytest -q
+python -m pytest -q -n auto   # parallel (pytest-xdist), as in CI
 python -m app validate
 ```
 

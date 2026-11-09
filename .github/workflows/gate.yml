@@ -53,8 +53,9 @@ jobs:
         run: ruff check --output-format=github .
 
       # No settings.env on purpose: the tests build their own settings.
+      # xdist: one worker per runner core; the suite is isolated per test.
       - name: pytest
-        run: python -m pytest -q
+        run: python -m pytest -q -n auto
 
       - name: JavaScript unit tests
         run: node --test tests/js/*.test.js
