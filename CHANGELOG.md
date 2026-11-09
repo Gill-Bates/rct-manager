@@ -1,5 +1,7 @@
 ## [1.2.3] - 2026-xx-xx
-
+- `Security` The published image is rescanned weekly for known vulnerabilities, and the release and CI gates now lint the container entrypoint and build scripts with ShellCheck.
+- `Fix` The charging plan header no longer shows a separate preview note; the Dry-Run state stays visible in the card title.
+- `Fix` Updated the Markdown renderer dependency to 3.11.3.
 
 
 <details markdown="1">

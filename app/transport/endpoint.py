@@ -383,6 +383,12 @@ class TransportEndpoint:
         if frame.command in _VALUE_READ_COMMANDS and self._demux.is_ambiguous(frame.plant_address, frame.object_id):
             # The protocol has no transaction id: a late answer to the earlier unanswered read of
             # this object would satisfy this one and be cached as fresh. Only a new connection isolates it.
+            log.info(
+                "Connection to %s dropped: object 0x%08x is read again after an unanswered read "
+                "(command=0x%02x origin=%s, unanswered_read_of_same_object); reconnecting, "
+                "periodic registrations are set up again",
+                self.endpoint_id, frame.object_id, frame.command, request.origin.name,
+            )
             await self._drop_connection(DeviceUnreachable("unanswered_read_of_same_object"))
             try:
                 await self._ensure_connected()
@@ -429,12 +435,14 @@ class TransportEndpoint:
                 self._read_timeouts_in_a_row += 1
                 diagnostics = self._timeout_diagnostics()
                 if not is_write and self._read_timeouts_in_a_row < self._cfg.read_timeouts_before_reconnect:
-                    if frame.command in _VALUE_READ_COMMANDS:
+                    value_read = frame.command in _VALUE_READ_COMMANDS
+                    if value_read:
                         self._demux.mark_ambiguous(frame.plant_address, frame.object_id)
                     log.info(
                         "No response from %s to object 0x%08x within %.1f s (command=0x%02x origin=%s, %s); "
-                        "keeping the connection for other objects, another miss in a row reconnects",
+                        "keeping the connection for other objects; %sanother miss in a row reconnects",
                         self.endpoint_id, frame.object_id, timeout, frame.command, request.origin.name, diagnostics,
+                        "the next read of this object reconnects first, " if value_read else "",
                     )
                     return self._fail(request, error, outcome)
                 # Repeated misses: the stream is not trustworthy any more, and a response still in

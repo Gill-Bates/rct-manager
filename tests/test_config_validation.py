@@ -11,6 +11,7 @@ import re
 import pytest
 from pydantic import ValidationError
 
+import app.config as config_module
 from app.config import (
     _REMOVED_ENV_NAMES,
     _SECURITY_RELEVANT_ENV_NAMES,
@@ -119,15 +120,18 @@ def test_non_loopback_bind_requires_explicit_consent(monkeypatch) -> None:
 def test_non_loopback_bind_with_consent_still_warns_without_proxy_mode(
     monkeypatch, caplog
 ) -> None:
+    # Fresh warn-once state: an earlier test may already have logged this warning.
+    monkeypatch.setattr(config_module, "_WARNED", set())
     monkeypatch.setenv("BIND_ADDRESS", "0.0.0.0")
     monkeypatch.setenv("ALLOW_NON_LOOPBACK_BIND", "true")
     with caplog.at_level("WARNING", logger="app.config"):
         settings = load_settings()
+        # Settings are re-validated on every admin save; the same misconfiguration warns once.
+        load_settings()
     assert str(settings.bind_address) == "0.0.0.0"
     assert settings.allow_non_loopback_bind is True
-    assert "behind reverse proxy' is off" in " ".join(
-        r.getMessage() for r in caplog.records
-    )
+    warnings = [r for r in caplog.records if "behind reverse proxy' is off" in r.getMessage()]
+    assert len(warnings) == 1
 
 
 def test_fixed_settings_are_named_not_valued(monkeypatch, caplog) -> None:

@@ -243,11 +243,12 @@ async def test_reads_of_other_objects_keep_the_connection_after_one_miss() -> No
     await endpoint.close()
 
 
-async def test_a_late_answer_of_a_missed_read_cannot_answer_the_retry_of_the_same_object() -> (
-    None
-):
+async def test_a_late_answer_of_a_missed_read_cannot_answer_the_retry_of_the_same_object(
+    caplog,
+) -> None:
     """The protocol has no transaction id: answer #1 arriving after request #2 was sent would
     satisfy #2. The same object is therefore re-read only on a new connection."""
+    caplog.set_level(logging.INFO, logger="app.transport.endpoint")
     clock = AutoClock()
     net = FakeNetwork(clock)
     late = b"\x00\x00\x00\x2a"
@@ -267,6 +268,9 @@ async def test_a_late_answer_of_a_missed_read_cannot_answer_the_retry_of_the_sam
     second = await endpoint.execute(_request(Command.READ), response_timeout=0.05)
     assert not second.ok and isinstance(second.error, DeviceTimeout)
     assert endpoint.connection_epoch == 2 and first_writer.closed
+    # The reconnect before the re-read is logged with its reason, not silent.
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("unanswered_read_of_same_object" in m and "0x00001234" in m for m in messages)
     await endpoint.close()
 
 

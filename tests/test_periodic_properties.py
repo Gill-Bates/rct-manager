@@ -7,7 +7,8 @@
 """Regression: a partial periodic registration must not count as available."""
 
 import asyncio
-from datetime import timedelta
+import selectors
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -23,8 +24,9 @@ from app.scheduling.periodic import (
     RETRY_BASE_SECONDS,
     PeriodicManager,
 )
+from app.scheduling.retry import RetryConfig, execute_with_retry
 from app.scheduling.serializer import AccessSerializer
-from app.transport.endpoint import EndpointConfig, TransportEndpoint
+from app.transport.endpoint import EndpointConfig, EndpointState, TransportEndpoint
 from app.transport.types import SendOutcome, TransactionOrigin, TransactionRequest, TransactionResult, make_frame
 from tests.api_helpers import ROOT_CATALOG, make_settings, running_app
 from tests.conftest import AutoClock
@@ -131,6 +133,142 @@ def test_setup_aborts_immediately_when_a_failed_request_dropped_the_connection()
     assert connects == 1
     # The request for the object AFTER the failing one is never sent: the round stopped at the drop.
     assert reads_last == 0
+
+
+class _VirtualTimeSelector(selectors.DefaultSelector):
+    """Instead of blocking until the next timer, jump the loop's time there: no real waiting."""
+
+    loop: "_VirtualTimeLoop"
+
+    def select(self, timeout: float | None = None):
+        events = super().select(0)
+        if not events and timeout is None:
+            raise RuntimeError("event loop idle with no timer: the scenario would hang")
+        if not events and timeout > 0:
+            self.loop.virtual_now += timeout
+        return events
+
+
+class _VirtualTimeLoop(asyncio.SelectorEventLoop):
+    """Drives asyncio.wait_for in the endpoint and clock.sleep in the retry layer on one time axis."""
+
+    def __init__(self) -> None:
+        self.virtual_now = 0.0
+        selector = _VirtualTimeSelector()
+        super().__init__(selector)
+        selector.loop = self
+
+    def time(self) -> float:
+        return self.virtual_now
+
+
+class _LoopClock:
+    """AutoClock would end the retry layer's attempt timer at once; this clock follows the loop."""
+
+    def now(self) -> datetime:
+        return datetime(2026, 1, 1, tzinfo=UTC) + timedelta(seconds=self.monotonic())
+
+    def monotonic(self) -> float:
+        return asyncio.get_running_loop().time()
+
+    async def sleep(self, seconds: float) -> None:
+        await asyncio.sleep(seconds)
+
+
+SILENT_PERIODIC_OBJECT_ID = 0x44D4C533
+
+
+def _setup_through_the_retry_layer(silent_on_every_connection: bool) -> dict:
+    """One setup() round on the production path PeriodicManager -> AccessSerializer ->
+    execute_with_retry -> TransportEndpoint, with production timeouts in virtual time."""
+
+    async def scenario() -> dict:
+        clock = _LoopClock()
+        key = EndpointKey("10.0.0.5", 8899)
+        attempts: list[tuple[int, int]] = []  # (connection number, endpoint epoch) per request
+
+        def behavior(frame):
+            if frame.command is Command.READ_PERIODICALLY and frame.object_id == SILENT_PERIODIC_OBJECT_ID:
+                attempts.append((net.connects, endpoint.connection_epoch))
+                if silent_on_every_connection or net.connects == 1:
+                    return "ignore"
+            return "respond"
+
+        net = FakeNetwork(clock, behavior=behavior)
+        endpoint = TransportEndpoint("endpoint-1", key, EndpointConfig(), clock, connector=net.connect)
+        retry = RetryConfig()
+
+        async def handler(request):
+            return await execute_with_retry(endpoint, request, retry, clock)
+
+        serializer = AccessSerializer(endpoint, handler, queue_max_length=10, queue_max_wait_seconds=60)
+        serializer.start()
+        ids = [0x1111, SILENT_PERIODIC_OBJECT_ID, 0x3333]
+        manager = PeriodicManager(endpoint, serializer, DeviceKey(key), ids, 30, clock)
+        try:
+            started = clock.monotonic()
+            ok = await manager.setup()
+            return {
+                "ok": ok,
+                "elapsed": clock.monotonic() - started,
+                "attempts": attempts,
+                "connects": net.connects,
+                "closed_connections": sum(1 for writer in net.writers if writer.closed),
+                "epoch": endpoint.connection_epoch,
+                "state": endpoint.state,
+                "last_failure": manager.last_failure,
+                "registrations": manager.registrations,
+                "registered_first": manager.is_registered(0x1111),
+                "routes_left": endpoint._demux.periodic_count(),
+                "reads_after": sum(
+                    1 for _, f in net.frames if f.command is Command.READ_PERIODICALLY and f.object_id == 0x3333
+                ),
+            }
+        finally:
+            await serializer.stop()
+            await endpoint.close()
+
+    loop = _VirtualTimeLoop()
+    try:
+        # The bound is virtual time: a livelock fails the test instead of hanging it.
+        return loop.run_until_complete(asyncio.wait_for(scenario(), 120))
+    finally:
+        loop.close()
+
+
+def test_a_single_periodic_registration_timeout_reconnects_through_the_retry_layer_and_rolls_back() -> None:
+    """Records the current behaviour, not a target: one unanswered READ_PERIODICALLY is retried on
+    the same connection, the second miss in a row drops it, and the next retry succeeds on a new one.
+    setup() sees the new epoch and discards the whole round."""
+    seen = _setup_through_the_retry_layer(silent_on_every_connection=False)
+
+    # Attempts 1 and 2 on the first connection; attempt 3 (the second retry) on the reconnected one.
+    assert seen["attempts"] == [(1, 1), (1, 1), (2, 2)]
+    assert seen["connects"] == 2 and seen["closed_connections"] == 1  # exactly one reconnect
+    assert seen["epoch"] == 2 and seen["state"] is EndpointState.CONNECTED
+    assert seen["ok"] is False
+    assert seen["last_failure"] == "connection replaced during registration"
+    assert seen["registrations"] == 0 and not seen["registered_first"] and seen["routes_left"] == 0
+    assert seen["reads_after"] == 0  # the round stops at the epoch change
+    assert seen["elapsed"] < 20  # two 5 s timeouts plus backoff, inside the 20 s read budget
+
+
+def test_a_permanently_silent_periodic_registration_drops_the_connection_twice_per_setup_round() -> None:
+    """Records the current behaviour, not a target: the retry layer uses its whole 20 s budget
+    (four attempts), every second miss in a row drops the connection, and the round rolls back.
+    The second drop is not followed by a reconnect inside the round; the next round opens it."""
+    seen = _setup_through_the_retry_layer(silent_on_every_connection=True)
+
+    # The fifth attempt is skipped: its backoff would cross the total read timeout.
+    assert seen["attempts"] == [(1, 1), (1, 1), (2, 2), (2, 2)]
+    assert seen["connects"] == 2 and seen["closed_connections"] == 2  # two drops, one reconnect
+    assert seen["epoch"] == 2 and seen["state"] is EndpointState.DISCONNECTED
+    assert seen["ok"] is False
+    # The epoch guard runs before the disconnected check, so the reason is the replaced connection.
+    assert seen["last_failure"] == "connection replaced during registration"
+    assert seen["registrations"] == 0 and not seen["registered_first"] and seen["routes_left"] == 0
+    assert seen["reads_after"] == 0
+    assert 20 <= seen["elapsed"] < 22
 
 
 def test_reconnect_during_setup_discards_registrations_from_the_old_connection() -> None:

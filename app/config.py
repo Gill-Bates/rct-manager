@@ -685,7 +685,7 @@ class Settings(BaseSettings):
                 "ALLOW_NON_LOOPBACK_BIND=true is required for a non-loopback BIND_ADDRESS"
             )
         if not loopback and not self.behind_reverse_proxy:
-            log.warning(
+            _warn_once(
                 "BIND_ADDRESS is not loopback and 'behind reverse proxy' is off: terminate TLS in front of "
                 "the service and enable it in the admin GUI"
             )

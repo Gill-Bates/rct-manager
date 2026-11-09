@@ -285,7 +285,7 @@ provider query is made.
 Basic mode shows the capacity source and the read-only preview ("Dynamic charging plan (Dry-Run
 preview)"). The result area uses the full card width:
 
-- Header: title with the forecast confidence (for adaptive history and the stored-history fallback; a plan on the configured baseline shows none), when available on one line, preview note, Inverter select, Expert switch.
+- Header: title with the forecast confidence (for adaptive history and the stored-history fallback; a plan on the configured baseline shows none), when available on one line, Inverter select, Expert switch.
 - Four equal KPI tiles (four columns on desktop, 2 + 2 on tablets, stacked on phones): Target SoC,
   Charge power, total plan grid energy and **Next grid charge**. The last tile shows the next charge
   window (or "No grid charging") and below it one line for today and tomorrow: the number of

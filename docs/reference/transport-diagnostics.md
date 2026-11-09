@@ -37,9 +37,17 @@ the reason is only in the log line "Setup of periodic reads failed".
 **Timeout behaviour.** A single unanswered read (5 s) keeps the connection for other objects, but the
 same object is re-read only on a new connection, because the protocol has no transaction id and a
 late answer would be taken for the retry's. The second unanswered read in a row drops the connection
-too. Either reconnect drops all periodic registrations. The log lines for both cases carry the parser
-state (`buffered`, age of the last frame, CRC and framing error counts), which tells an answer held
-or discarded by the parser from one never sent.
+too. Either reconnect drops all periodic registrations, which are then set up again. Log lines at
+INFO:
+
+| Log line                                                                                        | Meaning                                                                                                                                       |
+| ----------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| `No response from ... to object 0x... within 5.0 s (...); keeping the connection for other objects; ...` | First miss. For a plain read (`command=0x01` or `0x41`) the text adds that the next read of this object reconnects first.          |
+| `Connection to ... dropped: object 0x... is read again after an unanswered read (... unanswered_read_of_same_object); reconnecting ...` | The re-read of that object, usually the retry, opens a new connection before it is sent.                       |
+| `Connection to ... dropped: no response to object 0x... within 5.0 s (... N unanswered in a row ...); reconnecting` | Second miss in a row.                                                                                                        |
+
+The two timeout lines carry the parser state (`buffered`, age of the last frame, CRC and framing
+error counts), which tells an answer held or discarded by the parser from one never sent.
 
 ## Unsolicited response frames
 
@@ -88,8 +96,8 @@ Symptom: a long response with an unexpectedly short payload and a rising `discar
 
 Keep the polling load unchanged; do not add reads to reproduce it.
 
-1. Note the time of the log line "Connection to ... dropped: no response to object 0x... within 5.0 s"
-   and the object id.
+1. Note the time and object id of the log line "No response from ... to object 0x..." and of the
+   reconnect that follows it ("Connection to ... dropped: ...", see **Timeout behaviour** above).
 2. Capture `GET /api/v1/readiness`, `GET /metrics` (and the vendor transports, if enabled) as close
    before and after that time as possible; compare `crc_errors`, `framing_errors`, `discarded_bytes`,
    `connection_epoch`, `periodic_setup_failures`.
