@@ -2,9 +2,7 @@
 
 ## 1 Scope, status and normative language
 
-Status: Active. Updated 2026-11-09. This contract governs the RCT Manager administration GUI (`/ui/*`, served from `app/admin/`): the shared shell, the Overview dashboard, Inverters, Energy Manager (Inverter, Charging plan, Spot Market, Weather), TSDB, Prometheus, API tokens, Settings, About, the standalone login and password-change screens, the shared dialogs and every future UI route. It records the visual and interaction language that exists today and is not a redesign. Where the code deviates from a rule, the deviation is listed in 10.5 as an open requirement; it is not silently accepted. A change to a shared rule or component updates this document and its owning check in the same change.
-
-The document was derived from `app/admin/static/css/admin.css`, `dashboard.css`, `about.css`, `app/admin/templates/*.html`, `app/admin/static/js/*.js` and the existing design tests. Its structure follows the design contract of the sibling project justUp! so that both read alike; the product decisions are RCT Manager's own.
+Status: Draft. The baseline is documented; verification is pending (1.3). Updated 2026-11-09. This contract governs the RCT Manager administration GUI (`/ui/*`, served from `app/admin/`): the shared shell, the Overview dashboard, Inverters, Energy Manager (Inverter, Charging plan, Spot Market, Weather), TSDB, Prometheus, API tokens, Settings, About, the standalone login and password-change screens, the shared dialogs and every future UI route. It records the visual and interaction language that exists today and is not a redesign. Where the code deviates from a rule, the deviation is listed in 10.5 as an open requirement. A change to a shared rule or component updates this document and its owning check in the same change.
 
 ### 1.1 Normative language
 
@@ -14,7 +12,7 @@ The document was derived from `app/admin/static/css/admin.css`, `dashboard.css`,
 | SHOULD, SHOULD NOT | The default. A deviation needs a reason in the change that deviates. |
 | MAY | A permitted variation. Choosing it needs no exception. |
 
-- **DC-NORM-1** Only a sentence with one of these words, or a row of a rule table, is a requirement. Other text describes how something works, or gives rationale, and never adds a requirement.
+- **DC-NORM-1** Every numbered `DC-*` rule and every row of a rule table is binding. MUST and MUST NOT, SHOULD and SHOULD NOT, MAY set the degree. A rule written as a plain statement is a MUST. Unnumbered text describes how something works or gives rationale and adds no requirement.
 - **DC-NORM-2** Rules have stable IDs (`DC-<AREA>-<n>`). A test, a code comment or a later change references the ID. An ID is never reused for a different rule.
 - **DC-NORM-3** Absolute words (always, every, never, only, exactly) hold inside the scope the sentence names. Where no scope is named, the scope is the section that contains the rule. An absolute rule has no exception unless an exception row (DC-EXC-1) exists.
 - **DC-NORM-4** A numeric requirement states unit, scope and measurement condition. A tolerance is a named constant in the owning test, not contract text.
@@ -32,17 +30,30 @@ The document was derived from `app/admin/static/css/admin.css`, `dashboard.css`,
 - **DC-MEAS-1** A reflow check MUST use a CSS viewport 320 px wide. A label such as "200 % zoom" MUST NOT name a run that only changes the device pixel ratio.
 - **DC-MEAS-2** Behaviour specific to iOS (on-screen keyboard, browser chrome, safe areas, input zoom) MUST be reported as "unverified" until an E-IOS run is recorded. E-ENGINE results, including `tests/e2e/ios_viewport_audit.mjs`, do not change that status.
 
+### 1.3 Verification status
+
+Each rule is in one of three states. 10.1 maps the critical rules to their state; a rule that is not mapped is Documented.
+
+| State | Meaning |
+| --- | --- |
+| Automated (gate) | A static or unit test runs in the pull-request gate (`gate.yml`: pytest, `node --test`). |
+| Automated (manual run) | A browser driver under `tests/e2e/` checks it. The drivers are not part of the gate; a run is evidence only for the engine, viewport, theme and date it names. |
+| Documented | The rule describes the current implementation. No check fails when it is violated. |
+
+- **DC-STATUS-1** This document stays Draft until the critical rules in 10.1 are Automated and a full browser run of the matrix in 10.2 is recorded as passed. A rule MUST NOT be described as protected unless it is Automated.
+
 ## 2 Precedence and exceptions
 
 - **DC-PREC-1** When rules conflict, the higher level wins:
   1. Unchangeable product decisions and security boundaries (section 3).
   2. Global invariants (sections 4 and 5: tokens, shell, scrolling, focus; the state taxonomy of 6.1).
   3. Component contracts (section 6). They refine a global invariant and MUST NOT silently contradict it.
-  4. Feature contracts (section 9) and exception rows.
+  4. Feature contracts (section 9).
   5. Implementation, tests and code comments. They are evidence, not norms.
 - **DC-PREC-2** A conflict is resolved in the same change by correcting the lower item or by adding an exception row. Existing code or a passing test is never a reason to keep a contradiction.
 - **DC-PREC-3** A level-1 rule changes only by an explicit product decision. It is never relaxed through an exception row.
-- **DC-EXC-1** An exception is a row in the exception table of the rule it modifies, with: ID (`DC-EX-<AREA>-<n>`), scope (surface and selector), rationale, owner (file) and the test that proves it. A row without a test is invalid.
+- **DC-PREC-4** A valid exception row (DC-EXC-1) modifies the one rule it names, within its stated scope, and then takes precedence over that rule. It cannot modify a level-1 rule (DC-PD-*, security boundaries). A candidate without a test is not an exception; it is listed in 10.5 and the rule applies in full.
+- **DC-EXC-1** An exception is a row in the exception table of the rule it modifies, with: ID (`DC-EX-<AREA>-<n>`), scope (surface and selector), rationale, owner (file) and the test that proves it. A row without a test is invalid and does not take effect (DC-PREC-4).
 - **DC-EXC-2** An exception is bounded by its scope and sets no precedent. A second surface with the same need extends the row or adds a shared variant (DC-EXT-2).
 - **DC-EXC-3** Section 9 indexes all exception rows. The row stays with its rule, so each rule has one home.
 
@@ -80,7 +91,7 @@ A change to one of these needs a new product decision (DC-PREC-3).
 - **DC-EXT-3** A page arranges its own content but MUST NOT redefine the palette, common controls, the card gap or the appearance of a shared component.
 - **DC-EXT-4** A visual change MUST NOT change a route, permission boundary, stored preference, API contract, keyboard support, element IDs or Bootstrap hooks.
 - **DC-EXT-5** An interactive component defines each applicable state: default, hover, focus, active, disabled, loading, empty, success, error. A state that does not apply is stated as not applicable in the component's spec or test.
-- **DC-EXT-6** New presentation rules go to the shared or feature stylesheet, not to inline styles or `style` attributes written by script (a computed geometry value is allowed). When an existing component is touched, its obsolete local overrides are removed; unrelated legacy markup is not refactored.
+- **DC-EXT-6** New presentation rules go to the shared or feature stylesheet, not to inline styles or `style` attributes written by script. Allowed: a computed geometry value, and a data-driven colour of a chart or its legend that Chart.js supplies per dataset (the consumption legend swatch takes `dataset.backgroundColor`). Such a colour still comes from a CSS custom property (DC-TOK-3). When an existing component is touched, its obsolete local overrides are removed; unrelated legacy markup is not refactored.
 - **DC-EXT-7** Do not add a restyle of a Bootstrap utility class to a page. A utility that must change globally (`.text-secondary`, `.text-primary`) is overridden once in `admin.css` with a comment that names the reason.
 
 ## 4 Design tokens and technical owners
@@ -140,12 +151,12 @@ The shell differs from a viewport-bound application: the document scrolls, the h
 ### 5.2 Scroll ownership
 
 - **DC-SCROLL-1** The document scrolls vertically; a card has no inner vertical scroll. A bounded region is allowed only where listed here, with an accessible name and a keyboard route (`tabindex="0"` when it has no focusable content).
-- **DC-SCROLL-2** Never nest scroll regions (DC-SCROLL-3). `ios_viewport_audit.mjs` fails on one scroll container scrolling inside another.
+- **DC-SCROLL-2** Scroll regions MUST NOT nest. `ios_viewport_audit.mjs` fails on one scroll container scrolling inside another.
 - **DC-SCROLL-3** A bounded region sets `overscroll-behavior: contain` (horizontal: `overscroll-behavior-x`). Its height comes from the layout chain or a `max-height`, not a fixed `height`.
 
 | Region | Axis | Where | Owner |
 | --- | --- | --- | --- |
-| TSDB log console `.tsdb-console` | vertical | TSDB page status and log. Fills the viewport down to the footer on wide screens; below 38 rem it gets a `max-height` so the document does not grow with every log line. `role="log"`, `tabindex`, visible focus ring (DC-EX-FOCUS-1). | `admin.css` |
+| TSDB log console `.tsdb-console` | vertical | TSDB page status and log. Fills the viewport down to the footer on wide screens; below 38 rem it gets a `max-height` so the document does not grow with every log line. `role="log"`, `tabindex`, visible focus ring (10.5). | `admin.css` |
 | Parameter table `.param-table-wrap` | both | Inverters and Prometheus. The `param-card` fills the viewport down to the footer and the pager sits at the card bottom (R11). | `admin.css`, `_param_table.html` |
 | Tab strip `.energy-tabs` | horizontal | Energy Manager. One swipeable row, no wrap, scrollbar hidden, snap points. | `admin.css` |
 | Geocoding results list | vertical | Weather search, `max-height: 16rem`, overlays the form (DC-OVL-2). | `admin.css` |
@@ -175,10 +186,7 @@ The shell differs from a viewport-bound application: the document scrolls, the h
 - **DC-FOCUS-4** `outline: none` MUST NOT remove a focus indicator without an equally perceivable replacement. The switch and button focus glow of Bootstrap is replaced by the outline above (`--bs-btn-focus-shadow-rgb` follows the brand).
 - **DC-FOCUS-5** The outline indicator remains visible in `forced-colors: active`; no indicator relies on `box-shadow` or background alone.
 
-| ID | Exception to | Scope | Rationale | Owner | Test |
-| --- | --- | --- | --- | --- | --- |
-| DC-EX-FOCUS-1 | DC-FOCUS-1 (colour, width) | `.tsdb-console:focus-visible` | The console is a fixed dark surface; a 2 px `#4da3ff` ring inside the border stays visible on it in both themes. | `admin.css` | none (open, 10.5) |
-| DC-EX-FOCUS-2 | DC-FOCUS-1 (offset) | `.energy-status` | The row is clipped by its container; the ring is drawn inside (`outline-offset: -2px`). | `admin.css` | none (open, 10.5) |
+No exception row to DC-FOCUS-1 is active. Two known deviations are candidates listed in 10.5: the 2 px `#4da3ff` ring of `.tsdb-console:focus-visible` and the inset offset of `.energy-status`.
 
 ## 6 Shared components and binding variants
 
@@ -347,8 +355,6 @@ The shell differs from a viewport-bound application: the document scrolls, the h
 | ID | Rule | Home |
 | --- | --- | --- |
 | DC-EX-TOK-1 | DC-TOK-2 | 4.1 |
-| DC-EX-FOCUS-1 | DC-FOCUS-1 | 5.5 |
-| DC-EX-FOCUS-2 | DC-FOCUS-1 | 5.5 |
 
 ### 9.1 Overview dashboard
 
@@ -363,17 +369,17 @@ The shell differs from a viewport-bound application: the document scrolls, the h
 
 ### 9.2 Energy Manager and energy flow
 
-- **DC-ENERGY-1** The page is a stack of cards in a tab set (6.4): Inverter, Charging plan, Spot Market, Weather. Charging plan exists only while an inverter is Manual or External.
+- **DC-ENERGY-1** The page is a stack of cards in a tab set (6.4): Inverter, Charging plan, Spot Market, Weather. Charging plan, Spot Market and Weather are shown together and only while at least one inverter is in mode Manual (`planEligible`). External alone keeps all three hidden, and they ship `hidden` so no first paint shows them. Spot Market and Weather are site-wide, so their visibility follows the whole device set, not the selected inverter.
 - **DC-ENERGY-2** The flow graphic is an SVG shared by the Energy page and the Overview inverter card. Colour marks the flow: green for energy reaching the house or grid, whether generated, exported or drawn; inactive icons share one neutral grey. Direction is also carried by an arrowhead on every active line, never by colour alone.
 - **DC-ENERGY-3** Dashed flow dots animate at one constant speed; under `prefers-reduced-motion` the dots stand still and the arrowhead keeps the direction readable.
-- **DC-ENERGY-4** A mode option that is selected but blocked by an unfinished setup is outlined instead of solid and says so in text ("pending", "not active yet"). The setup checklist appears only while a step is unmet.
+- **DC-ENERGY-4** A mode option that is selected but blocked by an unfinished setup is outlined instead of solid (`is-pending`) and says so in text. The lead text has two variants: while the first unmet step is hardware verification it says that verification runs in the background and battery control unlocks when it completes; for any other unmet step it says the mode is "selected but not active yet" and control stays locked. The setup checklist appears only while a step is unmet.
 - **DC-ENERGY-5** Spot Market and Weather follow one pattern: one top-level settings card with compact groups, a status line, a context line and min/max highlights. A "tomorrow not published yet" note is a warning callout, not muted text.
-- **DC-ENERGY-6** The charging-plan header carries the identity group (title and badge, sub-line), the inverter select and the Expert switch; it wraps without overflow. Plan sections are separated by a hairline and spacing, not by nested cards. A plan label comes from the plan's action table; an unknown action has no label and fails the test `test_every_planner_action_has_a_plan_label`.
+- **DC-ENERGY-6** The charging-plan header carries the card title with the forecast confidence on the same line, then the inverter select and the Expert mode switch; it wraps without overflow. It has no mode badge and no sub-line. Plan sections are separated by a hairline and spacing, not by nested cards. A plan label comes from the plan's action table; an unknown action has no label and fails the test `test_every_planner_action_has_a_plan_label`.
 
 ### 9.3 TSDB, Prometheus, Inverters, API tokens, Settings, About
 
 - **DC-TSDB-1** The TSDB page has no own layout or typography CSS: the only `.tsdb-*` or `.export-*` selectors are the log console's (R1). Use `settings-grid`, `card-body`, `h2.h5`, `setting-row` and `form-text`. Colours in the TSDB, `.settings-grid` and `.btn-primary` rules come from tokens (R8).
-- **DC-TSDB-2** The TSDB console is `role="log"` with a visible focus ring (DC-EX-FOCUS-1), tails inside itself and fills the viewport down to the footer on wide screens (5.2). A log line MUST carry its level as text, not only as colour (DC-PRIN-2). Today `data-level` is a colour hook only; this is open (10.5).
+- **DC-TSDB-2** The TSDB console is `role="log"` with a visible focus ring (a deviation candidate from DC-FOCUS-1, 10.5), tails inside itself and fills the viewport down to the footer on wide screens (5.2). A log line MUST carry its level as text, not only as colour (DC-PRIN-2). Today `data-level` is a colour hook only; this is open (10.5).
 - **DC-PARAM-1** Prometheus and Inverters share the parameter table (DC-TABLE-2). Row actions are icon buttons with names and reach 44 px on a phone (`test_parameter_action_buttons_have_touch_target_size`). Reordering keeps focus on a stable action hook.
 - **DC-TOKEN-1** The API token table uses `.data-table-stack`. The token value is shown once; the stored suffix is a quiet code chip (`.token-suffix`). Copy follows DC-INT-4. Revoking uses the confirmation dialog (DC-MODAL-3).
 - **DC-SETTINGS-1** Settings apply on their own and never mention a restart (DC-MSG-6). A section failure persists as a section notice (DC-MSG-4); success is a toast.
@@ -393,8 +399,30 @@ The shell differs from a viewport-bound application: the document scrolls, the h
 | Script unit tests | Theme, dashboard, energy controls, charts, settings | `node --test tests/js/*.test.js` |
 | Browser E2E | Flows, layout, contrast, accessibility, iOS classes, resilience | `tests/e2e/*.mjs` (10.2) |
 
+#### Rule-to-check map (critical rules)
+
+| Rules | State | Check |
+| --- | --- | --- |
+| DC-BTN-1 | Automated (gate) | R7; `test_admin_ui.py::test_primary_button_themes_its_disabled_and_focus_state` |
+| DC-BTN-3, DC-FORM-2, DC-FORM-8, DC-FORM-9, DC-MSG-6, DC-VOICE-1, DC-VOICE-3, DC-TSDB-1, DC-CARD-3 (grid columns), DC-TABLE-1, DC-TABLE-2 | Automated (gate) | R1 to R13 in `test_admin_design_rules.py` |
+| DC-STATE-1 to DC-STATE-4 | Automated (gate) | `test_admin_design_rules_badges.py` |
+| DC-FORM-6 | Automated (gate) | `test_admin_ui.py::test_accessibility_wiring_for_help_texts_field_errors_and_icon_only_buttons` |
+| DC-MODAL-3 | Automated (gate) | `test_admin_ui.py::test_destructive_actions_use_the_themed_confirm_modal_not_native_confirm` |
+| DC-PD-6, DC-MODAL-5 (disclaimer) | Automated (gate) | `test_admin_ui.py::test_disclaimer_modal_markup_is_mandatory_and_not_dismissable` |
+| DC-DASH-2 | Automated (gate) | `test_dashboard_widget_registry.py` |
+| DC-THEME-2 | Automated (gate) | `tests/js/theme.test.js` (preference, resolve, cycle, persistence). Script order in `<head>` (DC-THEME-1) is Documented. |
+| DC-ENERGY-1 | Automated (gate) | `tests/js/admin-energy-setup.test.js` (External alone unlocks nothing); `test_admin_ui.py` asserts `planEligible`. |
+| DC-ENERGY-4 | Partly automated | `test_admin_ui.py` asserts the `is-pending` wiring. The two lead texts are checked only by `admin_flow.mjs` (one variant; see 10.5). |
+| DC-ENERGY-6 | Partly automated | `admin-energy-setup.test.js` covers the confidence chip and the removed mode badge. The header structure is Documented. |
+| DC-RESP-1, DC-RESP-2, DC-VP-1, DC-VP-2, DC-SCROLL-2 | Automated (manual run) | `live_resize.mjs`, `mobile_layout.mjs`, `ios_viewport_audit.mjs` |
+| DC-TAB-2 | Automated (manual run) | `mobile_layout.mjs` |
+| DC-A11Y-6 | Automated (manual run) | `axe_scan.mjs` |
+| DC-TAB-3, DC-FORM-4 (switch contrast) | Automated (manual run) | `contrast_audit.mjs` (Energy tab links and Expert switch only) |
+| DC-LIVE-1 | Automated (manual run) | `dashboard_resilience.mjs` |
+| DC-SHELL-3 to DC-SHELL-5, DC-FOCUS-1 to DC-FOCUS-5, DC-TOK-*, DC-MSG-2 to DC-MSG-5, DC-CHART-*, DC-NAV-*, DC-CARD-* (other), DC-THEME-3 to DC-THEME-6, DC-STACK-1 | Documented | none |
+
 - **DC-GATE-1** The pull-request gate (`.github/workflows/gate.yml`) runs Ruff, pytest and the Node unit tests. A failed design test fails the run.
-- **DC-GATE-2** Every static rule has a mutation test: a deliberately violating sample that the rule must reject, so a rule that silently stops matching fails. A new rule adds its sample in the same change.
+- **DC-GATE-2** The rules R1 to R13 and the badge rules have violating samples that the rule must reject, so a rule that silently stops matching fails. No other `DC-*` rule has such a mutation test. A new static check adds its violating sample in the same change.
 - **DC-GATE-3** A change to a shared component or token runs the rule file that owns it and, for layout or theme changes, the matching E2E driver in light and dark.
 
 ### 10.2 Execution prerequisites
@@ -402,6 +430,33 @@ The shell differs from a viewport-bound application: the document scrolls, the h
 - **DC-EXEC-1** E2E drivers need Playwright. Set `PLAYWRIGHT_DIR` to a directory with `node_modules/playwright`, `PYTHON` to the project venv interpreter, and `COLOR_SCHEME=light|dark`. `BROWSER` is the engine name (`chromium`, `webkit`, `firefox`); leave it unset for Chromium. `axe_scan.mjs` additionally needs `@axe-core/playwright`. Example: `env -u BROWSER PLAYWRIGHT_DIR=<dir> PYTHON=.venv/bin/python node tests/e2e/admin_flow.mjs <tmpdir>`.
 - **DC-EXEC-2** E2E output goes to a directory outside the repository. The drivers start an isolated database and a simulated inverter (`fake_inverter.py`).
 - **DC-EXEC-3** The E2E drivers are not part of the PR gate. A claim that a layout rule holds names the driver, engine, viewport and theme that proved it.
+
+#### Browser verification matrix
+
+Required for the status change from Draft (DC-STATUS-1): every cell passes.
+
+| Axis | Values |
+| --- | --- |
+| Pages | Login, change password, Overview, Inverters, Energy Manager (all four tabs), TSDB, Prometheus, API tokens, Settings, About |
+| Viewports (CSS px) | 320x640, 390x844, 768x1024, 1280x720 |
+| Themes | Light, dark |
+| Engines | Chromium, WebKit |
+| States | Dialog open (confirmation, reconnect, disclaimer), toast visible, keyboard focus on each control type, edit mode of the Overview, Energy Manager with no inverter, with Manual and with External only |
+
+Existing drivers and what they cover:
+
+| Driver | Pages | Viewport | Themes |
+| --- | --- | --- | --- |
+| `ios_viewport_audit.mjs` | Overview, Inverters, Energy, TSDB, Prometheus, API tokens, Settings, About | Devices named by `DEVICES` | `COLOR_SCHEME` |
+| `live_resize.mjs` | Overview, Energy | Live resize from 1280x900 through tablet and phone and back | `COLOR_SCHEME` |
+| `mobile_layout.mjs` | Energy, footer | `DEVICE` (default iPhone 14) | `COLOR_SCHEME` |
+| `axe_scan.mjs` | Login, Overview, Energy tabs | 1280x900 | `COLOR_SCHEME` |
+| `contrast_audit.mjs` | Energy | 1280x900 | `COLOR_SCHEME` |
+| `admin_flow.mjs` | Functional flows across the pages | Desktop | `COLOR_SCHEME` |
+
+Not covered by any driver: axe on Inverters, TSDB, Prometheus, API tokens, Settings and About; Login and change password at 320 px; the 768x1024 viewport; dialogs and toasts at 320 px; text enlargement; `forced-colors`.
+
+Recorded run status: no run of the matrix is recorded in this document. The last recorded `admin_flow.mjs` run (`.agents/OPEN_TASKS.md`) failed: 458 checks passed, one failed ("Manual with an open setup is marked pending and says it is not active yet"), and the run then aborted on a 30 s timeout. The cause is not established, so the driver is not a passing gate.
 
 ### 10.3 Evidence levels
 
@@ -420,10 +475,13 @@ The shell differs from a viewport-bound application: the document scrolls, the h
 These deviate from the rules above or lack a check. Each is open until it has a change that closes it; none is an accepted exception.
 
 - **Elevation tokens (DC-TOK-5).** Card, header, footer and toast shadows are literals in `admin.css`. Promote them to three tokens with light and dark values.
-- **`.status-dot` colours (DC-TOK-2, DC-STATE-5).** `.status-dot`, `.online` and `.offline` use literal hex colours and no shape cue; the adjacent word carries the state. Move them to the semantic tokens and add a shape repeat (as justUp! does) or fold them into `.status-badge`.
+- **`.status-dot` colours (DC-TOK-2, DC-STATE-5).** `.status-dot`, `.online` and `.offline` use literal hex colours and no shape cue; the adjacent word carries the state. Move them to the semantic tokens and add a shape repeat or fold them into `.status-badge`.
 - **Navbar focus colour (DC-FOCUS-3).** `#fff` is a literal; give it a token.
 - **Message markers (DC-MSG-1).** Error, success and warning markers are not yet one shared component; markup differs per surface. Add one component and a check that fails on a missing marker.
-- **`DC-EX-FOCUS-1` and `DC-EX-FOCUS-2` have no test.** An exception row needs its test (DC-EXC-1); `tests/e2e/tsdb_console_ui.mjs` does not assert the ring. Add the checks or remove the exceptions.
+- **Exception candidates to DC-FOCUS-1 (no test, so no active exception).** `.tsdb-console:focus-visible` draws a 2 px `#4da3ff` ring inside the border on a fixed dark surface, and `.energy-status` uses `outline-offset: -2px` because its container clips the ring. `tests/e2e/tsdb_console_ui.mjs` does not assert the ring. Add a test and an exception row, or conform the rules to DC-FOCUS-1.
+- **`admin_flow.mjs` energy-plan check (DC-ENERGY-4).** The failing assertion expects "not active yet" in the lead text, while the product shows the hardware-verification variant when the first unmet step is hardware. Whether the assertion is stale or the setup state is wrong is not established; do not change the product to fit the assertion.
+- **Focus ring checks (DC-FOCUS-1, DC-FOCUS-2).** No test reads `--rct-focus-ring` or measures the ring contrast. Add a static token-contrast test in the style of the badge test.
+- **Rule coverage (DC-STATUS-1).** Rules marked Documented in 10.1 have no check; the browser matrix in 10.2 has not been run.
 - **TSDB log level (DC-TSDB-2).** The level is a colour hook only. Render the level as text in each line.
 - **Chart theme redraw (DC-CHART-3).** No check proves that every chart recolours on a theme change.
 - **No external request check (DC-PD-2).** Nothing fails when a template or stylesheet references another origin. Add a static scan of templates and CSS.
@@ -452,7 +510,7 @@ These deviate from the rules above or lack a check. Each is open until it has a 
 
 ### A.2 Change log
 
-- 2026-11-09: initial design contract, derived from the current code and the existing design tests; structure follows the justUp! design contract; open requirements listed in 10.5.
+- 2026-11-09: initial draft: baseline documented, verification pending; open requirements listed in 10.5.
 
 ### A.3 Measurement records
 

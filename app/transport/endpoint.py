@@ -387,7 +387,10 @@ class TransportEndpoint:
                 "Connection to %s dropped: object 0x%08x is read again after an unanswered read "
                 "(command=0x%02x origin=%s, unanswered_read_of_same_object); reconnecting, "
                 "periodic registrations are set up again",
-                self.endpoint_id, frame.object_id, frame.command, request.origin.name,
+                self.endpoint_id,
+                frame.object_id,
+                frame.command,
+                request.origin.name,
             )
             await self._drop_connection(DeviceUnreachable("unanswered_read_of_same_object"))
             try:
