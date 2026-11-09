@@ -3,7 +3,7 @@
 // Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
 //
 // Prometheus page: exposed metrics editor (remove, add, keyboard sort, drag and drop, persistence).
-// Replaces admin_flow.mjs lines 1340-1387. Own gateway: the story rewrites the exposed list.
+// Replaces admin_flow.mjs lines 1340-1387 and 1913-1949 (master toggle). Own gateway: the story rewrites the exposed list.
 import { expect, test } from "./support/fixtures.mjs";
 import { freshGateway } from "./support/fresh.mjs";
 import { trackProblems } from "./support/problems.mjs";
@@ -62,6 +62,41 @@ test.describe("prometheus editor @prometheus", () => {
 			expect(await names(), "order persists after reload").toEqual(afterDrag);
 			expect(tracked.problems, "no console errors, failed requests or dialogs").toEqual([]);
 			expect([...tracked.external], "no request leaves the gateway").toEqual([]);
+		} finally {
+			await context.close();
+		}
+	});
+	test("master toggle gates the dependent fields live @prometheus", async ({ browser, browserName }) => {
+		const { context, page } = await fresh.newPage(browser);
+		try {
+			const tracked = trackProblems(page, browserName, fresh.gateway.base);
+			await page.goto("/ui/prometheus");
+			// The Scrape settings collapsible is gone: the master toggle is present directly, no summary to expand.
+			await page.waitForSelector("#setting-enable_metrics_endpoint");
+			expect(await page.locator('.prometheus-settings, summary:has-text("Scrape settings")').count(), "no Scrape settings collapsible on the Prometheus page").toBe(0);
+			// The master toggle is the first element inside the top status card, above the status grid.
+			const toggleFirstInTopCard = await page.evaluate(() => {
+				const card = document.querySelector('section.card[aria-label="Prometheus status"] > .card-body');
+				const toggle = document.getElementById("setting-enable_metrics_endpoint");
+				if (!card || !toggle) return false;
+				const first = card.firstElementChild;
+				return first.contains(toggle) && !first.classList.contains("prometheus-summary")
+					&& Boolean(card.querySelector(".prometheus-summary"))
+					&& (first.compareDocumentPosition(card.querySelector(".prometheus-summary")) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0;
+			});
+			expect(toggleFirstInTopCard, "Enable Metrics Endpoint toggle is first inside the top status card").toBe(true);
+			const DEPENDENT = ["metrics_require_token", "metrics_trusted_sources", "metrics_rate_limit_requests", "metrics_rate_limit_window_seconds"];
+			const dependent = page.locator(DEPENDENT.map((key) => `#setting-${key}`).join(", "));
+			expect((await page.locator('label[for="setting-enable_metrics_endpoint"]').innerText()).trim(), 'master toggle is labelled "Enable Metrics Endpoint"').toBe("Enable Metrics Endpoint");
+			if (!(await page.isChecked("#setting-enable_metrics_endpoint"))) await page.locator("#setting-enable_metrics_endpoint").setChecked(true);
+			await expect(dependent, "dependent metrics fields visible while the toggle is on").toHaveCount(4);
+			await page.locator("#setting-enable_metrics_endpoint").setChecked(false);
+			await expect(dependent, "dependent metrics fields hidden when the toggle is off (no reload)").toHaveCount(0);
+			// The exposed selection also drives the periodic reads and the TSDB push, so that card stays.
+			expect(await page.locator("#exposed-list").count(), "exposed metrics card stays visible with the endpoint off").toBe(1);
+			await page.locator("#setting-enable_metrics_endpoint").setChecked(true);
+			await expect(dependent, "dependent metrics fields come back when the toggle is on").toHaveCount(4);
+			expect(tracked.problems, "no console errors, failed requests or dialogs").toEqual([]);
 		} finally {
 			await context.close();
 		}

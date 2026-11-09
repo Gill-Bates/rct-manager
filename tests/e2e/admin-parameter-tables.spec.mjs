@@ -19,6 +19,8 @@ test.describe("parameter tables @parameters", () => {
 		tracked = trackProblems(page, browserName, fresh.gateway.base);
 	});
 	test.afterAll(async () => { await context?.close(); });
+	// WebKit reports a fetch that a navigation drops as a page error, so every save is settled before leaving the page.
+	const savedState = () => page.waitForFunction(() => document.getElementById("save-state")?.dataset.state === "saved", null, { timeout: 15000 });
 	// Pager parity: Prometheus and Inverters share one table, so the same walk must hold on both
 	// (15 rows per page, "x–y of N", Previous disabled on the first and Next on the last page).
 	async function pagerWalk(prefix) {
@@ -70,6 +72,7 @@ test.describe("parameter tables @parameters", () => {
 		await page.click(`#writable-list button[aria-label="Remove write access: ${grantee}"]`);
 		await page.waitForFunction((name) => !document.querySelector(`#writable-list .metric-row[data-name="${name}"]`), grantee);
 		await expect(page.locator("#writable-list td.text-secondary"), "row menu removes write access").toHaveCount(1);
+		await savedState();
 	});
 	test("Prometheus and Inverters pagers walk the same way; grants restored @parameters", async () => {
 		await page.goto("/ui/prometheus");
@@ -91,6 +94,7 @@ test.describe("parameter tables @parameters", () => {
 		await page.click("#confirm-add-writable");
 		await page.waitForSelector("#add-writable-modal", { state: "hidden" });
 		await grantSaved;
+		await savedState();
 		// The "Parameters saved" toast sits over the pager until it leaves.
 		await page.waitForFunction(() => !document.getElementById("toast-region").children.length, null, { timeout: 15000 });
 		const writablePager = await pagerWalk("writable");

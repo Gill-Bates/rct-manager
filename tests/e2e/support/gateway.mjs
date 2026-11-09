@@ -82,22 +82,35 @@ export async function startGateway(mode = "default") {
 		started.push(fake);
 		const args = ["tests.e2e.run_server", db, String(httpPort), String(devicePort)];
 		if (mode !== "default") args.push(mode);
-		const server = spawnPy(args, path.join(dir, "server.log"));
-		started.push(server);
-		await expect.poll(async () => {
-			if (server.proc.exitCode !== null) throw new Error(`gateway exited early with code ${server.proc.exitCode}`);
-			try {
-				return (await fetch(`${base}/health`)).ok;
-			} catch {
-				return false;
-			}
-		}, { message: "gateway answers /health", timeout: 30_000, intervals: [100, 200, 500] }).toBe(true);
+		let server;
+		const launchServer = async () => {
+			server = spawnPy(args, path.join(dir, "server.log"));
+			started.push(server);
+			const current = server;
+			await expect.poll(async () => {
+				if (current.proc.exitCode !== null) throw new Error(`gateway exited early with code ${current.proc.exitCode}`);
+				try {
+					return (await fetch(`${base}/health`)).ok;
+				} catch {
+					return false;
+				}
+			}, { message: "gateway answers /health", timeout: 30_000, intervals: [100, 200, 500] }).toBe(true);
+		};
+		await launchServer();
 		const firstPassword = () => {
 			const password = /One-time password:\s+(\S+)/.exec(server.output())?.[1];
 			if (!password) throw new Error("first-start password was not printed in the banner");
 			return password;
 		};
-		return { base, httpPort, devicePort, logDir: dir, mode, firstPassword, stop };
+		// Stop only the gateway process (SIGTERM, SIGKILL after 15 s) and start it again on the same database
+		// and ports; the simulator keeps running. Returns the console output of the new process.
+		const restart = async () => {
+			await stopProcess(server.proc);
+			started.splice(started.indexOf(server), 1);
+			await launchServer();
+			return { output: () => server.output() };
+		};
+		return { base, httpPort, devicePort, logDir: dir, mode, firstPassword, restart, stop };
 	} catch (error) {
 		await stop();
 		throw error;
