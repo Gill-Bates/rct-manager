@@ -7,15 +7,22 @@
 """QuestDB OSS provisioning: table, TTL and materialized-view rollups.
 
 Approach ported from fritzfluxdb: a TTL that exists and was not set by this service belongs to
-the administrator and is never replaced; the raw TTL only shortens after the rollup is current.
+the administrator and is never replaced; the raw TTL only shortens after all rollup views are current.
 """
 
 import hashlib
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from urllib.parse import quote_plus, urlencode
 
 log = logging.getLogger(__name__)
+
+EXEC_PATH = "/exec"
+# QuestDB answers 431 once the request head exceeds http.request.header.buffer.size (64 KiB default);
+# half of it stays free for the request line, Host, Authorization and a possible decoded copy.
+MAX_EXEC_TARGET_BYTES = 32 * 1024
+_SELECT_SEP = ",\n        "
 
 # Consecutive not-yet-refreshed attempts before warning (then again at each doubling); a power of two.
 _NOT_REFRESHED_WARN_AFTER = 8
@@ -123,21 +130,22 @@ def create_state_table_sql() -> str:
     )
 
 
-def rollup_ddl(table: str, preset: Preset, columns: dict[str, str], view: str) -> str:
-    """Materialized view over the symbol and DOUBLE columns present in the table."""
-    dims, values = _split_columns(columns)
-    if not values:
-        raise ValueError("no numeric columns to roll up yet")
+def exec_target(sql: str, path: str = EXEC_PATH) -> str:
+    """Request target of a QuestDB ``/exec`` call; the only place its query encoding is defined."""
+    return f"{path}?{urlencode({'query': sql})}"
+
+
+def _value_projections(name: str) -> list[str]:
+    if name.endswith(_COUNTER_SUFFIXES):
+        return [f"last({ident(name)}) AS {ident(name + '_last')}"]
+    return [f"{aggregate}({ident(name)}) AS {ident(f'{name}_{aggregate}')}" for aggregate in ("avg", "min", "max", "last")]
+
+
+def _rollup_sql(table: str, preset: Preset, dims: list[str], values: list[str], view: str) -> str:
     projections = ["timestamp", *(ident(name) for name in dims)]
     for name in values:
-        if name.endswith(_COUNTER_SUFFIXES):
-            projections.append(f"last({ident(name)}) AS {ident(name + '_last')}")
-        else:
-            for aggregate in ("avg", "min", "max", "last"):
-                projections.append(
-                    f"{aggregate}({ident(name)}) AS {ident(f'{name}_{aggregate}')}"
-                )
-    select_list = ",\n        ".join(projections)
+        projections.extend(_value_projections(name))
+    select_list = _SELECT_SEP.join(projections)
     return (
         f"CREATE MATERIALIZED VIEW IF NOT EXISTS {ident(view)} "
         f"WITH BASE {ident(table)} REFRESH IMMEDIATE AS (\n"
@@ -146,6 +154,60 @@ def rollup_ddl(table: str, preset: Preset, columns: dict[str, str], view: str) -
         f"    SAMPLE BY {preset.rollup_interval} ALIGN TO CALENDAR\n"
         ") PARTITION BY DAY;"
     )
+
+
+def rollup_ddl(table: str, preset: Preset, columns: dict[str, str], view: str) -> str:
+    """Materialized view over the symbol and DOUBLE columns present in the table."""
+    dims, values = _split_columns(columns)
+    if not values:
+        raise ValueError("no numeric columns to roll up yet")
+    return _rollup_sql(table, preset, dims, values, view)
+
+
+def rollup_views(table: str, preset: Preset, columns: dict[str, str]) -> list[tuple[str, str]]:
+    """``(view, ddl)`` pairs that together roll up every DOUBLE column of the table.
+
+    One view as before while its ``/exec`` request fits ``MAX_EXEC_TARGET_BYTES``; otherwise the
+    sorted value columns are packed into shards ``…_v<signature>_p<n>``. Each shard carries all
+    SYMBOL columns, and its signature covers exactly its own projection, so a name never stands
+    for different content and a new metric only renames the shards from its sort position on.
+    """
+    dims, values = _split_columns(columns)
+    whole_name = rollup_view_name(table, preset, schema_signature(columns))
+    whole_ddl = rollup_ddl(table, preset, columns, whole_name)
+    if len(exec_target(whole_ddl)) <= MAX_EXEC_TARGET_BYTES:
+        return [(whole_name, whole_ddl)]
+
+    def base_cost(index: int) -> int:
+        # Hex digits are not percent-encoded, so a zero hash has the length of the real one.
+        placeholder = rollup_view_name(table, preset, "0" * 10) + f"_p{index}"
+        return len(exec_target(_rollup_sql(table, preset, dims, [], placeholder)))
+
+    # Percent-encoding works per character, so the cost of the target is additive per projection.
+    shards: list[list[str]] = []
+    current: list[str] = []
+    used = base_cost(1)
+    for name in values:
+        cost = len(quote_plus("".join(_SELECT_SEP + p for p in _value_projections(name))))
+        if current and used + cost > MAX_EXEC_TARGET_BYTES:
+            shards.append(current)
+            current = []
+            used = base_cost(len(shards) + 1)
+        if used + cost > MAX_EXEC_TARGET_BYTES:
+            raise ValueError(f"rollup of column '{name}' does not fit one QuestDB /exec request")
+        current.append(name)
+        used += cost
+    shards.append(current)
+
+    views: list[tuple[str, str]] = []
+    for index, shard in enumerate(shards, start=1):
+        shard_columns = {name: "SYMBOL" for name in dims} | {name: "DOUBLE" for name in shard}
+        view = rollup_view_name(table, preset, schema_signature(shard_columns)) + f"_p{index}"
+        ddl = _rollup_sql(table, preset, dims, shard, view)
+        if len(exec_target(ddl)) > MAX_EXEC_TARGET_BYTES:
+            raise ValueError(f"rollup shard '{view}' exceeds the QuestDB /exec request budget")
+        views.append((view, ddl))
+    return views
 
 
 def ttl_days(value: object, unit: object) -> int | None:
@@ -182,7 +244,7 @@ class QuestDbProvisioner:
         self._exec(create_state_table_sql())
 
     def run(self, *, ensure: bool = True) -> bool:
-        """Apply retention and rollups; False while the rollup is not ready (retry later)."""
+        """Apply retention and rollups; False while any rollup view is not ready (retry later)."""
         if ensure:
             self.ensure_tables()
         preset = PRESETS.get(self.downsampling)
@@ -200,18 +262,27 @@ class QuestDbProvisioner:
         if not any(kind == "DOUBLE" for kind in columns.values()):
             log.info("QuestDB rollup waits for the first data in '%s'", self.table)
             return False
-        # The view name follows the column set (see schema_signature).
-        view = rollup_view_name(self.table, preset, schema_signature(columns))
-        self._exec(rollup_ddl(self.table, preset, columns, view))
-        if not self._view_current(view):
-            self._note_not_refreshed(view)
+        # View names follow the column set (see schema_signature and rollup_views).
+        plan = rollup_views(self.table, preset, columns)
+        whole = rollup_view_name(self.table, preset, schema_signature(columns))
+        if len(plan) > 1 and whole in self._base_view_names():
+            # A single view created before sharding already covers this exact column set.
+            views = [whole]
+        else:
+            for _, ddl in plan:
+                self._exec(ddl)
+            views = [view for view, _ in plan]
+        lagging = next((view for view in views if not self._view_current(view)), None)
+        if lagging is not None:
+            self._note_not_refreshed(lagging)
             return False
         self._not_refreshed = 0
-        self._warn_about_superseded_rollups(view)
-        # The raw TTL only shortens once the rollup holds the data that it would drop.
-        return self._apply_ttl(view, self.total_days, view=True) and self._apply_ttl(
-            self.table, self.raw_days or 0, view=False
-        )
+        self._warn_about_superseded_rollups(views)
+        for view in views:
+            if not self._apply_ttl(view, self.total_days, view=True):
+                return False
+        # The raw TTL only shortens once every rollup view holds the data that it would drop.
+        return self._apply_ttl(self.table, self.raw_days or 0, view=False)
 
     def _note_not_refreshed(self, view: str) -> None:
         """A fresh or rebuilt view catches up on its own; only a persistent lag is worth a warning."""
@@ -229,8 +300,19 @@ class QuestDbProvisioner:
                 view,
             )
 
-    def _warn_about_superseded_rollups(self, current: str) -> None:
+    def _base_view_names(self) -> set[str]:
+        rows = (
+            self._exec(
+                f"SELECT view_name FROM materialized_views() WHERE base_table_name = {literal(self.table)};"
+            ).get("dataset")
+            or []
+        )
+        return {str(name) for (name, *_) in rows}
+
+    def _warn_about_superseded_rollups(self, current: Sequence[str]) -> None:
         """Report earlier service-created rollup views of this table that a schema change replaced.
+
+        Every name in ``current`` is part of the active rollup, so sibling shards are never superseded.
 
         Never auto-dropped: a schema change (e.g. a newly exported metric) rebuilds ``current``
         from the raw table alone, which can only reconstruct whatever the (possibly already
@@ -240,18 +322,9 @@ class QuestDbProvisioner:
         left in place for an administrator to remove once a verified retention/overlap window has
         passed and no aggregate held only there is still needed.
         """
-        rows = (
-            self._exec(
-                f"SELECT view_name FROM materialized_views() WHERE base_table_name = {literal(self.table)};"
-            ).get("dataset")
-            or []
-        )
         prefix = f"{self.table}_rollup_"
-        superseded = {
-            str(name)
-            for (name, *_) in rows
-            if str(name).startswith(prefix) and str(name) != current
-        }
+        superseded = {name for name in self._base_view_names() if name.startswith(prefix) and name not in current}
+        replacement = ", ".join(sorted(current))
         # Provisioning reruns every recheck cycle over an unchanged schema, so warn once per view
         # name for the process; a name only seen later (another schema change) still warns fresh.
         self._warned_superseded &= superseded  # forget names an admin has since dropped
@@ -261,9 +334,9 @@ class QuestDbProvisioner:
                 " losing historical rollup data the raw table may no longer hold"
             )
             if name in self._warned_superseded:
-                log.debug(message, name, current)
+                log.debug(message, name, replacement)
             else:
-                log.warning(message, name, current)
+                log.warning(message, name, replacement)
                 self._warned_superseded.add(name)
 
     def _view_current(self, view: str) -> bool:

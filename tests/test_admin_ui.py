@@ -208,7 +208,7 @@ def test_energy_controls_use_server_mode_and_capability_values() -> None:
     }
 
 
-E2E_ADMIN_FLOW = Path(__file__).resolve().parent / "e2e" / "admin_flow.mjs"
+E2E_TOKENS_SPEC = Path(__file__).resolve().parent / "e2e" / "admin-tokens.spec.mjs"
 
 
 # The Swagger UI sidebar ships user-visible text too, so it is covered by the English-only check.
@@ -692,11 +692,13 @@ def test_token_expiry_uses_presets_with_a_ninety_day_default():
 
 def test_token_copy_has_a_browser_regression_check_for_the_http_modal_fallback():
     """The browser test must cover the path used on a non-TLS LAN deployment, not only Clipboard API success."""
-    e2e = E2E_ADMIN_FLOW.read_text(encoding="utf-8")
-    assert "token copy icon is centred in its button" in e2e
+    e2e = E2E_TOKENS_SPEC.read_text(encoding="utf-8")
+    assert "token copy icon is centred horizontally" in e2e
+    assert "token copy icon is centred vertically" in e2e
     assert "Clipboard denied" in e2e
     assert "insideOpenModal" in e2e
-    assert "copying the PAT falls back inside the open modal and enables Done" in e2e
+    assert "the copy fallback runs inside the open modal" in e2e
+    assert "Done is enabled after copying" in e2e
 
 
 def test_parameter_action_buttons_have_touch_target_size():

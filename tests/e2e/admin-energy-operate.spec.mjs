@@ -5,10 +5,12 @@
 // Energy page of a hardware-verified inverter: lite flow, mode control (Off / Manual / External), commands,
 // PAT versus GUI access, Expert mode and power limits. Replaces admin_flow.mjs lines 2128-2360.
 // One story on an own energy gateway. The former driver relied on the setup story having recorded Off;
-// this spec records Off itself in its first test. Former `if (...)` gated checks are hard assertions.
+// this spec records Off itself in its first test and approves the required write registers as an operator
+// does on the Inverters page (the product now requires it before the panel is ready). Former `if (...)` gated checks are hard assertions.
 import { expect, test } from "./support/fixtures.mjs";
 import { freshGateway } from "./support/fresh.mjs";
 import { ATTESTATION, installEnergyMocks } from "./support/energy-mocks.mjs";
+import { approveRequiredWrites } from "./support/energy-setup.mjs";
 import { trackProblems } from "./support/problems.mjs";
 test.describe.configure({ mode: "serial" });
 test.describe("energy operate and expert @energy", () => {
@@ -43,7 +45,7 @@ test.describe("energy operate and expert @energy", () => {
 		({ context, page } = await fresh.newPage(browser, { viewport: { width: 1280, height: 900 } }));
 		watch = trackProblems(page, browserName, fresh.gateway.base);
 		mocks = await installEnergyMocks(page);
-		mocks.strategy = { ...mocks.strategy, code: 4, label: "Internal" };
+		mocks.strategy = { ...mocks.strategy, code: 1, label: "Constant" }; // as left by the setup story
 		page.on("request", (r) => {
 			if (r.method() === "POST" && r.url().endsWith("/command")) commands.push(r.postDataJSON());
 			if (r.method() === "PUT" && r.url().endsWith("/mode")) modeCalls.push(r.postDataJSON());
@@ -62,6 +64,9 @@ test.describe("energy operate and expert @energy", () => {
 		]);
 		expect(off.ok(), `Off is recorded (HTTP ${off.status()})`).toBe(true);
 		modeCalls.length = 0;
+		// Manual control needs the required write registers approved on the Inverters page (the former driver
+		// never did this and no longer reached a ready panel; see report finding F7).
+		expect(await approveRequiredWrites(page.request), "required write registers approved").toBe(200);
 		// The simulator ships unverified hardware; verify it first, as an operator would in Expert.
 		const verification = await page.request.put(`${fresh.gateway.base}/admin/api/energy/devices/sim/hardware-verification`, {
 			headers: { "X-CSRF-Token": await csrf(), Origin: fresh.gateway.base },
@@ -75,6 +80,7 @@ test.describe("energy operate and expert @energy", () => {
 		await page.waitForSelector(".energy-panel");
 		await expect(page.locator(".energy-panel"), "energy page renders a device panel").not.toHaveCount(0);
 		// The Energy panel reuses the live readings in a compact grid-house-battery view.
+		await expect(page.locator(".energy-panel .energy-flow-lite svg"), "the lite flow is rendered once the verified state is known").toBeVisible({ timeout: 15_000 });
 		const lite = await page.locator(".energy-panel .energy-body").evaluate((layout) => {
 			const graphic = layout.querySelector(".energy-flow-lite");
 			const control = layout.querySelector(".energy-operate-main");

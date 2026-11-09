@@ -96,14 +96,14 @@
         "name": "rollup_view",
         "type": "query",
         "label": "Rollup view (auto)",
-        "description": "Current materialized rollup view for ${table}, discovered dynamically because its name is content-hashed and changes whenever the exported column set changes.",
+        "description": "Current materialized rollup view for ${table}, discovered dynamically because its name is content-hashed and changes whenever the exported column set changes. Large column sets split the rollup across several views; this picks the one that holds rct_grid_power_watts_avg.",
         "datasource": {
           "type": "questdb-questdb-datasource",
           "uid": "${datasource}"
         },
-        "definition": "SELECT view_name FROM materialized_views() WHERE base_table_name = '${table}' AND view_status = 'valid' ORDER BY view_name DESC LIMIT 1;",
+        "definition": "SELECT view_name FROM materialized_views() WHERE base_table_name = '${table}' AND view_status = 'valid' AND view_sql LIKE '%rct_grid_power_watts_avg%' ORDER BY view_name DESC LIMIT 1;",
         "query": {
-          "rawSql": "SELECT view_name FROM materialized_views() WHERE base_table_name = '${table}' AND view_status = 'valid' ORDER BY view_name DESC LIMIT 1;",
+          "rawSql": "SELECT view_name FROM materialized_views() WHERE base_table_name = '${table}' AND view_status = 'valid' AND view_sql LIKE '%rct_grid_power_watts_avg%' ORDER BY view_name DESC LIMIT 1;",
           "queryType": "sql",
           "format": 1,
           "selectedFormat": 1,
@@ -606,7 +606,7 @@
       "id": 7,
       "type": "timeseries",
       "title": "Grid power — long range (rollup view)",
-      "description": "Retention-aware: queries the current materialized rollup view (${rollup_view}), discovered dynamically via materialized_views() rather than a hardcoded content-hashed name, instead of the raw table whose TTL can be as short as 1 day. No FILL is applied, so an export gap renders as a gap rather than an interpolated value. Empty if no downsampling preset is configured (no rollup view exists yet).",
+      "description": "Retention-aware: queries the current materialized rollup view (${rollup_view}), discovered dynamically via materialized_views() rather than a hardcoded content-hashed name, instead of the raw table whose TTL can be as short as 1 day. No FILL is applied, so an export gap renders as a gap rather than an interpolated value. Empty if no downsampling preset is configured (no rollup view exists yet). When the rollup is split across several views, ${rollup_view} is the one that holds rct_grid_power_watts_avg.",
       "gridPos": {
         "x": 0,
         "y": 24,

@@ -19,7 +19,7 @@ from urllib.parse import quote, urlencode
 from app.clock import Clock
 from app.config import DbType, Settings
 from app.export.lineprotocol import batches, build_lines
-from app.export.questdb_admin import QuestDbProvisioner
+from app.export.questdb_admin import EXEC_PATH, QuestDbProvisioner, exec_target
 from app.observability.exporter import MetricsExporter
 from app.observability.stats import ServiceCounters
 
@@ -87,7 +87,7 @@ class Target:
             "/write",
             headers,
             settings.questdb_verify_tls,
-            exec_path="/exec",
+            exec_path=EXEC_PATH,
         )
 
 
@@ -139,7 +139,7 @@ def write(target: Target, body: str) -> None:
 
 
 def questdb_exec(target: Target, sql: str) -> dict:
-    raw = _request(target, f"{target.exec_path}?{urlencode({'query': sql})}", None)
+    raw = _request(target, exec_target(sql, target.exec_path or EXEC_PATH), None)
     try:
         data = json.loads(raw)
     except ValueError:

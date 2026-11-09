@@ -9,6 +9,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { expect, test, NEW_PASSWORD } from "./support/fixtures.mjs";
+import { freshGateway } from "./support/fresh.mjs";
 import { startGateway } from "./support/gateway.mjs";
 import { trackProblems } from "./support/problems.mjs";
 import { frames } from "./support/settle.mjs";
@@ -68,5 +69,26 @@ test.describe("first login @auth", () => {
 	test("the whole first-login flow raised no console, network or dialog problems @auth", async () => {
 		expect(watch.problems, "no console errors, page errors, failed requests, HTTP >= 400 or native dialogs").toEqual([]);
 		expect([...watch.external], "no external requests").toEqual([]);
+	});
+});
+
+// Logout of an established session. The former driver ended its whole run with this check and the run-wide
+// console/network/external-request guard; every ported spec now asserts that guard for its own pages.
+test.describe("logout @auth", () => {
+	const fresh = freshGateway("default");
+	test("logout ends the session; console, network and external requests clean @auth", async ({ browser, browserName }) => {
+		const { context, page } = await fresh.newPage(browser);
+		try {
+			const watch = trackProblems(page, browserName, fresh.gateway.base);
+			await page.goto("/ui/dashboard");
+			await page.click("#logout-button");
+			await page.waitForURL("**/login");
+			await page.goto("/ui/dashboard");
+			await expect(page, "logout ends the session").toHaveURL(/\/login$/);
+			expect(watch.problems, "browser console and network clean").toEqual([]);
+			expect([...watch.external], "no external requests").toEqual([]);
+		} finally {
+			await context.close();
+		}
 	});
 });

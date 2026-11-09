@@ -16,7 +16,8 @@ import pytest
 
 from app.config import Settings
 from app.export.lineprotocol import batches, build_lines, escape_key, escape_measurement
-from app.export.pusher import MAX_BACKOFF_SECONDS, PushError, PushExporter, Target
+from app.export.pusher import MAX_BACKOFF_SECONDS, PushError, PushExporter, Target, questdb_exec
+from app.export.questdb_admin import EXEC_PATH, exec_target
 from app.observability.exporter import MetricsExporter, _labels
 from app.observability.stats import ServiceCounters
 
@@ -212,6 +213,14 @@ async def test_rejected_provisioning_does_not_taint_a_stored_write(server) -> No
     assert await exporter.cycle() == 30  # still inside the provisioning backoff
     assert (stats.export_success, stats.export_failures) == (2, 0)
     assert calls == [False]
+
+
+def test_questdb_exec_sends_the_budgeted_request_target(server) -> None:
+    """The rollup budget is measured on exec_target(), so the wire request must be exactly that."""
+    sql = "SELECT \"a b\", 'c&d' FROM \"rct\" WHERE x = 1;"
+    assert questdb_exec(Target(server.url, "/write", {}, False, exec_path=EXEC_PATH), sql) == {"dataset": []}
+    method, path, _, _ = server.requests[-1]
+    assert (method, path) == ("GET", exec_target(sql))
 
 
 async def test_provisioning_runs_once_per_column_set(server) -> None:

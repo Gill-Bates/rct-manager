@@ -6,17 +6,28 @@
 
 """QuestDB provisioning SQL: presets, raw/total retention, administrator TTLs preserved."""
 
+import json
+import re
+from pathlib import Path
+
 import pytest
 
+from app.catalog.registry import RegistryCatalog
 from app.export.questdb_admin import (
+    MAX_EXEC_TARGET_BYTES,
     PRESETS,
     QuestDbProvisioner,
     effective_raw_days,
+    exec_target,
     rollup_ddl,
     rollup_view_name,
+    rollup_views,
     schema_signature,
     ttl_days,
 )
+from app.observability.names import prometheus_name
+
+_ROOT = Path(__file__).resolve().parents[1]
 
 COLUMNS = {"timestamp": "TIMESTAMP", "device": "SYMBOL", "rct_grid_power": "DOUBLE", "rct_api_requests_total": "DOUBLE"}
 _HASH = schema_signature(COLUMNS)
@@ -252,3 +263,133 @@ def test_a_view_that_is_not_refreshed_yet_warns_only_when_the_lag_persists(caplo
     assert not provisioner.run()  # 8th consecutive attempt
     warnings = [r for r in caplog.records if r.levelname == "WARNING"]
     assert len(warnings) == 1 and "after 8 attempts" in warnings[0].getMessage()
+
+
+_CATALOG_VALUES = sorted(
+    {prometheus_name(e) for e in RegistryCatalog.from_file(_ROOT / "app" / "catalog" / "objects.json").entries()}
+)
+CATALOG_COLUMNS = {
+    "timestamp": "TIMESTAMP",
+    **dict.fromkeys(("device", "endpoint", "state", "metric"), "SYMBOL"),
+    **dict.fromkeys(_CATALOG_VALUES, "DOUBLE"),
+}
+
+
+def _aliases(name: str) -> list[str]:
+    if name.endswith(("_total", "_sum", "_count")):
+        return [f"{name}_last"]
+    return [f"{name}_{aggregate}" for aggregate in ("avg", "min", "max", "last")]
+
+
+class ShardedQuestDb(FakeQuestDb):
+    """Fake that knows the views it was asked to create, plus ``preexisting`` ones; views named in
+    ``lagging`` report a base table transaction they have not refreshed to yet.
+    """
+
+    def __init__(self, preexisting: list[str] | None = None, lagging: set[str] | None = None) -> None:
+        super().__init__(columns=CATALOG_COLUMNS)
+        self.preexisting, self.lagging = preexisting or [], lagging or set()
+        self.created: list[str] = []
+
+    def __call__(self, sql: str) -> dict:
+        if sql.startswith("CREATE MATERIALIZED VIEW"):
+            self.sql.append(sql)
+            self.created.append(re.search(r'IF NOT EXISTS "([^"]+)"', sql).group(1))
+            return {}
+        if "materialized_views()" in sql:
+            self.sql.append(sql)
+            known = dict.fromkeys([*self.preexisting, *self.created])
+            if "WHERE base_table_name" in sql:
+                return {"dataset": [[name, "rct", "valid", 5, 5] for name in known]}
+            name = re.search(r"WHERE view_name = '([^']+)'", sql).group(1)
+            latest = 9 if name in self.lagging else 5
+            return {"dataset": [[name, "rct", "valid", 5, latest]] if name in known else []}
+        return super().__call__(sql)
+
+
+def _superseded_warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [r.getMessage() for r in caplog.records if r.levelname == "WARNING" and "is superseded by" in r.getMessage()]
+
+
+def test_every_exec_request_for_the_whole_catalog_stays_under_the_budget() -> None:
+    assert len(_CATALOG_VALUES) == 894
+    assert MAX_EXEC_TARGET_BYTES <= 32 * 1024 < 64 * 1024
+    for preset in PRESETS.values():
+        views = rollup_views("rct", preset, CATALOG_COLUMNS)
+        assert len(views) > 1
+        assert all(len(exec_target(ddl)) <= MAX_EXEC_TARGET_BYTES for _, ddl in views)
+    db = ShardedQuestDb()
+    assert QuestDbProvisioner(db, "rct", "medium", 3, 90).run()
+    assert max(len(exec_target(sql)) for sql in db.sql) <= MAX_EXEC_TARGET_BYTES
+
+
+def test_shards_cover_every_value_column_exactly_once() -> None:
+    views = rollup_views("rct", PRESETS["medium"], CATALOG_COLUMNS)
+    ddls = [ddl for _, ddl in views]
+    for name in _CATALOG_VALUES:
+        for alias in _aliases(name):
+            assert sum(ddl.count(f'AS "{alias}"') for ddl in ddls) == 1, alias
+    for ddl in ddls:
+        assert all(f'"{dim}"' in ddl for dim in ("device", "endpoint", "state", "metric"))
+        assert "SAMPLE BY 1m ALIGN TO CALENDAR" in ddl and 'WITH BASE "rct"' in ddl
+    names = [view for view, _ in views]
+    assert len(set(names)) == len(names)
+    assert all(re.fullmatch(rf"rct_rollup_1m_v[0-9a-f]{{10}}_p{i}", view) for i, view in enumerate(names, start=1))
+    assert rollup_views("rct", PRESETS["medium"], dict(CATALOG_COLUMNS)) == views
+    # A metric sorting behind the catalog only renames the shard it lands in.
+    extended = [view for view, _ in rollup_views("rct", PRESETS["medium"], {**CATALOG_COLUMNS, "zzz_new": "DOUBLE"})]
+    assert extended[: len(names) - 1] == names[:-1]
+
+
+def test_raw_ttl_waits_until_every_shard_is_current() -> None:
+    shards = [view for view, _ in rollup_views("rct", PRESETS["medium"], CATALOG_COLUMNS)]
+    db = ShardedQuestDb(lagging={shards[-1]})
+    provisioner = QuestDbProvisioner(db, "rct", "medium", 3, 90)
+    assert not provisioner.run()
+    assert db.altered() == []
+    db.lagging.clear()
+    assert provisioner.run()
+    assert db.altered() == [
+        *(f'ALTER MATERIALIZED VIEW "{view}" SET TTL 90 DAYS;' for view in shards),
+        'ALTER TABLE "rct" SET TTL 3 DAYS;',
+    ]
+
+
+def test_sibling_shards_are_not_reported_as_superseded(caplog: pytest.LogCaptureFixture) -> None:
+    db = ShardedQuestDb(preexisting=["rct_rollup_1m_vold"])
+    with caplog.at_level("WARNING", logger="app.export.questdb_admin"):
+        assert QuestDbProvisioner(db, "rct", "medium", 3, 90).run()
+    warnings = _superseded_warnings(caplog)
+    assert len(warnings) == 1 and warnings[0].startswith("QuestDB rollup view 'rct_rollup_1m_vold' is superseded")
+    assert not any(s.startswith("DROP") for s in db.sql)
+
+
+def test_an_existing_single_view_for_the_current_schema_is_kept_instead_of_sharding(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    whole = rollup_view_name("rct", PRESETS["medium"], schema_signature(CATALOG_COLUMNS))
+    db = ShardedQuestDb(preexisting=[whole])
+    with caplog.at_level("WARNING", logger="app.export.questdb_admin"):
+        assert QuestDbProvisioner(db, "rct", "medium", 3, 90).run()
+    assert not any(s.startswith("CREATE MATERIALIZED VIEW") for s in db.sql)
+    assert db.altered() == [f'ALTER MATERIALIZED VIEW "{whole}" SET TTL 90 DAYS;', 'ALTER TABLE "rct" SET TTL 3 DAYS;']
+    assert not _superseded_warnings(caplog)
+
+
+def test_small_column_sets_keep_the_single_view() -> None:
+    view = rollup_view_name("rct", PRESETS["medium"], _HASH)
+    assert rollup_views("rct", PRESETS["medium"], COLUMNS) == [
+        (view, rollup_ddl("rct", PRESETS["medium"], COLUMNS, view))
+    ]
+
+
+def test_dashboard_discovers_the_view_holding_its_rollup_column() -> None:
+    dashboard = json.loads((_ROOT / "grafana" / "dashboard_questdb.json").read_text(encoding="utf-8"))
+    variable = next(v for v in dashboard["templating"]["list"] if v["name"] == "rollup_view")
+    for sql in (variable["definition"], variable["query"]["rawSql"]):
+        assert "view_sql LIKE '%rct_grid_power_watts_avg%'" in sql and "view_status = 'valid'" in sql
+    panel = next(p for p in dashboard["panels"] if p["id"] == 7)
+    raw_sql = panel["targets"][0]["rawSql"]
+    assert '"rct_grid_power_watts_avg"' in raw_sql and 'FROM "${rollup_view}"' in raw_sql
+    ddls = [ddl for _, ddl in rollup_views("rct", PRESETS["medium"], CATALOG_COLUMNS)]
+    assert sum('AS "rct_grid_power_watts_avg"' in ddl for ddl in ddls) == 1
