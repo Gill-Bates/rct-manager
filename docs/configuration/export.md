@@ -38,10 +38,15 @@ own backoff; its failures do not mark the export as failed.
   `QUESTDB_RAW_RETENTION_DAYS` to the raw table. This value is required;
   `QUESTDB_RETENTION_DAYS` is ignored in this mode.
 - `QUESTDB_DOWNSAMPLING=low` (1 min rollup, 30 days raw), `medium` (1 min, 7 days) or
-  `high` (5 min, 1 day) creates a materialized view named from its interval and current column
-  signature. `QUESTDB_RETENTION_DAYS` sets the view TTL.
+  `high` (5 min, 1 day) creates a materialized view `<table>_rollup_<interval>_v<signature>` named
+  from its interval and current column signature. `QUESTDB_RETENTION_DAYS` sets the view TTL.
+- When that view definition would exceed 32 KiB per `/exec` request, the rollup is split across
+  several views `<table>_rollup_<interval>_v<signature>_p<n>`. Each of them carries all tag
+  columns and its own share of the metric columns; together they cover every metric. An existing
+  single view for the same column set stays in use.
 - With a rollup, `QUESTDB_RAW_RETENTION_DAYS` overrides the preset raw days and must not exceed
   the total retention unless the total is unlimited (`0`).
 - The view is created after the first data arrived and covers the columns present at that time.
 - A TTL that already exists and was not set by this service is never replaced.
-  The raw TTL is only applied once the rollup view is refreshed.
+  The raw TTL is only applied once every rollup view is refreshed.
+- Rollup views replaced by a changed column set are reported in the log and never dropped.

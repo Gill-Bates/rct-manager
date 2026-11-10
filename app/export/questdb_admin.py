@@ -138,7 +138,9 @@ def exec_target(sql: str, path: str = EXEC_PATH) -> str:
 def _value_projections(name: str) -> list[str]:
     if name.endswith(_COUNTER_SUFFIXES):
         return [f"last({ident(name)}) AS {ident(name + '_last')}"]
-    return [f"{aggregate}({ident(name)}) AS {ident(f'{name}_{aggregate}')}" for aggregate in ("avg", "min", "max", "last")]
+    return [
+        f"{aggregate}({ident(name)}) AS {ident(f'{name}_{aggregate}')}" for aggregate in ("avg", "min", "max", "last")
+    ]
 
 
 def _rollup_sql(table: str, preset: Preset, dims: list[str], values: list[str], view: str) -> str:

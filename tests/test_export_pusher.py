@@ -217,7 +217,7 @@ async def test_rejected_provisioning_does_not_taint_a_stored_write(server) -> No
 
 def test_questdb_exec_sends_the_budgeted_request_target(server) -> None:
     """The rollup budget is measured on exec_target(), so the wire request must be exactly that."""
-    sql = "SELECT \"a b\", 'c&d' FROM \"rct\" WHERE x = 1;"
+    sql = """SELECT "a b", 'c&d' FROM "rct" WHERE x = 1;"""
     assert questdb_exec(Target(server.url, "/write", {}, False, exec_path=EXEC_PATH), sql) == {"dataset": []}
     method, path, _, _ = server.requests[-1]
     assert (method, path) == ("GET", exec_target(sql))
