@@ -90,9 +90,7 @@ test.describe("dashboard layout editing @gridstack", () => {
 		const saved = layoutPut.last?.widgets?.find((w) => w.id === "pv-power");
 		expect(saved, `Done saves the moved/resized layout via PUT /admin/api/dashboard-layout ${JSON.stringify({ movedPosition, put: layoutPut.last })}`)
 			.toMatchObject(movedPosition);
-		await expect(page.locator("#toast-region"), "Done shows the \"Dashboard layout saved.\" toast").toContainText("Dashboard layout saved.");
-		const toast = (await page.locator("#toast-region").innerText()).trim();
-		expect((toast.match(/Dashboard layout saved\./g) || []).length, "the saved toast shows once").toBe(1);
+		await expect(page.locator("#toast-region").getByText("Dashboard layout saved."), "Done shows the \"Dashboard layout saved.\" toast once").toHaveCount(1);
 		await Promise.all([page.waitForResponse((r) => r.url().endsWith("/admin/api/dashboard-layout") && r.request().method() === "GET"), page.reload()]);
 		await pvWidgetReady();
 		// The stored layout is applied after its GET answered; wait for the settled position.
@@ -125,12 +123,13 @@ test.describe("dashboard layout editing @gridstack", () => {
 		await page.locator("#add-widget-modal").getByRole("button", { name: "Remove widget: PV power" }).click();
 		await page.locator("#add-widget-modal").getByRole("button", { name: "Close" }).last().click();
 		await page.locator("#add-widget-modal").waitFor({ state: "hidden" });
+		await page.locator(".modal-backdrop").waitFor({ state: "detached" }); // Escape must reach the page, not a closing modal
 		await page.keyboard.press("Escape");
-		expect(await editToggle.isVisible(), "Escape closes edit mode: the edit toggle is back").toBe(true);
+		await expect(editToggle, "Escape closes edit mode: the edit toggle is back").toBeVisible();
 		await expect(page.locator(".dashboard-editing"), "Escape closes edit mode").toHaveCount(0);
 		await expect(page.locator("#confirm-modal.show"), "Escape closes edit mode without a confirmation").toHaveCount(0);
-		expect(await pvPosition(), "Escape restores the saved position").toEqual(movedPosition);
-		expect(await page.locator('.grid-stack-item[data-widget-id="pv-power"]').isVisible(), "Escape restores the widget visibility").toBe(true);
+		await expect.poll(() => pvPosition(), { message: "Escape restores the saved position" }).toEqual(movedPosition);
+		await expect(page.locator('.grid-stack-item[data-widget-id="pv-power"]'), "Escape restores the widget visibility").toBeVisible();
 		expect(layoutPut.count, "Escape does not write the discarded layout").toBe(1);
 		await page.unroute("**/admin/api/dashboard-layout");
 	});
@@ -145,7 +144,7 @@ test.describe("dashboard layout editing @gridstack", () => {
 		await elapse(400, "a confirmation dialog would open within this window after Reset layout");
 		await expect(page.locator("#confirm-modal.show"), "reset layout does not ask for confirmation").toHaveCount(0);
 		await page.keyboard.press("Escape");
-		expect(await pvPosition(), "Escape after Reset layout restores the prior saved layout").toEqual(movedPosition);
+		await expect.poll(() => pvPosition(), { message: "Escape after Reset layout restores the prior saved layout" }).toEqual(movedPosition);
 		await editToggle.click();
 		await page.waitForSelector(".dashboard-editing");
 		await page.locator("#dashboard-reset-layout").click();

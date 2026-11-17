@@ -79,9 +79,11 @@ test.describe("energy setup before verification @energy", () => {
 		const shownStep = await page.locator(".energy-setup-step").first().innerText();
 		await expect(page.locator(".energy-setup-step form"), "Basic mode shows no hardware verification form").toHaveCount(0);
 		expect(shownStep, "Basic mode shows no strategy code or byte width fields").not.toMatch(/Strategy code|Byte width/);
-		// Hardware verification runs automatically: the Basic step is status-only and offers no button.
+		// Hardware verification runs automatically: the Basic step is status-only and offers no button. Its text
+		// depends on the poll time (waiting, checking, or "cannot complete" while the write registers are not
+		// approved); all three name the automatic check (report finding F8).
 		await expect(page.locator(".energy-setup-step button"), "the Basic hardware step has no \"Verify hardware\" button").toHaveCount(0);
-		await expect(page.locator(".energy-setup-step").first(), "the Basic hardware step names the automatic check").toContainText(/Waiting for a safe time|Checking this inverter/);
+		await expect(page.locator(".energy-setup-step").first(), "the Basic hardware step names the automatic check").toContainText(/Waiting for a safe time|Checking this inverter|Automatic verification cannot complete/);
 		expect(await page.locator("#energy-expert-mode").isChecked(), "the Basic hardware step leaves Expert mode off").toBe(false);
 		// Expert mode is switched on by the user, never by the setup step.
 		await page.locator("#energy-expert-mode").check();

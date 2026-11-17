@@ -84,11 +84,13 @@ export async function installPlanMocks(page) {
 	const state = {
 		planStatus: "ok",
 		planRequests: 0,
+		planLog: [], // status answered per plan request, for failure messages
 		consumption: { days: consumptionDays(day), recording_since: "2026-10-01T00:00:00+00:00" },
 		consumptionGate: null,
 	};
 	await page.route("**/admin/api/energy/devices/*/dynamic-plan", (route) => {
 		state.planRequests += 1;
+		state.planLog.push(`${state.planRequests}:${state.planStatus}`);
 		return route.fulfill({ json: state.planStatus === "ok" ? plan : { status: state.planStatus, slots: [], detail: null } });
 	});
 	await page.route("**/admin/api/energy/devices/*/consumption-history", async (route) => {

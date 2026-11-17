@@ -81,6 +81,14 @@ test.describe("energy planning tabs and charging plan @energy", () => {
 		});
 		const device = () => page.locator("#energy-plan-device");
 		const requestPlan = () => Promise.all([page.waitForResponse((r) => r.url().includes("/dynamic-plan")), device().dispatchEvent("change")]);
+		// In-flight requests of the status change itself (not polling) must have arrived before a quiet window starts:
+		// wait until the request count is identical on two reads 300 ms apart.
+		const settledRequests = async () => {
+			let previous = -1;
+			await expect.poll(async () => { const now = mocks.planRequests; const stable = now === previous; previous = now; return stable; },
+				{ message: "plan requests of the status change have arrived", intervals: [300], timeout: 10_000 }).toBe(true);
+			return mocks.planRequests;
+		};
 		const expectRequests = (n, message) => expect.poll(() => mocks.planRequests, { message, timeout: 5000, intervals: [100] }).toBe(n);
 		test("plan chart renders accessibly at 1280, 390 and 320 px without horizontal overflow @energy", async () => {
 			await reportInverterAs(page, () => "manual");
@@ -202,19 +210,19 @@ test.describe("energy planning tabs and charging plan @energy", () => {
 			await page.clock.runFor(10_000);
 			await expectRequests(before + 2, "polling never stacks timers: one request per interval");
 			mocks.planStatus = "ok";
-			await device().dispatchEvent("change");
+			await requestPlan();
 			await page.waitForSelector("#energy-plan-schedule canvas");
-			before = mocks.planRequests;
+			before = await settledRequests();
 			await page.clock.runFor(60_000);
 			await expectRequests(before, "polling stops on a device change and once the plan is ok");
 			// spot_disabled also shows the hourglass (every not-ok status does); it is still not polled.
 			mocks.planStatus = "spot_disabled";
-			await device().dispatchEvent("change");
+			await requestPlan();
 			await page.waitForSelector('#energy-plan-result [role="status"] .material-icons');
-			before = mocks.planRequests;
+			before = await settledRequests();
 			await page.clock.runFor(60_000);
 			await expect(page.locator("#energy-plan-result .plan-loading"), "spot_disabled shows the hourglass").toHaveCount(1);
-			await expectRequests(before, "spot_disabled is never polled");
+			await expectRequests(before, `spot_disabled is never polled (${mocks.planLog.slice(-4).join(" ")})`);
 			expect(await page.getByText("Usable battery capacity").first().isVisible(), "spot_disabled shows no readiness list").toBe(false);
 			// solar_not_configured: hourglass PLUS a Weather-setup badge pointing at the postal code / PV data.
 			mocks.planStatus = "solar_not_configured";

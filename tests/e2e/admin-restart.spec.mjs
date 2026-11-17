@@ -10,8 +10,8 @@ import { freshGateway } from "./support/fresh.mjs";
 import { trackProblems } from "./support/problems.mjs";
 // The restart drops the page's health probes; only these exact failures of the health URL are expected.
 const expectedRestartProblem = (problem, base) => problem.includes(`${base}/health`) && (
-	/^requestfailed: GET .*ERR_CONNECTION_REFUSED/.test(problem)
-	|| /^console error: Failed to load resource: net::ERR_CONNECTION_REFUSED/.test(problem)
+	/^requestfailed: GET .*(ERR_CONNECTION_REFUSED|Could not connect to 127\.0\.0\.1: Connection refused)/.test(problem)
+	|| /^console error: Failed to load resource: (net::ERR_CONNECTION_REFUSED|Could not connect to 127\.0\.0\.1: Connection refused)/.test(problem)
 	|| problem.startsWith("http 503: GET ")
 	|| /^console error: Failed to load resource: the server responded with a status of 503/.test(problem)
 );

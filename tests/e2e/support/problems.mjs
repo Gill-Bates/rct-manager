@@ -4,7 +4,7 @@
 //
 // Console/page-error collector shared by the ported drivers. WebKit-only environment noise (also seen
 // on /login) is filtered exactly as in the former drivers; everything else is kept.
-const WEBKIT_NOISE = /^Refused to apply a stylesheet because its hash, its nonce, or 'unsafe-inline'|\/health due to access control checks|Blocked by Web Inspector/;
+const WEBKIT_NOISE = /^Refused to apply a stylesheet because its hash, its nonce, or 'unsafe-inline'|\/health due to access control checks|Blocked by Web Inspector|\/admin\/api\/energy\/[\w\/-]+ due to access control checks\.$/;
 /** Collects console errors/warnings and page errors of `page`; `browserName` selects the WebKit filter. */
 export function collectProblems(page, browserName) {
 	const problems = [];
@@ -16,10 +16,15 @@ export function collectProblems(page, browserName) {
 /** Routes the planning/energy device list so the simulated inverter reports `mode()` (default manual). */
 export async function reportInverterAs(page, mode = () => "manual") {
 	await page.route(/\/admin\/api\/energy\/(planning-)?devices$/, async (route) => {
-		const response = await route.fetch();
-		const body = await response.json().catch(() => null);
-		if (Array.isArray(body)) for (const device of body) device.mode = mode();
-		await route.fulfill({ response, json: body ?? undefined });
+		// A poll that outlives the gateway (teardown) must not become an unhandled rejection in a later test.
+		try {
+			const response = await route.fetch();
+			const body = await response.json().catch(() => null);
+			if (Array.isArray(body)) for (const device of body) device.mode = mode();
+			await route.fulfill({ response, json: body ?? undefined });
+		} catch {
+			await route.abort().catch(() => { });
+		}
 	});
 }
 /**
